@@ -1,0 +1,7 @@
+{
+    "id": "env-010",
+    "name": "Top K Frequent Elements",
+    "difficulty": "medium",
+    "domain": "coding",
+    "tags": ["hash-map", "heap", "sorting"]
+}

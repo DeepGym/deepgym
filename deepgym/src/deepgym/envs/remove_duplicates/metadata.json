@@ -1,0 +1,7 @@
+{
+    "id": "env-006",
+    "name": "Remove Duplicates from Sorted Array",
+    "difficulty": "easy",
+    "domain": "coding",
+    "tags": ["array", "two-pointers"]
+}

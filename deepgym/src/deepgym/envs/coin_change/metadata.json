@@ -1,0 +1,7 @@
+{
+    "id": "env-012",
+    "name": "Coin Change",
+    "difficulty": "medium",
+    "domain": "coding",
+    "tags": ["dynamic-programming", "bfs"]
+}

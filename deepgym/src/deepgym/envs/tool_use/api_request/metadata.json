@@ -1,0 +1,8 @@
+{
+    "id": "tu-001",
+    "name": "API Request",
+    "type": "tool-use",
+    "difficulty": "easy",
+    "domain": "api",
+    "tags": ["http", "json", "api", "requests"]
+}

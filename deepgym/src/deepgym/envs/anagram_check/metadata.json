@@ -1,0 +1,7 @@
+{
+    "id": "env-003",
+    "name": "Anagram Check",
+    "difficulty": "easy",
+    "domain": "coding",
+    "tags": ["string", "hash-map", "sorting"]
+}

@@ -1,0 +1,225 @@
+{
+    "version": "1.0",
+    "environments": [
+        {
+            "id": "env-001",
+            "name": "Reverse String",
+            "path": "reverse_string",
+            "difficulty": "easy",
+            "domain": "coding",
+            "family": "array-string",
+            "tags": ["string", "array", "basics"]
+        },
+        {
+            "id": "env-002",
+            "name": "Palindrome Check",
+            "path": "palindrome_check",
+            "difficulty": "easy",
+            "domain": "coding",
+            "family": "array-string",
+            "tags": ["string", "two-pointers", "basics"]
+        },
+        {
+            "id": "env-003",
+            "name": "Anagram Check",
+            "path": "anagram_check",
+            "difficulty": "easy",
+            "domain": "coding",
+            "family": "array-string",
+            "tags": ["string", "hash-map", "sorting"]
+        },
+        {
+            "id": "env-004",
+            "name": "Maximum Subarray",
+            "path": "max_subarray",
+            "difficulty": "medium",
+            "domain": "coding",
+            "family": "array-string",
+            "tags": ["array", "dynamic-programming", "kadane"]
+        },
+        {
+            "id": "env-005",
+            "name": "Rotate Array",
+            "path": "rotate_array",
+            "difficulty": "easy",
+            "domain": "coding",
+            "family": "array-string",
+            "tags": ["array", "math"]
+        },
+        {
+            "id": "env-006",
+            "name": "Remove Duplicates from Sorted Array",
+            "path": "remove_duplicates",
+            "difficulty": "easy",
+            "domain": "coding",
+            "family": "array-string",
+            "tags": ["array", "two-pointers"]
+        },
+        {
+            "id": "env-007",
+            "name": "Valid Parentheses",
+            "path": "valid_parentheses",
+            "difficulty": "easy",
+            "domain": "coding",
+            "family": "array-string",
+            "tags": ["string", "stack"]
+        },
+        {
+            "id": "env-008",
+            "name": "Group Anagrams",
+            "path": "group_anagrams",
+            "difficulty": "medium",
+            "domain": "coding",
+            "family": "hash-map-search",
+            "tags": ["hash-map", "string", "sorting"]
+        },
+        {
+            "id": "env-009",
+            "name": "Longest Consecutive Sequence",
+            "path": "longest_consecutive",
+            "difficulty": "medium",
+            "domain": "coding",
+            "family": "hash-map-search",
+            "tags": ["hash-map", "union-find", "array"]
+        },
+        {
+            "id": "env-010",
+            "name": "Top K Frequent Elements",
+            "path": "top_k_frequent",
+            "difficulty": "medium",
+            "domain": "coding",
+            "family": "hash-map-search",
+            "tags": ["hash-map", "heap", "sorting"]
+        },
+        {
+            "id": "env-011",
+            "name": "Climbing Stairs",
+            "path": "climbing_stairs",
+            "difficulty": "easy",
+            "domain": "coding",
+            "family": "dynamic-programming",
+            "tags": ["dynamic-programming", "math", "fibonacci"]
+        },
+        {
+            "id": "env-012",
+            "name": "Coin Change",
+            "path": "coin_change",
+            "difficulty": "medium",
+            "domain": "coding",
+            "family": "dynamic-programming",
+            "tags": ["dynamic-programming", "bfs"]
+        },
+        {
+            "id": "env-013",
+            "name": "Longest Common Subsequence",
+            "path": "longest_common_subsequence",
+            "difficulty": "medium",
+            "domain": "coding",
+            "family": "dynamic-programming",
+            "tags": ["dynamic-programming", "string"]
+        },
+        {
+            "id": "env-014",
+            "name": "House Robber",
+            "path": "house_robber",
+            "difficulty": "medium",
+            "domain": "coding",
+            "family": "dynamic-programming",
+            "tags": ["dynamic-programming", "array"]
+        },
+        {
+            "id": "env-015",
+            "name": "Binary Search",
+            "path": "binary_search",
+            "difficulty": "easy",
+            "domain": "coding",
+            "family": "graph-tree",
+            "tags": ["binary-search", "array"]
+        },
+        {
+            "id": "env-016",
+            "name": "Merge Intervals",
+            "path": "merge_intervals",
+            "difficulty": "medium",
+            "domain": "coding",
+            "family": "graph-tree",
+            "tags": ["array", "sorting", "intervals"]
+        },
+        {
+            "id": "env-017",
+            "name": "Binary Tree Level Order Traversal",
+            "path": "level_order_traversal",
+            "difficulty": "medium",
+            "domain": "coding",
+            "family": "graph-tree",
+            "tags": ["tree", "bfs", "binary-tree"]
+        },
+        {
+            "id": "env-018",
+            "name": "FizzBuzz with Custom Rules",
+            "path": "fizzbuzz",
+            "difficulty": "easy",
+            "domain": "coding",
+            "family": "practical-applied",
+            "tags": ["basics", "string", "modular-arithmetic"]
+        },
+        {
+            "id": "env-019",
+            "name": "Roman to Integer",
+            "path": "roman_to_integer",
+            "difficulty": "easy",
+            "domain": "coding",
+            "family": "practical-applied",
+            "tags": ["string", "math", "hash-map"]
+        },
+        {
+            "id": "env-020",
+            "name": "Spiral Matrix",
+            "path": "matrix_spiral",
+            "difficulty": "medium",
+            "domain": "coding",
+            "family": "practical-applied",
+            "tags": ["matrix", "array", "simulation"]
+        },
+        {
+            "id": "cu-002",
+            "name": "File Organizer",
+            "path": "file_organizer",
+            "type": "computer-use",
+            "difficulty": "easy",
+            "domain": "filesystem",
+            "family": "computer-use",
+            "tags": ["filesystem", "directories", "organization"]
+        },
+        {
+            "id": "cu-003",
+            "name": "CLI Task - Git Operations",
+            "path": "cli_task",
+            "type": "computer-use",
+            "difficulty": "easy",
+            "domain": "cli",
+            "family": "computer-use",
+            "tags": ["git", "cli", "version-control"]
+        },
+        {
+            "id": "tu-001",
+            "name": "API Request",
+            "path": "api_request",
+            "type": "tool-use",
+            "difficulty": "easy",
+            "domain": "api",
+            "family": "tool-use",
+            "tags": ["http", "json", "api", "requests"]
+        },
+        {
+            "id": "tu-002",
+            "name": "Data Pipeline",
+            "path": "data_pipeline",
+            "type": "tool-use",
+            "difficulty": "easy",
+            "domain": "data",
+            "family": "tool-use",
+            "tags": ["csv", "data", "filtering", "pipeline"]
+        }
+    ]
+}

@@ -1,0 +1,7 @@
+{
+    "id": "env-013",
+    "name": "Longest Common Subsequence",
+    "difficulty": "medium",
+    "domain": "coding",
+    "tags": ["dynamic-programming", "string"]
+}

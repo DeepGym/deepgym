@@ -1,0 +1,65 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "deepgym"
+version = "0.1.0"
+description = "RL training environments with verifiable rewards for coding agents"
+readme = "README.md"
+license = {text = "MIT"}
+requires-python = ">=3.10"
+authors = [
+    {name = "Abhishek Gahlot", email = "me@abhishek.it"},
+]
+keywords = ["reinforcement-learning", "rl", "grpo", "coding", "environments", "verifiable-rewards", "trl", "unsloth"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Developers",
+    "Intended Audience :: Science/Research",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+]
+dependencies = [
+    "pydantic>=2.0",
+    "httpx>=0.24",
+]
+
+[project.optional-dependencies]
+server = ["fastapi>=0.100", "uvicorn[standard]>=0.20"]
+daytona = ["daytona-sdk"]
+dev = ["pytest", "pytest-asyncio", "ruff", "fastapi>=0.100", "uvicorn[standard]>=0.20"]
+all = ["daytona-sdk", "fastapi>=0.100", "uvicorn[standard]>=0.20", "pytest", "pytest-asyncio", "ruff"]
+
+[project.urls]
+Homepage = "https://deepgym.io"
+Repository = "https://github.com/abhishekgahlot2/deepgym"
+Documentation = "https://github.com/abhishekgahlot2/deepgym#readme"
+Issues = "https://github.com/abhishekgahlot2/deepgym/issues"
+
+[project.scripts]
+deepgym = "deepgym.cli:main"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/deepgym"]
+
+[tool.ruff]
+target-version = "py310"
+line-length = 100
+[tool.ruff.format]
+quote-style = "single"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "N", "W", "UP", "Q"]
+
+[tool.ruff.lint.flake8-quotes]
+inline-quotes = "single"
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
+pythonpath = ["src"]

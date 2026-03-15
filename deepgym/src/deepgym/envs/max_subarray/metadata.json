@@ -1,0 +1,7 @@
+{
+    "id": "env-004",
+    "name": "Maximum Subarray",
+    "difficulty": "medium",
+    "domain": "coding",
+    "tags": ["array", "dynamic-programming", "kadane"]
+}

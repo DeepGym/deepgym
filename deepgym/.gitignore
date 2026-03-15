@@ -1,0 +1,47 @@
+# Environment and secrets
+.env
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+
+# Distribution / packaging
+dist/
+build/
+*.egg-info/
+*.egg
+
+# Virtual environments
+.venv/
+venv/
+
+# Testing
+.pytest_cache/
+test_output/
+htmlcov/
+.coverage
+coverage.xml
+
+# Linting / formatting
+.ruff_cache/
+.mypy_cache/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Data (SQLite databases are local, not tracked)
+data/*.db
+
+# Daytona (submodule, not part of this repo)
+daytona/
+.DS_Store

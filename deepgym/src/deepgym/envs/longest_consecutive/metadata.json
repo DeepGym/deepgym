@@ -1,0 +1,7 @@
+{
+    "id": "env-009",
+    "name": "Longest Consecutive Sequence",
+    "difficulty": "medium",
+    "domain": "coding",
+    "tags": ["hash-map", "union-find", "array"]
+}

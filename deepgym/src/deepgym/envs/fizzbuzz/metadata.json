@@ -1,0 +1,7 @@
+{
+    "id": "env-018",
+    "name": "FizzBuzz with Custom Rules",
+    "difficulty": "easy",
+    "domain": "coding",
+    "tags": ["basics", "string", "modular-arithmetic"]
+}

@@ -1,0 +1,1077 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>DeepGym</title>
+<style>
+*, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+:root {
+  --bg: #0d1117;
+  --bg-secondary: #161b22;
+  --bg-tertiary: #21262d;
+  --border: #30363d;
+  --text: #e6edf3;
+  --text-muted: #8b949e;
+  --text-dim: #484f58;
+  --accent: #58a6ff;
+  --accent-subtle: #1f6feb;
+  --green: #3fb950;
+  --green-bg: rgba(63, 185, 80, 0.1);
+  --red: #f85149;
+  --red-bg: rgba(248, 81, 73, 0.1);
+  --yellow: #d29922;
+  --orange: #db6d28;
+  --radius: 6px;
+  --font-mono: 'SF Mono', 'Cascadia Code', 'Fira Code', 'JetBrains Mono',
+               'Consolas', 'Liberation Mono', monospace;
+  --font-sans: -apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica,
+               Arial, sans-serif;
+}
+
+html, body { height: 100%; }
+
+body {
+  background: var(--bg);
+  color: var(--text);
+  font-family: var(--font-sans);
+  font-size: 14px;
+  line-height: 1.5;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+/* ── Layout ────────────────────────────────────────────────────────── */
+
+.app {
+  display: flex;
+  flex: 1;
+  overflow: hidden;
+}
+
+/* ── Sidebar ───────────────────────────────────────────────────────── */
+
+.sidebar {
+  width: 280px;
+  min-width: 280px;
+  background: var(--bg-secondary);
+  border-right: 1px solid var(--border);
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+.sidebar-header {
+  padding: 16px 16px 12px;
+  border-bottom: 1px solid var(--border);
+  flex-shrink: 0;
+}
+
+.sidebar-header h1 {
+  font-size: 18px;
+  font-weight: 600;
+  color: var(--text);
+  letter-spacing: -0.3px;
+}
+
+.sidebar-header h1 span {
+  color: var(--accent);
+}
+
+.sidebar-header .subtitle {
+  font-size: 11px;
+  color: var(--text-muted);
+  margin-top: 2px;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+}
+
+.search-box {
+  margin: 12px 16px 8px;
+  flex-shrink: 0;
+}
+
+.search-box input {
+  width: 100%;
+  padding: 6px 10px;
+  background: var(--bg-tertiary);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  color: var(--text);
+  font-size: 13px;
+  outline: none;
+  font-family: var(--font-sans);
+}
+
+.search-box input:focus {
+  border-color: var(--accent-subtle);
+  box-shadow: 0 0 0 3px rgba(31, 111, 235, 0.15);
+}
+
+.search-box input::placeholder { color: var(--text-dim); }
+
+.env-groups {
+  flex: 1;
+  overflow-y: auto;
+  padding: 4px 0 12px;
+}
+
+.env-group-label {
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--text-muted);
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  padding: 12px 16px 4px;
+}
+
+.env-item {
+  padding: 7px 16px;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  transition: background 0.1s;
+}
+
+.env-item:hover { background: var(--bg-tertiary); }
+.env-item.active { background: var(--accent-subtle); }
+
+.env-item .name {
+  flex: 1;
+  font-size: 13px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.env-item .difficulty {
+  font-size: 10px;
+  font-weight: 600;
+  padding: 1px 6px;
+  border-radius: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.3px;
+  flex-shrink: 0;
+}
+
+.diff-easy { background: var(--green-bg); color: var(--green); }
+.diff-medium { background: rgba(210, 153, 34, 0.15); color: var(--yellow); }
+.diff-hard { background: var(--red-bg); color: var(--red); }
+
+/* ── Main Content ──────────────────────────────────────────────────── */
+
+.main {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  min-width: 0;
+}
+
+.main-header {
+  padding: 14px 24px;
+  border-bottom: 1px solid var(--border);
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex-shrink: 0;
+  background: var(--bg-secondary);
+}
+
+.main-header h2 {
+  font-size: 16px;
+  font-weight: 600;
+  flex: 1;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.main-header .tags {
+  display: flex;
+  gap: 6px;
+  flex-shrink: 0;
+}
+
+.tag {
+  font-size: 11px;
+  padding: 2px 8px;
+  border-radius: 10px;
+  background: var(--bg-tertiary);
+  color: var(--text-muted);
+  border: 1px solid var(--border);
+}
+
+.workspace {
+  flex: 1;
+  display: flex;
+  overflow: hidden;
+}
+
+/* ── Left panel: task + editor ─────────────────────────────────────── */
+
+.left-panel {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  min-width: 0;
+}
+
+.panel-tabs {
+  display: flex;
+  border-bottom: 1px solid var(--border);
+  background: var(--bg-secondary);
+  flex-shrink: 0;
+}
+
+.panel-tab {
+  padding: 8px 16px;
+  font-size: 12px;
+  font-weight: 500;
+  color: var(--text-muted);
+  cursor: pointer;
+  border-bottom: 2px solid transparent;
+  transition: color 0.1s, border-color 0.1s;
+}
+
+.panel-tab:hover { color: var(--text); }
+.panel-tab.active { color: var(--text); border-bottom-color: var(--accent); }
+
+.tab-content { display: none; flex: 1; overflow: auto; }
+.tab-content.active { display: flex; flex-direction: column; }
+
+.task-view {
+  padding: 20px 24px;
+  line-height: 1.7;
+  overflow-y: auto;
+  flex: 1;
+}
+
+.task-view h1 { font-size: 20px; margin-bottom: 12px; }
+.task-view h2 { font-size: 16px; margin: 16px 0 8px; color: var(--accent); }
+.task-view p { margin-bottom: 10px; }
+.task-view ul, .task-view ol { padding-left: 24px; margin-bottom: 10px; }
+.task-view li { margin-bottom: 4px; }
+.task-view code {
+  background: var(--bg-tertiary);
+  padding: 2px 6px;
+  border-radius: 3px;
+  font-family: var(--font-mono);
+  font-size: 13px;
+}
+.task-view pre {
+  background: var(--bg-tertiary);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 12px 16px;
+  overflow-x: auto;
+  margin-bottom: 12px;
+}
+.task-view pre code {
+  background: none;
+  padding: 0;
+  font-size: 13px;
+  line-height: 1.5;
+}
+
+.editor-container {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+.editor-toolbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 8px 16px;
+  background: var(--bg-secondary);
+  border-bottom: 1px solid var(--border);
+  flex-shrink: 0;
+}
+
+.editor-toolbar .hint {
+  font-size: 11px;
+  color: var(--text-dim);
+}
+
+.btn {
+  padding: 6px 16px;
+  border-radius: var(--radius);
+  font-size: 13px;
+  font-weight: 500;
+  border: none;
+  cursor: pointer;
+  transition: background 0.15s, box-shadow 0.15s;
+  font-family: var(--font-sans);
+}
+
+.btn-primary {
+  background: var(--accent-subtle);
+  color: #fff;
+}
+
+.btn-primary:hover { background: #388bfd; }
+.btn-primary:disabled { opacity: 0.5; cursor: not-allowed; }
+
+.editor-wrapper {
+  flex: 1;
+  position: relative;
+  overflow: hidden;
+}
+
+#code-editor {
+  width: 100%;
+  height: 100%;
+  resize: none;
+  background: var(--bg);
+  color: var(--text);
+  border: none;
+  padding: 16px;
+  font-family: var(--font-mono);
+  font-size: 13px;
+  line-height: 1.6;
+  tab-size: 4;
+  outline: none;
+  overflow: auto;
+}
+
+#code-editor::placeholder { color: var(--text-dim); }
+
+.line-numbers {
+  position: absolute;
+  top: 0;
+  left: 0;
+  width: 44px;
+  height: 100%;
+  background: var(--bg-secondary);
+  border-right: 1px solid var(--border);
+  padding: 16px 8px 16px 0;
+  text-align: right;
+  font-family: var(--font-mono);
+  font-size: 13px;
+  line-height: 1.6;
+  color: var(--text-dim);
+  overflow: hidden;
+  pointer-events: none;
+  user-select: none;
+}
+
+#code-editor.with-lines { padding-left: 56px; }
+
+/* ── Right panel: results ──────────────────────────────────────────── */
+
+.right-panel {
+  width: 360px;
+  min-width: 320px;
+  border-left: 1px solid var(--border);
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  background: var(--bg-secondary);
+}
+
+.results-header {
+  padding: 10px 16px;
+  font-size: 12px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  color: var(--text-muted);
+  border-bottom: 1px solid var(--border);
+  flex-shrink: 0;
+}
+
+.result-card {
+  padding: 16px;
+  border-bottom: 1px solid var(--border);
+  flex-shrink: 0;
+}
+
+.score-display {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  margin-bottom: 12px;
+}
+
+.score-value {
+  font-size: 36px;
+  font-weight: 700;
+  font-family: var(--font-mono);
+  letter-spacing: -1px;
+}
+
+.score-label {
+  font-size: 13px;
+  color: var(--text-muted);
+}
+
+.score-bar-track {
+  height: 6px;
+  background: var(--bg-tertiary);
+  border-radius: 3px;
+  overflow: hidden;
+  margin-bottom: 12px;
+}
+
+.score-bar-fill {
+  height: 100%;
+  border-radius: 3px;
+  transition: width 0.4s ease, background 0.4s ease;
+}
+
+.result-meta {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 8px;
+}
+
+.meta-item {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.meta-label {
+  font-size: 10px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  color: var(--text-dim);
+}
+
+.meta-value {
+  font-size: 13px;
+  font-family: var(--font-mono);
+}
+
+.status-pass { color: var(--green); }
+.status-fail { color: var(--red); }
+
+.result-details {
+  margin-top: 12px;
+  padding: 10px 12px;
+  background: var(--bg);
+  border-radius: var(--radius);
+  font-size: 12px;
+  font-family: var(--font-mono);
+  line-height: 1.5;
+  color: var(--text-muted);
+  max-height: 180px;
+  overflow-y: auto;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.reward-components {
+  margin-top: 12px;
+}
+
+.reward-row {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 4px 0;
+  font-size: 12px;
+}
+
+.reward-name { color: var(--text-muted); }
+
+.reward-value {
+  font-family: var(--font-mono);
+  font-weight: 600;
+}
+
+.reward-bar-track {
+  flex: 1;
+  height: 3px;
+  background: var(--bg-tertiary);
+  border-radius: 2px;
+  margin: 0 10px;
+  overflow: hidden;
+}
+
+.reward-bar-fill {
+  height: 100%;
+  border-radius: 2px;
+  transition: width 0.3s ease;
+}
+
+/* ── History panel ─────────────────────────────────────────────────── */
+
+.history-section {
+  flex: 1;
+  overflow-y: auto;
+  min-height: 0;
+}
+
+.history-header {
+  padding: 10px 16px;
+  font-size: 12px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  color: var(--text-muted);
+  border-bottom: 1px solid var(--border);
+  border-top: 1px solid var(--border);
+  position: sticky;
+  top: 0;
+  background: var(--bg-secondary);
+  z-index: 1;
+}
+
+.history-item {
+  display: grid;
+  grid-template-columns: 52px 1fr 56px 56px;
+  gap: 8px;
+  align-items: center;
+  padding: 6px 16px;
+  font-size: 12px;
+  border-bottom: 1px solid var(--border);
+}
+
+.history-item:hover { background: var(--bg-tertiary); }
+
+.history-time {
+  font-family: var(--font-mono);
+  color: var(--text-dim);
+  font-size: 11px;
+}
+
+.history-env {
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.history-score {
+  font-family: var(--font-mono);
+  font-weight: 600;
+  text-align: right;
+}
+
+.history-time-ms {
+  font-family: var(--font-mono);
+  color: var(--text-dim);
+  text-align: right;
+  font-size: 11px;
+}
+
+/* ── Empty / loading states ────────────────────────────────────────── */
+
+.empty-state {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  padding: 40px 20px;
+  color: var(--text-dim);
+  text-align: center;
+  flex: 1;
+}
+
+.empty-state .icon { font-size: 32px; margin-bottom: 12px; opacity: 0.3; }
+.empty-state p { font-size: 13px; max-width: 240px; }
+
+.spinner {
+  width: 16px;
+  height: 16px;
+  border: 2px solid transparent;
+  border-top-color: #fff;
+  border-radius: 50%;
+  animation: spin 0.6s linear infinite;
+  display: inline-block;
+  vertical-align: middle;
+  margin-right: 6px;
+}
+
+@keyframes spin { to { transform: rotate(360deg); } }
+
+/* ── Scrollbar styling ─────────────────────────────────────────────── */
+
+::-webkit-scrollbar { width: 8px; height: 8px; }
+::-webkit-scrollbar-track { background: transparent; }
+::-webkit-scrollbar-thumb {
+  background: var(--border);
+  border-radius: 4px;
+}
+::-webkit-scrollbar-thumb:hover { background: var(--text-dim); }
+
+/* ── Responsive ────────────────────────────────────────────────────── */
+
+@media (max-width: 960px) {
+  .sidebar { width: 220px; min-width: 220px; }
+  .right-panel { width: 300px; min-width: 260px; }
+}
+
+@media (max-width: 720px) {
+  .app { flex-direction: column; }
+  .sidebar {
+    width: 100%; min-width: 0; max-height: 200px;
+    border-right: none; border-bottom: 1px solid var(--border);
+  }
+  .workspace { flex-direction: column; }
+  .right-panel {
+    width: 100%; min-width: 0;
+    border-left: none; border-top: 1px solid var(--border);
+  }
+}
+</style>
+</head>
+<body>
+
+<div class="app">
+  <!-- Sidebar -->
+  <div class="sidebar">
+    <div class="sidebar-header">
+      <h1>Deep<span>Gym</span></h1>
+      <div class="subtitle">Environment Debugger</div>
+    </div>
+    <div class="search-box">
+      <input type="text" id="env-search" placeholder="Filter environments..." />
+    </div>
+    <div class="env-groups" id="env-list"></div>
+  </div>
+
+  <!-- Main -->
+  <div class="main">
+    <div class="main-header" id="main-header">
+      <h2 id="env-title">Select an environment</h2>
+      <div class="tags" id="env-tags"></div>
+    </div>
+    <div class="workspace">
+      <div class="left-panel">
+        <div class="panel-tabs">
+          <div class="panel-tab active" data-tab="task">Task</div>
+          <div class="panel-tab" data-tab="editor">Editor</div>
+        </div>
+        <div class="tab-content active" id="tab-task">
+          <div class="task-view" id="task-content">
+            <div class="empty-state">
+              <div class="icon">&#9654;</div>
+              <p>Select an environment from the sidebar to view its task description.</p>
+            </div>
+          </div>
+        </div>
+        <div class="tab-content" id="tab-editor">
+          <div class="editor-toolbar">
+            <span class="hint">Ctrl+Enter to run</span>
+            <button class="btn btn-primary" id="run-btn" disabled>Run</button>
+          </div>
+          <div class="editor-container">
+            <div class="editor-wrapper">
+              <div class="line-numbers" id="line-numbers">1</div>
+              <textarea
+                id="code-editor"
+                class="with-lines"
+                placeholder="Write your solution here..."
+                spellcheck="false"
+              ></textarea>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- Results -->
+      <div class="right-panel">
+        <div class="results-header">Results</div>
+        <div id="result-area">
+          <div class="empty-state">
+            <p>Run code against an environment to see results here.</p>
+          </div>
+        </div>
+        <div class="history-section">
+          <div class="history-header">Run History</div>
+          <div id="history-list"></div>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<script>
+(function() {
+  'use strict';
+
+  // ── State ─────────────────────────────────────────────────────────
+
+  let environments = [];
+  let selectedEnv = null;
+  let isRunning = false;
+
+  // ── DOM refs ──────────────────────────────────────────────────────
+
+  const envList = document.getElementById('env-list');
+  const envSearch = document.getElementById('env-search');
+  const envTitle = document.getElementById('env-title');
+  const envTags = document.getElementById('env-tags');
+  const taskContent = document.getElementById('task-content');
+  const codeEditor = document.getElementById('code-editor');
+  const lineNumbers = document.getElementById('line-numbers');
+  const runBtn = document.getElementById('run-btn');
+  const resultArea = document.getElementById('result-area');
+  const historyList = document.getElementById('history-list');
+  const tabTask = document.getElementById('tab-task');
+  const tabEditor = document.getElementById('tab-editor');
+  const panelTabs = document.querySelectorAll('.panel-tab');
+
+  // ── Tab switching ─────────────────────────────────────────────────
+
+  panelTabs.forEach(function(tab) {
+    tab.addEventListener('click', function() {
+      panelTabs.forEach(function(t) { t.classList.remove('active'); });
+      tab.classList.add('active');
+      tabTask.classList.remove('active');
+      tabEditor.classList.remove('active');
+      var target = tab.getAttribute('data-tab');
+      if (target === 'task') tabTask.classList.add('active');
+      else tabEditor.classList.add('active');
+    });
+  });
+
+  // ── Line numbers ──────────────────────────────────────────────────
+
+  function updateLineNumbers() {
+    var count = codeEditor.value.split('\n').length;
+    var nums = [];
+    for (var i = 1; i <= count; i++) nums.push(i);
+    lineNumbers.textContent = nums.join('\n');
+  }
+
+  codeEditor.addEventListener('input', updateLineNumbers);
+  codeEditor.addEventListener('scroll', function() {
+    lineNumbers.style.transform = 'translateY(-' + codeEditor.scrollTop + 'px)';
+  });
+
+  // Tab key support in editor
+  codeEditor.addEventListener('keydown', function(e) {
+    if (e.key === 'Tab') {
+      e.preventDefault();
+      var start = this.selectionStart;
+      var end = this.selectionEnd;
+      this.value = this.value.substring(0, start) + '    ' + this.value.substring(end);
+      this.selectionStart = this.selectionEnd = start + 4;
+      updateLineNumbers();
+    }
+    if ((e.ctrlKey || e.metaKey) && e.key === 'Enter') {
+      e.preventDefault();
+      if (!isRunning && selectedEnv) runCode();
+    }
+  });
+
+  // ── Markdown renderer (minimal, no deps) ──────────────────────────
+
+  function renderMarkdown(md) {
+    var html = md;
+
+    // Fenced code blocks
+    html = html.replace(/```(\w*)\n([\s\S]*?)```/g, function(m, lang, code) {
+      return '<pre><code>' + escapeHtml(code.trim()) + '</code></pre>';
+    });
+
+    // Inline code
+    html = html.replace(/`([^`]+)`/g, '<code>$1</code>');
+
+    // Headers
+    html = html.replace(/^### (.+)$/gm, '<h3>$1</h3>');
+    html = html.replace(/^## (.+)$/gm, '<h2>$1</h2>');
+    html = html.replace(/^# (.+)$/gm, '<h1>$1</h1>');
+
+    // Bold and italic
+    html = html.replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>');
+    html = html.replace(/\*(.+?)\*/g, '<em>$1</em>');
+
+    // Unordered lists
+    html = html.replace(/^- (.+)$/gm, '<li>$1</li>');
+    html = html.replace(/(<li>.*<\/li>\n?)+/g, function(m) {
+      return '<ul>' + m + '</ul>';
+    });
+
+    // Paragraphs: wrap lines not already wrapped in block elements
+    var lines = html.split('\n');
+    var result = [];
+    var inBlock = false;
+    for (var i = 0; i < lines.length; i++) {
+      var line = lines[i].trim();
+      if (line.match(/^<(h[1-6]|pre|ul|ol|li|div|blockquote)/)) {
+        inBlock = true;
+        result.push(line);
+      } else if (line.match(/^<\/(pre|ul|ol|div|blockquote)/)) {
+        result.push(line);
+        inBlock = false;
+      } else if (inBlock) {
+        result.push(line);
+      } else if (line === '') {
+        result.push('');
+      } else {
+        result.push('<p>' + line + '</p>');
+      }
+    }
+
+    return result.join('\n');
+  }
+
+  function escapeHtml(str) {
+    var div = document.createElement('div');
+    div.textContent = str;
+    return div.innerHTML;
+  }
+
+  // ── Score color ───────────────────────────────────────────────────
+
+  function scoreColor(score) {
+    if (score >= 0.9) return 'var(--green)';
+    if (score >= 0.7) return '#7ee787';
+    if (score >= 0.5) return 'var(--yellow)';
+    if (score >= 0.3) return 'var(--orange)';
+    return 'var(--red)';
+  }
+
+  // ── Load environments ─────────────────────────────────────────────
+
+  function loadEnvironments() {
+    fetch('/api/environments')
+      .then(function(r) { return r.json(); })
+      .then(function(data) {
+        environments = data;
+        renderEnvList(data);
+      })
+      .catch(function(err) {
+        envList.innerHTML = '<div class="empty-state"><p>Failed to load environments.</p></div>';
+      });
+  }
+
+  function renderEnvList(envs) {
+    // Group by family
+    var groups = {};
+    envs.forEach(function(env) {
+      var family = env.family || 'other';
+      if (!groups[family]) groups[family] = [];
+      groups[family].push(env);
+    });
+
+    var html = '';
+    var families = Object.keys(groups).sort();
+    families.forEach(function(family) {
+      var label = family.replace(/-/g, ' ').replace(
+        /\b\w/g, function(c) { return c.toUpperCase(); });
+      html += '<div class="env-group-label">' + escapeHtml(label) + '</div>';
+      groups[family].forEach(function(env) {
+        var diffClass = 'diff-' + (env.difficulty || 'medium');
+        html += '<div class="env-item" data-path="' + escapeHtml(env.path) + '">';
+        html += '<span class="name">' + escapeHtml(env.name) + '</span>';
+        html += '<span class="difficulty ' + diffClass + '">'
+          + escapeHtml(env.difficulty || '?') + '</span>';
+        html += '</div>';
+      });
+    });
+
+    envList.innerHTML = html;
+
+    // Attach click handlers
+    envList.querySelectorAll('.env-item').forEach(function(item) {
+      item.addEventListener('click', function() {
+        selectEnvironment(item.getAttribute('data-path'));
+      });
+    });
+  }
+
+  // ── Filter environments ───────────────────────────────────────────
+
+  envSearch.addEventListener('input', function() {
+    var q = envSearch.value.toLowerCase();
+    var filtered = environments.filter(function(env) {
+      return env.name.toLowerCase().indexOf(q) >= 0
+        || (env.path && env.path.toLowerCase().indexOf(q) >= 0)
+        || (env.family && env.family.toLowerCase().indexOf(q) >= 0)
+        || (env.tags && env.tags.join(' ').toLowerCase().indexOf(q) >= 0);
+    });
+    renderEnvList(filtered);
+  });
+
+  // ── Select environment ────────────────────────────────────────────
+
+  function selectEnvironment(path) {
+    selectedEnv = path;
+    runBtn.disabled = false;
+
+    // Highlight active
+    envList.querySelectorAll('.env-item').forEach(function(item) {
+      item.classList.toggle('active', item.getAttribute('data-path') === path);
+    });
+
+    // Find metadata
+    var meta = environments.find(function(e) { return e.path === path; });
+    envTitle.textContent = meta ? meta.name : path;
+
+    // Tags
+    envTags.innerHTML = '';
+    if (meta && meta.tags) {
+      meta.tags.forEach(function(t) {
+        var span = document.createElement('span');
+        span.className = 'tag';
+        span.textContent = t;
+        envTags.appendChild(span);
+      });
+    }
+
+    // Load task
+    fetch('/api/environments/' + encodeURIComponent(path))
+      .then(function(r) { return r.json(); })
+      .then(function(data) {
+        taskContent.innerHTML = '<div class="task-view">' + renderMarkdown(data.task) + '</div>';
+      })
+      .catch(function() {
+        taskContent.innerHTML = '<div class="empty-state"><p>Failed to load task.</p></div>';
+      });
+
+    // Switch to task tab
+    panelTabs.forEach(function(t) { t.classList.remove('active'); });
+    panelTabs[0].classList.add('active');
+    tabTask.classList.add('active');
+    tabEditor.classList.remove('active');
+  }
+
+  // ── Run code ──────────────────────────────────────────────────────
+
+  runBtn.addEventListener('click', function() {
+    if (!isRunning && selectedEnv) runCode();
+  });
+
+  function runCode() {
+    if (!selectedEnv) return;
+    isRunning = true;
+    runBtn.disabled = true;
+    runBtn.innerHTML = '<span class="spinner"></span>Running...';
+
+    resultArea.innerHTML =
+      '<div class="empty-state"><span class="spinner"></span>'
+      + '<p>Executing...</p></div>';
+
+    fetch('/api/run', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ environment: selectedEnv, code: codeEditor.value })
+    })
+    .then(function(r) { return r.json(); })
+    .then(function(data) {
+      renderResult(data);
+      loadHistory();
+    })
+    .catch(function(err) {
+      resultArea.innerHTML =
+        '<div class="result-card"><div class="result-details">'
+        + 'Error: ' + escapeHtml(String(err))
+        + '</div></div>';
+    })
+    .finally(function() {
+      isRunning = false;
+      runBtn.disabled = false;
+      runBtn.textContent = 'Run';
+    });
+  }
+
+  // ── Render result ─────────────────────────────────────────────────
+
+  function renderResult(data) {
+    var color = scoreColor(data.score);
+    var status = data.passed ? 'PASS' : 'FAIL';
+    var statusClass = data.passed ? 'status-pass' : 'status-fail';
+
+    var html = '<div class="result-card">';
+
+    // Score
+    html += '<div class="score-display">';
+    html += '<span class="score-value" style="color:' + color
+      + '">' + data.score.toFixed(2) + '</span>';
+    html += '<span class="score-label">/ 1.00</span>';
+    html += '</div>';
+
+    // Score bar
+    html += '<div class="score-bar-track">';
+    html += '<div class="score-bar-fill" style="width:'
+      + (data.score * 100) + '%;background:'
+      + color + '"></div>';
+    html += '</div>';
+
+    // Meta
+    html += '<div class="result-meta">';
+    html += '<div class="meta-item"><span class="meta-label">Status</span>';
+    html += '<span class="meta-value ' + statusClass + '">' + status + '</span></div>';
+    html += '<div class="meta-item"><span class="meta-label">Time</span>';
+    html += '<span class="meta-value">' + data.execution_time_ms.toFixed(0) + ' ms</span></div>';
+    html += '</div>';
+
+    // Reward components
+    if (data.reward_components && Object.keys(data.reward_components).length > 0) {
+      html += '<div class="reward-components">';
+      var keys = Object.keys(data.reward_components);
+      keys.forEach(function(key) {
+        var val = data.reward_components[key];
+        var c = scoreColor(val);
+        html += '<div class="reward-row">';
+        html += '<span class="reward-name">' + escapeHtml(key) + '</span>';
+        html += '<div class="reward-bar-track">'
+          + '<div class="reward-bar-fill" style="width:'
+          + (val * 100) + '%;background:' + c
+          + '"></div></div>';
+        html += '<span class="reward-value" style="color:' + c + '">' + val.toFixed(2) + '</span>';
+        html += '</div>';
+      });
+      html += '</div>';
+    }
+
+    // Details / error
+    var details = data.error || data.output;
+    if (details) {
+      html += '<div class="result-details">' + escapeHtml(details) + '</div>';
+    }
+
+    html += '</div>';
+    resultArea.innerHTML = html;
+  }
+
+  // ── History ───────────────────────────────────────────────────────
+
+  function loadHistory() {
+    fetch('/api/history')
+      .then(function(r) { return r.json(); })
+      .then(function(data) {
+        if (!data.length) {
+          historyList.innerHTML = '';
+          return;
+        }
+        var html = '';
+        data.forEach(function(item) {
+          var color = scoreColor(item.score);
+          var statusClass = item.passed ? 'status-pass' : 'status-fail';
+          html += '<div class="history-item">';
+          html += '<span class="history-time">' + escapeHtml(item.timestamp) + '</span>';
+          html += '<span class="history-env">' + escapeHtml(item.environment) + '</span>';
+          html += '<span class="history-score ' + statusClass
+            + '">' + item.score.toFixed(2) + '</span>';
+          html += '<span class="history-time-ms">'
+            + item.execution_time_ms.toFixed(0) + 'ms</span>';
+          html += '</div>';
+        });
+        historyList.innerHTML = html;
+      });
+  }
+
+  // ── Init ──────────────────────────────────────────────────────────
+
+  loadEnvironments();
+  loadHistory();
+  updateLineNumbers();
+
+})();
+</script>
+
+</body>
+</html>

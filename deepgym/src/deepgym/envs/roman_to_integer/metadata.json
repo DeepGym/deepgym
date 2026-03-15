@@ -1,0 +1,7 @@
+{
+    "id": "env-019",
+    "name": "Roman to Integer",
+    "difficulty": "easy",
+    "domain": "coding",
+    "tags": ["string", "math", "hash-map"]
+}

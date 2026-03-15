@@ -1,0 +1,8 @@
+{
+    "id": "tu-002",
+    "name": "Data Pipeline",
+    "type": "tool-use",
+    "difficulty": "easy",
+    "domain": "data",
+    "tags": ["csv", "data", "filtering", "pipeline"]
+}

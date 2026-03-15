@@ -1,0 +1,8 @@
+{
+    "id": "cu-003",
+    "name": "CLI Task - Git Operations",
+    "type": "computer-use",
+    "difficulty": "easy",
+    "domain": "cli",
+    "tags": ["git", "cli", "version-control"]
+}

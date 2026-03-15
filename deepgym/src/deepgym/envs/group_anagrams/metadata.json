@@ -1,0 +1,7 @@
+{
+    "id": "env-008",
+    "name": "Group Anagrams",
+    "difficulty": "medium",
+    "domain": "coding",
+    "tags": ["hash-map", "string", "sorting"]
+}

@@ -1,0 +1,7 @@
+{
+    "id": "env-007",
+    "name": "Valid Parentheses",
+    "difficulty": "easy",
+    "domain": "coding",
+    "tags": ["string", "stack"]
+}

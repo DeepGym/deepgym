@@ -1,0 +1,8 @@
+{
+    "id": "cu-002",
+    "name": "File Organizer",
+    "type": "computer-use",
+    "difficulty": "easy",
+    "domain": "filesystem",
+    "tags": ["filesystem", "directories", "organization"]
+}

@@ -1,0 +1,7 @@
+{
+    "id": "env-016",
+    "name": "Merge Intervals",
+    "difficulty": "medium",
+    "domain": "coding",
+    "tags": ["array", "sorting", "intervals"]
+}

@@ -1,0 +1,7 @@
+{
+    "id": "env-002",
+    "name": "Palindrome Check",
+    "difficulty": "easy",
+    "domain": "coding",
+    "tags": ["string", "two-pointers", "basics"]
+}

@@ -9,6 +9,7 @@ Image, Sandbox) against the installed daytona-sdk version.
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import os
@@ -386,10 +387,6 @@ class LocalExecutor:
             stdout = proc.stdout.strip()
             stderr = proc.stderr.strip()
 
-            if proc.returncode == 2:
-                # Verifier crashed — still try to parse its JSON output.
-                pass
-
             json_str = _extract_json_line(stdout)
             if json_str is None:
                 raise VerifierError(
@@ -441,8 +438,6 @@ class AsyncLocalExecutor:
             TimeoutError: If execution exceeds *timeout*.
             VerifierError: If verifier output is invalid or execution fails.
         """
-        import asyncio
-
         _validate_env_vars(env_vars)
 
         tmp_dir = tempfile.mkdtemp(prefix='deepgym_async_local_')

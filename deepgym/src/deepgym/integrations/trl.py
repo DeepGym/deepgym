@@ -27,7 +27,7 @@ Sources:
 from __future__ import annotations
 
 import asyncio
-from collections.abc import Callable
+from collections.abc import Awaitable, Callable
 
 from deepgym.core import DeepGym
 from deepgym.models import Environment
@@ -68,7 +68,7 @@ def make_trl_reward_fn(env: Environment, dg: DeepGym | None = None) -> Callable[
 
 def make_trl_async_reward_fn(
     env: Environment, dg: DeepGym | None = None
-) -> Callable[..., list[float]]:
+) -> Callable[..., Awaitable[list[float]]]:
     """Create an async reward function for TRL's GRPOTrainer.
 
     Async reward functions run concurrently when multiple are provided,

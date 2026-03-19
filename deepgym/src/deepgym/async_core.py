@@ -14,6 +14,8 @@ import time
 from collections.abc import Awaitable, Callable, Sequence
 from typing import TYPE_CHECKING, Any, Literal
 
+import httpx
+
 from deepgym.exceptions import DeepGymError, SandboxError, TimeoutError, VerifierError
 from deepgym.models import (
     BatchResult,
@@ -646,8 +648,6 @@ class AsyncDeepGym:
 
     async def _run_http(self, env: Environment, model_output: str) -> RunResult:
         """Execute a run via the remote DeepGym API server."""
-        import httpx
-
         async with httpx.AsyncClient() as client:
             resp = await client.post(
                 f'{self._api_url}/v1/run',

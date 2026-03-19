@@ -8,6 +8,7 @@ Opens a browser-based interface for testing environments interactively.
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import os
 import time
@@ -62,7 +63,10 @@ def create_web_app() -> FastAPI:
             'when running without Daytona. This prevents accidental host code execution.'
         )
 
+    from deepgym.core import DeepGym
+
     app = FastAPI(title='DeepGym Web UI', docs_url='/docs')
+    dg = DeepGym(mode='auto')
 
     # In-memory run history (bounded to last 200 entries).
     _history: list[dict] = []
@@ -109,14 +113,15 @@ def create_web_app() -> FastAPI:
         Args:
             request: Contains environment name and solution code.
         """
-        from deepgym.core import DeepGym
         from deepgym.registry import load_environment
 
         start = time.perf_counter()
         try:
-            dg = DeepGym(mode='auto')
             env = load_environment(request.environment)
-            result = dg.run(env, model_output=request.code)
+            loop = asyncio.get_running_loop()
+            result = await loop.run_in_executor(
+                None, lambda: dg.run(env, model_output=request.code)
+            )
             elapsed_ms = (time.perf_counter() - start) * 1000
 
             entry = {

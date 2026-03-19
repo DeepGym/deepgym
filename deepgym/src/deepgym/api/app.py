@@ -37,7 +37,7 @@ def _is_no_auth() -> bool:
     return os.getenv('DEEPGYM_NO_AUTH', '').lower() in ('1', 'true', 'yes')
 
 
-async def verify_api_key(api_key: str = Security(api_key_header)):
+async def verify_api_key(api_key: str | None = Security(api_key_header)) -> None:
     """Validate the X-API-Key header against DEEPGYM_API_KEY env var.
 
     If ``DEEPGYM_NO_AUTH=true`` is set, all requests are allowed (dev mode).
@@ -65,11 +65,10 @@ def _check_auth_config() -> None:
     no_auth = _is_no_auth()
 
     if not has_key and not no_auth:
-        print(
-            'ERROR: DEEPGYM_API_KEY is not set.\n'
+        logger.error(
+            'DEEPGYM_API_KEY is not set. '
             'Set DEEPGYM_API_KEY for production, or set DEEPGYM_NO_AUTH=true '
-            'for development.\n',
-            file=sys.stderr,
+            'for development.'
         )
         sys.exit(1)
 
@@ -92,12 +91,11 @@ def _check_local_exec_safety() -> None:
         'yes',
     )
     if not allow_local:
-        print(
-            'ERROR: Running in local executor mode without Daytona sandboxes.\n'
-            'This allows unauthenticated remote code execution on the host.\n\n'
-            'To start the server anyway, pass --allow-local-exec or set\n'
-            'DEEPGYM_ALLOW_LOCAL_EXEC=true in your environment.\n',
-            file=sys.stderr,
+        logger.error(
+            'Running in local executor mode without Daytona sandboxes. '
+            'This allows unauthenticated remote code execution on the host. '
+            'To start the server anyway, pass --allow-local-exec or set '
+            'DEEPGYM_ALLOW_LOCAL_EXEC=true in your environment.'
         )
         sys.exit(1)
 
@@ -127,8 +125,8 @@ async def _lifespan(_app: FastAPI) -> AsyncIterator[None]:
         if os.getenv('DAYTONA_API_KEY') and client._local_executor is not None:
             logger.error('DAYTONA_API_KEY set but client fell back to local mode')
             sys.exit(1)
-    except Exception as exc:
-        logger.error('Failed to initialize DeepGym client: %s', exc)
+    except Exception:
+        logger.error('Failed to initialize DeepGym client', exc_info=True)
         sys.exit(1)
 
     yield

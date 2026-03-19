@@ -206,7 +206,7 @@ def get_environment(env_id: str) -> dict:
 
 
 @v1_router.post('/snapshots', status_code=status.HTTP_501_NOT_IMPLEMENTED)
-def create_snapshot(body: CreateSnapshotRequest) -> None:
+def create_snapshot(_body: CreateSnapshotRequest) -> None:
     """Create a pre-built sandbox snapshot with dependencies pre-installed.
 
     Not yet implemented. Returns 501.

@@ -45,7 +45,7 @@ class ComputerUseEnvironment(Environment):
     viewport: dict[str, int] = Field(default_factory=lambda: {'width': 1280, 'height': 720})
     """Browser viewport dimensions."""
 
-    timeout: int = 120
+    timeout: int = Field(default=120, ge=1)
     """Max time in seconds for the agent to complete the task."""
 
     snapshot: str | None = 'docker-dind'
@@ -236,5 +236,5 @@ class ToolUseEnvironment(Environment):
     expected_state: dict | None = None
     """Expected final state to check against."""
 
-    timeout: int = 60
+    timeout: int = Field(default=60, ge=1)
     """Max time in seconds for the agent to complete the task."""

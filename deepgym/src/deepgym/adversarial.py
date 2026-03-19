@@ -147,7 +147,6 @@ class AdversarialTester:
         api_key: str | None = None,
         model: str = 'claude-haiku-4-5-20251001',
     ) -> None:
-        self._dg = dg
         self._pass_threshold = pass_threshold
         self._api_key = api_key
         self._model = model
@@ -285,6 +284,7 @@ class AdversarialTester:
         Generates a file that defines commonly expected symbols (``def solve``,
         ``def main``, ``class Solution``) returning trivial values.
         """
+        _ = env  # Kept for API consistency; env may inform future strategies.
         return textwrap.dedent("""\
             # Adversarial attack: trivial definitions
             # Defines symbols a weak verifier might check for by name only.
@@ -705,7 +705,6 @@ class LLMAdversarialTester:
         *,
         pass_threshold: float = _PASS_THRESHOLD,
     ) -> None:
-        self._dg = dg
         self._api_key = api_key
         self._model = model
         self._max_attacks = max_attacks
@@ -908,7 +907,6 @@ class BlackBoxAdversarialTester:
         *,
         pass_threshold: float = _PASS_THRESHOLD,
     ) -> None:
-        self._dg = dg
         self._api_key = api_key
         self._model = model
         self._max_rounds = max_rounds

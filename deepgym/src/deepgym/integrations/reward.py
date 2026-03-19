@@ -9,13 +9,9 @@ DeepGym handles execution, verification, and scoring.
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING
-
+from deepgym.async_core import AsyncDeepGym
 from deepgym.core import DeepGym
 from deepgym.models import BatchResult, Environment
-
-if TYPE_CHECKING:
-    from deepgym.async_core import AsyncDeepGym
 
 
 class RewardFunction:
@@ -102,10 +98,8 @@ class AsyncRewardFunction:
         dg: AsyncDeepGym | None = None,
         max_parallel: int = 10,
     ) -> None:
-        from deepgym.async_core import AsyncDeepGym as _AsyncDeepGym
-
         self._env = env
-        self._dg = dg or _AsyncDeepGym(mode='auto')
+        self._dg = dg or AsyncDeepGym(mode='auto')
         self._max_parallel = max_parallel
 
     async def __call__(self, outputs: list[str]) -> list[float]:

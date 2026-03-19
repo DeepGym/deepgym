@@ -52,6 +52,8 @@ and per-test-case breakdown showing exactly which tests passed and which didn't.
 - Deterministic seeding (same input, same score, every time)
 - Three runtime modes: local subprocess, self-hosted Daytona, cloud Daytona
 - Drop-in reward functions for TRL, verl, OpenRLHF
+- lm-evaluation-harness task adapter (evaluate with `lm_eval --tasks deepgym_*`)
+- HuggingFace Hub integration (share environments as HF datasets)
 - Batch scoring for GRPO (score N completions in parallel)
 - Gymnasium-style API if you prefer reset/step/state
 
@@ -91,6 +93,48 @@ from trl import GRPOTrainer
 reward_fn = make_trl_reward_fn(env)
 trainer = GRPOTrainer(model=model, reward_funcs=[reward_fn])
 trainer.train()
+```
+
+### Drop into verl
+
+```python
+from deepgym.integrations.verl import make_verl_compute_score
+
+compute_score = make_verl_compute_score(env)
+# In verl config: custom_reward_function.path = "your_reward_module.py"
+```
+
+### Drop into OpenRLHF
+
+```python
+from fastapi import FastAPI
+from deepgym.integrations.openrlhf import create_openrlhf_router
+
+app = FastAPI()
+app.include_router(create_openrlhf_router(env, dg))
+# Run with: uvicorn app:app --port 8000
+```
+
+### Use with lm-evaluation-harness
+
+```python
+from deepgym.integrations.lm_eval import register_deepgym_tasks
+register_deepgym_tasks()  # registers deepgym_* tasks
+
+# lm_eval --model hf --model_args pretrained=Qwen/Qwen2-0.5B-Instruct \
+#         --tasks deepgym_coin_change,deepgym_two_sum
+```
+
+### Share environments on HuggingFace Hub
+
+```python
+from deepgym.integrations.hf import push_environment_to_hub, load_environment_from_hub
+
+# Push to HF Hub
+push_environment_to_hub(env, repo_id='your-org/deepgym-coin-change', env_name='coin_change')
+
+# Load from anywhere
+env = load_environment_from_hub('your-org/deepgym-coin-change')
 ```
 
 ### Write your own verifier

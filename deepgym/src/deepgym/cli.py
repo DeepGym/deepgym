@@ -61,6 +61,57 @@ def _build_parser() -> argparse.ArgumentParser:
     create_p.add_argument('--domain', default='coding', help='Task domain')
     create_p.add_argument('--tags', nargs='*', default=[], help='Freeform tags')
 
+    # ── audit ─────────────────────────────────────────────────────────
+    audit_p = sub.add_parser('audit', help='Audit a verifier for reward hacking risk')
+    audit_p.add_argument('--task', required=True, help='Task description / prompt')
+    audit_p.add_argument('--verifier', required=True, help='Path to verifier Python file')
+    audit_p.add_argument('--benchmark', default='custom', help='Benchmark label for the audit')
+    audit_p.add_argument('--verifier-id', default=None, help='Optional stable verifier identifier')
+    audit_p.add_argument(
+        '--strategies',
+        nargs='*',
+        default=None,
+        help='Subset of adversarial strategies to run',
+    )
+    audit_p.add_argument(
+        '--persist',
+        action='store_true',
+        help='Persist the audit result to the exploit database',
+    )
+    audit_p.add_argument('--db-path', default=None, help='Optional SQLite path for persisted audits')
+    audit_p.add_argument('--json', action='store_true', help='Print machine-readable JSON only')
+
+    # ── benchmark-audit ───────────────────────────────────────────────
+    bench_p = sub.add_parser('benchmark-audit', help='Audit benchmark split leakage and holdouts')
+    bench_p.add_argument('--env-dir', required=True, help='Root directory containing task/verifier envs')
+    bench_p.add_argument('--benchmark', default=None, help='Benchmark label (defaults to dir name)')
+    bench_p.add_argument('--seed', type=int, default=0, help='Deterministic split seed')
+    bench_p.add_argument(
+        '--public-eval-ratio',
+        type=float,
+        default=0.2,
+        help='Fraction of environments assigned to public eval',
+    )
+    bench_p.add_argument(
+        '--holdout-ratio',
+        type=float,
+        default=0.1,
+        help='Fraction of environments assigned to private holdout',
+    )
+    bench_p.add_argument(
+        '--canary-ratio',
+        type=float,
+        default=0.05,
+        help='Fraction of environments assigned to canary',
+    )
+    bench_p.add_argument(
+        '--split',
+        action='append',
+        default=[],
+        help='Explicit split override in the form env_id=public_train|public_eval|private_holdout|canary',
+    )
+    bench_p.add_argument('--json', action='store_true', help='Print machine-readable JSON only')
+
     # ── serve ─────────────────────────────────────────────────────────
     serve_p = sub.add_parser('serve', help='Start the DeepGym API server')
     serve_p.add_argument('--host', default='127.0.0.1', help='Bind address')
@@ -217,6 +268,61 @@ def _cmd_create(args: argparse.Namespace) -> None:
     print(json.dumps(env.model_dump(), indent=2, default=str))
 
 
+def _cmd_audit(args: argparse.Namespace) -> None:
+    from deepgym.core import DeepGym
+    from deepgym.models import Environment
+    from deepgym.reward_qa import RewardAuditor
+
+    task_value = _read_file_or_string(args.task)
+    verifier_code = _read_file_or_string(args.verifier)
+    env = Environment(task=task_value, verifier_code=verifier_code)
+
+    auditor = RewardAuditor(DeepGym(mode='local'))
+    report = auditor.audit(
+        env,
+        verifier_id=args.verifier_id or '',
+        benchmark=args.benchmark,
+        strategies=args.strategies,
+        persist=args.persist,
+        db_path=Path(args.db_path) if args.db_path else None,
+    )
+
+    if args.json:
+        print(json.dumps(report.model_dump(), indent=2))
+        return
+    _print_verifier_audit(report)
+
+
+def _cmd_benchmark_audit(args: argparse.Namespace) -> None:
+    from deepgym.benchmark_ops import build_benchmark_audit, load_environments_from_dir
+
+    root = Path(args.env_dir)
+    if not root.is_dir():
+        print(f'Error: {root} is not a directory', file=sys.stderr)
+        sys.exit(1)
+
+    environments = load_environments_from_dir(root)
+    if not environments:
+        print(f'Error: no environments found under {root}', file=sys.stderr)
+        sys.exit(1)
+
+    report = build_benchmark_audit(
+        environments,
+        benchmark=args.benchmark or root.name,
+        provenance='filesystem',
+        seed=args.seed,
+        public_eval_ratio=args.public_eval_ratio,
+        holdout_ratio=args.holdout_ratio,
+        canary_ratio=args.canary_ratio,
+        split_overrides=_parse_split_overrides(args.split),
+    )
+
+    if args.json:
+        print(json.dumps(report.model_dump(), indent=2))
+        return
+    _print_benchmark_audit(report)
+
+
 def _cmd_web(args: argparse.Namespace) -> None:
     try:
         import uvicorn
@@ -323,8 +429,59 @@ def _print_eval_result(result, elapsed: float) -> None:
     print(f'{"=" * 50}')
 
 
+def _print_verifier_audit(report) -> None:
+    print(f'\n{"=" * 50}')
+    print(f'  Verifier Audit: {report.verifier_id}')
+    print(f'  Benchmark:      {report.benchmark}')
+    print(f'  Risk:           {report.risk_level.upper()} ({report.risk_score:.2f})')
+    print(f'  Exploitable:    {report.exploitable}')
+    print(f'  Attacks:        {report.exploits_found}/{report.attacks_run}')
+    print(f'  Stored:         {report.stored}')
+    print(f'{"=" * 50}')
+    if report.patterns:
+        print('\n  Patterns:')
+        for pattern in report.patterns:
+            print(f'    - {pattern}')
+    if report.recommendations:
+        print('\n  Recommendations:')
+        for recommendation in report.recommendations:
+            print(f'    - {recommendation}')
+
+
+def _print_benchmark_audit(report) -> None:
+    print(f'\n{"=" * 60}')
+    print(f'  Benchmark Audit: {report.benchmark}')
+    print(f'  Total envs:      {report.total_environments}')
+    print(f'  Contamination:   {report.contamination_risk}')
+    print(f'{"=" * 60}')
+    print('  Split counts:')
+    for split, count in report.split_counts.items():
+        print(f'    - {split}: {count}')
+    print(f'  Duplicate task groups: {len(report.duplicate_task_groups)}')
+    print(f'  Duplicate verifier groups: {len(report.duplicate_verifier_groups)}')
+    print(f'  Leak findings: {len(report.leaks)}')
+    if report.recommendations:
+        print('\n  Recommendations:')
+        for recommendation in report.recommendations:
+            print(f'    - {recommendation}')
+
+
 def _indent(text: str, prefix: str = '    ') -> str:
     return '\n'.join(prefix + line for line in text.splitlines())
+
+
+def _parse_split_overrides(values: list[str]) -> dict[str, str]:
+    allowed = {'public_train', 'public_eval', 'private_holdout', 'canary'}
+    overrides: dict[str, str] = {}
+    for value in values:
+        if '=' not in value:
+            raise ValueError(f'Invalid --split value {value!r}; expected env_id=split')
+        env_id, split = value.split('=', 1)
+        split = split.strip()
+        if split not in allowed:
+            raise ValueError(f'Invalid split {split!r}; expected one of {sorted(allowed)}')
+        overrides[env_id.strip()] = split
+    return overrides
 
 
 # ---------------------------------------------------------------------------
@@ -332,6 +489,8 @@ def _indent(text: str, prefix: str = '    ') -> str:
 # ---------------------------------------------------------------------------
 
 _COMMANDS = {
+    'audit': _cmd_audit,
+    'benchmark-audit': _cmd_benchmark_audit,
     'run': _cmd_run,
     'run-batch': _cmd_run_batch,
     'eval': _cmd_eval,

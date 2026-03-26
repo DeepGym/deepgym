@@ -6,7 +6,9 @@ from typing import Literal
 
 from pydantic import BaseModel, Field, field_validator
 
+from deepgym.benchmark_ops import BenchmarkAuditReport
 from deepgym.models import Environment
+from deepgym.reward_qa import VerifierAuditReport
 
 # ---------------------------------------------------------------------------
 # API-safe environment model (no filesystem paths)
@@ -72,6 +74,14 @@ class RunRequest(BaseModel):
     """Request body for a single episode run."""
 
     environment: APIEnvironment
+    model_output: str = Field(
+        ..., max_length=500_000, description='Model-generated solution source code.'
+    )
+
+
+class RegisteredRunRequest(BaseModel):
+    """Request body for running against a previously registered environment."""
+
     model_output: str = Field(
         ..., max_length=500_000, description='Model-generated solution source code.'
     )
@@ -183,6 +193,39 @@ class CreateSnapshotRequest(BaseModel):
     )
 
 
+class VerifierAuditRequest(BaseModel):
+    """Request body for auditing an inline environment verifier."""
+
+    environment: APIEnvironment
+    verifier_id: str | None = Field(default=None, max_length=200)
+    benchmark: str = Field(default='custom', max_length=200)
+    strategies: list[str] | None = Field(default=None, max_length=20)
+    persist: bool = False
+
+
+class RegisteredVerifierAuditRequest(BaseModel):
+    """Request body for auditing a registered environment verifier."""
+
+    verifier_id: str | None = Field(default=None, max_length=200)
+    benchmark: str = Field(default='registered', max_length=200)
+    strategies: list[str] | None = Field(default=None, max_length=20)
+    persist: bool = False
+
+
+class BenchmarkAuditRequest(BaseModel):
+    """Request body for auditing benchmark split leakage."""
+
+    environment_ids: list[str] = Field(..., min_length=1, max_length=10_000)
+    benchmark: str = Field(default='registered', max_length=200)
+    seed: int = 0
+    public_eval_ratio: float = Field(default=0.2, ge=0.0, lt=1.0)
+    holdout_ratio: float = Field(default=0.1, ge=0.0, lt=1.0)
+    canary_ratio: float = Field(default=0.05, ge=0.0, lt=1.0)
+    split_overrides: (
+        dict[str, Literal['public_train', 'public_eval', 'private_holdout', 'canary']] | None
+    ) = None
+
+
 # ---------------------------------------------------------------------------
 # Response schemas
 # ---------------------------------------------------------------------------
@@ -200,6 +243,19 @@ class CreateEnvironmentResponse(BaseModel):
 
     id: str
     created: bool
+
+
+class CapabilitiesResponse(BaseModel):
+    """Response describing server capabilities exposed to remote runtimes."""
+
+    version: str = '0.1.0'
+    sync_run: bool = True
+    batch_run: bool = True
+    async_jobs: bool = True
+    registered_environments: bool = True
+    named_environment_run: bool = True
+    verifier_audit: bool = True
+    benchmark_audit: bool = True
 
 
 class CreateSnapshotResponse(BaseModel):
@@ -220,14 +276,21 @@ from deepgym.models import Job as JobResponse  # noqa: E402
 
 __all__ = [  # noqa: F822
     'APIEnvironment',
+    'BenchmarkAuditReport',
+    'BenchmarkAuditRequest',
     'RunRequest',
+    'RegisteredRunRequest',
     'BatchRunRequest',
     'EvalRequest',
     'CreateEnvironmentRequest',
     'CreateSnapshotRequest',
+    'VerifierAuditRequest',
+    'RegisteredVerifierAuditRequest',
     'HealthResponse',
+    'CapabilitiesResponse',
     'CreateEnvironmentResponse',
     'CreateSnapshotResponse',
+    'VerifierAuditReport',
     'JobResponse',
     'BatchJobResponse',
 ]

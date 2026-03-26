@@ -18,14 +18,22 @@ from deepgym.api.deps import get_deepgym
 from deepgym.api.schemas import (
     BatchJobResponse,
     BatchRunRequest,
+    BenchmarkAuditReport,
+    BenchmarkAuditRequest,
+    CapabilitiesResponse,
     CreateEnvironmentRequest,
     CreateEnvironmentResponse,
     CreateSnapshotRequest,
     EvalRequest,
     HealthResponse,
     JobResponse,
+    RegisteredRunRequest,
+    RegisteredVerifierAuditRequest,
     RunRequest,
+    VerifierAuditReport,
+    VerifierAuditRequest,
 )
+from deepgym.benchmark_ops import build_benchmark_audit
 from deepgym.core import DeepGym
 from deepgym.exceptions import DeepGymError, SandboxError, VerifierError
 from deepgym.models import (
@@ -37,6 +45,7 @@ from deepgym.models import (
     JobStatus,
     RunResult,
 )
+from deepgym.reward_qa import RewardAuditor
 
 # ---------------------------------------------------------------------------
 # Health router
@@ -75,8 +84,30 @@ def run_episode(
     The solution is executed inside an isolated Daytona sandbox and scored
     by the environment's verifier script.
     """
+    return _run_environment(dg, body.environment.to_environment(), body.model_output)
+
+
+@v1_router.get('/capabilities', response_model=CapabilitiesResponse)
+def get_capabilities() -> CapabilitiesResponse:
+    """Return the server features exposed for remote runtimes."""
+    return CapabilitiesResponse()
+
+
+@v1_router.post('/environments/{env_id}/run', response_model=RunResult)
+def run_registered_environment(
+    env_id: str,
+    body: RegisteredRunRequest,
+    dg: Annotated[DeepGym, Depends(get_deepgym)],
+) -> RunResult:
+    """Run a model output against a previously registered environment."""
+    env = _get_registered_environment(env_id)
+    return _run_environment(dg, env, body.model_output)
+
+
+def _run_environment(dg: DeepGym, environment: Environment, model_output: str) -> RunResult:
+    """Execute a run and normalize backend errors into HTTP exceptions."""
     try:
-        return dg.run(body.environment.to_environment(), body.model_output)
+        return dg.run(environment, model_output)
     except VerifierError as exc:
         raise HTTPException(
             status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
@@ -92,6 +123,63 @@ def run_episode(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f'DeepGym error: {exc}',
         ) from exc
+
+
+@v1_router.post('/audit/verifier', response_model=VerifierAuditReport)
+def audit_verifier(
+    body: VerifierAuditRequest,
+    dg: Annotated[DeepGym, Depends(get_deepgym)],
+) -> VerifierAuditReport:
+    """Audit an inline environment verifier for reward hacking risk."""
+    auditor = RewardAuditor(dg)
+    return auditor.audit(
+        body.environment.to_environment(),
+        verifier_id=body.verifier_id or '',
+        benchmark=body.benchmark,
+        strategies=body.strategies,
+        persist=body.persist,
+    )
+
+
+@v1_router.post('/environments/{env_id}/audit', response_model=VerifierAuditReport)
+def audit_registered_environment(
+    env_id: str,
+    body: RegisteredVerifierAuditRequest,
+    dg: Annotated[DeepGym, Depends(get_deepgym)],
+) -> VerifierAuditReport:
+    """Audit a registered environment verifier."""
+    env = _get_registered_environment(env_id)
+    auditor = RewardAuditor(dg)
+    return auditor.audit(
+        env,
+        verifier_id=body.verifier_id or env_id,
+        benchmark=body.benchmark,
+        strategies=body.strategies,
+        persist=body.persist,
+    )
+
+
+@v1_router.post('/benchmarks/audit', response_model=BenchmarkAuditReport)
+def audit_registered_benchmark(body: BenchmarkAuditRequest) -> BenchmarkAuditReport:
+    """Audit split leakage across a set of registered environments."""
+    missing = sorted(env_id for env_id in body.environment_ids if env_id not in _environments)
+    if missing:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f'Unknown environment ids: {missing}',
+        )
+
+    environments = {env_id: _environments[env_id] for env_id in body.environment_ids}
+    return build_benchmark_audit(
+        environments,
+        benchmark=body.benchmark,
+        provenance='registered',
+        seed=body.seed,
+        public_eval_ratio=body.public_eval_ratio,
+        holdout_ratio=body.holdout_ratio,
+        canary_ratio=body.canary_ratio,
+        split_overrides=body.split_overrides,
+    )
 
 
 @v1_router.post('/run/batch', response_model=BatchResult)
@@ -187,6 +275,17 @@ def _strip_env_vars(env: Environment) -> dict:
     return {**env.model_dump(), 'env_vars': None}
 
 
+def _get_registered_environment(env_id: str) -> Environment:
+    """Resolve a stored environment or raise 404."""
+    env = _environments.get(env_id)
+    if env is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Environment '{env_id}' not found.",
+        )
+    return env
+
+
 @v1_router.get('/environments')
 def list_environments() -> list[dict]:
     """List all registered environments (env_vars stripped)."""
@@ -196,13 +295,7 @@ def list_environments() -> list[dict]:
 @v1_router.get('/environments/{env_id}')
 def get_environment(env_id: str) -> dict:
     """Retrieve a specific environment by its identifier (env_vars stripped)."""
-    env = _environments.get(env_id)
-    if env is None:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail=f"Environment '{env_id}' not found.",
-        )
-    return _strip_env_vars(env)
+    return _strip_env_vars(_get_registered_environment(env_id))
 
 
 @v1_router.post('/snapshots', status_code=status.HTTP_501_NOT_IMPLEMENTED)

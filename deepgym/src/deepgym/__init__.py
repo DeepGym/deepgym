@@ -3,6 +3,7 @@
 __version__ = '0.1.0'
 
 from deepgym.async_core import AsyncDeepGym
+from deepgym.benchmark_ops import BenchmarkAuditReport, BenchmarkLeak, BenchmarkManifestEntry
 from deepgym.computer_use import (
     ComputerUseEnvironment,
     ScreenshotVerifier,
@@ -25,6 +26,7 @@ from deepgym.models import (
 )
 from deepgym.multi_turn import MultiTurnRunner
 from deepgym.registry import list_environments, load_environment, load_suite
+from deepgym.reward_qa import RewardAuditor, VerifierAuditReport
 from deepgym.verifier import Verifier
 
 __all__ = [
@@ -34,6 +36,9 @@ __all__ = [
     'AsyncDeepGymEnv',
     'AsyncRewardFunction',
     'BatchResult',
+    'BenchmarkAuditReport',
+    'BenchmarkLeak',
+    'BenchmarkManifestEntry',
     'ComputerUseEnvironment',
     'DeepGym',
     'DeepGymEnv',
@@ -44,6 +49,7 @@ __all__ = [
     'MultiTurnEnvironment',
     'MultiTurnRunner',
     'Observation',
+    'RewardAuditor',
     'RewardFunction',
     'RunResult',
     'ScreenshotVerifier',
@@ -51,6 +57,7 @@ __all__ = [
     'CaseResult',
     'Trajectory',
     'Verifier',
+    'VerifierAuditReport',
     'VerifierResult',
     'list_environments',
     'load_environment',

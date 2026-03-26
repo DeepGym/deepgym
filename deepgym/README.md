@@ -271,6 +271,13 @@ docker compose -f docker/docker-compose.yaml up -d
 
 Or use Daytona cloud: get a key from [app.daytona.io](https://app.daytona.io).
 
+## Built with Daytona
+
+DeepGym is part of the [Daytona Startup Grid](https://www.daytona.io/startups).
+
+We use Daytona to power fast, isolated execution for modern agent training
+and evaluation workflows.
+
 ## License
 
 MIT

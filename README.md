@@ -12,7 +12,9 @@
 
 ---
 
-Your model writes code. DeepGym runs it in a sandbox, checks it against a verifier, and gives you back a score between 0 and 1. Plug that into TRL, verl, OpenRLHF -- whatever you're using for GRPO/DAPO/PPO.
+Your model writes code. DeepGym runs it in an isolated sandbox, executes tests against it, and returns a structured reward signal -- per-test-case scores, shaped reward components, execution metrics -- that plugs straight into TRL, verl, OpenRLHF, or your own GRPO/DAPO/PPO loop.
+
+DeepSeek-R1 [deliberately avoided neural reward models](https://arxiv.org/abs/2501.12948) for code because they're susceptible to reward hacking at scale. DAPO, QwQ-32B, and Open-R1 followed the same path: rule-based, execution-verified rewards. That's what DeepGym provides -- deterministic, execution-based scoring with per-test granularity, running in sandboxed containers so untrusted model outputs can't touch your infrastructure.
 
 ```
                           reward signal
@@ -118,19 +120,26 @@ print(result.cases)    # per-test breakdown: which tests passed, which failed
     |                 |                   |                     |
 ```
 
-The verifier spits out JSON: a score from 0.0 to 1.0, pass/fail, and (optionally) a per-test-case breakdown so you can see exactly which tests passed and which didn't. That's a much denser training signal than binary pass/fail.
+The verifier returns structured JSON: a 0.0-1.0 score, pass/fail, per-test-case breakdown, and optional shaped reward components (correctness, efficiency, style -- whatever you define). The per-test granularity is what makes this useful for training. Binary pass/fail is a sparse signal. Knowing that 12 out of 14 tests passed, and specifically which two failed, gives the optimizer something to work with -- this is the same approach used by [CodePRM](https://aclanthology.org/2025.findings-acl.428/), [PRIME](https://github.com/PRIME-RL/PRIME), and [Posterior-GRPO](https://arxiv.org/html/2508.05170v1), but without needing a separate process reward model.
+
+## Why execution-based rewards
+
+The field has largely converged here. [A Practitioner's Guide to Multi-Turn Agentic RL](https://arxiv.org/abs/2510.01132) found execution-based unit tests hit 22% success on SWE-Gym vs 4.2% for sparse binary and 7-9% for model-based judges (including GPT-4.1). DeepSeek-R1, DAPO, and QwQ-32B all use rule-based execution rewards rather than neural reward models.
+
+The catch is infrastructure. You need sandboxed execution (you can't run untrusted model output on your training nodes), deterministic scoring (GRPO computes advantages across completions -- non-determinism breaks this), and structured output (binary pass/fail is too sparse for GRPO/DAPO to learn from). DeepGym handles all three.
 
 ## What you get
 
-- **24 built-in coding environments** (easy/medium/hard) plus 2 computer-use and 2 tool-use
-- **2,350+ importable benchmarks** -- HumanEval, MBPP, EvalPlus, BigCodeBench
-- **Per-test rewards** -- not just pass/fail, you see which tests broke and can shape rewards from that
-- **Deterministic scoring** -- seeded verifiers, same input same score, every time (GRPO needs this)
-- **Three runtime modes** -- `local` (subprocess), `daytona` (container isolation), `auto` (tries Daytona, falls back)
-- **Drop-in integrations** -- TRL, verl, OpenRLHF reward functions, lm-eval task adapter, HF Hub
-- **Batch scoring** -- score N completions in parallel with `run_batch()`
-- **Gymnasium API** -- `reset()` / `step()` if that's what you prefer
-- **Reward hack detection** -- adversarial testing with 6 attack strategies
+- **Execution-based verification** -- the approach DeepSeek-R1, DAPO, and QwQ-32B converged on, not neural reward models
+- **Per-test reward signals** -- test-case-level scores like [CodePRM](https://aclanthology.org/2025.findings-acl.428/) and [PRIME](https://github.com/PRIME-RL/PRIME) provide, without training a separate PRM
+- **Shaped reward components** -- `reward_components` dict for multi-signal composition (correctness + efficiency + style), similar to [Posterior-GRPO](https://arxiv.org/html/2508.05170v1)'s gated reward approach
+- **Deterministic seeded scoring** -- same solution, same score, every time. GRPO and DAPO both require this
+- **Sandboxed execution via Daytona** -- container isolation for untrusted code, same pattern as [verl's Sandbox Fusion](https://verl.readthedocs.io/en/latest/examples/sandbox_fusion_example.html) and [DeepSWE](https://www.together.ai/blog/deepswe)'s 512-container setup
+- **Reward hack detection** -- 6 adversarial attack strategies. [Anthropic's Nov 2025 paper](https://arxiv.org/abs/2511.18397) showed reward hacking during RL causes emergent misalignment. Check your verifiers before you train
+- **24 built-in environments** + 2,350+ importable benchmarks (HumanEval, MBPP, EvalPlus, BigCodeBench)
+- **Drop-in integrations** -- TRL `GRPOTrainer`, verl `compute_score`, OpenRLHF reward server, lm-eval tasks, HF Hub
+- **Batch scoring** -- N completions in parallel with `run_batch()`, async client with semaphore-based concurrency
+- **Gymnasium API** -- `reset()` / `step()` for multi-turn agent training, same interface as [Agent-R1](https://github.com/0russwest0/Agent-R1) and [VerlTool](https://arxiv.org/html/2509.01055v1)
 - **REST API** -- FastAPI server with async jobs and API key auth
 
 ## Usage
@@ -304,7 +313,7 @@ obs, reward, done, info = gym_env.step('def coin_change(coins, amount): ...')
 
 ### Audit verifiers for reward hacking
 
-Before you burn GPU hours training against a verifier, check that it can't be gamed:
+[Anthropic found](https://arxiv.org/abs/2511.18397) that models which learn to reward-hack during RL generalize to alignment faking and sabotage. [Lilian Weng's analysis](https://lilianweng.github.io/posts/2024-11-28-reward-hacking/) documents models rewriting unit tests, modifying reward-computing code, and gaming complexity metrics. Check your verifiers before training:
 
 ```python
 from deepgym.adversarial import AdversarialTester
@@ -319,6 +328,8 @@ print(f'Robust: {report.is_robust}')
 ```bash
 deepgym audit --verifier verifier.py --task "..." --strategies empty hardcoded trivial
 ```
+
+Six attack strategies: empty/null code, hardcoded outputs, trivial placeholders, numeric overflow (NaN/Inf), pattern matching against test structure, and LLM-generated adversarial code. The auditor also analyzes verifier source for anti-patterns (static inputs, few test cases, no type validation) and assigns a risk score.
 
 ## Environments
 
@@ -346,7 +357,7 @@ python scripts/import_bigcodebench.py   # 1,140 problems
 
 ## Verifier protocol
 
-Verifiers write JSON to stdout:
+Verifiers are standalone scripts that print JSON to stdout. No SDK, no imports from DeepGym, any language works. This is deliberate -- same philosophy as DeepSeek-R1's rule-based rewards. Keep the verifier simple and auditable.
 
 ```json
 {
@@ -363,7 +374,13 @@ Verifiers write JSON to stdout:
 }
 ```
 
-The `cases` field is the interesting part. Your training loop gets per-test granularity instead of a single 0 or 1. Simple verifiers that return a float or bool get auto-wrapped to this format. Full spec in the [wiki](https://github.com/DeepGym/deepgym/wiki/Verifier-Protocol).
+Three levels of reward signal, depending on how much you want from your verifier:
+
+1. **Binary** -- just `score` and `passed`. Equivalent to what most RLVR setups use.
+2. **Per-test** -- add `cases` for test-case-level granularity. The model learns which tests it gets right, not just whether everything passed. This is what [PRIME](https://github.com/PRIME-RL/PRIME) and [CodePRM](https://aclanthology.org/2025.findings-acl.428/) provide through process reward models, but here it comes directly from execution.
+3. **Multi-signal** -- add `reward_components` for shaped rewards. Compose correctness, efficiency, and style signals with custom weights, like [Posterior-GRPO](https://arxiv.org/html/2508.05170v1)'s format + rule + thinking reward composition.
+
+Simple verifiers that return a float or bool get auto-wrapped to this format. Full spec in the [wiki](https://github.com/DeepGym/deepgym/wiki/Verifier-Protocol).
 
 ## Architecture
 
@@ -409,7 +426,34 @@ The `cases` field is the interesting part. Your training loop gets per-test gran
      RunResult { score, passed, cases, reward_components }
 ```
 
-Three modes: **local** (subprocess, no deps, no isolation), **daytona** (container isolation), **auto** (tries Daytona, falls back to local). Use local for dev, Daytona for anything untrusted.
+Three modes: **local** (subprocess, no deps, no isolation), **daytona** (container isolation), **auto** (tries Daytona, falls back to local). Use local for dev, Daytona for anything untrusted. The same Daytona infrastructure [runs 500 sandboxes in parallel for TRL GRPO training](https://www.daytona.io/docs/en/guides/reinforcement-learning/trl-grpo-training/) with sub-200ms cold starts.
+
+## Where DeepGym fits
+
+```
+You're probably using one of these:        DeepGym is this layer:
+
++-------------------------------------+
+| Training Framework                  |    TRL GRPOTrainer, verl, OpenRLHF,
+| (policy optimization)               |    rLLM, or your own PPO/GRPO loop
++-------------------------------------+
+                  |
+                  | "score these N completions"
+                  v
++-------------------------------------+
+| Reward Infrastructure               |    <-- DeepGym
+| (execution, verification, scoring)  |
++-------------------------------------+
+                  |
+                  | sandbox lifecycle
+                  v
++-------------------------------------+
+| Compute Isolation                   |    Daytona containers, local subprocess
+| (run untrusted code safely)         |
++-------------------------------------+
+```
+
+Other projects in this space: verl uses [Sandbox Fusion](https://verl.readthedocs.io/en/latest/examples/sandbox_fusion_example.html) for code verification. [DeepSWE](https://www.together.ai/blog/deepswe) runs 512 Docker containers via rLLM. [SWE-Gym](https://github.com/SWE-Gym/SWE-Gym) and [R2E-Gym](https://github.com/R2E-Gym/R2E-Gym) provide execution-based environments for SWE tasks. DeepGym wraps the same pattern -- sandboxed execution + structured reward output -- into a single `pip install` with drop-in reward functions for the major frameworks.
 
 ## CLI
 

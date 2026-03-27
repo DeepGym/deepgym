@@ -45,3 +45,12 @@ data/*.db
 # Daytona (submodule, not part of this repo)
 daytona/
 .DS_Store
+
+# Local scripts (not tracked)
+scripts/deer_flow_demo.py
+scripts/live_sandbox_monitor.py
+scripts/long_sandbox_run.py
+scripts/parallel_sandbox_blast.py
+scripts/ticker_100.py
+scripts/ticker_blast.py
+scripts/ticker_local.py

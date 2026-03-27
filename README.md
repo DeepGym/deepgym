@@ -14,18 +14,29 @@
 
 Your model writes code. DeepGym runs it in a sandbox, checks it against a verifier, and gives you back a score between 0 and 1. Plug that into TRL, verl, OpenRLHF -- whatever you're using for GRPO/DAPO/PPO.
 
-```mermaid
-flowchart LR
-    A["Model"] -->|"generated code"| B["DeepGym"]
-    B -->|"execute"| C{"Sandbox"}
-    C -->|"Daytona container"| D["Verifier"]
-    C -->|"local subprocess"| D
-    D -->|"JSON score + per-test breakdown"| E["Training Loop"]
-    E -->|"reward signal"| A
-
-    style B fill:#4A90D9,color:#fff
-    style C fill:#F5A623,color:#fff
-    style D fill:#7ED321,color:#fff
+```
+                          reward signal
+               +------------------------------------+
+               |                                    |
+               v                                    |
+           +-------+     +----------+     +--------------------+
+           | Model | --> | DeepGym  | --> |      Sandbox       |
+           +-------+     +----------+     | (Daytona / local)  |
+               ^              |           +--------------------+
+               |              |                    |
+               |              v                    v
+               |         +-----------+       +----------+
+               |         |  RunResult |<-----| Verifier |
+               |         +-----------+       +----------+
+               |           |                       |
+               |           | score: 0.85           | JSON stdout
+               |           | passed: false         | per-test cases
+               |           | cases: [...]          | reward components
+               |           v
+           +-------------------+
+           |   Training Loop   |
+           | (TRL/verl/ORLHF)  |
+           +-------------------+
 ```
 
 ## Install
@@ -84,22 +95,27 @@ print(result.cases)    # per-test breakdown: which tests passed, which failed
 
 ## How it works
 
-```mermaid
-sequenceDiagram
-    participant M as Model
-    participant D as DeepGym
-    participant S as Sandbox
-    participant V as Verifier
-
-    M->>D: solution code
-    D->>S: create sandbox (Daytona or local)
-    D->>S: upload solution + verifier
-    S->>V: python verifier.py solution.py
-    V->>V: run tests (fixed + randomized, seeded)
-    V-->>S: JSON stdout (score, cases, metrics)
-    S-->>D: stdout + stderr + exit code
-    D->>D: parse VerifierResult
-    D-->>M: RunResult (score, passed, per-test cases)
+```
+  Model            DeepGym             Sandbox              Verifier
+    |                 |                   |                     |
+    |  solution code  |                   |                     |
+    |---------------->|                   |                     |
+    |                 |  create sandbox   |                     |
+    |                 |------------------>|                     |
+    |                 |  upload files     |                     |
+    |                 |------------------>|                     |
+    |                 |                   |  python verifier.py |
+    |                 |                   |-------------------->|
+    |                 |                   |                     | run tests
+    |                 |                   |                     | (seeded)
+    |                 |                   |  JSON stdout        |
+    |                 |                   |<--------------------|
+    |                 |  stdout + stderr  |                     |
+    |                 |<------------------|                     |
+    |                 |  parse JSON       |                     |
+    |  RunResult      |                   |                     |
+    |<----------------|                   |                     |
+    |                 |                   |                     |
 ```
 
 The verifier spits out JSON: a score from 0.0 to 1.0, pass/fail, and (optionally) a per-test-case breakdown so you can see exactly which tests passed and which didn't. That's a much denser training signal than binary pass/fail.
@@ -351,49 +367,46 @@ The `cases` field is the interesting part. Your training loop gets per-test gran
 
 ## Architecture
 
-```mermaid
-graph TB
-    subgraph "Training Frameworks"
-        TRL["TRL (HuggingFace)"]
-        VERL["verl (ByteDance)"]
-        ORLHF["OpenRLHF"]
-        CUSTOM["Custom Loop"]
-    end
-
-    subgraph "DeepGym"
-        API["REST API / Python Client"]
-        SYNC["DeepGym (sync)"]
-        ASYNC["AsyncDeepGym (async)"]
-        REG["Environment Registry"]
-        VER["Verifier Engine"]
-        ADV["Adversarial Tester"]
-    end
-
-    subgraph "Execution"
-        LOCAL["LocalExecutor<br/>(subprocess)"]
-        DAYTONA["DaytonaSandbox<br/>(container isolation)"]
-    end
-
-    subgraph "Data Sources"
-        BUILTIN["24 Built-in Envs"]
-        HE["HumanEval (164)"]
-        MBPP["MBPP (500)"]
-        EP["EvalPlus"]
-        BCB["BigCodeBench (1140)"]
-        HF["HF Hub"]
-    end
-
-    TRL & VERL & ORLHF & CUSTOM --> API
-    API --> SYNC & ASYNC
-    SYNC & ASYNC --> VER
-    VER --> LOCAL & DAYTONA
-    REG --> BUILTIN & HE & MBPP & EP & BCB & HF
-    SYNC & ASYNC --> REG
-    ADV --> VER
-
-    style API fill:#4A90D9,color:#fff
-    style DAYTONA fill:#F5A623,color:#fff
-    style VER fill:#7ED321,color:#fff
+```
++------------------------------------------------------------------+
+|                      TRAINING FRAMEWORKS                          |
+|   TRL (HuggingFace)  |  verl (ByteDance)  |  OpenRLHF  | Custom |
++------------------------------------------------------------------+
+                               |
+                      completions (code)
+                               |
+                               v
++------------------------------------------------------------------+
+|                           DEEPGYM                                 |
+|                                                                   |
+|  +---------------------+    +----------------------------------+  |
+|  | Python Client       |    | Environment Registry             |  |
+|  |   DeepGym (sync)    |    |   24 built-in envs               |  |
+|  |   AsyncDeepGym      |    |   HumanEval / MBPP / EvalPlus   |  |
+|  +---------------------+    |   BigCodeBench / HF Hub          |  |
+|            |                 +----------------------------------+  |
+|            v                                                      |
+|  +---------------------+    +----------------------------------+  |
+|  | Verifier Engine      |    | Adversarial Tester              |  |
+|  |   template wrapping  |    |   6 attack strategies           |  |
+|  |   JSON protocol      |    |   reward hack detection         |  |
+|  +---------------------+    +----------------------------------+  |
+|            |                                                      |
++------------------------------------------------------------------+
+             |
+             v
++------------------------------------------------------------------+
+|                         EXECUTION LAYER                           |
+|                                                                   |
+|   +-------------------------+  +------------------------------+   |
+|   | LocalExecutor           |  | DaytonaSandbox               |   |
+|   | (subprocess, no isolation) | (container, full isolation)  |   |
+|   +-------------------------+  +------------------------------+   |
+|                                                                   |
++------------------------------------------------------------------+
+             |
+             v
+     RunResult { score, passed, cases, reward_components }
 ```
 
 Three modes: **local** (subprocess, no deps, no isolation), **daytona** (container isolation), **auto** (tries Daytona, falls back to local). Use local for dev, Daytona for anything untrusted.

@@ -137,7 +137,8 @@ The catch is infrastructure. You need sandboxed execution (you can't run untrust
 - **Sandboxed execution via Daytona** -- container isolation for untrusted code, same pattern as [verl's Sandbox Fusion](https://verl.readthedocs.io/en/latest/examples/sandbox_fusion_example.html) and [DeepSWE](https://www.together.ai/blog/deepswe)'s 512-container setup
 - **Reward hack detection** -- 6 adversarial attack strategies. [Anthropic's Nov 2025 paper](https://arxiv.org/abs/2511.18397) showed reward hacking during RL causes emergent misalignment. Check your verifiers before you train
 - **24 built-in environments** + 2,350+ importable benchmarks (HumanEval, MBPP, EvalPlus, BigCodeBench)
-- **Drop-in integrations** -- TRL `GRPOTrainer`, verl `compute_score`, OpenRLHF reward server, lm-eval tasks, HF Hub
+- **Drop-in integrations** -- Axolotl, TRL `GRPOTrainer`, verl `compute_score`, OpenRLHF reward server, lm-eval tasks, HF Hub
+- **PRM data generation** -- convert per-test results into [Axolotl-compatible](https://axolotlai.substack.com/p/process-reward-models) stepwise supervision datasets via `deepgym generate-prm`
 - **Batch scoring** -- N completions in parallel with `run_batch()`, async client with semaphore-based concurrency
 - **Gymnasium API** -- `reset()` / `step()` for multi-turn agent training, same interface as [Agent-R1](https://github.com/0russwest0/Agent-R1) and [VerlTool](https://arxiv.org/html/2509.01055v1)
 - **REST API** -- FastAPI server with async jobs and API key auth
@@ -224,6 +225,124 @@ push_environment_to_hub(env, repo_id='your-org/deepgym-coin-change', env_name='c
 # load from anywhere
 env = load_environment_from_hub('your-org/deepgym-coin-change')
 ```
+
+### Axolotl
+
+Axolotl wraps TRL's GRPOTrainer under the hood. DeepGym's reward functions work with it directly -- point your config at a DeepGym environment and completions get scored in sandboxes during training. No glue code.
+
+```python
+from deepgym.integrations.axolotl import make_axolotl_reward_fn
+from deepgym import load_environment
+
+env = load_environment('coin_change')
+reward_fn = make_axolotl_reward_fn(env)
+
+# Use in your Axolotl training script with GRPOTrainer
+from trl import GRPOTrainer
+
+trainer = GRPOTrainer(
+    model='Qwen/Qwen3.5-Coder-7B',
+    reward_funcs=[reward_fn],
+    train_dataset=dataset,
+)
+trainer.train()
+```
+
+Multi-signal training -- use separate reward functions for each component:
+
+```python
+from deepgym.integrations.axolotl import make_axolotl_shaped_reward_fn
+
+correctness_fn = make_axolotl_shaped_reward_fn(env, component='correctness')
+efficiency_fn = make_axolotl_shaped_reward_fn(env, component='efficiency')
+
+trainer = GRPOTrainer(
+    model='Qwen/Qwen3.5-Coder-7B',
+    reward_funcs=[correctness_fn, efficiency_fn],
+    train_dataset=dataset,
+)
+```
+
+Generate an Axolotl YAML config:
+
+```python
+from deepgym.integrations.axolotl import generate_axolotl_config
+
+config = generate_axolotl_config(
+    base_model='Qwen/Qwen3.5-Coder-7B',
+    method='grpo',
+    dataset_path='data/train.jsonl',
+)
+
+with open('axolotl_grpo.yaml', 'w') as f:
+    f.write(config)
+# axolotl train axolotl_grpo.yaml
+```
+
+### PRM data generation
+
+Process Reward Models score each reasoning step individually rather than giving one pass/fail for the whole solution. DeepGym already returns per-test-case verdicts, so the mapping is mechanical: each test case is a step, each pass/fail is a label. You get PRM training data from any DeepGym environment without hand-labeling.
+
+```python
+from deepgym.integrations.axolotl import generate_prm_dataset, write_prm_dataset
+from deepgym import DeepGym, load_environment
+from pathlib import Path
+
+dg = DeepGym(mode='local')
+env = load_environment('coin_change')
+
+# Score solutions and extract per-test step labels
+solutions = [open(f).read() for f in sorted(Path('solutions/').glob('*.py'))]
+records = generate_prm_dataset(env, solutions, dg=dg)
+write_prm_dataset(records, Path('prm_data.jsonl'))
+```
+
+Each record follows Axolotl's `stepwise_supervised` format:
+
+```json
+{
+  "prompt": "Given coins [1,2,5] and amount 11, find minimum coins needed.",
+  "completions": ["Input: [1,2,5], 11 | Expected: 3 | Got: 3", "Input: [], 0 | Expected: 0 | Got: -1"],
+  "labels": [true, false]
+}
+```
+
+Train a PRM with Axolotl on the generated data:
+
+```yaml
+# prm_config.yaml
+base_model: Qwen/Qwen3.5-Coder-7B
+model_type: AutoModelForTokenClassification
+num_labels: 2
+process_reward_model: true
+
+datasets:
+  - path: prm_data.jsonl
+    type: stepwise_supervised
+    step_separator: "\n\n"
+    split: train
+```
+
+```bash
+axolotl train prm_config.yaml
+```
+
+Or do it all from the CLI:
+
+```bash
+# Generate PRM dataset + Axolotl config in one shot
+deepgym generate-prm \
+  --env coin_change \
+  --solutions-dir ./solutions/ \
+  -o prm_data.jsonl \
+  --axolotl-config prm_config.yaml \
+  --base-model Qwen/Qwen3.5-Coder-7B
+
+# Train
+axolotl train prm_config.yaml
+```
+
+DeepGym runs code in sandboxes and reports which tests passed. Axolotl trains on that signal. The PRM piece goes a step further: instead of "this solution scored 0.85," the model sees "tests 1 through 10 passed, test 11 failed on the empty-list edge case." That's the same per-step granularity that [CodePRM](https://aclanthology.org/2025.findings-acl.428/) and [PRIME](https://github.com/PRIME-RL/PRIME) get from trained reward models -- but here it comes from execution directly, no reward model needed.
 
 ## Advanced Examples
 
@@ -387,7 +506,7 @@ Simple verifiers that return a float or bool get auto-wrapped to this format. Fu
 ```
 +------------------------------------------------------------------+
 |                      TRAINING FRAMEWORKS                          |
-|   TRL (HuggingFace)  |  verl (ByteDance)  |  OpenRLHF  | Custom |
+| Axolotl | TRL (HuggingFace) | verl (ByteDance) | OpenRLHF | ... |
 +------------------------------------------------------------------+
                                |
                       completions (code)
@@ -434,8 +553,8 @@ Three modes: **local** (subprocess, no deps, no isolation), **daytona** (contain
 You're probably using one of these:        DeepGym is this layer:
 
 +-------------------------------------+
-| Training Framework                  |    TRL GRPOTrainer, verl, OpenRLHF,
-| (policy optimization)               |    rLLM, or your own PPO/GRPO loop
+| Training Framework                  |    Axolotl, TRL GRPOTrainer, verl,
+| (policy optimization)               |    OpenRLHF, rLLM, or your own loop
 +-------------------------------------+
                   |
                   | "score these N completions"
@@ -522,7 +641,7 @@ Full docs on the [GitHub Wiki](https://github.com/DeepGym/deepgym/wiki):
 - [Core API Reference](https://github.com/DeepGym/deepgym/wiki/Core-API-Reference) -- classes, methods, models
 - [Environments](https://github.com/DeepGym/deepgym/wiki/Environments) -- built-in + importable benchmarks
 - [Verifier Protocol](https://github.com/DeepGym/deepgym/wiki/Verifier-Protocol) -- JSON spec, writing verifiers
-- [Integrations](https://github.com/DeepGym/deepgym/wiki/Integrations) -- TRL, verl, OpenRLHF, lm-eval, HF Hub
+- [Integrations](https://github.com/DeepGym/deepgym/wiki/Integrations) -- Axolotl, TRL, verl, OpenRLHF, lm-eval, HF Hub
 - [Sandbox Modes](https://github.com/DeepGym/deepgym/wiki/Sandbox-Modes) -- local vs Daytona vs auto
 - [Adversarial Testing](https://github.com/DeepGym/deepgym/wiki/Adversarial-Testing) -- reward hack detection
 - [Advanced Usage](https://github.com/DeepGym/deepgym/wiki/Advanced-Usage) -- Gymnasium API, multi-turn, shaped rewards

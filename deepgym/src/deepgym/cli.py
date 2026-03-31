@@ -112,6 +112,42 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     bench_p.add_argument('--json', action='store_true', help='Print machine-readable JSON only')
 
+    # ── generate-prm ───────────────────────────────────────────────────
+    prm_p = sub.add_parser(
+        'generate-prm',
+        help='Generate PRM stepwise-supervision dataset from DeepGym environments',
+    )
+    prm_p.add_argument(
+        '--env', required=True, help='Built-in environment name (e.g. coin_change)'
+    )
+    prm_p.add_argument(
+        '--solutions-dir',
+        required=True,
+        help='Directory containing .py solution files to score',
+    )
+    prm_p.add_argument(
+        '-o', '--output', required=True, help='Output path for .jsonl dataset file'
+    )
+    prm_p.add_argument(
+        '--step-separator', default='\n\n', help='Step separator for PRM records'
+    )
+    prm_p.add_argument(
+        '--max-parallel', type=int, default=32, help='Max concurrent sandbox runs'
+    )
+    prm_p.add_argument(
+        '--include-metadata', action='store_true', help='Include solution metadata in output'
+    )
+    prm_p.add_argument(
+        '--axolotl-config',
+        default=None,
+        help='Also generate an Axolotl PRM YAML config at this path',
+    )
+    prm_p.add_argument(
+        '--base-model',
+        default='Qwen/Qwen3.5-Coder-7B',
+        help='Base model for generated Axolotl config',
+    )
+
     # ── serve ─────────────────────────────────────────────────────────
     serve_p = sub.add_parser('serve', help='Start the DeepGym API server')
     serve_p.add_argument('--host', default='127.0.0.1', help='Bind address')
@@ -323,6 +359,70 @@ def _cmd_benchmark_audit(args: argparse.Namespace) -> None:
     _print_benchmark_audit(report)
 
 
+def _cmd_generate_prm(args: argparse.Namespace) -> None:
+    from deepgym.core import DeepGym
+    from deepgym.integrations.axolotl import (
+        generate_axolotl_config,
+        generate_prm_dataset,
+        write_prm_dataset,
+    )
+    from deepgym.registry import load_environment
+
+    env = load_environment(args.env)
+
+    solutions_dir = Path(args.solutions_dir)
+    if not solutions_dir.is_dir():
+        print(f'Error: {solutions_dir} is not a directory', file=sys.stderr)
+        sys.exit(1)
+
+    solution_files = sorted(solutions_dir.glob('*.py'))
+    if not solution_files:
+        print(f'Error: no .py files found in {solutions_dir}', file=sys.stderr)
+        sys.exit(1)
+
+    solutions = [f.read_text(encoding='utf-8') for f in solution_files]
+    print(f'Loaded {len(solutions)} solutions from {solutions_dir}')
+
+    dg = DeepGym()
+    start = time.perf_counter()
+    records = generate_prm_dataset(
+        env=env,
+        solutions=solutions,
+        dg=dg,
+        max_parallel=args.max_parallel,
+        step_separator=args.step_separator,
+    )
+    elapsed = time.perf_counter() - start
+
+    output_path = Path(args.output)
+    written = write_prm_dataset(
+        records, output_path, include_metadata=args.include_metadata
+    )
+
+    print(f'\n{"=" * 50}')
+    print('  PRM Dataset Generated')
+    print(f'  Solutions scored:  {len(solutions)}')
+    print(f'  Records written:   {written}')
+    print(f'  Skipped:           {len(solutions) - written}')
+    print(f'  Output:            {output_path}')
+    print(f'  Time:              {elapsed:.2f}s')
+    print(f'{"=" * 50}')
+
+    if args.axolotl_config:
+        config_path = Path(args.axolotl_config)
+        config = generate_axolotl_config(
+            base_model=args.base_model,
+            method='prm',
+            dataset_path=str(output_path),
+            step_separator=args.step_separator.encode('unicode_escape').decode('ascii'),
+            config_filename=config_path.name,
+        )
+        config_path.parent.mkdir(parents=True, exist_ok=True)
+        config_path.write_text(config, encoding='utf-8')
+        print(f'\n  Axolotl config:    {config_path}')
+        print(f'  Train with:        axolotl train {config_path}')
+
+
 def _cmd_web(args: argparse.Namespace) -> None:
     try:
         import uvicorn
@@ -491,6 +591,7 @@ def _parse_split_overrides(values: list[str]) -> dict[str, str]:
 _COMMANDS = {
     'audit': _cmd_audit,
     'benchmark-audit': _cmd_benchmark_audit,
+    'generate-prm': _cmd_generate_prm,
     'run': _cmd_run,
     'run-batch': _cmd_run_batch,
     'eval': _cmd_eval,

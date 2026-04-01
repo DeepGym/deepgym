@@ -98,6 +98,31 @@ trainer = GRPOTrainer(model=model, reward_funcs=[reward_fn])
 trainer.train()
 ```
 
+### Drop into DAPO
+
+```python
+from deepgym.integrations.dapo import make_dapo_reward_fn
+
+reward_fn = make_dapo_reward_fn(env)
+scores = reward_fn(completions=['def solve(x): return x'])
+```
+
+For verl-style DAPO recipes, DeepGym also exposes thin helpers to generate a
+reward module and a minimal config snippet:
+
+```python
+from deepgym.integrations.dapo import (
+    generate_dapo_reward_module,
+    generate_dapo_verl_config,
+)
+
+reward_module = generate_dapo_reward_module('coin_change')
+config_yaml = generate_dapo_verl_config(
+    train_files='data/train.parquet',
+    reward_module_path='reward_module.py',
+)
+```
+
 ### Train on repo patches with SWE-bench Pro
 
 ```python

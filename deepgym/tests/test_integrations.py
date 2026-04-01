@@ -7,12 +7,19 @@ from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
 from deepgym.core import DeepGym
+from deepgym.integrations.dapo import (
+    generate_dapo_reward_module,
+    generate_dapo_verl_config,
+    make_dapo_async_reward_fn,
+    make_dapo_reward_fn,
+    make_dapo_shaped_reward_fn,
+)
 from deepgym.integrations.openrlhf import (
     OpenRLHFRewardRequest,
     OpenRLHFRewardResponse,
     create_openrlhf_router,
 )
-from deepgym.integrations.reward import AsyncRewardFunction, RewardFunction
+from deepgym.integrations.reward import RewardFunction
 from deepgym.integrations.trl import make_trl_async_reward_fn, make_trl_reward_fn
 from deepgym.integrations.verl import make_verl_compute_score, make_verl_reward_fn
 from deepgym.models import Environment
@@ -93,6 +100,53 @@ class TestVerlIntegration:
         scores = fn({'responses': [GOOD_SOLUTION]})
         assert len(scores) == 1
         assert scores[0] >= 0.5
+
+
+class TestDAPOIntegration:
+    """Verify thin DAPO integration helpers."""
+
+    def test_make_dapo_reward_fn_returns_callable(self, env: Environment) -> None:
+        fn = make_dapo_reward_fn(env=env)
+        assert callable(fn)
+
+    def test_dapo_reward_fn_scores_good_solution(self, env: Environment, local_dg: DeepGym) -> None:
+        fn = make_dapo_reward_fn(env=env, dg=local_dg)
+        scores = fn(completions=[GOOD_SOLUTION])
+        assert len(scores) == 1
+        assert scores[0] >= 0.9
+
+    def test_make_dapo_async_reward_fn_returns_callable(self, env: Environment) -> None:
+        fn = make_dapo_async_reward_fn(env=env)
+        assert callable(fn)
+
+    def test_dapo_shaped_reward_fn_returns_component(
+        self,
+        local_dg: DeepGym,
+    ) -> None:
+        shaped_env = Environment(
+            task='Return anything',
+            verifier_code=(
+                'return {"score": 0.4, "passed": False, '
+                '"reward_components": {"correctness": 0.8, "style": 0.2}}\n'
+            ),
+        )
+        fn = make_dapo_shaped_reward_fn(env=shaped_env, dg=local_dg, component='correctness')
+        scores = fn(completions=['print("hi")\n'])
+        assert scores == [0.8]
+
+    def test_generate_dapo_verl_config_contains_expected_fields(self) -> None:
+        config = generate_dapo_verl_config(
+            train_files='data/train.parquet',
+            reward_module_path='reward_module.py',
+        )
+        assert 'adv_estimator: dapo' in config
+        assert 'custom_reward_function:' in config
+        assert 'reward_module.py' in config
+
+    def test_generate_dapo_reward_module_uses_dapo_reward_fn(self) -> None:
+        module_text = generate_dapo_reward_module('coin_change')
+        assert "load_environment('coin_change')" in module_text
+        assert 'make_dapo_reward_fn' in module_text
 
 
 class TestRewardFunction:

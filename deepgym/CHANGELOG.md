@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.2.0 (2026-04-02)
+
+- Added `SWEBenchProEnvironment` for repo-level patch tasks backed by ScaleAI/SWE-bench_Pro
+- Added `TerminalBenchEnvironment` for shell-task evaluation backed by Terminal-Bench 2.0
+- Added `MixedEnvironment` for ratio-based multi-benchmark reward routing through existing TRL/reward APIs
+- Added reusable `PatchVerifier` for unified-diff parsing, apply checks, and repo test scoring
+- Extended reward integrations so per-sample benchmark metadata can flow through existing batch interfaces
+
 ## 0.1.0 (2026-03-17)
 
 Initial release.

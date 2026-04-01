@@ -48,6 +48,9 @@ and per-test-case breakdown showing exactly which tests passed and which didn't.
 
 - 24 built-in coding environments (ship with pip install)
 - 2,350+ importable benchmarks (HumanEval, MBPP, BigCodeBench, EvalPlus)
+- SWE-bench Pro support for repo-level patch RL tasks
+- Terminal-Bench 2.0 support for shell/terminal RL tasks
+- MixedEnvironment routing for multi-benchmark training in one reward function
 - Per-test-case reward traces (not just pass/fail -- you see which tests broke)
 - Deterministic seeding (same input, same score, every time)
 - Three runtime modes: local subprocess, self-hosted Daytona, cloud Daytona
@@ -93,6 +96,61 @@ from trl import GRPOTrainer
 reward_fn = make_trl_reward_fn(env)
 trainer = GRPOTrainer(model=model, reward_funcs=[reward_fn])
 trainer.train()
+```
+
+### Train on repo patches with SWE-bench Pro
+
+```python
+from deepgym import DeepGym, load_environment
+
+dg = DeepGym(mode='auto')
+env = load_environment('swebench_pro')
+
+result = dg.run(
+    env,
+    model_output='''```diff\n... unified diff ...\n```''',
+    repo='owner/repo',
+    base_commit='abc123',
+    test_patch='diff --git ...',
+    fail_to_pass=['tests/test_bug.py::test_fix'],
+    pass_to_pass=['tests/test_smoke.py::test_smoke'],
+)
+print(result.score)
+```
+
+### Train on terminal tasks with Terminal-Bench 2.0
+
+```python
+from deepgym import DeepGym, load_environment
+
+dg = DeepGym(mode='auto')
+env = load_environment('terminal_bench_2')
+
+result = dg.run(
+    env,
+    model_output='python solve.py --input data.txt > output.txt',
+    task_id='regex-log',
+)
+print(result.score)
+```
+
+### Mix multiple benchmarks behind one reward function
+
+```python
+from deepgym import MixedEnvironment, load_environment
+from deepgym.integrations.trl import make_trl_reward_fn
+
+swe_env = load_environment('swebench_pro')
+terminal_env = load_environment('terminal_bench_2')
+humaneval_env = load_environment('coin_change')
+
+mixed = MixedEnvironment([
+    (swe_env, 0.6),
+    (terminal_env, 0.2),
+    (humaneval_env, 0.2),
+])
+
+reward_fn = make_trl_reward_fn(mixed)
 ```
 
 ### Drop into verl
@@ -196,6 +254,15 @@ python scripts/import_bigcodebench.py   # 1,140 problems
 
 After import, they're available through `load_environment()`.
 
+### Benchmark-backed special environments
+
+These names resolve directly through `load_environment()` and use custom execution paths:
+
+- `swebench_pro`: repo clone -> checkout -> patch apply -> test run -> score by pass fraction
+- `terminal_bench_2`: execute terminal commands in a task sandbox -> verify expected output/state
+
+`MixedEnvironment` lets you combine these with built-in or imported coding environments while keeping the same reward-function surface.
+
 ## Verifier protocol
 
 Verifiers output JSON to stdout:
@@ -256,10 +323,21 @@ production or `DEEPGYM_NO_AUTH=true` for local development.
 
 ```bash
 pip install -e ".[dev]"   # install with test deps
-pytest                    # 227 tests
+pytest                    # 280 tests
 ruff check src/           # lint
 ruff format src/          # format
 ```
+
+### Release
+
+PyPI publishing is tag-driven in GitHub Actions.
+
+```bash
+git tag v0.2.0
+git push origin v0.2.0
+```
+
+Pushing a normal branch commit runs CI only. Pushing a `v*` tag runs the publish job and uploads the package to PyPI.
 
 ### Daytona setup
 

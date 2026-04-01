@@ -186,7 +186,11 @@ def _parse_patch_from_model_output(model_output: str) -> str:
         return patch
 
     stripped = model_output.strip()
-    if stripped.startswith('diff --git') or stripped.startswith('--- ') or stripped.startswith('*** '):
+    if (
+        stripped.startswith('diff --git')
+        or stripped.startswith('--- ')
+        or stripped.startswith('*** ')
+    ):
         if not stripped.endswith('\n'):
             stripped += '\n'
         return stripped
@@ -325,7 +329,7 @@ class PatchVerifier:
     def build_runner_script() -> str:
         """Return the self-contained patch runner script."""
         return textwrap.dedent(
-            '''
+            """
             import json
             import shutil
             import subprocess
@@ -594,7 +598,7 @@ class PatchVerifier:
 
             if __name__ == '__main__':
                 sys.exit(main())
-            '''
+            """
         )
 
 
@@ -912,7 +916,7 @@ class TerminalBenchEnvironment(Environment):
     def build_runner_script() -> str:
         """Return the self-contained terminal task runner."""
         return textwrap.dedent(
-            '''
+            """
             import json
             import shutil
             import subprocess
@@ -1086,7 +1090,7 @@ class TerminalBenchEnvironment(Environment):
 
             if __name__ == '__main__':
                 sys.exit(main())
-            '''
+            """
         )
 
     def run_with_deepgym(

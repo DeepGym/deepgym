@@ -78,12 +78,23 @@ def _build_parser() -> argparse.ArgumentParser:
         action='store_true',
         help='Persist the audit result to the exploit database',
     )
-    audit_p.add_argument('--db-path', default=None, help='Optional SQLite path for persisted audits')
+    audit_p.add_argument(
+        '--db-path',
+        default=None,
+        help='Optional SQLite path for persisted audits',
+    )
     audit_p.add_argument('--json', action='store_true', help='Print machine-readable JSON only')
 
     # ── benchmark-audit ───────────────────────────────────────────────
-    bench_p = sub.add_parser('benchmark-audit', help='Audit benchmark split leakage and holdouts')
-    bench_p.add_argument('--env-dir', required=True, help='Root directory containing task/verifier envs')
+    bench_p = sub.add_parser(
+        'benchmark-audit',
+        help='Audit benchmark split leakage and holdouts',
+    )
+    bench_p.add_argument(
+        '--env-dir',
+        required=True,
+        help='Root directory containing task/verifier envs',
+    )
     bench_p.add_argument('--benchmark', default=None, help='Benchmark label (defaults to dir name)')
     bench_p.add_argument('--seed', type=int, default=0, help='Deterministic split seed')
     bench_p.add_argument(
@@ -108,7 +119,10 @@ def _build_parser() -> argparse.ArgumentParser:
         '--split',
         action='append',
         default=[],
-        help='Explicit split override in the form env_id=public_train|public_eval|private_holdout|canary',
+        help=(
+            'Explicit split override in the form '
+            'env_id=public_train|public_eval|private_holdout|canary'
+        ),
     )
     bench_p.add_argument('--json', action='store_true', help='Print machine-readable JSON only')
 
@@ -117,23 +131,15 @@ def _build_parser() -> argparse.ArgumentParser:
         'generate-prm',
         help='Generate PRM stepwise-supervision dataset from DeepGym environments',
     )
-    prm_p.add_argument(
-        '--env', required=True, help='Built-in environment name (e.g. coin_change)'
-    )
+    prm_p.add_argument('--env', required=True, help='Built-in environment name (e.g. coin_change)')
     prm_p.add_argument(
         '--solutions-dir',
         required=True,
         help='Directory containing .py solution files to score',
     )
-    prm_p.add_argument(
-        '-o', '--output', required=True, help='Output path for .jsonl dataset file'
-    )
-    prm_p.add_argument(
-        '--step-separator', default='\n\n', help='Step separator for PRM records'
-    )
-    prm_p.add_argument(
-        '--max-parallel', type=int, default=32, help='Max concurrent sandbox runs'
-    )
+    prm_p.add_argument('-o', '--output', required=True, help='Output path for .jsonl dataset file')
+    prm_p.add_argument('--step-separator', default='\n\n', help='Step separator for PRM records')
+    prm_p.add_argument('--max-parallel', type=int, default=32, help='Max concurrent sandbox runs')
     prm_p.add_argument(
         '--include-metadata', action='store_true', help='Include solution metadata in output'
     )
@@ -395,9 +401,7 @@ def _cmd_generate_prm(args: argparse.Namespace) -> None:
     elapsed = time.perf_counter() - start
 
     output_path = Path(args.output)
-    written = write_prm_dataset(
-        records, output_path, include_metadata=args.include_metadata
-    )
+    written = write_prm_dataset(records, output_path, include_metadata=args.include_metadata)
 
     print(f'\n{"=" * 50}')
     print('  PRM Dataset Generated')

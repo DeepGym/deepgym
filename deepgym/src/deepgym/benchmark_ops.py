@@ -90,7 +90,7 @@ def assign_splits(
 
     ordered = sorted(
         (env_id for env_id in environment_ids if env_id not in split_overrides),
-        key=lambda env_id: hashlib.sha256(f'{seed}:{env_id}'.encode('utf-8')).hexdigest(),
+        key=lambda env_id: hashlib.sha256(f'{seed}:{env_id}'.encode()).hexdigest(),
     )
     total = len(ordered)
 
@@ -176,9 +176,13 @@ def build_benchmark_audit(
     if duplicate_verifier_groups:
         recommendations.append('Rotate or diversify verifier logic across split boundaries.')
     if leaks:
-        recommendations.append('Regenerate holdout and canary splits after removing leaked content.')
+        recommendations.append(
+            'Regenerate holdout and canary splits after removing leaked content.'
+        )
     if not recommendations:
-        recommendations.append('Keep private holdouts hidden and rerun this audit after each import.')
+        recommendations.append(
+            'Keep private holdouts hidden and rerun this audit after each import.'
+        )
 
     split_counts: dict[BenchmarkSplit, int] = {
         'public_train': 0,

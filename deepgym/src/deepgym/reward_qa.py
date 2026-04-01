@@ -87,13 +87,21 @@ def recommend_fixes(patterns: list[str], report: AdversarialReport) -> list[str]
     mapping = {
         'static-inputs': 'Add randomized or parameterized cases and log the verifier seed.',
         'few-test-cases': 'Increase test coverage with edge cases and anti-cheat assertions.',
-        'output-only-check': 'Check implementation behavior or intermediate artifacts, not only output.',
+        'output-only-check': (
+            'Check implementation behavior or intermediate artifacts, not only output.'
+        ),
         'no-type-validation': 'Validate return types and schema before assigning reward.',
         'no-import-restriction': 'Block reflection, dangerous imports, and side-effectful modules.',
         'predictable-tests': 'Move high-value checks into private holdouts or rotating canaries.',
-        'shallow-symbol-check': 'Assert semantic correctness instead of only checking symbol presence.',
-        'numeric-edge-acceptance': 'Guard against NaN, Inf, and extreme numeric values explicitly.',
-        'structure-leakage': 'Avoid exposing easily echoed test structure or deterministic templates.',
+        'shallow-symbol-check': (
+            'Assert semantic correctness instead of only checking symbol presence.'
+        ),
+        'numeric-edge-acceptance': (
+            'Guard against NaN, Inf, and extreme numeric values explicitly.'
+        ),
+        'structure-leakage': (
+            'Avoid exposing easily echoed test structure or deterministic templates.'
+        ),
     }
 
     for pattern in patterns:
@@ -102,7 +110,9 @@ def recommend_fixes(patterns: list[str], report: AdversarialReport) -> list[str]
             suggestions.append(recommendation)
 
     if report.exploits_found > 0:
-        suggestions.append('Rerun the verifier against private holdouts after patching the weaknesses.')
+        suggestions.append(
+            'Rerun the verifier against private holdouts after patching the weaknesses.'
+        )
 
     return list(dict.fromkeys(suggestions))
 

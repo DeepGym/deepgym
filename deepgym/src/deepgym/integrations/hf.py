@@ -204,8 +204,7 @@ def load_environment_from_hub(
         if not matches:
             available = [row.get('env_name', '') for row in dataset]
             raise ValueError(
-                f'Environment {env_name!r} not found in {repo_id}. '
-                f'Available: {available}'
+                f'Environment {env_name!r} not found in {repo_id}. Available: {available}'
             )
         row = matches[0]
     else:

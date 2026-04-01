@@ -12,6 +12,7 @@ from deepgym.benchmark_envs import (
     PatchVerifier,
     SWEBenchProEnvironment,
     TerminalBenchEnvironment,
+    _split_batch_kwargs,
 )
 from deepgym.integrations.trl import make_trl_reward_fn
 from deepgym.models import Environment
@@ -218,6 +219,35 @@ class TestMixedEnvironment:
         sampled = mixed.sample_batch(5)
         assert len(sampled) == 5
         assert all(env.name in {'python_sorting', 'terminal_bench_2'} for env in sampled)
+
+    def test_split_batch_kwargs_rejects_mismatched_sequence_lengths(self) -> None:
+        with pytest.raises(ValueError, match='batch size is 2'):
+            _split_batch_kwargs(2, {'task_type': ['coding']})
+
+    def test_ambiguous_task_type_route_raises(
+        self,
+        sorting_env: Environment,
+        string_env: Environment,
+    ) -> None:
+        named_sorting = sorting_env.model_copy(update={'name': 'python_sorting'})
+        named_string = string_env.model_copy(update={'name': 'string_manipulation'})
+        mixed = MixedEnvironment(environments=[(named_sorting, 0.5), (named_string, 0.5)], seed=3)
+
+        with pytest.raises(ValueError, match='could not route'):
+            mixed.prepare_batch_requests(['def solve():\n    pass\n'], task_type=['coding'])
+
+    def test_explicit_environment_object_route_wins(
+        self,
+        sorting_env: Environment,
+        sorting_solution: str,
+        local_dg,
+    ) -> None:
+        named_sorting = sorting_env.model_copy(update={'name': 'python_sorting'})
+        mixed = MixedEnvironment(environments=[(named_sorting, 1.0)], seed=5)
+
+        reward_fn = make_trl_reward_fn(env=mixed, dg=local_dg)
+        scores = reward_fn(completions=[sorting_solution], environment=[named_sorting])
+        assert scores[0] >= 0.9
 
     def test_trl_reward_routes_to_matching_child_env(
         self,

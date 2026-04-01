@@ -43,23 +43,56 @@ def _get_cache_dir() -> Path:
     return cache
 
 
-def _find_registry_json() -> Path | None:
-    """Locate registry.json, checking built-in package path first.
+def _iter_registry_json_paths() -> list[Path]:
+    """Locate every known registry.json file.
 
     Returns:
-        Path to registry.json if found, else None.
+        Existing registry paths in deterministic order.
     """
-    # 1. Built-in (shipped with wheel).
     builtin = _get_builtin_envs_path() / 'registry.json'
-    if builtin.exists():
-        return builtin
+    cache_root = _get_cache_dir()
+    candidates = [builtin, cache_root / 'registry.json']
+    candidates.extend(
+        sorted(
+            path
+            for path in cache_root.rglob('registry.json')
+            if path != cache_root / 'registry.json'
+        )
+    )
 
-    # 2. Cache directory (downloaded benchmarks may add to it).
-    cache = _get_cache_dir() / 'registry.json'
-    if cache.exists():
-        return cache
+    unique: list[Path] = []
+    seen: set[Path] = set()
+    for path in candidates:
+        if path.exists() and path not in seen:
+            seen.add(path)
+            unique.append(path)
+    return unique
 
-    return None
+
+def _normalize_registry_entries(data: object, registry_path: Path) -> list[dict]:
+    """Normalize builtin and imported registry formats to one entry list."""
+    if isinstance(data, dict):
+        entries = data.get('environments')
+    elif isinstance(data, list):
+        entries = data
+    else:
+        entries = None
+
+    if not isinstance(entries, list):
+        raise KeyError('environments')
+
+    normalized: list[dict] = []
+    inferred_benchmark = (
+        registry_path.parent.name if registry_path.parent != _get_cache_dir() else None
+    )
+    for raw_entry in entries:
+        if not isinstance(raw_entry, dict):
+            continue
+        entry = dict(raw_entry)
+        if inferred_benchmark is not None:
+            entry.setdefault('benchmark', inferred_benchmark.lower())
+        normalized.append(entry)
+    return normalized
 
 
 def _read_registry() -> list[dict]:
@@ -73,14 +106,18 @@ def _read_registry() -> list[dict]:
     """
     from deepgym.exceptions import DeepGymError
 
-    registry_path = _find_registry_json()
-    if registry_path is None:
+    registry_paths = _iter_registry_json_paths()
+    if not registry_paths:
         raise DeepGymError('Registry not found. Checked built-in package and cache dir.')
-    try:
-        data = json.loads(registry_path.read_text(encoding='utf-8'))
-        return data['environments']
-    except (json.JSONDecodeError, KeyError) as exc:
-        raise DeepGymError(f'Failed to parse registry: {exc}') from exc
+
+    entries: list[dict] = []
+    for registry_path in registry_paths:
+        try:
+            data = json.loads(registry_path.read_text(encoding='utf-8'))
+            entries.extend(_normalize_registry_entries(data, registry_path))
+        except (json.JSONDecodeError, KeyError) as exc:
+            raise DeepGymError(f'Failed to parse registry {registry_path}: {exc}') from exc
+    return entries
 
 
 def list_environments() -> list[dict]:
@@ -115,24 +152,96 @@ def _find_env_dir(name: str) -> Path | None:
     Returns:
         Path to the environment directory, or None if not found.
     """
-    # 1. Built-in package envs (top-level).
     builtin_root = _get_builtin_envs_path()
-    builtin = builtin_root / name
+    cache_root = _get_cache_dir()
+    normalized_name = name.replace('\\', '/')
+    rel_path = Path(normalized_name)
+
+    if normalized_name and not rel_path.is_absolute() and '..' not in rel_path.parts:
+        direct_candidates = [
+            builtin_root / rel_path,
+            cache_root / rel_path,
+        ]
+        if rel_path.parts and rel_path.parts[0] == 'environments':
+            direct_candidates.extend(
+                [
+                    builtin_root.parent / rel_path,
+                    cache_root.parent / rel_path,
+                    cache_root.joinpath(*rel_path.parts[1:]),
+                ]
+            )
+        for candidate in direct_candidates:
+            if candidate.is_dir():
+                return candidate
+
+    # 1. Built-in package envs (top-level).
+    builtin = builtin_root / normalized_name
     if builtin.is_dir():
         return builtin
 
     # 2. Check nested subdirectories within built-in envs.
     for subdir in _NESTED_SUBDIRS:
-        nested = builtin_root / subdir / name
+        nested = builtin_root / subdir / normalized_name
         if nested.is_dir():
             return nested
 
     # 3. Cache directory.
-    cached = _get_cache_dir() / name
+    cached = cache_root / normalized_name
     if cached.is_dir():
         return cached
 
+    # 4. Benchmark cache directories one level down.
+    nested_cached = sorted(cache_root.glob(f'*/{normalized_name}'))
+    for candidate in nested_cached:
+        if candidate.is_dir():
+            return candidate
+
+    safe_name = normalized_name.replace('/', '_')
+    if safe_name != normalized_name:
+        safe_cached = sorted(cache_root.glob(f'*/{safe_name}'))
+        for candidate in safe_cached:
+            if candidate.is_dir():
+                return candidate
+
     return None
+
+
+def _name_tokens(name: str) -> set[str]:
+    """Generate normalized lookup tokens for an environment name."""
+    normalized = name.replace('\\', '/').strip()
+    tokens = {normalized, normalized.lower()}
+    if '/' in normalized:
+        safe = normalized.replace('/', '_')
+        tokens.update({safe, safe.lower(), Path(normalized).name, Path(normalized).name.lower()})
+    return {token for token in tokens if token}
+
+
+def _entry_tokens(entry: dict) -> set[str]:
+    """Generate normalized lookup tokens for a registry entry."""
+    tokens: set[str] = set()
+    path_value = str(entry.get('path', '')).strip()
+    if path_value:
+        path_obj = Path(path_value)
+        tokens.update(_name_tokens(path_value))
+        tokens.update(_name_tokens(path_obj.name))
+        if path_value.startswith('environments/'):
+            tokens.update(_name_tokens('/'.join(path_obj.parts[1:])))
+    for key in ('id', 'name', 'benchmark'):
+        raw = entry.get(key)
+        if raw:
+            tokens.update(_name_tokens(str(raw)))
+    return tokens
+
+
+def _benchmark_entries(registry: list[dict], benchmark_name: str) -> list[dict]:
+    """Return registry entries belonging to a benchmark alias."""
+    result = [
+        entry
+        for entry in registry
+        if str(entry.get('benchmark', '')).lower() == benchmark_name
+        or f'/{benchmark_name}/' in f'/{str(entry.get("path", "")).lower()}/'
+    ]
+    return sorted(result, key=lambda entry: str(entry.get('path', '')))
 
 
 def _load_env_from_dir(env_dir: Path, metadata: dict | None = None) -> Environment:
@@ -200,8 +309,14 @@ def load_environment(name: str) -> Environment:
     Raises:
         ValueError: If environment not found or name looks like a path.
     """
-    # Reject anything that looks like a filesystem path.
-    if '/' in name or '\\' in name or name.startswith('.'):
+    normalized_name = name.replace('\\', '/')
+
+    # Reject paths that escape the registry namespace.
+    if (
+        normalized_name.startswith('.')
+        or normalized_name.startswith('/')
+        or '..' in Path(normalized_name).parts
+    ):
         raise ValueError(
             f'Invalid environment name {name!r}. '
             'Use a registered name like "coin_change", not a path.'
@@ -229,14 +344,24 @@ def load_environment(name: str) -> Environment:
     except Exception:
         registry = []
 
+    benchmark_name = normalized_name.lower()
+    if benchmark_name in _BENCHMARK_NAMES:
+        benchmark_entries = _benchmark_entries(registry, benchmark_name)
+        if benchmark_entries:
+            entry = benchmark_entries[0]
+            env_dir = _find_env_dir(entry['path'])
+            if env_dir is not None:
+                return _load_env_from_dir(env_dir, metadata=entry)
+
+    lookup_tokens = _name_tokens(normalized_name)
     for entry in registry:
-        if entry.get('path') == name or entry.get('name', '').lower().replace(' ', '_') == name:
+        if lookup_tokens & _entry_tokens(entry):
             env_dir = _find_env_dir(entry['path'])
             if env_dir is not None:
                 return _load_env_from_dir(env_dir, metadata=entry)
 
     # 2. Direct directory lookup across all sources.
-    env_dir = _find_env_dir(name)
+    env_dir = _find_env_dir(normalized_name)
     if env_dir is not None:
         return _load_env_from_dir(env_dir)
 

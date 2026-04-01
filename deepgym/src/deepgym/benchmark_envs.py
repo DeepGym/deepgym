@@ -128,10 +128,14 @@ def _split_batch_kwargs(batch_size: int, kwargs: dict[str, Any]) -> list[dict[st
     per_item = [dict() for _ in range(batch_size)]
     for key, value in kwargs.items():
         if isinstance(value, Sequence) and not isinstance(value, str | bytes | bytearray):
-            if len(value) == batch_size:
-                for index, item in enumerate(value):
-                    per_item[index][key] = item
-                continue
+            if len(value) != batch_size:
+                raise ValueError(
+                    f'Keyword argument {key!r} has {len(value)} items, '
+                    f'but batch size is {batch_size}.'
+                )
+            for index, item in enumerate(value):
+                per_item[index][key] = item
+            continue
         for item_kwargs in per_item:
             item_kwargs[key] = value
     return per_item
@@ -170,6 +174,8 @@ def _infer_environment_name(env: Environment) -> str:
 
 def _environment_aliases(env: Environment) -> set[str]:
     aliases = {_infer_environment_name(env)}
+    aliases.update({env.type, env.domain})
+    aliases.update(env.tags)
     if isinstance(env, SWEBenchProEnvironment):
         aliases.update({'swebench_pro', 'swebench', env.dataset_id})
     if isinstance(env, TerminalBenchEnvironment):
@@ -1181,15 +1187,55 @@ class MixedEnvironment(Environment):
     def sample_batch(self, batch_size: int) -> list[Environment]:
         return [self.sample_environment() for _ in range(batch_size)]
 
+    def _direct_environment_match(self, item_kwargs: dict[str, Any]) -> Environment | None:
+        for route_key in ('environment', 'env'):
+            route_value = item_kwargs.get(route_key)
+            if not isinstance(route_value, Environment):
+                continue
+            for env, _ in self.environments:
+                if route_value is env or _infer_environment_name(
+                    route_value
+                ) == _infer_environment_name(env):
+                    return env
+            raise ValueError(
+                f'MixedEnvironment received {route_key}=... that is not one of its child environments.'
+            )
+        return None
+
+    def _route_matches(self, route_key: str, route_value: str) -> list[Environment]:
+        matches: list[Environment] = []
+        for env, _ in self.environments:
+            if route_key in {'environment_name', 'env_name'}:
+                candidates = {_infer_environment_name(env), env.name or ''}
+            elif route_key == 'task_type':
+                candidates = {env.type}
+            else:
+                candidates = _environment_aliases(env)
+            if route_value in {candidate for candidate in candidates if candidate}:
+                matches.append(env)
+        return matches
+
     def _route_env(self, item_kwargs: dict[str, Any]) -> Environment:
+        direct_match = self._direct_environment_match(item_kwargs)
+        if direct_match is not None:
+            return direct_match
+
         for route_key in _MIXED_ROUTE_KEYS:
             route_value = item_kwargs.get(route_key)
             if not route_value:
                 continue
-            route_value = str(route_value)
-            for env, _ in self.environments:
-                if route_value in _environment_aliases(env):
-                    return env
+            matches = self._route_matches(route_key, str(route_value))
+            if len(matches) == 1:
+                return matches[0]
+            if len(matches) > 1 and route_key in {
+                'environment_name',
+                'env_name',
+                'benchmark',
+                'dataset_name',
+            }:
+                raise ValueError(
+                    f'MixedEnvironment routing for {route_key}={route_value!r} is ambiguous.'
+                )
 
         candidates: list[Environment] = []
         for env, _ in self.environments:
@@ -1210,7 +1256,8 @@ class MixedEnvironment(Environment):
 
         raise ValueError(
             'MixedEnvironment could not route the sample. '
-            'Pass environment_name=.../env_name=... or benchmark-specific task metadata.'
+            'Pass environment_name=.../env_name=..., an exact child environment, '
+            'or benchmark-specific task metadata.'
         )
 
     def prepare_batch_requests(

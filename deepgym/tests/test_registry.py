@@ -1,7 +1,10 @@
 """Tests for deepgym.registry -- environment registry loading."""
 
+from pathlib import Path
+
 import pytest
 
+from deepgym import registry as registry_module
 from deepgym.models import Environment
 from deepgym.registry import (
     _read_registry,
@@ -57,6 +60,57 @@ class TestLoadEnvironment:
     def test_load_by_path_returns_valid_task(self) -> None:
         env = load_environment('binary_search')
         assert 'binary' in env.task.lower() or len(env.task) > 10
+
+    def test_load_humaneval_benchmark_alias_from_nested_cache(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        cache_dir = tmp_path / 'environments'
+        env_dir = cache_dir / 'humaneval' / 'HumanEval_0'
+        env_dir.mkdir(parents=True)
+        (env_dir / 'task.md').write_text('Write solve().\n', encoding='utf-8')
+        (env_dir / 'verifier.py').write_text('return 1.0\n', encoding='utf-8')
+        (env_dir / 'metadata.json').write_text(
+            '{"id":"HumanEval_0","benchmark":"humaneval","difficulty":"medium"}\n',
+            encoding='utf-8',
+        )
+        (cache_dir / 'humaneval' / 'registry.json').write_text(
+            (
+                '[{"id":"HumanEval_0","name":"solve","benchmark":"humaneval",'
+                '"difficulty":"medium","path":"environments/humaneval/HumanEval_0"}]\n'
+            ),
+            encoding='utf-8',
+        )
+
+        monkeypatch.setattr(registry_module, '_get_cache_dir', lambda: cache_dir)
+
+        env = load_environment('humaneval')
+        assert isinstance(env, Environment)
+        assert env.name == 'HumanEval_0'
+
+    def test_load_humaneval_task_id_with_slash_alias(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        cache_dir = tmp_path / 'environments'
+        env_dir = cache_dir / 'humaneval' / 'HumanEval_0'
+        env_dir.mkdir(parents=True)
+        (env_dir / 'task.md').write_text('Write solve().\n', encoding='utf-8')
+        (env_dir / 'verifier.py').write_text('return 1.0\n', encoding='utf-8')
+        (cache_dir / 'humaneval' / 'registry.json').write_text(
+            (
+                '[{"id":"HumanEval_0","benchmark":"humaneval",'
+                '"path":"environments/humaneval/HumanEval_0"}]\n'
+            ),
+            encoding='utf-8',
+        )
+
+        monkeypatch.setattr(registry_module, '_get_cache_dir', lambda: cache_dir)
+
+        env = load_environment('HumanEval/0')
+        assert env.name == 'HumanEval_0'
 
 
 class TestLoadSuite:

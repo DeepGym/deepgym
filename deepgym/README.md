@@ -348,7 +348,7 @@ production or `DEEPGYM_NO_AUTH=true` for local development.
 
 ```bash
 pip install -e ".[dev]"   # install with test deps
-pytest                    # 280 tests
+pytest                    # 291 tests
 ruff check src/           # lint
 ruff format src/          # format
 ```
@@ -358,8 +358,8 @@ ruff format src/          # format
 PyPI publishing is tag-driven in GitHub Actions.
 
 ```bash
-git tag v0.2.0
-git push origin v0.2.0
+git tag v0.3.0
+git push origin v0.3.0
 ```
 
 Pushing a normal branch commit runs CI only. Pushing a `v*` tag runs the publish job and uploads the package to PyPI.

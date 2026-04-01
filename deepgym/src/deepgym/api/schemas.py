@@ -235,7 +235,7 @@ class HealthResponse(BaseModel):
     """Response for the /health endpoint."""
 
     status: str = 'ok'
-    version: str = '0.2.0'
+    version: str = '0.3.0'
 
 
 class CreateEnvironmentResponse(BaseModel):
@@ -248,7 +248,7 @@ class CreateEnvironmentResponse(BaseModel):
 class CapabilitiesResponse(BaseModel):
     """Response describing server capabilities exposed to remote runtimes."""
 
-    version: str = '0.2.0'
+    version: str = '0.3.0'
     sync_run: bool = True
     batch_run: bool = True
     async_jobs: bool = True

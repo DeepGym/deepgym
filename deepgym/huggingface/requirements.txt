@@ -1,2 +1,2 @@
-deepgym>=0.2.0
+deepgym>=0.3.0
 gradio>=4.0

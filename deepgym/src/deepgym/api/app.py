@@ -139,7 +139,7 @@ async def _lifespan(_app: FastAPI) -> AsyncIterator[None]:
 app = FastAPI(
     title='DeepGym API',
     description='RL training and evaluation infrastructure',
-    version='0.2.0',
+    version='0.3.0',
     lifespan=_lifespan,
 )
 

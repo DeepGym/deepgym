@@ -3,6 +3,12 @@
 __version__ = '0.1.0'
 
 from deepgym.async_core import AsyncDeepGym
+from deepgym.benchmark_envs import (
+    MixedEnvironment,
+    PatchVerifier,
+    SWEBenchProEnvironment,
+    TerminalBenchEnvironment,
+)
 from deepgym.benchmark_ops import BenchmarkAuditReport, BenchmarkLeak, BenchmarkManifestEntry
 from deepgym.computer_use import (
     ComputerUseEnvironment,
@@ -46,13 +52,17 @@ __all__ = [
     'EvalResult',
     'GymInfo',
     'GymObservation',
+    'MixedEnvironment',
     'MultiTurnEnvironment',
     'MultiTurnRunner',
     'Observation',
+    'PatchVerifier',
     'RewardAuditor',
     'RewardFunction',
     'RunResult',
     'ScreenshotVerifier',
+    'SWEBenchProEnvironment',
+    'TerminalBenchEnvironment',
     'ToolUseEnvironment',
     'CaseResult',
     'Trajectory',

@@ -60,7 +60,12 @@ def make_trl_reward_fn(env: Environment, dg: DeepGym | None = None) -> Callable[
         """
         if not completions:
             return []
-        batch = _dg.run_batch(env, completions, max_parallel=min(len(completions), 32))
+        batch = _dg.run_batch(
+            env,
+            completions,
+            max_parallel=min(len(completions), 32),
+            **kwargs,
+        )
         return [r.score for r in batch.results]
 
     return reward_fn
@@ -98,7 +103,12 @@ def make_trl_async_reward_fn(
         loop = asyncio.get_running_loop()
         batch = await loop.run_in_executor(
             None,
-            lambda: _dg.run_batch(env, completions, max_parallel=min(len(completions), 32)),
+            lambda: _dg.run_batch(
+                env,
+                completions,
+                max_parallel=min(len(completions), 32),
+                **kwargs,
+            ),
         )
         return [r.score for r in batch.results]
 

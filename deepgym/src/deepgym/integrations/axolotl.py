@@ -99,7 +99,12 @@ def make_axolotl_reward_fn(
         """
         if not completions:
             return []
-        batch = _dg.run_batch(env, completions, max_parallel=min(len(completions), max_parallel))
+        batch = _dg.run_batch(
+            env,
+            completions,
+            max_parallel=min(len(completions), max_parallel),
+            **kwargs,
+        )
         return [r.score for r in batch.results]
 
     return reward_fn
@@ -141,7 +146,10 @@ def make_axolotl_async_reward_fn(
         batch = await loop.run_in_executor(
             None,
             lambda: _dg.run_batch(
-                env, completions, max_parallel=min(len(completions), max_parallel)
+                env,
+                completions,
+                max_parallel=min(len(completions), max_parallel),
+                **kwargs,
             ),
         )
         return [r.score for r in batch.results]
@@ -186,7 +194,12 @@ def make_axolotl_shaped_reward_fn(
         """
         if not completions:
             return []
-        batch = _dg.run_batch(env, completions, max_parallel=min(len(completions), max_parallel))
+        batch = _dg.run_batch(
+            env,
+            completions,
+            max_parallel=min(len(completions), max_parallel),
+            **kwargs,
+        )
         if component is None:
             return [r.score for r in batch.results]
         return [(r.reward_components or {}).get(component, r.score) for r in batch.results]

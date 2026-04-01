@@ -9,6 +9,7 @@ from collections.abc import Sequence
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Literal
 
+from deepgym.benchmark_envs import build_run_requests
 from deepgym.exceptions import DeepGymError, SandboxError, TimeoutError, VerifierError
 from deepgym.models import BatchResult, Environment, EvalResult, RunResult
 from deepgym.sandbox import (
@@ -84,7 +85,7 @@ class DeepGym:
     # Single run
     # ------------------------------------------------------------------
 
-    def run(self, env: Environment, model_output: str) -> RunResult:
+    def run(self, env: Environment, model_output: str, **kwargs: object) -> RunResult:
         """Run a model's output against an environment's verifier in a sandbox.
 
         Args:
@@ -95,6 +96,9 @@ class DeepGym:
             A RunResult with score, pass/fail, stdout, stderr, timing, and
             sandbox id.
         """
+        if hasattr(env, 'run_with_deepgym'):
+            return env.run_with_deepgym(self, model_output, **kwargs)  # type: ignore[return-value]
+
         if self._local_executor is not None:
             return self._run_local(env, model_output)
         return self._run_daytona(env, model_output)
@@ -163,6 +167,7 @@ class DeepGym:
         outputs: Sequence[str],
         *,
         max_parallel: int = 10,
+        **kwargs: object,
     ) -> BatchResult:
         """Run multiple solutions against one environment in parallel.
 
@@ -182,8 +187,13 @@ class DeepGym:
         start = time.perf_counter()
         results: list[RunResult | None] = [None] * len(outputs)
 
+        run_requests = build_run_requests(env, outputs, dict(kwargs))
+
         with ThreadPoolExecutor(max_workers=max_parallel) as pool:
-            futures = {pool.submit(self.run, env, output): i for i, output in enumerate(outputs)}
+            futures = {
+                pool.submit(self.run, request.env, request.output, **request.kwargs): i
+                for i, request in enumerate(run_requests)
+            }
             for future in as_completed(futures):
                 idx = futures[future]
                 try:

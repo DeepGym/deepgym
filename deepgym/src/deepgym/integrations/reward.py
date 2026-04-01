@@ -32,22 +32,32 @@ class RewardFunction:
         self._dg = dg or DeepGym(mode='auto')
         self._max_parallel = max_parallel
 
-    def __call__(self, outputs: list[str]) -> list[float]:
+    def __call__(self, outputs: list[str], **kwargs: object) -> list[float]:
         """Score a batch of model outputs. Return list of scores 0.0-1.0."""
         if not outputs:
             return []
-        batch = self._dg.run_batch(self._env, outputs, max_parallel=self._max_parallel)
+        batch = self._dg.run_batch(
+            self._env,
+            outputs,
+            max_parallel=self._max_parallel,
+            **kwargs,
+        )
         return [r.score for r in batch.results]
 
-    def call_with_details(self, outputs: list[str]) -> BatchResult:
+    def call_with_details(self, outputs: list[str], **kwargs: object) -> BatchResult:
         """Score with full details (reward_components, metrics, etc.)."""
         if not outputs:
             return BatchResult(
                 results=[], total=0, passed=0, failed=0, avg_score=0.0, execution_time_ms=0.0
             )
-        return self._dg.run_batch(self._env, outputs, max_parallel=self._max_parallel)
+        return self._dg.run_batch(
+            self._env,
+            outputs,
+            max_parallel=self._max_parallel,
+            **kwargs,
+        )
 
-    def shaped_rewards(self, outputs: list[str]) -> list[dict[str, float]]:
+    def shaped_rewards(self, outputs: list[str], **kwargs: object) -> list[dict[str, float]]:
         """Return shaped reward components for each output.
 
         Useful for GRPO/DAPO which benefit from multi-dimensional rewards:
@@ -55,10 +65,15 @@ class RewardFunction:
         """
         if not outputs:
             return []
-        batch = self._dg.run_batch(self._env, outputs, max_parallel=self._max_parallel)
+        batch = self._dg.run_batch(
+            self._env,
+            outputs,
+            max_parallel=self._max_parallel,
+            **kwargs,
+        )
         return [r.reward_components or {'score': r.score} for r in batch.results]
 
-    def per_test_rewards(self, outputs: list[str]) -> list[dict[str, float]]:
+    def per_test_rewards(self, outputs: list[str], **kwargs: object) -> list[dict[str, float]]:
         """Return per-test-case score breakdown for each output.
 
         Each dict maps test case IDs to their individual scores plus an
@@ -77,7 +92,12 @@ class RewardFunction:
         """
         if not outputs:
             return []
-        batch = self._dg.run_batch(self._env, outputs, max_parallel=self._max_parallel)
+        batch = self._dg.run_batch(
+            self._env,
+            outputs,
+            max_parallel=self._max_parallel,
+            **kwargs,
+        )
         result: list[dict[str, float]] = []
         for r in batch.results:
             if r.cases:

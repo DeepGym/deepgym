@@ -11,6 +11,11 @@ from deepgym.models import Environment
 
 logger = logging.getLogger(__name__)
 
+_SPECIAL_ENV_FACTORIES = {
+    'swebench_pro': 'SWEBenchProEnvironment',
+    'terminal_bench_2': 'TerminalBenchEnvironment',
+}
+
 _DIFFICULTY_LEVELS = frozenset({'easy', 'medium', 'hard'})
 _TYPE_SUITES = frozenset({'coding', 'computer-use', 'tool-use'})
 
@@ -170,6 +175,7 @@ def _load_env_from_dir(env_dir: Path, metadata: dict | None = None) -> Environme
         env_type = metadata.get('type', env_type)
 
     return Environment(
+        name=env_dir.name,
         task=task,
         type=env_type,
         verifier_path=verifier_path,
@@ -207,6 +213,15 @@ def load_environment(name: str) -> Environment:
             f'Environment {name!r} is not loadable. '
             'It requires special runtime support and cannot be used with dg.run().'
         )
+
+    if name in _SPECIAL_ENV_FACTORIES:
+        from deepgym.benchmark_envs import SWEBenchProEnvironment, TerminalBenchEnvironment
+
+        factory_map = {
+            'swebench_pro': SWEBenchProEnvironment,
+            'terminal_bench_2': TerminalBenchEnvironment,
+        }
+        return factory_map[name]()
 
     # 1. Check registry.json for a matching path.
     try:

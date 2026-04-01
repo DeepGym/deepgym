@@ -18,6 +18,9 @@ class Environment(BaseModel):
     constraints, and optional pre-built sandbox snapshot.
     """
 
+    name: str | None = None
+    """Optional stable environment identifier used for routing and reporting."""
+
     task: str
     """The task description / prompt presented to the model."""
 

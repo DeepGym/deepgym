@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import uuid
-from datetime import UTC, datetime
+from datetime import datetime, timezone
 from enum import Enum
 from pathlib import Path
 from typing import Any, Literal
@@ -296,8 +296,8 @@ class Job(BaseModel):
 
     id: str = Field(default_factory=lambda: str(uuid.uuid4()))
     status: JobStatus = JobStatus.queued
-    created_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
-    updated_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
+    created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+    updated_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
     result: RunResult | None = None
     error: str | None = None
 
@@ -307,8 +307,8 @@ class BatchJob(BaseModel):
 
     id: str = Field(default_factory=lambda: str(uuid.uuid4()))
     status: JobStatus = JobStatus.queued
-    created_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
-    updated_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
+    created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+    updated_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
     total: int = 0
     completed_count: int = 0
     result: BatchResult | None = None

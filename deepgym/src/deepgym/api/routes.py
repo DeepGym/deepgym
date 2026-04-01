@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import uuid
-from datetime import UTC, datetime
+from datetime import datetime, timezone
 from typing import Annotated
 
 try:
@@ -337,7 +337,7 @@ async def _run_job_background(
     assert isinstance(job, Job)
     try:
         job.status = JobStatus.running
-        job.updated_at = datetime.now(UTC)
+        job.updated_at = datetime.now(timezone.utc)
 
         loop = asyncio.get_running_loop()
         result = await loop.run_in_executor(None, dg.run, environment, model_output)
@@ -352,7 +352,7 @@ async def _run_job_background(
         job.status = JobStatus.failed
         job.error = str(exc)
     finally:
-        job.updated_at = datetime.now(UTC)
+        job.updated_at = datetime.now(timezone.utc)
 
 
 async def _run_batch_job_background(
@@ -363,7 +363,7 @@ async def _run_batch_job_background(
     assert isinstance(job, BatchJob)
     try:
         job.status = JobStatus.running
-        job.updated_at = datetime.now(UTC)
+        job.updated_at = datetime.now(timezone.utc)
 
         loop = asyncio.get_running_loop()
         result = await loop.run_in_executor(
@@ -381,7 +381,7 @@ async def _run_batch_job_background(
         job.status = JobStatus.failed
         job.error = str(exc)
     finally:
-        job.updated_at = datetime.now(UTC)
+        job.updated_at = datetime.now(timezone.utc)
 
 
 @v1_router.post('/jobs/run', response_model=JobResponse, status_code=status.HTTP_202_ACCEPTED)
@@ -464,5 +464,5 @@ async def cancel_job(job_id: str) -> Job | BatchJob:
             detail=f"Job '{job_id}' is already in terminal state '{job.status.value}'.",
         )
     job.status = JobStatus.cancelled
-    job.updated_at = datetime.now(UTC)
+    job.updated_at = datetime.now(timezone.utc)
     return job

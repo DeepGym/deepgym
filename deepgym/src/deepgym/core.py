@@ -68,10 +68,13 @@ class DeepGym:
         """Initialise the Daytona SDK client."""
         try:
             from daytona import Daytona, DaytonaConfig
-        except ImportError as exc:
-            raise DeepGymError(
-                "daytona-sdk is required. Install it with: pip install 'deepgym[daytona]'"
-            ) from exc
+        except ImportError:
+            try:
+                from daytona_sdk import Daytona, DaytonaConfig
+            except ImportError as exc:
+                raise DeepGymError(
+                    "daytona-sdk is required. Install it with: pip install 'deepgym[daytona]'"
+                ) from exc
 
         kwargs = {}
         if api_key:

@@ -1,0 +1,53 @@
+{
+  "count": 100,
+  "passed": 69,
+  "avg_score": 0.69,
+  "failure_details": [
+    [
+      "patch does not apply",
+      31
+    ]
+  ],
+  "projects_fail_top": [
+    [
+      "libxml2",
+      7
+    ],
+    [
+      "libxaac",
+      3
+    ],
+    [
+      "lwan",
+      3
+    ],
+    [
+      "jq",
+      2
+    ],
+    [
+      "libxslt",
+      2
+    ],
+    [
+      "freetype2",
+      1
+    ],
+    [
+      "htslib",
+      1
+    ],
+    [
+      "faad2",
+      1
+    ],
+    [
+      "libplist",
+      1
+    ],
+    [
+      "libarchive",
+      1
+    ]
+  ]
+}

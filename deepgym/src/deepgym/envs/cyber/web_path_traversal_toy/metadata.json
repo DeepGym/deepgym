@@ -1,0 +1,8 @@
+{
+  "id": "cyber-002",
+  "name": "Toy Web Path Traversal",
+  "difficulty": "medium",
+  "domain": "cyber",
+  "family": "cyberbench",
+  "tags": ["ctf-style", "web", "path-traversal", "local-only", "exploit-simulation"]
+}

@@ -26,7 +26,10 @@ from deepgym.models import Environment, RunResult, VerifierResult
 from deepgym.verifier_template import wrap_verifier
 
 if TYPE_CHECKING:
-    from daytona import Daytona, Sandbox
+    try:
+        from daytona import Daytona, Sandbox
+    except ImportError:
+        from daytona_sdk import Daytona, Sandbox
 
 logger = logging.getLogger(__name__)
 
@@ -154,11 +157,18 @@ def create_sandbox(env: Environment, daytona: Daytona) -> Sandbox:
             CreateSandboxFromSnapshotParams,
             Image,
         )
-    except ImportError as exc:
-        raise SandboxError(
-            'daytona-sdk is required but could not be imported. '
-            'Install it with: pip install daytona-sdk'
-        ) from exc
+    except ImportError:
+        try:
+            from daytona_sdk import (
+                CreateSandboxFromImageParams,
+                CreateSandboxFromSnapshotParams,
+                Image,
+            )
+        except ImportError as exc:
+            raise SandboxError(
+                'daytona-sdk is required but could not be imported. '
+                'Install it with: pip install daytona-sdk'
+            ) from exc
 
     try:
         if env.snapshot:

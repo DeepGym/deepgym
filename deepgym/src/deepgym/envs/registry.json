@@ -220,6 +220,24 @@
             "domain": "data",
             "family": "tool-use",
             "tags": ["csv", "data", "filtering", "pipeline"]
+        },
+        {
+            "id": "cyber-001",
+            "name": "CVE-2021-44228 Log Triage",
+            "path": "cyber/cve_2021_44228_log_triage",
+            "difficulty": "easy",
+            "domain": "cyber",
+            "family": "cyberbench",
+            "tags": ["cve-style", "defensive", "log-analysis", "log4shell", "incident-response"]
+        },
+        {
+            "id": "cyber-002",
+            "name": "Toy Web Path Traversal",
+            "path": "cyber/web_path_traversal_toy",
+            "difficulty": "medium",
+            "domain": "cyber",
+            "family": "cyberbench",
+            "tags": ["ctf-style", "web", "path-traversal", "local-only", "exploit-simulation"]
         }
     ]
 }

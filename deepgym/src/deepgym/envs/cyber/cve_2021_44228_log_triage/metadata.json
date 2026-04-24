@@ -1,0 +1,8 @@
+{
+  "id": "cyber-001",
+  "name": "CVE-2021-44228 Log Triage",
+  "difficulty": "easy",
+  "domain": "cyber",
+  "family": "cyberbench",
+  "tags": ["cve-style", "defensive", "log-analysis", "log4shell", "incident-response"]
+}

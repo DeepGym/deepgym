@@ -50,6 +50,7 @@ and per-test-case breakdown showing exactly which tests passed and which didn't.
 - 2,350+ importable benchmarks (HumanEval, MBPP, BigCodeBench, EvalPlus)
 - SWE-bench Pro support for repo-level patch RL tasks
 - Terminal-Bench 2.0 support for shell/terminal RL tasks
+- CyberBench/CyberGym support for local, artifact-backed cyber patch tasks
 - MixedEnvironment routing for multi-benchmark training in one reward function
 - Per-test-case reward traces (not just pass/fail -- you see which tests broke)
 - Deterministic seeding (same input, same score, every time)
@@ -158,6 +159,74 @@ result = dg.run(
 )
 print(result.score)
 ```
+
+### Train a cyber model with CyberBench/CyberGym
+
+DeepGym can turn CyberGym Hugging Face metadata and artifacts into
+CyberBench-style RL tasks for defensive cyber training. Use it for local
+patch-repair, log-triage, forensics, and synthetic CTF-style tasks where the
+reward comes from a deterministic verifier, not from live targets.
+
+Install the optional Hugging Face and Daytona dependencies:
+
+```bash
+pip install "deepgym[hf,daytona]"
+```
+
+Keep provider keys local and untracked:
+
+```bash
+cp .env.example .env
+# edit .env with DAYTONA_API_KEY, ZAI_API_KEY, ZAI_API_BASE, ZAI_MODEL
+```
+
+Generate safe CyberBench seed specs from CyberGym metadata. Add `--use-zai` if
+you want GLM/Z.ai to enrich the seed plans while preserving local-only safety
+constraints:
+
+```bash
+python scripts/inspect_cybergym_hf.py --repo-id sunblaze-ucb/cybergym --limit 100
+python scripts/generate_cyberbench_seeds.py --count 100 --use-zai
+```
+
+For RL reward diagnostics, prefer artifact-backed patch tasks over
+metadata-only prompts. The runner downloads the vulnerable repository archive
+and reference patch, applies a model-produced unified diff in a sandbox, then
+scores application, touched-file overlap, changed-line similarity, minimality,
+and safety scope.
+
+```bash
+# Local verifier smoke/diagnostics
+python scripts/run_cybergym_artifact_eval.py --count 100 --mode local --max-parallel 12
+
+# Daytona-isolated execution for untrusted model outputs
+python scripts/run_cybergym_artifact_eval.py --count 20 --mode daytona --max-parallel 4
+
+# Ask GLM for candidate patches when rate limits allow
+python scripts/run_cybergym_artifact_eval.py --count 20 --answer-source glm --fallback-to-reference
+```
+
+Inside a trainer, load a CyberGym row, build a `CyberGymPatchEnvironment`, and
+score model completions exactly like any other DeepGym environment:
+
+```python
+from deepgym import DeepGym
+from deepgym.cybergym_artifacts import CyberGymPatchEnvironment, load_cybergym_rows
+
+dg = DeepGym(mode='auto')  # Daytona when configured, local fallback otherwise
+row = load_cybergym_rows(count=1)[0]
+env = CyberGymPatchEnvironment.from_row(row)
+
+candidate_patch = model.generate(env.task)  # return a unified diff
+result = dg.run(env, model_output=candidate_patch)
+reward = result.score
+```
+
+Use the generated `data/cyberbench/*.jsonl` files as curriculum inputs for
+TRL/verl/OpenRLHF. Keep training and evaluation splits separate, use Daytona for
+untrusted completions, and do not train on metadata-only scores; materialize
+seed specs into artifact-backed environments with deterministic verifiers first.
+See `docs/cyberbench.md` for the full workflow and current diagnostic numbers.
 
 ### Mix multiple benchmarks behind one reward function
 

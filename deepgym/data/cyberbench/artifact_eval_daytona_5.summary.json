@@ -1,0 +1,8 @@
+{
+  "count": 5,
+  "mode": "daytona",
+  "answer_source": "reference",
+  "passed": 4,
+  "avg_score": 0.8,
+  "output": "/Users/abhishek/Desktop/New Folder With Items 2/rlgym/deepgym/data/cyberbench/artifact_eval_daytona_5.jsonl"
+}

@@ -1,0 +1,61 @@
+{
+  "rows": 100,
+  "passed": 100,
+  "avg_score": 1.0,
+  "families": {
+    "parser-state": 16,
+    "memory-safety": 39,
+    "general-vulnerability-analysis": 42,
+    "auth-access-control": 3
+  },
+  "languages": {
+    "c++": 83,
+    "c": 17
+  },
+  "projects_top10": [
+    [
+      "libxml2",
+      22
+    ],
+    [
+      "libxaac",
+      15
+    ],
+    [
+      "lwan",
+      5
+    ],
+    [
+      "libxslt",
+      5
+    ],
+    [
+      "yara",
+      4
+    ],
+    [
+      "faad2",
+      4
+    ],
+    [
+      "mosquitto",
+      4
+    ],
+    [
+      "opensc",
+      4
+    ],
+    [
+      "selinux",
+      3
+    ],
+    [
+      "libplist",
+      3
+    ]
+  ],
+  "answer_sources": {
+    "fallback": 99,
+    "cache": 1
+  }
+}

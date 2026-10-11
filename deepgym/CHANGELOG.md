@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- **Apple container backend:** `DeepGym(mode='apple')` / `AsyncDeepGym(mode='apple')` run judges and multi-turn sessions in throwaway Linux VMs from Apple's `container` CLI on macOS. Same isolation as Daytona: separate solver user, no network for the solution or session commands, all capabilities dropped. Image set by `DEEPGYM_CONTAINER_IMAGE`. Desktop envs still need Daytona. On Daytona the solution now also runs without network when the sandbox allows it.
 - **Rewards:** NaN, inf and out-of-range scores are verifier errors, never reward. A single run raises `InvalidScoreError`; batches and trainer reward functions score that sample 0 with `error_type='invalid_score'`. Non-finite reward components are zeroed. Before, NaN scored 1.0.
 - **Benchmark-backed envs:** SWE-bench Pro, Terminal-Bench and `MixedEnvironment` now score correctly in `AsyncDeepGym` and in single sync runs. Before, both silently scored a 0.0 placeholder.
 - **Benchmark names:** a fully qualified name such as `humaneval_plus/HumanEval_0` beats loose matches, and an ambiguous name raises instead of loading the wrong benchmark. Before, HumanEval+ requests could load HumanEval.
@@ -24,7 +25,7 @@
 - Verifier shape is detected by parsing the source (`script`, `verify_function`, `body`) or set with `verifier_mode`, replacing a text search that misclassified verifiers. `from __future__` imports are hoisted when wrapping.
 - `support_files` on `Environment` (and `metadata.json`) for multi-file verifiers and shared helpers across environments.
 - `cli_task` now works in its own directory (`my_repo` in the working dir) instead of a shared `/tmp/my_repo`.
-- Breaking: `LocalExecutor.run()` / `AsyncLocalExecutor.run()` take a `JudgeJob`. `is_standalone_verifier`, `setup_sandbox` and `execute_verifier` are replaced by `prepare_verifier` and `run_judge_daytona`.
+- Breaking: `LocalExecutor.run()` / `AsyncLocalExecutor.run()` take a `JudgeJob`. `is_standalone_verifier`, `setup_sandbox` and `execute_verifier` are replaced by `prepare_verifier` and `run_judge_in_sandbox`.
 
 - Added live multi-turn sessions (`dg.session()`, `dg.run_episode()`, `Session`): one sandbox per episode, actions applied step by step, final verifier run against the resulting state. Local and Daytona backends.
 - Added real computer-use support on Daytona's desktop: typed GUI actions (click, type, key, scroll, drag, ...), full-resolution screenshots in observations, GUI-only action sets by default

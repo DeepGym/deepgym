@@ -15,14 +15,15 @@ import shlex
 import subprocess
 from typing import TYPE_CHECKING
 
+from deepgym.apple_container import ContainerTimeoutError
 from deepgym.exceptions import InvalidScoreError, SandboxError, TimeoutError, VerifierError
 from deepgym.judge import (
-    DAYTONA_SETUP,
     DEADLINE_GRACE_S,
+    SANDBOX_SETUP,
     JudgeJob,
-    daytona_judge,
-    daytona_uploads,
     local_judge,
+    sandbox_judge,
+    sandbox_uploads,
 )
 from deepgym.models import Environment, RunResult, VerifierResult, checked_score
 
@@ -157,8 +158,11 @@ def create_sandbox(env: Environment, daytona: Daytona) -> Sandbox:
     return sandbox
 
 
-def run_judge_daytona(sandbox: Sandbox, job: JudgeJob) -> ExecutionResult:
-    """Run *job*'s verifier in *sandbox*, with the solution as a separate, unprivileged user.
+def run_judge_in_sandbox(sandbox: Sandbox, job: JudgeJob) -> ExecutionResult:
+    """Run *job*'s verifier in *sandbox* (Daytona or Apple container).
+
+    The solution runs as a separate, unprivileged user with no capabilities and,
+    where the sandbox allows it, no network.
 
     Raises:
         SandboxError: If setting up users or uploading files fails.
@@ -167,16 +171,16 @@ def run_judge_daytona(sandbox: Sandbox, job: JudgeJob) -> ExecutionResult:
     """
     _validate_env_vars(job.env_vars)
     try:
-        setup = sandbox.process.exec(f'bash -c {shlex.quote(DAYTONA_SETUP)}', timeout=60)
+        setup = sandbox.process.exec(f'bash -c {shlex.quote(SANDBOX_SETUP)}', timeout=60)
         if setup.exit_code != 0:
             raise SandboxError(f'Judge setup failed: {setup.result[-2000:]}')
-        for content, path in daytona_uploads(job):
+        for content, path in sandbox_uploads(job):
             sandbox.fs.upload_file(content, path)
     except SandboxError:
         raise
     except Exception as exc:
         raise SandboxError(f'Failed to set up the judge: {exc}') from exc
-    command, env = daytona_judge(job, setup.result)
+    command, env = sandbox_judge(job, setup.result)
     try:
         response = sandbox.process.exec(command, env=env, timeout=job.timeout + DEADLINE_GRACE_S)
     except Exception as exc:
@@ -240,9 +244,13 @@ def parse_verifier_output(stdout: str, context: str = '') -> VerifierResult:
 
 
 def is_command_timeout(exc: Exception) -> bool:
-    """Return True if a Daytona exec failed because the command outran its timeout."""
-    from daytona import DaytonaProcessExecutionTimeoutError
-
+    """Return True if a sandbox exec failed because the command outran its timeout."""
+    if isinstance(exc, ContainerTimeoutError):
+        return True
+    try:
+        from daytona import DaytonaProcessExecutionTimeoutError
+    except ImportError:
+        return False
     return isinstance(exc, DaytonaProcessExecutionTimeoutError)
 
 

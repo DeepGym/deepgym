@@ -27,6 +27,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, NamedTuple, Protocol
 from uuid import uuid4
 
+from deepgym.apple_container import AppleContainer, ContainerTimeoutError
 from deepgym.exceptions import (
     ActionError,
     DeepGymError,
@@ -55,7 +56,7 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
-_DAYTONA_WORKDIR = '/tmp/deepgym'
+_SANDBOX_WORKDIR = '/tmp/deepgym'
 _DISPLAY = ':0'
 _STEP_OUTPUT = '_step_output.txt'
 
@@ -193,7 +194,7 @@ class DaytonaBackend:
         self._setup_timeout = env.setup_timeout
         self.sandbox_id = str(getattr(self._sandbox, 'id', 'unknown'))
         try:
-            self._sandbox.fs.create_folder(_DAYTONA_WORKDIR, '755')
+            self._sandbox.fs.create_folder(_SANDBOX_WORKDIR, '755')
         except Exception as exc:
             self.close()
             raise SandboxError(f'Failed to create work dir: {exc}') from exc
@@ -208,7 +209,7 @@ class DaytonaBackend:
         try:
             response = self._sandbox.process.exec(
                 f'bash -c {shlex.quote(command)}',
-                cwd=_DAYTONA_WORKDIR,
+                cwd=_SANDBOX_WORKDIR,
                 env={**self._env, **(env or {})},
                 timeout=timeout,
             )
@@ -221,7 +222,7 @@ class DaytonaBackend:
     def write_file(self, path: str, content: bytes) -> None:
         """Upload *content* to *path* under the work directory."""
         try:
-            self._sandbox.fs.upload_file(content, f'{_DAYTONA_WORKDIR}/{path}')
+            self._sandbox.fs.upload_file(content, f'{_SANDBOX_WORKDIR}/{path}')
         except Exception as exc:
             raise SandboxError(f'Failed to write {path}: {exc}') from exc
 
@@ -288,6 +289,91 @@ class DaytonaBackend:
     def close(self) -> None:
         """Delete the sandbox and wait until Daytona confirms it is gone."""
         cleanup_sandbox(self._sandbox, self._daytona, wait=True)
+
+
+# Runs as root inside a fresh network namespace: bring loopback up (it starts down and
+# slim images have no `ip`), then sleep forever to keep the namespace alive.
+_LOOPBACK_UP_THEN_SLEEP = """
+import fcntl, os, socket, struct
+s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+flags = struct.unpack('16sH', fcntl.ioctl(s, 0x8913, struct.pack('16sH', b'lo', 0)))[1]
+fcntl.ioctl(s, 0x8914, struct.pack('16sH', b'lo', flags | 1))
+os.execvp('sleep', ['sleep', 'infinity'])
+"""
+
+
+class AppleContainerBackend:
+    """Run actions in a throwaway Apple container VM on macOS. Shell only: no desktop.
+
+    Every command joins one network namespace that has only loopback, so servers
+    started during setup stay reachable across steps while the internet and the
+    host Mac are not. Commands run with all capabilities dropped, so they can't
+    leave that namespace.
+    """
+
+    python = 'python3'
+
+    def __init__(self, env: MultiTurnEnvironment) -> None:
+        self._container = AppleContainer()
+        self.sandbox_id = self._container.id
+        try:
+            self._container.create_folder(_SANDBOX_WORKDIR, '755')
+            holder = self._container.exec(
+                f'setsid unshare --net -- python3 -c {shlex.quote(_LOOPBACK_UP_THEN_SLEEP)} '
+                '>/dev/null 2>&1 & echo $!',
+                timeout=30,
+            )
+            pid = holder.result.strip().splitlines()[-1]
+            check = self._container.exec(f'nsenter --net=/proc/{pid}/ns/net true', timeout=30)
+            if holder.exit_code != 0 or check.exit_code != 0:
+                raise SandboxError(
+                    'Could not isolate the session network; the image needs util-linux '
+                    f'(unshare, nsenter): {check.result[-500:]}'
+                )
+        except BaseException:
+            self.close()
+            raise
+        self._enter = (
+            f'nsenter --net=/proc/{pid}/ns/net -- setpriv --inh-caps=-all --bounding-set=-all --'
+        )
+
+    def exec(self, command: str, timeout: int, env: dict[str, str] | None = None) -> ExecResult:
+        """Run *command* with bash in the container's work directory, offline.
+
+        Raises:
+            TimeoutError: If the command exceeds *timeout* seconds.
+            SandboxError: If the container call itself fails.
+        """
+        try:
+            response = self._container.exec(
+                f'{self._enter} bash -c {shlex.quote(command)}',
+                cwd=_SANDBOX_WORKDIR,
+                env=env,
+                timeout=timeout,
+            )
+        except ContainerTimeoutError as exc:
+            raise TimeoutError(f'Command exceeded {timeout}s timeout') from exc
+        return ExecResult(response.exit_code, response.result)
+
+    def write_file(self, path: str, content: bytes) -> None:
+        """Write *content* to *path* under the work directory."""
+        self._container.upload_file(content, f'{_SANDBOX_WORKDIR}/{path}')
+
+    def start_desktop(self) -> None:
+        """Refuse: Apple containers have no desktop."""
+        raise DeepGymError('Desktop environments need the Daytona backend')
+
+    def act(self, action: Action) -> None:
+        """Refuse: Apple containers have no desktop."""
+        raise DeepGymError('GUI actions need the Daytona backend')
+
+    def screenshot(self) -> str:
+        """Refuse: Apple containers have no desktop."""
+        raise DeepGymError('Screenshots need the Daytona backend')
+
+    def close(self) -> None:
+        """Delete the container."""
+        self._container.delete()
 
 
 class Session:

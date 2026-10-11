@@ -44,24 +44,27 @@ RUNTIME_SOURCE = Path(__file__).with_name('solution_runtime.py').read_text(encod
 # Extra seconds past the run's deadline for the verifier to finish and print.
 DEADLINE_GRACE_S = 5
 
-_DAYTONA_ROOT = '/opt/deepgym'
+_SANDBOX_ROOT = '/opt/deepgym'
 _SOLVER_USER = 'dgsolver'
 
-# Run once per Daytona sandbox, as its default user (root, or a sudoer).
-DAYTONA_SETUP = f"""
+# Run once per sandbox (Daytona or Apple container), as its default user (root or a sudoer).
+SANDBOX_SETUP = f"""
 set -e
 if [ "$(id -u)" = 0 ]; then SUDO=; else SUDO="sudo -n"; fi
 id {_SOLVER_USER} >/dev/null 2>&1 || \\
   $SUDO useradd --system --no-create-home --shell /usr/sbin/nologin {_SOLVER_USER}
-$SUDO mkdir -p {_DAYTONA_ROOT}/judge {_DAYTONA_ROOT}/runtime {_DAYTONA_ROOT}/solution \\
-  {_DAYTONA_ROOT}/tmp
-$SUDO chown -R "$(id -u):$(id -g)" {_DAYTONA_ROOT}
-chmod 755 {_DAYTONA_ROOT} {_DAYTONA_ROOT}/runtime
-chmod 700 {_DAYTONA_ROOT}/judge
-chmod 755 {_DAYTONA_ROOT}/solution
+$SUDO mkdir -p {_SANDBOX_ROOT}/judge {_SANDBOX_ROOT}/runtime {_SANDBOX_ROOT}/solution \\
+  {_SANDBOX_ROOT}/tmp
+$SUDO chown -R "$(id -u):$(id -g)" {_SANDBOX_ROOT}
+chmod 755 {_SANDBOX_ROOT} {_SANDBOX_ROOT}/runtime
+chmod 700 {_SANDBOX_ROOT}/judge
+chmod 755 {_SANDBOX_ROOT}/solution
 # Judge temp files: the solution user may enter known subdirectories, never list.
-chmod 711 {_DAYTONA_ROOT}/tmp
-echo "$(id -u) $(id -u {_SOLVER_USER}) $(id -g {_SOLVER_USER}) $(command -v python3)"
+chmod 711 {_SANDBOX_ROOT}/tmp
+# 1 if the solution can get its own (offline) network namespace here.
+netns=0
+command -v setpriv >/dev/null && $SUDO unshare --net true 2>/dev/null && netns=1
+echo "$(id -u) $(id -u {_SOLVER_USER}) $(id -g {_SOLVER_USER}) $(command -v python3) $netns"
 """
 
 
@@ -220,42 +223,52 @@ def local_judge(job: JudgeJob) -> Iterator[tuple[list[str], dict[str, str], str]
 
 
 # ---------------------------------------------------------------------------
-# Daytona
+# Sandboxes (Daytona, Apple container)
 # ---------------------------------------------------------------------------
 
 
-def daytona_isolation(setup_output: str) -> tuple[dict, str]:
-    """Turn DAYTONA_SETUP's output into (isolation spec, python path)."""
-    judge_uid, uid, gid, python = setup_output.split()[-4:]
+def sandbox_isolation(setup_output: str) -> tuple[dict, str]:
+    """Turn SANDBOX_SETUP's output into (isolation spec, python path).
+
+    The solution runs as the unprivileged solver user with every capability
+    dropped and, where the sandbox allows it, in its own network namespace
+    (loopback only: no internet, no host).
+    """
+    judge_uid, uid, gid, python, netns = setup_output.split()[-5:]
+    drop = ['setpriv', f'--reuid={uid}', f'--regid={gid}', '--clear-groups']
+    drop += ['--inh-caps=-all', '--bounding-set=-all', '--']
+    offline = ['unshare', '--net', '--'] if netns == '1' else []
     if judge_uid == '0':
-        prefix = ['setpriv', f'--reuid={uid}', f'--regid={gid}', '--clear-groups', '--']
+        prefix = [*offline, *drop]
+    elif offline:
+        prefix = ['sudo', '-n', *offline, *drop]
     else:
         prefix = ['sudo', '-n', '-u', _SOLVER_USER, '--']
     return {'kind': 'user', 'prefix': prefix}, python
 
 
-def daytona_uploads(job: JudgeJob) -> list[tuple[bytes, str]]:
+def sandbox_uploads(job: JudgeJob) -> list[tuple[bytes, str]]:
     """(content, sandbox path) pairs for the judge, runtime, and solution files."""
     uploads = [
-        (content.encode('utf-8'), f'{_DAYTONA_ROOT}/judge/{rel}')
+        (content.encode('utf-8'), f'{_SANDBOX_ROOT}/judge/{rel}')
         for rel, content in job.judge_files().items()
     ]
-    uploads.append((RUNTIME_SOURCE.encode('utf-8'), f'{_DAYTONA_ROOT}/runtime/{RUNTIME_FILE}'))
-    uploads.append((job.solution.encode('utf-8'), f'{_DAYTONA_ROOT}/solution/solution.py'))
+    uploads.append((RUNTIME_SOURCE.encode('utf-8'), f'{_SANDBOX_ROOT}/runtime/{RUNTIME_FILE}'))
+    uploads.append((job.solution.encode('utf-8'), f'{_SANDBOX_ROOT}/solution/solution.py'))
     return uploads
 
 
-def daytona_judge(job: JudgeJob, setup_output: str) -> tuple[str, dict[str, str]]:
+def sandbox_judge(job: JudgeJob, setup_output: str) -> tuple[str, dict[str, str]]:
     """Return (bash command, env) that run the verifier inside the sandbox."""
-    isolation, python = daytona_isolation(setup_output)
-    judge_dir = f'{_DAYTONA_ROOT}/judge'
-    args = job.verifier_args(judge_dir, f'{_DAYTONA_ROOT}/solution/solution.py')
+    isolation, python = sandbox_isolation(setup_output)
+    judge_dir = f'{_SANDBOX_ROOT}/judge'
+    args = job.verifier_args(judge_dir, f'{_SANDBOX_ROOT}/solution/solution.py')
     command = (
         f'umask 077 && cd {judge_dir} && DEEPGYM_DEADLINE=$(( $(date +%s) + {job.timeout} )) '
         f'exec {shlex.quote(python)} {shlex.join(args)}'
     )
-    env = job.runtime_env(isolation, f'{_DAYTONA_ROOT}/runtime/{RUNTIME_FILE}', python)
+    env = job.runtime_env(isolation, f'{_SANDBOX_ROOT}/runtime/{RUNTIME_FILE}', python)
     # Private temp dir + umask 077: the judge's own temp files stay unreadable to the
     # solution; run_solution shares only the directories it hands over.
-    env['TMPDIR'] = f'{_DAYTONA_ROOT}/tmp'
+    env['TMPDIR'] = f'{_SANDBOX_ROOT}/tmp'
     return f'bash -c {shlex.quote(command)}', env

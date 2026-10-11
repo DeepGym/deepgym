@@ -398,8 +398,8 @@ for static checks without running it.
 
 How the solution is isolated:
 
-- **Daytona:** it runs as a separate Linux user that can't read the judge's
-  files, touch the judge's process, or write to its output.
+- **Daytona / Apple container:** it runs as a separate Linux user that can't read the judge's
+  files, touch the judge's process, or write to its output, with no network.
 - **Locally:** it runs under `sandbox-exec` on macOS or `bwrap` on Linux, with
   the judge directory and the deepgym package hidden. If neither is available,
   you still get process separation and a warning.
@@ -510,10 +510,33 @@ DeepGym (environments + verifiers + scoring)
 Daytona sandbox / local subprocess
 ```
 
-Three modes: **local** (subprocess, no deps, no isolation), **daytona**
-(real container isolation), **auto** (tries Daytona, falls back to local).
+Four modes: **local** (subprocess, no deps, no isolation), **daytona**
+(real container isolation), **apple** (Apple container VMs on your Mac),
+**auto** (tries Daytona, falls back to local).
 
-Local mode is fine for development. For anything shared or untrusted, use Daytona.
+Local mode is fine for development. For anything shared or untrusted, use Daytona
+or Apple container.
+
+### Run on Apple container (macOS)
+
+Each run or session gets a throwaway Linux VM from Apple's
+[container](https://github.com/apple/container) CLI. Same isolation as Daytona,
+no API key, no cloud.
+
+```bash
+brew install container
+container system start
+```
+
+```python
+dg = DeepGym(mode='apple')   # or AsyncDeepGym(mode='apple')
+dg.run(env, solution)
+```
+
+- Image: `python:3.12-slim`, override with `DEEPGYM_CONTAINER_IMAGE`.
+- Sessions run offline; servers inside the VM still work on localhost.
+- Desktop (computer-use) envs need Daytona.
+- Stop the service with `container system stop`.
 
 ## CLI
 

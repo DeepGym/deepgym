@@ -9,6 +9,7 @@ from collections.abc import Callable, Sequence
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Literal
 
+from deepgym.apple_container import AppleContainer, apple_container_available
 from deepgym.benchmark_envs import build_run_requests, route_single_run
 from deepgym.exceptions import (
     DeepGymError,
@@ -33,9 +34,15 @@ from deepgym.sandbox import (
     build_run_result,
     cleanup_sandbox,
     create_sandbox,
-    run_judge_daytona,
+    run_judge_in_sandbox,
 )
-from deepgym.session import DaytonaBackend, LocalBackend, Session, run_episode
+from deepgym.session import (
+    AppleContainerBackend,
+    DaytonaBackend,
+    LocalBackend,
+    Session,
+    run_episode,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -50,16 +57,24 @@ class DeepGym:
     def __init__(
         self,
         api_key: str | None = None,
-        mode: Literal['auto', 'daytona', 'local'] = 'auto',
+        mode: Literal['auto', 'daytona', 'local', 'apple'] = 'auto',
     ) -> None:
         self._daytona = None
         self._local_executor: LocalExecutor | None = None
+        self._apple = mode == 'apple'
 
         # Read env vars for configuration.
         daytona_api_key = api_key or os.getenv('DAYTONA_API_KEY')
         daytona_api_url = os.getenv('DAYTONA_API_URL')
 
-        if mode == 'local':
+        if self._apple:
+            if not apple_container_available():
+                raise DeepGymError(
+                    "mode='apple' needs Apple's container CLI with its service running "
+                    '(`container system start`)'
+                )
+            logger.info('Initialising DeepGym with Apple container backend')
+        elif mode == 'local':
             logger.info('Initialising DeepGym in local mode (no Daytona)')
             self._local_executor = LocalExecutor()
         elif mode == 'daytona':
@@ -116,6 +131,8 @@ class DeepGym:
         if hasattr(env, 'run_with_deepgym'):
             return env.run_with_deepgym(self, model_output, **kwargs)  # type: ignore[return-value]
 
+        if self._apple:
+            return self._run_apple(env, model_output)
         if self._local_executor is not None:
             return self._run_local(env, model_output)
         return self._run_daytona(env, model_output)
@@ -138,7 +155,7 @@ class DeepGym:
         sandbox = create_sandbox(env, self._daytona)
         start = time.perf_counter()
         try:
-            exec_result = run_judge_daytona(sandbox, JudgeJob.for_environment(env, model_output))
+            exec_result = run_judge_in_sandbox(sandbox, JudgeJob.for_environment(env, model_output))
             return build_run_result(
                 exec_result.verifier_result,
                 (time.perf_counter() - start) * 1000,
@@ -147,6 +164,23 @@ class DeepGym:
             )
         finally:
             cleanup_sandbox(sandbox, self._daytona)
+
+    def _run_apple(self, env: Environment, model_output: str) -> RunResult:
+        """Execute in a fresh Apple container VM, deleted afterwards."""
+        container = AppleContainer()
+        start = time.perf_counter()
+        try:
+            exec_result = run_judge_in_sandbox(
+                container, JudgeJob.for_environment(env, model_output)
+            )
+            return build_run_result(
+                exec_result.verifier_result,
+                (time.perf_counter() - start) * 1000,
+                container.id,
+                exit_code=exec_result.exit_code,
+            )
+        finally:
+            container.delete()
 
     # ------------------------------------------------------------------
     # Multi-turn episodes
@@ -164,6 +198,8 @@ class DeepGym:
         Raises:
             SandboxError: If the Daytona sandbox cannot be created.
         """
+        if self._apple:
+            return Session(env, AppleContainerBackend(env))
         if self._local_executor is not None:
             return Session(env, LocalBackend())
         return Session(env, DaytonaBackend(self._daytona, env))

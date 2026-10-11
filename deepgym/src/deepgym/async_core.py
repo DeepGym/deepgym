@@ -20,7 +20,7 @@ from deepgym.exceptions import (
     VerifierError,
     error_type_for,
 )
-from deepgym.judge import DAYTONA_SETUP, DEADLINE_GRACE_S, JudgeJob, daytona_judge, daytona_uploads
+from deepgym.judge import DEADLINE_GRACE_S, SANDBOX_SETUP, JudgeJob, sandbox_judge, sandbox_uploads
 from deepgym.models import (
     BatchResult,
     Environment,
@@ -62,8 +62,9 @@ class AsyncDeepGym:
         api_key: str | None = None,
         api_url: str | None = None,
         default_timeout: int = 30,
-        mode: Literal['auto', 'daytona', 'local'] = 'auto',
+        mode: Literal['auto', 'daytona', 'local', 'apple'] = 'auto',
     ) -> None:
+        self._mode = mode
         self._api_key = api_key
         self._api_url = api_url
         self._default_timeout = default_timeout
@@ -77,6 +78,10 @@ class AsyncDeepGym:
 
         if api_url is not None:
             logger.info('Initialising AsyncDeepGym in HTTP mode: %s', api_url)
+        elif mode == 'apple':
+            # Apple container runs go through the sync client in worker threads;
+            # creating it now fails fast if the container service isn't running.
+            self._sync_client()
         elif mode == 'local':
             logger.info('Initialising AsyncDeepGym in local mode (no Daytona)')
             self._local_executor = AsyncLocalExecutor()
@@ -135,6 +140,9 @@ class AsyncDeepGym:
             )
         if self._api_url is not None:
             return await self._run_http(env, model_output)
+
+        if self._mode == 'apple':
+            return await asyncio.to_thread(self._sync_client().run, env, model_output)
 
         if self._local_executor is not None:
             return await self._run_local(env, model_output)
@@ -501,7 +509,10 @@ class AsyncDeepGym:
         if self._sync is None:
             from deepgym.core import DeepGym
 
-            mode = 'local' if self._local_executor is not None else 'daytona'
+            if self._mode == 'apple':
+                mode = 'apple'
+            else:
+                mode = 'local' if self._local_executor is not None else 'daytona'
             self._sync = DeepGym(api_key=self._api_key, mode=mode)
         return self._sync
 
@@ -555,7 +566,7 @@ class AsyncDeepGym:
             raise SandboxError(f'Failed to create async sandbox: {exc}') from exc
 
     async def _run_judge(self, sandbox: Sandbox, job: JudgeJob) -> ExecutionResult:
-        """Async twin of :func:`deepgym.sandbox.run_judge_daytona`.
+        """Async twin of :func:`deepgym.sandbox.run_judge_in_sandbox`.
 
         Raises:
             SandboxError: If setting up users or uploading files fails.
@@ -564,16 +575,16 @@ class AsyncDeepGym:
         """
         _validate_env_vars(job.env_vars)
         try:
-            setup = await sandbox.process.exec(f'bash -c {shlex.quote(DAYTONA_SETUP)}', timeout=60)
+            setup = await sandbox.process.exec(f'bash -c {shlex.quote(SANDBOX_SETUP)}', timeout=60)
             if setup.exit_code != 0:
                 raise SandboxError(f'Judge setup failed: {setup.result[-2000:]}')
-            for content, path in daytona_uploads(job):
+            for content, path in sandbox_uploads(job):
                 await sandbox.fs.upload_file(content, path)
         except SandboxError:
             raise
         except Exception as exc:
             raise SandboxError(f'Failed to set up the judge: {exc}') from exc
-        command, env = daytona_judge(job, setup.result)
+        command, env = sandbox_judge(job, setup.result)
         try:
             response = await sandbox.process.exec(
                 command, env=env, timeout=job.timeout + DEADLINE_GRACE_S

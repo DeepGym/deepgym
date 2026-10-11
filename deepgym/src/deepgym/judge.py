@@ -34,6 +34,7 @@ from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
+from deepgym.exceptions import SandboxError
 from deepgym.models import Environment
 from deepgym.verifier_template import prepare_verifier
 
@@ -227,14 +228,22 @@ def local_judge(job: JudgeJob) -> Iterator[tuple[list[str], dict[str, str], str]
 # ---------------------------------------------------------------------------
 
 
-def sandbox_isolation(setup_output: str) -> tuple[dict, str]:
+def sandbox_isolation(setup_output: str, *, require_offline: bool = False) -> tuple[dict, str]:
     """Turn SANDBOX_SETUP's output into (isolation spec, python path).
 
     The solution runs as the unprivileged solver user with every capability
     dropped and, where the sandbox allows it, in its own network namespace
     (loopback only: no internet, no host).
+
+    Raises:
+        SandboxError: If *require_offline* is set but the sandbox can't make that namespace.
     """
     judge_uid, uid, gid, python, netns = setup_output.split()[-5:]
+    if require_offline and netns != '1':
+        raise SandboxError(
+            'Cannot cut the solution off the network here; the image needs util-linux '
+            '(unshare, setpriv)'
+        )
     drop = ['setpriv', f'--reuid={uid}', f'--regid={gid}', '--clear-groups']
     drop += ['--inh-caps=-all', '--bounding-set=-all', '--']
     offline = ['unshare', '--net', '--'] if netns == '1' else []
@@ -258,9 +267,15 @@ def sandbox_uploads(job: JudgeJob) -> list[tuple[bytes, str]]:
     return uploads
 
 
-def sandbox_judge(job: JudgeJob, setup_output: str) -> tuple[str, dict[str, str]]:
-    """Return (bash command, env) that run the verifier inside the sandbox."""
-    isolation, python = sandbox_isolation(setup_output)
+def sandbox_judge(
+    job: JudgeJob, setup_output: str, *, require_offline: bool = False
+) -> tuple[str, dict[str, str]]:
+    """Return (bash command, env) that run the verifier inside the sandbox.
+
+    Raises:
+        SandboxError: If *require_offline* is set but the solution can't be cut off the network.
+    """
+    isolation, python = sandbox_isolation(setup_output, require_offline=require_offline)
     judge_dir = f'{_SANDBOX_ROOT}/judge'
     args = job.verifier_args(judge_dir, f'{_SANDBOX_ROOT}/solution/solution.py')
     command = (

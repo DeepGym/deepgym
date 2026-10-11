@@ -2,7 +2,7 @@
 
 ## Unreleased
 
-- **Apple container backend:** `DeepGym(mode='apple')` / `AsyncDeepGym(mode='apple')` run judges and multi-turn sessions in throwaway Linux VMs from Apple's `container` CLI on macOS. Same isolation as Daytona: separate solver user, no network for the solution or session commands, all capabilities dropped. Image set by `DEEPGYM_CONTAINER_IMAGE`. Desktop envs still need Daytona. On Daytona the solution now also runs without network when the sandbox allows it.
+- **Apple container backend:** `DeepGym(mode='apple')` / `AsyncDeepGym(mode='apple')` run judges and multi-turn sessions in throwaway Linux VMs from Apple's `container` CLI on macOS. Same isolation as Daytona: the solution and session commands run as non-root users with all capabilities dropped and no network; a judge run fails rather than run online if the image lacks util-linux. Image set by `DEEPGYM_CONTAINER_IMAGE`. Desktop envs still need Daytona. On Daytona the solution now also runs without network when the sandbox allows it.
 - **Rewards:** NaN, inf and out-of-range scores are verifier errors, never reward. A single run raises `InvalidScoreError`; batches and trainer reward functions score that sample 0 with `error_type='invalid_score'`. Non-finite reward components are zeroed. Before, NaN scored 1.0.
 - **Benchmark-backed envs:** SWE-bench Pro, Terminal-Bench and `MixedEnvironment` now score correctly in `AsyncDeepGym` and in single sync runs. Before, both silently scored a 0.0 placeholder.
 - **Benchmark names:** a fully qualified name such as `humaneval_plus/HumanEval_0` beats loose matches, and an ambiguous name raises instead of loading the wrong benchmark. Before, HumanEval+ requests could load HumanEval.

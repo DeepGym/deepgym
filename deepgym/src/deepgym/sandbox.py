@@ -158,14 +158,18 @@ def create_sandbox(env: Environment, daytona: Daytona) -> Sandbox:
     return sandbox
 
 
-def run_judge_in_sandbox(sandbox: Sandbox, job: JudgeJob) -> ExecutionResult:
+def run_judge_in_sandbox(
+    sandbox: Sandbox, job: JudgeJob, *, require_offline: bool = False
+) -> ExecutionResult:
     """Run *job*'s verifier in *sandbox* (Daytona or Apple container).
 
     The solution runs as a separate, unprivileged user with no capabilities and,
-    where the sandbox allows it, no network.
+    where the sandbox allows it, no network. *require_offline* fails the run
+    instead of letting the solution keep the sandbox's network.
 
     Raises:
-        SandboxError: If setting up users or uploading files fails.
+        SandboxError: If setting up users or uploading files fails, or if
+            *require_offline* is set and the solution can't be cut off the network.
         TimeoutError: If the verifier outruns its time budget.
         VerifierError: If the verifier fails to run or prints no protocol JSON.
     """
@@ -180,7 +184,7 @@ def run_judge_in_sandbox(sandbox: Sandbox, job: JudgeJob) -> ExecutionResult:
         raise
     except Exception as exc:
         raise SandboxError(f'Failed to set up the judge: {exc}') from exc
-    command, env = sandbox_judge(job, setup.result)
+    command, env = sandbox_judge(job, setup.result, require_offline=require_offline)
     try:
         response = sandbox.process.exec(command, env=env, timeout=job.timeout + DEADLINE_GRACE_S)
     except Exception as exc:

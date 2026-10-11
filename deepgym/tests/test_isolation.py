@@ -9,7 +9,8 @@ import time
 import pytest
 
 from deepgym import DeepGym, load_environment
-from deepgym.judge import local_isolation_kind
+from deepgym.exceptions import SandboxError
+from deepgym.judge import local_isolation_kind, sandbox_isolation
 from deepgym.models import Environment
 
 needs_sandbox = pytest.mark.skipif(
@@ -612,3 +613,12 @@ def test_sharing_a_workdir_never_follows_symlinks(tmp_path) -> None:
     assert tmp_path.stat().st_mode & 0o777 != 0o777
     assert (work / 'input.csv').stat().st_mode & 0o044 == 0o044
     assert (work / 'sub').stat().st_mode & 0o777 == 0o777
+
+
+def test_sandbox_isolation_goes_offline_or_fails_closed() -> None:
+    offline = sandbox_isolation('0 999 987 /usr/bin/python3 1')[0]['prefix']
+    assert offline[:3] == ['unshare', '--net', '--']
+    assert '--bounding-set=-all' in offline
+    assert sandbox_isolation('0 999 987 /usr/bin/python3 0')[0]['prefix'][0] == 'setpriv'
+    with pytest.raises(SandboxError, match='network'):
+        sandbox_isolation('0 999 987 /usr/bin/python3 0', require_offline=True)

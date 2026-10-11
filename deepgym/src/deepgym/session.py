@@ -57,6 +57,8 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 _SANDBOX_WORKDIR = '/tmp/deepgym'
+# Unprivileged user that runs Apple container session commands and file writes.
+_AGENT_USER = 'dgagent'
 _DISPLAY = ':0'
 _STEP_OUTPUT = '_step_output.txt'
 
@@ -307,8 +309,9 @@ class AppleContainerBackend:
 
     Every command joins one network namespace that has only loopback, so servers
     started during setup stay reachable across steps while the internet and the
-    host Mac are not. Commands run with all capabilities dropped, so they can't
-    leave that namespace.
+    host Mac are not. Commands and file writes run as an unprivileged user with
+    all capabilities dropped: root owns the binaries that every exec runs with
+    full privileges in the container's own network, so the agent must never be root.
     """
 
     python = 'python3'
@@ -317,7 +320,19 @@ class AppleContainerBackend:
         self._container = AppleContainer()
         self.sandbox_id = self._container.id
         try:
-            self._container.create_folder(_SANDBOX_WORKDIR, '755')
+            user = self._container.exec(
+                f'useradd --system --no-create-home --shell /usr/sbin/nologin {_AGENT_USER} && '
+                f'mkdir -p {_SANDBOX_WORKDIR} && chown {_AGENT_USER}: {_SANDBOX_WORKDIR} && '
+                f'echo "$(id -u {_AGENT_USER}) $(id -g {_AGENT_USER})"',
+                timeout=30,
+            )
+            if user.exit_code != 0:
+                raise SandboxError(f'Could not create the session user: {user.result[-500:]}')
+            uid, gid = user.result.split()[-2:]
+            self._as_agent = [
+                'setpriv', f'--reuid={uid}', f'--regid={gid}', '--clear-groups',
+                '--inh-caps=-all', '--bounding-set=-all', '--',
+            ]  # fmt: skip
             holder = self._container.exec(
                 f'setsid unshare --net -- python3 -c {shlex.quote(_LOOPBACK_UP_THEN_SLEEP)} '
                 '>/dev/null 2>&1 & echo $!',
@@ -333,9 +348,7 @@ class AppleContainerBackend:
         except BaseException:
             self.close()
             raise
-        self._enter = (
-            f'nsenter --net=/proc/{pid}/ns/net -- setpriv --inh-caps=-all --bounding-set=-all --'
-        )
+        self._enter = f'nsenter --net=/proc/{pid}/ns/net -- {shlex.join(self._as_agent)}'
 
     def exec(self, command: str, timeout: int, env: dict[str, str] | None = None) -> ExecResult:
         """Run *command* with bash in the container's work directory, offline.
@@ -356,8 +369,8 @@ class AppleContainerBackend:
         return ExecResult(response.exit_code, response.result)
 
     def write_file(self, path: str, content: bytes) -> None:
-        """Write *content* to *path* under the work directory."""
-        self._container.upload_file(content, f'{_SANDBOX_WORKDIR}/{path}')
+        """Write *content* to *path* under the work directory, as the session user."""
+        self._container.upload_file(content, f'{_SANDBOX_WORKDIR}/{path}', as_user=self._as_agent)
 
     def start_desktop(self) -> None:
         """Refuse: Apple containers have no desktop."""

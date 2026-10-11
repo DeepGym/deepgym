@@ -4,13 +4,15 @@ Skipped unless Apple's container CLI is installed and its service is running.
 """
 
 import asyncio
+import contextlib
+import shlex
 import subprocess
 
 import pytest
 
 from deepgym import AsyncDeepGym, ComputerUseEnvironment, DeepGym, load_environment
 from deepgym.apple_container import apple_container_available
-from deepgym.exceptions import DeepGymError
+from deepgym.exceptions import DeepGymError, SandboxError
 from deepgym.models import Action, MultiTurnEnvironment
 from tests.test_isolation import _env
 
@@ -103,6 +105,48 @@ def test_session_is_offline_but_keeps_local_servers(dg: DeepGym) -> None:
     assert '200' in output
     assert 'offline' in output
     assert 'stayed' in escaped
+
+
+# Planted where the privileged exec wrapper would run it on the next step.
+_TROJAN = '#!/bin/sh\ntouch /tmp/deepgym/pwned\nexec /usr/bin/nsenter "$@"\n'
+_PWNED = 'test -e pwned && echo PWNED || echo clean'
+
+
+def test_session_cannot_trojan_the_exec_wrapper(dg: DeepGym) -> None:
+    plant = f'printf %s {shlex.quote(_TROJAN)} > /usr/local/bin/nsenter'
+    plant += ' && chmod +x /usr/local/bin/nsenter; echo planted'
+    with dg.session(MultiTurnEnvironment(task='t', max_steps=5)) as session:
+        session.start()
+        session.step(Action(action_type='bash', content=plant))
+        after = session.step(Action(action_type='bash', content=_PWNED)).observation.content
+    assert 'clean' in after
+
+
+def test_session_write_file_cannot_follow_symlinks_out(dg: DeepGym) -> None:
+    with dg.session(MultiTurnEnvironment(task='t', max_steps=5)) as session:
+        session.start()
+        session.step(Action(action_type='bash', content='ln -s /usr/bin ub'))
+        with contextlib.suppress(SandboxError):
+            session.step(Action(action_type='write_file', path='ub/timeout', content=_TROJAN))
+        after = session.step(Action(action_type='bash', content=_PWNED)).observation.content
+    assert 'clean' in after
+
+
+def test_session_cannot_kill_the_network_holder(dg: DeepGym) -> None:
+    kill_all = 'for p in /proc/[0-9]*; do kill -9 "${p#/proc/}" 2>/dev/null; done; echo swept'
+    probe = (
+        'import socket\n'
+        'try:\n'
+        '    socket.create_connection(("1.1.1.1", 80), timeout=3)\n'
+        '    print("ONLINE")\n'
+        'except OSError:\n'
+        '    print("offline")\n'
+    )
+    with dg.session(MultiTurnEnvironment(task='t', max_steps=5)) as session:
+        session.start()
+        session.step(Action(action_type='bash', content=kill_all))
+        after = session.step(Action(content=probe)).observation.content
+    assert 'offline' in after, after
 
 
 def test_desktop_env_is_refused(dg: DeepGym) -> None:

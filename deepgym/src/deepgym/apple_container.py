@@ -3,7 +3,7 @@
 Needs Apple's container CLI (https://github.com/apple/container) with its system
 service running (``container system start``). :class:`AppleContainer` exposes
 the same small surface the judge and sessions use on Daytona sandboxes
-(``process.exec``, ``fs.upload_file``, ``fs.create_folder``), so both backends
+(``process.exec``, ``fs.upload_file``), so both backends
 share one code path.
 """
 
@@ -13,6 +13,7 @@ import os
 import shutil
 import subprocess
 import time
+from collections.abc import Sequence
 from typing import NamedTuple
 from uuid import uuid4
 
@@ -69,8 +70,9 @@ class AppleContainer:
 
     The container gets CAP_SYS_ADMIN and CAP_NET_ADMIN so root setup code can
     create an offline network namespace (with loopback up). Untrusted code (the
-    judged solution, session commands) always runs with every capability dropped,
-    so it can neither leave that namespace nor change the network.
+    judged solution, session commands) always runs as a non-root user with every
+    capability dropped, so it can't leave that namespace, change the network, or
+    tamper with the binaries root runs.
     """
 
     def __init__(self, image: str = DEFAULT_IMAGE) -> None:
@@ -118,32 +120,24 @@ class AppleContainer:
         output = done.stdout.decode('utf-8', 'replace') + done.stderr.decode('utf-8', 'replace')
         return ExecResponse(done.returncode, output)
 
-    def upload_file(self, content: bytes, path: str, timeout: int = 120) -> None:
+    def upload_file(
+        self, content: bytes, path: str, timeout: int = 120, as_user: Sequence[str] = ()
+    ) -> None:
         """Write *content* to *path* inside the container, creating parent directories.
+
+        *as_user* is an argv prefix (e.g. ``setpriv --reuid=...``) that runs the write
+        with less privilege; by default it runs as root.
 
         Raises:
             SandboxError: If the write fails.
         """
         script = 'mkdir -p "$(dirname "$1")" && cat > "$1"'
         done = _cli(
-            'exec', '--interactive', self.id, 'sh', '-c', script, 'upload', path,
+            'exec', '--interactive', self.id, *as_user, 'sh', '-c', script, 'upload', path,
             input=content, timeout=timeout,
         )  # fmt: skip
         if done.returncode != 0:
             raise SandboxError(f'Failed to upload {path}: {done.stderr.decode()[-500:]}')
-
-    def create_folder(self, path: str, mode: str) -> None:
-        """Create *path* (and parents) inside the container with *mode*.
-
-        Raises:
-            SandboxError: If the folder can't be created.
-        """
-        done = _cli(
-            'exec', self.id, 'sh', '-c', 'mkdir -p "$1" && chmod "$2" "$1"', 'mkdir', path, mode,
-            timeout=60,
-        )  # fmt: skip
-        if done.returncode != 0:
-            raise SandboxError(f'Failed to create {path}: {done.stderr.decode()[-500:]}')
 
     def delete(self) -> None:
         """Stop and remove the container; errors are ignored (it may already be gone)."""

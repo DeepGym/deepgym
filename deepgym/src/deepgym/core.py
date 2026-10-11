@@ -171,7 +171,7 @@ class DeepGym:
         start = time.perf_counter()
         try:
             exec_result = run_judge_in_sandbox(
-                container, JudgeJob.for_environment(env, model_output)
+                container, JudgeJob.for_environment(env, model_output), require_offline=True
             )
             return build_run_result(
                 exec_result.verifier_result,

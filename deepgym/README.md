@@ -1,5 +1,11 @@
 # DeepGym
 
+[![PyPI](https://img.shields.io/pypi/v/deepgym)](https://pypi.org/project/deepgym/)
+[![CI](https://github.com/DeepGym/deepgym/actions/workflows/deepgym-ci.yml/badge.svg)](https://github.com/DeepGym/deepgym/actions/workflows/deepgym-ci.yml)
+[![License: MIT](https://img.shields.io/badge/license-MIT-blue)](https://github.com/DeepGym/deepgym/blob/main/LICENSE)
+[![Hacktoberfest](https://img.shields.io/badge/Hacktoberfest-2026-blueviolet)](https://github.com/DeepGym/deepgym/issues?q=is%3Aissue+is%3Aopen+label%3Ahacktoberfest)
+[![GitHub stars](https://img.shields.io/github/stars/DeepGym/deepgym?style=social)](https://github.com/DeepGym/deepgym)
+
 RL training environments with verifiable rewards for coding and computer-use agents.
 
 You give it model-generated code. It runs the code in a sandbox, checks it against
@@ -558,7 +564,7 @@ production or `DEEPGYM_NO_AUTH=true` for local development.
 
 ```bash
 pip install -e ".[dev]"   # install with test deps
-pytest                    # 291 tests
+pytest
 ruff check src/           # lint
 ruff format src/          # format
 ```
@@ -590,6 +596,15 @@ DeepGym is part of the [Daytona Startup Grid](https://www.daytona.io/startups).
 
 We use Daytona to power fast, isolated execution for modern agent training
 and evaluation workflows.
+
+## Contributing
+
+New environments, verifiers, benchmark importers and integrations are all welcome.
+Start with a [good first issue](https://github.com/DeepGym/deepgym/issues?q=is%3Aissue+is%3Aopen+label%3A%22good+first+issue%22)
+and see [CONTRIBUTING.md](https://github.com/DeepGym/deepgym/blob/main/.github/CONTRIBUTING.md). We're in Hacktoberfest: merged PRs get
+the `hacktoberfest-accepted` label.
+
+If DeepGym is useful to you, a star helps other people find it.
 
 ## License
 

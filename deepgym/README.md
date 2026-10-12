@@ -312,12 +312,27 @@ are closed after 30 minutes; at most 100 run at once.
 
 ### Drop into verl
 
-```python
-from deepgym.integrations.verl import make_verl_compute_score
+verl loads DeepGym's reward function from the package; each dataset row names
+its environment, so one run can mix environments:
 
-compute_score = make_verl_compute_score(env)
-# In verl config: custom_reward_function.path = "your_reward_module.py"
+```python
+import pandas as pd
+from deepgym.integrations.verl import verl_rows
+
+pd.DataFrame(verl_rows(['coin_change', 'two_sum']) * 64).to_parquet('train.parquet')
 ```
+
+```yaml
+reward:
+  custom_reward_function:
+    path: pkg://deepgym.integrations.verl
+    name: compute_score
+    reward_kwargs: {mode: daytona}   # or auto, local, apple
+```
+
+It runs the last fenced code block of each response and logs `score`, `passed`
+and `error` (1.0 when the sandbox or verifier failed and the score is a forced 0).
+For one fixed environment in your own module, use `make_verl_compute_score(env)`.
 
 For multi-turn agent RL, use DeepGym's agent loop plus its session tool. verl's
 stock `ToolAgentLoop` creates and releases a tool around every call, so the
@@ -341,6 +356,8 @@ screenshot. Written against verl v0.9.1 and tested against a stand-in for its lo
 
 Pick the env and variant per dataset row with
 `extra_info.tools_kwargs.computer.create_kwargs: {environment: todo_list, variant: 3}`.
+verl cuts tool output to 256 characters by default; raise
+`actor_rollout_ref.rollout.multi_turn.max_tool_response_length` for shell output.
 
 ### Drop into OpenRLHF
 

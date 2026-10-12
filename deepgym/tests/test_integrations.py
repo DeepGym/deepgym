@@ -21,7 +21,13 @@ from deepgym.integrations.openrlhf import (
 )
 from deepgym.integrations.reward import RewardFunction
 from deepgym.integrations.trl import make_trl_async_reward_fn, make_trl_reward_fn
-from deepgym.integrations.verl import make_verl_compute_score, make_verl_reward_fn
+from deepgym.integrations.verl import (
+    compute_score,
+    extract_code,
+    make_verl_compute_score,
+    make_verl_reward_fn,
+    verl_rows,
+)
 from deepgym.models import Environment
 
 ENVS_DIR = Path(__file__).resolve().parent.parent / 'src' / 'deepgym' / 'envs'
@@ -101,6 +107,47 @@ class TestVerlIntegration:
         assert len(scores) == 1
         assert scores[0] >= 0.5
 
+    def test_compute_score_accepts_verl_extra_kwargs(
+        self, env: Environment, local_dg: DeepGym
+    ) -> None:
+        fn = make_verl_compute_score(env=env, dg=local_dg)
+        score = fn(
+            data_source='ds',
+            solution_str=f'Here you go:\n```python\n{GOOD_SOLUTION}```\n',
+            ground_truth='',
+            extra_info={},
+            reward_router_address=None,
+        )
+        assert score >= 0.5
+
+    def test_extract_code_takes_last_block_or_whole_text(self) -> None:
+        assert extract_code('a\n```python\nx = 1\n```\nb\n```\ny = 2\n```') == 'y = 2\n'
+        assert extract_code('def f(): pass') == 'def f(): pass'
+
+    def test_package_compute_score_picks_env_per_row(self) -> None:
+        reference = (
+            Path(__file__).resolve().parent.parent
+            / 'src/deepgym/envs/coin_change/reference_solution.py'
+        ).read_text()
+        row = verl_rows(['coin_change'])[0]
+        kwargs = {
+            'data_source': row['data_source'],
+            'ground_truth': row['reward_model']['ground_truth'],
+            'extra_info': {**row['extra_info'], 'num_turns': None},
+            'mode': 'local',
+        }
+        good = compute_score(solution_str=f'```python\n{reference}```', **kwargs)
+        bad = compute_score(solution_str='nothing useful', **kwargs)
+        assert good == {'score': 1.0, 'passed': 1.0, 'error': 0.0}
+        assert bad.keys() == good.keys()
+        assert bad['score'] < 1.0
+
+    def test_verl_rows_have_verl_fields(self) -> None:
+        row = verl_rows(['coin_change'])[0]
+        assert row['prompt'][0]['role'] == 'user'
+        assert row['extra_info'] == {'environment': 'coin_change'}
+        assert set(row) == {'data_source', 'prompt', 'ability', 'reward_model', 'extra_info'}
+
 
 class TestDAPOIntegration:
     """Verify thin DAPO integration helpers."""
@@ -135,18 +182,16 @@ class TestDAPOIntegration:
         assert scores == [0.8]
 
     def test_generate_dapo_verl_config_contains_expected_fields(self) -> None:
-        config = generate_dapo_verl_config(
-            train_files='data/train.parquet',
-            reward_module_path='reward_module.py',
-        )
-        assert 'adv_estimator: dapo' in config
-        assert 'custom_reward_function:' in config
-        assert 'reward_module.py' in config
+        config = generate_dapo_verl_config(train_files='data/train.parquet')
+        assert 'adv_estimator: grpo' in config
+        assert 'reward:\n  reward_manager:\n    name: dapo\n' in config
+        assert '    path: pkg://deepgym.integrations.verl\n    name: compute_score\n' in config
+        assert 'actor_rollout_ref:\n  rollout:\n    n: 8\n' in config
 
-    def test_generate_dapo_reward_module_uses_dapo_reward_fn(self) -> None:
+    def test_generate_dapo_reward_module_defines_per_sample_compute_score(self) -> None:
         module_text = generate_dapo_reward_module('coin_change')
         assert "load_environment('coin_change')" in module_text
-        assert 'make_dapo_reward_fn' in module_text
+        assert 'compute_score = make_verl_compute_score(' in module_text
 
 
 class TestRewardFunction:

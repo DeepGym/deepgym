@@ -281,7 +281,7 @@ class TestSupportFiles:
     def test_helper_module_is_importable(self, dg: DeepGym) -> None:
         env = Environment(
             task='t',
-            verifier_code='from scoring import half\n\ndef verify(solution_path):\n    return half()\n',
+            verifier_code='from scoring import half\n\ndef verify(solution_path):\n    return half()\n',  # noqa: E501
             support_files={'scoring.py': 'def half():\n    return 0.5\n'},
         )
         assert dg.run(env, '').score == 0.5
@@ -289,7 +289,7 @@ class TestSupportFiles:
     def test_nested_helper_package(self, dg: DeepGym) -> None:
         env = Environment(
             task='t',
-            verifier_code='from lib.scoring import full\n\ndef verify(solution_path):\n    return full()\n',
+            verifier_code='from lib.scoring import full\n\ndef verify(solution_path):\n    return full()\n',  # noqa: E501
             support_files={
                 'lib/__init__.py': '',
                 'lib/scoring.py': 'def full():\n    return 1.0\n',

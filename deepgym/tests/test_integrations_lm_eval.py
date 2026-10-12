@@ -54,40 +54,49 @@ class TestMakeLmEvalTask:
 
     def test_returns_class(self, env: Environment) -> None:
         mock_lm_eval = _make_mock_lm_eval()
-        with patch.dict('sys.modules', {
-            'lm_eval': mock_lm_eval,
-            'lm_eval.api': mock_lm_eval.api,
-            'lm_eval.api.task': mock_lm_eval.api.task,
-            'lm_eval.api.metrics': mock_lm_eval.api.metrics,
-            'lm_eval.api.instance': MagicMock(),
-        }):
-            TaskClass = make_lm_eval_task(env, task_name='reverse_string')
-        assert isinstance(TaskClass, type)
+        with patch.dict(
+            'sys.modules',
+            {
+                'lm_eval': mock_lm_eval,
+                'lm_eval.api': mock_lm_eval.api,
+                'lm_eval.api.task': mock_lm_eval.api.task,
+                'lm_eval.api.metrics': mock_lm_eval.api.metrics,
+                'lm_eval.api.instance': MagicMock(),
+            },
+        ):
+            task_class = make_lm_eval_task(env, task_name='reverse_string')
+        assert isinstance(task_class, type)
 
     def test_task_name_embedded_in_class_name(self, env: Environment) -> None:
         mock_lm_eval = _make_mock_lm_eval()
-        with patch.dict('sys.modules', {
-            'lm_eval': mock_lm_eval,
-            'lm_eval.api': mock_lm_eval.api,
-            'lm_eval.api.task': mock_lm_eval.api.task,
-            'lm_eval.api.metrics': mock_lm_eval.api.metrics,
-            'lm_eval.api.instance': MagicMock(),
-        }):
-            TaskClass = make_lm_eval_task(env, task_name='reverse_string')
-        assert 'reverse_string' in TaskClass.__name__
+        with patch.dict(
+            'sys.modules',
+            {
+                'lm_eval': mock_lm_eval,
+                'lm_eval.api': mock_lm_eval.api,
+                'lm_eval.api.task': mock_lm_eval.api.task,
+                'lm_eval.api.metrics': mock_lm_eval.api.metrics,
+                'lm_eval.api.instance': MagicMock(),
+            },
+        ):
+            task_class = make_lm_eval_task(env, task_name='reverse_string')
+        assert 'reverse_string' in task_class.__name__
 
     def test_task_methods_present(self, env: Environment) -> None:
         mock_lm_eval = _make_mock_lm_eval()
-        with patch.dict('sys.modules', {
-            'lm_eval': mock_lm_eval,
-            'lm_eval.api': mock_lm_eval.api,
-            'lm_eval.api.task': mock_lm_eval.api.task,
-            'lm_eval.api.metrics': mock_lm_eval.api.metrics,
-            'lm_eval.api.instance': MagicMock(),
-        }):
-            TaskClass = make_lm_eval_task(env, task_name='reverse_string')
+        with patch.dict(
+            'sys.modules',
+            {
+                'lm_eval': mock_lm_eval,
+                'lm_eval.api': mock_lm_eval.api,
+                'lm_eval.api.task': mock_lm_eval.api.task,
+                'lm_eval.api.metrics': mock_lm_eval.api.metrics,
+                'lm_eval.api.instance': MagicMock(),
+            },
+        ):
+            task_class = make_lm_eval_task(env, task_name='reverse_string')
 
-        instance = TaskClass.__new__(TaskClass)
+        instance = task_class.__new__(task_class)
         assert hasattr(instance, 'has_test_docs')
         assert hasattr(instance, 'doc_to_text')
         assert hasattr(instance, 'process_results')
@@ -96,32 +105,38 @@ class TestMakeLmEvalTask:
 
     def test_has_test_docs_returns_true(self, env: Environment) -> None:
         mock_lm_eval = _make_mock_lm_eval()
-        with patch.dict('sys.modules', {
-            'lm_eval': mock_lm_eval,
-            'lm_eval.api': mock_lm_eval.api,
-            'lm_eval.api.task': mock_lm_eval.api.task,
-            'lm_eval.api.metrics': mock_lm_eval.api.metrics,
-            'lm_eval.api.instance': MagicMock(),
-        }):
-            TaskClass = make_lm_eval_task(env, task_name='reverse_string')
+        with patch.dict(
+            'sys.modules',
+            {
+                'lm_eval': mock_lm_eval,
+                'lm_eval.api': mock_lm_eval.api,
+                'lm_eval.api.task': mock_lm_eval.api.task,
+                'lm_eval.api.metrics': mock_lm_eval.api.metrics,
+                'lm_eval.api.instance': MagicMock(),
+            },
+        ):
+            task_class = make_lm_eval_task(env, task_name='reverse_string')
 
-        instance = TaskClass.__new__(TaskClass)
+        instance = task_class.__new__(task_class)
         assert instance.has_test_docs() is True
         assert instance.has_training_docs() is False
         assert instance.has_validation_docs() is False
 
     def test_test_docs_returns_single_doc(self, env: Environment) -> None:
         mock_lm_eval = _make_mock_lm_eval()
-        with patch.dict('sys.modules', {
-            'lm_eval': mock_lm_eval,
-            'lm_eval.api': mock_lm_eval.api,
-            'lm_eval.api.task': mock_lm_eval.api.task,
-            'lm_eval.api.metrics': mock_lm_eval.api.metrics,
-            'lm_eval.api.instance': MagicMock(),
-        }):
-            TaskClass = make_lm_eval_task(env, task_name='reverse_string')
+        with patch.dict(
+            'sys.modules',
+            {
+                'lm_eval': mock_lm_eval,
+                'lm_eval.api': mock_lm_eval.api,
+                'lm_eval.api.task': mock_lm_eval.api.task,
+                'lm_eval.api.metrics': mock_lm_eval.api.metrics,
+                'lm_eval.api.instance': MagicMock(),
+            },
+        ):
+            task_class = make_lm_eval_task(env, task_name='reverse_string')
 
-        instance = TaskClass.__new__(TaskClass)
+        instance = task_class.__new__(task_class)
         docs = instance.test_docs()
         assert len(docs) == 1
         assert docs[0]['env_name'] == 'reverse_string'
@@ -129,31 +144,37 @@ class TestMakeLmEvalTask:
 
     def test_doc_to_text_returns_task_prompt(self, env: Environment) -> None:
         mock_lm_eval = _make_mock_lm_eval()
-        with patch.dict('sys.modules', {
-            'lm_eval': mock_lm_eval,
-            'lm_eval.api': mock_lm_eval.api,
-            'lm_eval.api.task': mock_lm_eval.api.task,
-            'lm_eval.api.metrics': mock_lm_eval.api.metrics,
-            'lm_eval.api.instance': MagicMock(),
-        }):
-            TaskClass = make_lm_eval_task(env, task_name='reverse_string')
+        with patch.dict(
+            'sys.modules',
+            {
+                'lm_eval': mock_lm_eval,
+                'lm_eval.api': mock_lm_eval.api,
+                'lm_eval.api.task': mock_lm_eval.api.task,
+                'lm_eval.api.metrics': mock_lm_eval.api.metrics,
+                'lm_eval.api.instance': MagicMock(),
+            },
+        ):
+            task_class = make_lm_eval_task(env, task_name='reverse_string')
 
-        instance = TaskClass.__new__(TaskClass)
+        instance = task_class.__new__(task_class)
         doc = {'task': env.task, 'env_name': 'reverse_string'}
         assert instance.doc_to_text(doc) == env.task
 
     def test_process_results_good_solution_scores_high(self, env: Environment) -> None:
         mock_lm_eval = _make_mock_lm_eval()
-        with patch.dict('sys.modules', {
-            'lm_eval': mock_lm_eval,
-            'lm_eval.api': mock_lm_eval.api,
-            'lm_eval.api.task': mock_lm_eval.api.task,
-            'lm_eval.api.metrics': mock_lm_eval.api.metrics,
-            'lm_eval.api.instance': MagicMock(),
-        }):
-            TaskClass = make_lm_eval_task(env, task_name='reverse_string')
+        with patch.dict(
+            'sys.modules',
+            {
+                'lm_eval': mock_lm_eval,
+                'lm_eval.api': mock_lm_eval.api,
+                'lm_eval.api.task': mock_lm_eval.api.task,
+                'lm_eval.api.metrics': mock_lm_eval.api.metrics,
+                'lm_eval.api.instance': MagicMock(),
+            },
+        ):
+            task_class = make_lm_eval_task(env, task_name='reverse_string')
 
-        instance = TaskClass.__new__(TaskClass)
+        instance = task_class.__new__(task_class)
         doc = {'task': env.task, 'env_name': 'reverse_string'}
         metrics = instance.process_results(doc, [GOOD_SOLUTION])
         assert metrics['deepgym_score'] >= 0.9
@@ -161,16 +182,19 @@ class TestMakeLmEvalTask:
 
     def test_process_results_bad_solution_scores_zero(self, env: Environment) -> None:
         mock_lm_eval = _make_mock_lm_eval()
-        with patch.dict('sys.modules', {
-            'lm_eval': mock_lm_eval,
-            'lm_eval.api': mock_lm_eval.api,
-            'lm_eval.api.task': mock_lm_eval.api.task,
-            'lm_eval.api.metrics': mock_lm_eval.api.metrics,
-            'lm_eval.api.instance': MagicMock(),
-        }):
-            TaskClass = make_lm_eval_task(env, task_name='reverse_string')
+        with patch.dict(
+            'sys.modules',
+            {
+                'lm_eval': mock_lm_eval,
+                'lm_eval.api': mock_lm_eval.api,
+                'lm_eval.api.task': mock_lm_eval.api.task,
+                'lm_eval.api.metrics': mock_lm_eval.api.metrics,
+                'lm_eval.api.instance': MagicMock(),
+            },
+        ):
+            task_class = make_lm_eval_task(env, task_name='reverse_string')
 
-        instance = TaskClass.__new__(TaskClass)
+        instance = task_class.__new__(task_class)
         doc = {'task': env.task, 'env_name': 'reverse_string'}
         metrics = instance.process_results(doc, [BAD_SOLUTION])
         assert metrics['deepgym_score'] == 0.0
@@ -178,32 +202,38 @@ class TestMakeLmEvalTask:
 
     def test_process_results_empty_results_returns_zero(self, env: Environment) -> None:
         mock_lm_eval = _make_mock_lm_eval()
-        with patch.dict('sys.modules', {
-            'lm_eval': mock_lm_eval,
-            'lm_eval.api': mock_lm_eval.api,
-            'lm_eval.api.task': mock_lm_eval.api.task,
-            'lm_eval.api.metrics': mock_lm_eval.api.metrics,
-            'lm_eval.api.instance': MagicMock(),
-        }):
-            TaskClass = make_lm_eval_task(env, task_name='reverse_string')
+        with patch.dict(
+            'sys.modules',
+            {
+                'lm_eval': mock_lm_eval,
+                'lm_eval.api': mock_lm_eval.api,
+                'lm_eval.api.task': mock_lm_eval.api.task,
+                'lm_eval.api.metrics': mock_lm_eval.api.metrics,
+                'lm_eval.api.instance': MagicMock(),
+            },
+        ):
+            task_class = make_lm_eval_task(env, task_name='reverse_string')
 
-        instance = TaskClass.__new__(TaskClass)
+        instance = task_class.__new__(task_class)
         doc = {'task': env.task, 'env_name': 'reverse_string'}
         metrics = instance.process_results(doc, [])
         assert metrics['deepgym_score'] == 0.0
 
     def test_aggregation_keys_match_higher_is_better(self, env: Environment) -> None:
         mock_lm_eval = _make_mock_lm_eval()
-        with patch.dict('sys.modules', {
-            'lm_eval': mock_lm_eval,
-            'lm_eval.api': mock_lm_eval.api,
-            'lm_eval.api.task': mock_lm_eval.api.task,
-            'lm_eval.api.metrics': mock_lm_eval.api.metrics,
-            'lm_eval.api.instance': MagicMock(),
-        }):
-            TaskClass = make_lm_eval_task(env, task_name='reverse_string')
+        with patch.dict(
+            'sys.modules',
+            {
+                'lm_eval': mock_lm_eval,
+                'lm_eval.api': mock_lm_eval.api,
+                'lm_eval.api.task': mock_lm_eval.api.task,
+                'lm_eval.api.metrics': mock_lm_eval.api.metrics,
+                'lm_eval.api.instance': MagicMock(),
+            },
+        ):
+            task_class = make_lm_eval_task(env, task_name='reverse_string')
 
-        instance = TaskClass.__new__(TaskClass)
+        instance = task_class.__new__(task_class)
         assert set(instance.aggregation().keys()) == set(instance.higher_is_better().keys())
         assert all(instance.higher_is_better().values())
 
@@ -227,14 +257,17 @@ class TestRegisterDeepGymTasks:
         mock_lm_eval.api.registry = MagicMock()
         mock_lm_eval.api.registry.register_task = fake_register_task
 
-        with patch.dict('sys.modules', {
-            'lm_eval': mock_lm_eval,
-            'lm_eval.api': mock_lm_eval.api,
-            'lm_eval.api.task': mock_lm_eval.api.task,
-            'lm_eval.api.metrics': mock_lm_eval.api.metrics,
-            'lm_eval.api.registry': mock_lm_eval.api.registry,
-            'lm_eval.api.instance': MagicMock(),
-        }):
+        with patch.dict(
+            'sys.modules',
+            {
+                'lm_eval': mock_lm_eval,
+                'lm_eval.api': mock_lm_eval.api,
+                'lm_eval.api.task': mock_lm_eval.api.task,
+                'lm_eval.api.metrics': mock_lm_eval.api.metrics,
+                'lm_eval.api.registry': mock_lm_eval.api.registry,
+                'lm_eval.api.instance': MagicMock(),
+            },
+        ):
             result = register_deepgym_tasks(env_names=['reverse_string', 'two_sum'])
 
         assert 'deepgym_reverse_string' in result

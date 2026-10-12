@@ -33,11 +33,11 @@ def _standalone_verifier(return_expr: str) -> str:
         '    sp = sys.argv[1] if len(sys.argv) > 1 else "solution.py"\n'
         '    result = _run(sp)\n'
         '    if isinstance(result, (int, float)):\n'
-        '        out = {"schema_version":"1.0","score":float(result),"passed":float(result)>=0.5,"details":None,"truncated":False}\n'
+        '        out = {"schema_version":"1.0","score":float(result),"passed":float(result)>=0.5,"details":None,"truncated":False}\n'  # noqa: E501
         '    elif isinstance(result, dict):\n'
-        '        out = {"schema_version":"1.0","score":float(result.get("score",0)),"passed":bool(result.get("passed",False)),"details":result.get("details"),"truncated":False}\n'
+        '        out = {"schema_version":"1.0","score":float(result.get("score",0)),"passed":bool(result.get("passed",False)),"details":result.get("details"),"truncated":False}\n'  # noqa: E501
         '    else:\n'
-        '        out = {"schema_version":"1.0","score":0.0,"passed":False,"details":"bad type","truncated":False}\n'
+        '        out = {"schema_version":"1.0","score":0.0,"passed":False,"details":"bad type","truncated":False}\n'  # noqa: E501
         '    out["score"] = max(0.0, min(1.0, out["score"]))\n'
         '    print(json.dumps(out))\n'
         '    sys.exit(0 if out["passed"] else 1)\n'

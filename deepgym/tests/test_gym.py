@@ -1,10 +1,9 @@
 """Tests for the Gymnasium-compatible DeepGymEnv and AsyncDeepGymEnv."""
 
 import pytest
-import pytest_asyncio
 
-from deepgym.core import DeepGym
 from deepgym.async_core import AsyncDeepGym
+from deepgym.core import DeepGym
 from deepgym.gym import (
     AsyncDeepGymEnv,
     DeepGymEnv,
@@ -12,7 +11,6 @@ from deepgym.gym import (
     GymObservation,
 )
 from deepgym.models import Environment
-
 
 # ---------------------------------------------------------------------------
 # Fixtures

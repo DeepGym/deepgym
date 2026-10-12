@@ -18,7 +18,9 @@ def built_ui(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     """A stand-in static export with an index and a sub-page."""
     static = tmp_path / 'static'
     (static / 'runs').mkdir(parents=True)
-    (static / 'index.html').write_text('<html><head><title>c</title></head><body>console</body></html>')
+    (static / 'index.html').write_text(
+        '<html><head><title>c</title></head><body>console</body></html>'
+    )
     (static / 'runs' / 'index.html').write_text('<html><head></head><body>runs</body></html>')
     (static / 'app.js').write_text('console.log(1)')
     monkeypatch.setattr(console_app, 'STATIC_DIR', static)
@@ -36,9 +38,12 @@ def test_cross_origin_writes_are_refused(tmp_path: Path) -> None:
     client = make_client(tmp_path)
     response = client.post('/api/runs', json=RUN, headers={'Origin': 'https://evil.example'})
     assert response.status_code == 403
-    assert client.delete(
-        '/api/sandboxes/docker/deepgym-ab12', headers={'Origin': 'https://evil.example'}
-    ).status_code == 403
+    assert (
+        client.delete(
+            '/api/sandboxes/docker/deepgym-ab12', headers={'Origin': 'https://evil.example'}
+        ).status_code
+        == 403
+    )
     assert client.get('/api/runs').json() == []
 
 
@@ -51,7 +56,9 @@ def test_same_origin_writes_pass(tmp_path: Path) -> None:
 @pytest.mark.parametrize('content_type', ['text/plain', 'application/x-www-form-urlencoded', ''])
 def test_writes_must_be_json(tmp_path: Path, content_type: str) -> None:
     response = make_client(tmp_path).post(
-        '/api/runs', content=b'{"environments": ["fizzbuzz"]}', headers={'Content-Type': content_type}
+        '/api/runs',
+        content=b'{"environments": ["fizzbuzz"]}',
+        headers={'Content-Type': content_type},
     )
     assert response.status_code == 415
 
@@ -84,5 +91,11 @@ def test_missing_ui_explains_how_to_build(tmp_path: Path, monkeypatch: pytest.Mo
 def test_rejects_foreign_host_headers(tmp_path: Path) -> None:
     app = create_app(tmp_path / 'c.db', tmp_path / 'qa', allowed_hosts=['127.0.0.1'], token=TOKEN)
     headers = {TOKEN_HEADER: TOKEN}
-    assert TestClient(app, base_url='http://evil.example').get('/api/qa', headers=headers).status_code == 400
-    assert TestClient(app, base_url='http://127.0.0.1').get('/api/qa', headers=headers).status_code == 200
+    assert (
+        TestClient(app, base_url='http://evil.example').get('/api/qa', headers=headers).status_code
+        == 400
+    )
+    assert (
+        TestClient(app, base_url='http://127.0.0.1').get('/api/qa', headers=headers).status_code
+        == 200
+    )

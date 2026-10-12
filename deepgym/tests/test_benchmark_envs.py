@@ -41,14 +41,11 @@ def swebench_repo(tmp_path: Path) -> dict[str, object]:
         subprocess.run(command, check=True, capture_output=True, text=True)
 
     (repo_dir / 'calculator.py').write_text(
-        'def add(a, b):\n'
-        '    return a - b\n',
+        'def add(a, b):\n    return a - b\n',
         encoding='utf-8',
     )
     (repo_dir / 'tests' / 'test_calc.py').write_text(
-        'from calculator import add\n\n'
-        'def test_add():\n'
-        '    assert add(1, 2) == 3\n',
+        'from calculator import add\n\ndef test_add():\n    assert add(1, 2) == 3\n',
         encoding='utf-8',
     )
     subprocess.run(
@@ -66,8 +63,7 @@ def swebench_repo(tmp_path: Path) -> dict[str, object]:
     base_commit = _git(repo_dir, 'rev-parse', 'HEAD')
 
     (repo_dir / 'calculator.py').write_text(
-        'def add(a, b):\n'
-        '    return a + b\n',
+        'def add(a, b):\n    return a + b\n',
         encoding='utf-8',
     )
     patch_text = _git(repo_dir, 'diff', 'HEAD')
@@ -111,8 +107,7 @@ def terminal_task_root(tmp_path: Path) -> Path:
         encoding='utf-8',
     )
     (task_dir / 'task.toml').write_text(
-        '[verifier]\n'
-        'timeout_sec = 60\n',
+        '[verifier]\ntimeout_sec = 60\n',
         encoding='utf-8',
     )
     (tests_dir / 'test.sh').write_text(

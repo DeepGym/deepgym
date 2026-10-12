@@ -7,9 +7,9 @@ from unittest.mock import patch
 import pytest
 from fastapi.testclient import TestClient
 
+from deepgym.api import routes
 from deepgym.api.app import app
 from deepgym.api.deps import get_deepgym
-from deepgym.api import routes
 from deepgym.api.routes import _environments, _sessions
 from deepgym.core import DeepGym
 

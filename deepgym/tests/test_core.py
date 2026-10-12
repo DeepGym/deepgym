@@ -2,8 +2,6 @@
 
 from pathlib import Path
 
-import pytest
-
 from deepgym.core import DeepGym
 from deepgym.models import BatchResult, Environment, RunResult
 

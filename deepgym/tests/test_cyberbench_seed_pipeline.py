@@ -84,10 +84,12 @@ def test_write_seed_specs_jsonl(tmp_path: Path) -> None:
 
 
 def test_summarize_rows_counts_families() -> None:
-    summary = summarize_rows([
-        _row('heap buffer overflow'),
-        _row('path traversal in file endpoint'),
-    ])
+    summary = summarize_rows(
+        [
+            _row('heap buffer overflow'),
+            _row('path traversal in file endpoint'),
+        ]
+    )
 
     assert summary['total'] == 2
     assert summary['families']['memory-safety'] == 1

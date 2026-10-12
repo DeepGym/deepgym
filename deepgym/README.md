@@ -3,7 +3,6 @@
 [![PyPI](https://img.shields.io/pypi/v/deepgym)](https://pypi.org/project/deepgym/)
 [![CI](https://github.com/DeepGym/deepgym/actions/workflows/deepgym-ci.yml/badge.svg)](https://github.com/DeepGym/deepgym/actions/workflows/deepgym-ci.yml)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue)](https://github.com/DeepGym/deepgym/blob/main/LICENSE)
-[![Hacktoberfest](https://img.shields.io/badge/Hacktoberfest-2026-blueviolet)](https://github.com/DeepGym/deepgym/issues?q=is%3Aissue+is%3Aopen+label%3Ahacktoberfest)
 [![GitHub stars](https://img.shields.io/github/stars/DeepGym/deepgym?style=social)](https://github.com/DeepGym/deepgym)
 
 RL training environments with verifiable rewards for coding and computer-use agents.
@@ -589,13 +588,6 @@ docker compose -f docker/docker-compose.yaml up -d
 ```
 
 Or use Daytona cloud: get a key from [app.daytona.io](https://app.daytona.io).
-
-## Built with Daytona
-
-DeepGym is part of the [Daytona Startup Grid](https://www.daytona.io/startups).
-
-We use Daytona to power fast, isolated execution for modern agent training
-and evaluation workflows.
 
 ## Contributing
 

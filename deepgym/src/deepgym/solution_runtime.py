@@ -171,21 +171,32 @@ def _macos_profile(spec: dict, writable: Sequence[str], allow_fork: bool) -> str
     )
 
 
+def _no_follow_flags() -> tuple[int, int]:
+    """The O_NOFOLLOW and O_DIRECTORY flags, or 0 on platforms that lack them.
+
+    Both are POSIX-only; Windows omits them, and reading them raised
+    AttributeError there (see the do-nothing smoke test).  Without them the walk
+    still works, it just can't refuse a symlinked component on those platforms.
+    """
+    return getattr(os, 'O_NOFOLLOW', 0), getattr(os, 'O_DIRECTORY', 0)
+
+
 def _share_with_solution(workdir: str) -> None:
     """Let the solution user write in *workdir* and read what the judge put there.
 
     Works through file descriptors opened with O_NOFOLLOW, so a symlink swapped
     in mid-walk is refused instead of followed to a judge-owned file.
     """
-    no_follow = os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK
-    top = os.open(workdir, no_follow | os.O_DIRECTORY)
+    no_follow, directory = _no_follow_flags()
+    no_follow |= os.O_RDONLY | getattr(os, 'O_NONBLOCK', 0)
+    top = os.open(workdir, no_follow | directory)
     try:
         os.fchmod(top, 0o777)
     finally:
         os.close(top)
     for _, dirs, files, dir_fd in os.fwalk(workdir, follow_symlinks=False):
         for name, flags, mode in [
-            *((d, no_follow | os.O_DIRECTORY, 0o777) for d in dirs),
+            *((d, no_follow | directory, 0o777) for d in dirs),
             *((f, no_follow, None) for f in files),
         ]:
             try:
@@ -246,8 +257,13 @@ def _kill(proc: subprocess.Popen) -> None:
         # its next call.
         kill_all = [*spec['prefix'], 'bash', '-c', 'kill -9 -1']
         subprocess.run(kill_all, capture_output=True, check=False)
-    with contextlib.suppress(ProcessLookupError, PermissionError):
-        os.killpg(proc.pid, signal.SIGKILL)
+    # killpg lives only on POSIX; Windows has no process groups to signal, and
+    # accessing the attribute there raised AttributeError outside the suppress,
+    # which crashed every run (see the do-nothing smoke test).
+    killpg = getattr(os, 'killpg', None)
+    if killpg is not None:
+        with contextlib.suppress(ProcessLookupError, PermissionError):
+            killpg(proc.pid, signal.SIGKILL)
     with contextlib.suppress(Exception):
         proc.kill()
     with contextlib.suppress(Exception):
@@ -318,20 +334,42 @@ def _open_inside(path: str, root: str) -> int:
 
     No component may be a symlink, so a solution can't redirect the judge to its
     own files, even by swapping a directory between a check and the open.
+
+    The component walk needs ``openat``-style ``dir_fd`` and ``O_NOFOLLOW``, both
+    POSIX-only (``os.supports_dir_fd`` is empty on Windows).  There the walk is
+    impossible, so fall back to resolving the real path and checking it stays
+    under *root*: it still refuses symlinks escaping the run, it just can't catch
+    one swapped in between the check and the open.
     """
     rel = os.path.relpath(os.path.abspath(path), os.path.abspath(root))
     parts = rel.split(os.sep)
     if rel in ('.', '') or parts[0] == '..' or os.path.isabs(rel):
         raise PermissionError(f'{path} is not inside {root}')
-    fd = os.open(os.path.realpath(root), os.O_RDONLY | os.O_DIRECTORY)
+    if os.open not in os.supports_dir_fd:
+        return _open_inside_resolved(path, root)
+    no_follow, directory = _no_follow_flags()
+    fd = os.open(os.path.realpath(root), os.O_RDONLY | directory)
     try:
         for part in parts[:-1]:
-            child = os.open(part, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=fd)
+            child = os.open(part, os.O_RDONLY | directory | no_follow, dir_fd=fd)
             os.close(fd)
             fd = child
-        return os.open(parts[-1], os.O_RDONLY | os.O_NOFOLLOW, dir_fd=fd)
+        return os.open(parts[-1], os.O_RDONLY | no_follow, dir_fd=fd)
     finally:
         os.close(fd)
+
+
+def _open_inside_resolved(path: str, root: str) -> int:
+    """Open *path* on a platform without ``dir_fd``/``O_NOFOLLOW`` (Windows).
+
+    ``os.open`` can't open directories there, so the component walk is replaced
+    by a realpath containment check.
+    """
+    resolved = os.path.realpath(path)
+    base = os.path.realpath(root)
+    if os.path.commonpath([base, resolved]) != base or resolved == base:
+        raise PermissionError(f'{path} is not inside {root}')
+    return os.open(resolved, os.O_RDONLY)
 
 
 def read_output(path: str, root: str) -> str:

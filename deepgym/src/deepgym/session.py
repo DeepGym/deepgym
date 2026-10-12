@@ -703,8 +703,12 @@ def run_episode(
 def _kill_group(group: int) -> None:
     """SIGKILL a process group; it may already be gone."""
     # ponytail: a group id could be reused within one session's lifetime; accepted, low risk.
+    # killpg is POSIX-only; on Windows there is nothing to signal here.
+    killpg = getattr(os, 'killpg', None)
+    if killpg is None:
+        return
     with contextlib.suppress(ProcessLookupError, PermissionError):
-        os.killpg(group, signal.SIGKILL)
+        killpg(group, signal.SIGKILL)
 
 
 def _delete_labelled(daytona: Daytona, label: dict[str, str]) -> None:

@@ -16,7 +16,27 @@ from pathlib import Path
 # Some EvalPlus reference outputs are very large integers (HumanEval/83, /139)
 sys.set_int_max_str_digits(0)
 
-from evalplus.data import get_human_eval_plus, get_mbpp_plus
+
+def _has_large_int(obj, max_digits=4300):
+    """Check recursively if obj contains any integer with more than max_digits digits."""
+    if isinstance(obj, bool):
+        return False
+    if isinstance(obj, int):
+        # 10^4300 has ~14285 bits
+        if obj.bit_length() < 14284:
+            return False
+        try:
+            return len(str(abs(obj))) > max_digits
+        except ValueError:
+            return True
+    if isinstance(obj, (list, tuple, set, frozenset)):
+        return any(_has_large_int(x, max_digits) for x in obj)
+    if isinstance(obj, dict):
+        return any(
+            _has_large_int(k, max_digits) or _has_large_int(v, max_digits)
+            for k, v in obj.items()
+        )
+    return False
 
 
 
@@ -69,12 +89,16 @@ def generate_evalplus_verifier(task_id, entry_point, base_inputs, plus_inputs,
     num_plus = len(plus_inputs)
     total = len(all_inputs)
 
-    # Use repr() for embedding — handles tuples, complex, sets, large ints
-    inputs_repr = repr(all_inputs)
-    outputs_repr = repr(expected_outputs)
+    # Use compressed pickle if any integer exceeds the Python compilation string digit limit
+    # (4300 digits), which fails at compile time regardless of runtime sys.set_int_max_str_digits()
+    use_compressed = _has_large_int(all_inputs) or _has_large_int(expected_outputs)
 
-    # If the repr is too large (>500KB), use pickle+zlib+base64 instead
-    use_compressed = len(inputs_repr) + len(outputs_repr) > 500_000
+    if not use_compressed:
+        # Use repr() for embedding — handles tuples, complex, sets, large ints
+        inputs_repr = repr(all_inputs)
+        outputs_repr = repr(expected_outputs)
+        # If the repr is too large (>500KB), use pickle+zlib+base64 instead
+        use_compressed = len(inputs_repr) + len(outputs_repr) > 500_000
 
     if use_compressed:
         data_blob = _pickle.dumps((all_inputs, expected_outputs))
@@ -302,6 +326,12 @@ def import_benchmark(name, data, output_dir):
 
 
 def main():
+    try:
+        from evalplus.data import get_human_eval_plus, get_mbpp_plus
+    except ImportError:
+        print('evalplus is required to run the importer: pip install evalplus')
+        sys.exit(1)
+
     cache_root = Path.home() / ".deepgym" / "environments"
     stats = {}
 

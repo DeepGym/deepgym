@@ -122,11 +122,12 @@ class DeepGymSessionTool(BaseTool):
                 'so one sandbox spans the whole rollout'
             )
         self._episode_of[instance_id] = episode
+        # Parquet rows carry missing keys as None, so fall back on falsy, not only absent.
         self._specs.setdefault(
             episode,
             (
-                create_kwargs.get('environment', self.config['environment']),
-                create_kwargs.get('variant', 0),
+                create_kwargs.get('environment') or self.config['environment'],
+                int(create_kwargs.get('variant') or 0),
             ),
         )
         return instance_id, ToolResponse()

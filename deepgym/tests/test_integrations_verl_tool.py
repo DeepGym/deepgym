@@ -171,3 +171,10 @@ def test_default_schema_lists_every_action(verl: types.ModuleType) -> None:
         'enum'
     ]
     assert {'click', 'type', 'key', 'bash', 'done'} <= set(enum)
+
+
+def test_parquet_nulls_fall_back_to_the_tool_default(verl: types.ModuleType) -> None:
+    tool = _tool(verl)
+    create_kwargs = {'episode': 'e', 'environment': None, 'variant': None}
+    asyncio.run(tool.create(create_kwargs=create_kwargs))
+    assert tool._specs['e'] == ('x', 0)

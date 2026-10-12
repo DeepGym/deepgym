@@ -1,78 +1,154 @@
-"""verl (ByteDance) integration.
+"""verl integration.
 
-verl supports function-based verifiable rewards via a specific interface:
-    def compute_score(data_source, solution_str, ground_truth, extra_info=None):
-        return score_value
+No-code setup: verl loads DeepGym's reward function straight from the package,
+and each dataset row names its environment::
 
-This module provides reward functions matching that signature.
+    reward:
+      custom_reward_function:
+        path: pkg://deepgym.integrations.verl
+        name: compute_score
+        reward_kwargs: {mode: daytona}   # optional: auto (default), daytona, local, apple
 
-Usage (single function):
-    # In your reward module file:
-    from deepgym.integrations.verl import make_verl_compute_score
+Build the rows with :func:`verl_rows` and save them with
+``pandas.DataFrame(rows).to_parquet(path)``.
 
-    env = Environment(task='...', verifier_code='...')
-    compute_score = make_verl_compute_score(env=env)
-
-    # In verl config:
-    # custom_reward_function.path = "path/to/your/reward_module.py"
-    # custom_reward_function.name = "compute_score"  (optional if named compute_score)
-
-Usage (batch, for custom training loops):
-    from deepgym.integrations.verl import make_verl_reward_fn
-    reward_fn = make_verl_reward_fn(env=env)
-    scores = reward_fn(data_batch)
+For a fixed environment in your own reward module, use
+:func:`make_verl_compute_score`; for custom training loops,
+:func:`make_verl_reward_fn`.
 
 Sources:
     - https://verl.readthedocs.io/en/latest/preparation/reward_function.html
-    - https://github.com/verl-project/verl
+    - https://github.com/volcengine/verl (verl/trainer/ppo/reward.py,
+      verl/experimental/reward_loop/reward_manager/naive.py)
 """
 
 from __future__ import annotations
 
-from collections.abc import Callable
-from typing import Any
+import functools
+import re
+from collections.abc import Callable, Sequence
+from typing import Any, Literal
 
 from deepgym.core import DeepGym
-from deepgym.models import Environment
+from deepgym.models import Environment, RunResult
+from deepgym.registry import load_environment
+
+_FENCED_BLOCK = re.compile(r'```[\w+-]*\n(.*?)```', re.DOTALL)
+
+
+def extract_code(response: str) -> str:
+    """Return the last fenced code block in *response*, or *response* unchanged if none."""
+    blocks = _FENCED_BLOCK.findall(response)
+    return blocks[-1] if blocks else response
+
+
+@functools.cache
+def _client(mode: str) -> DeepGym:
+    return DeepGym(mode=mode)  # type: ignore[arg-type]
+
+
+@functools.cache
+def _environment(name: str, variant: int) -> Environment:
+    return load_environment(name, variant=variant)  # type: ignore[return-value]
+
+
+def _score_one(dg: DeepGym, env: Environment, response: str) -> RunResult:
+    # run_batch turns verifier and sandbox errors into a zero score instead of crashing training.
+    return dg.run_batch(env, [extract_code(response)], max_parallel=1).results[0]
+
+
+def compute_score(
+    data_source: str,
+    solution_str: str,
+    ground_truth: Any = None,
+    extra_info: dict | None = None,
+    mode: Literal['auto', 'daytona', 'local', 'apple'] = 'auto',
+    **kwargs: Any,
+) -> dict[str, float]:
+    """Score one verl response with the DeepGym environment its dataset row names.
+
+    The environment is ``extra_info['environment']`` (with optional
+    ``extra_info['variant']``), else *data_source*. The last fenced code block
+    in the response is what gets run. Extra keyword arguments verl passes (e.g.
+    ``reward_router_address``) are ignored.
+
+    Args:
+        data_source: verl's dataset name; the environment name if extra_info has none.
+        solution_str: The model's decoded response.
+        ground_truth: Unused; the environment's verifier holds the answers.
+        extra_info: The row's extra_info.
+        mode: DeepGym backend, set from verl's ``reward_kwargs``.
+        **kwargs: Anything else verl passes.
+
+    Returns:
+        The same keys for every row, as verl requires to batch them: ``score``,
+        ``passed`` (1.0 or 0.0), and ``error``, which is 1.0 when no verdict was
+        produced (sandbox or verifier failure, timeout, invalid score). The score is
+        then 0.0. A reward function can't mask a sample in verl, so watch this metric.
+
+    Raises:
+        DeepGymError: If the named environment doesn't exist.
+    """
+    info = extra_info or {}
+    env = _environment(info.get('environment') or data_source, int(info.get('variant') or 0))
+    result = _score_one(_client(mode), env, solution_str)
+    return {
+        'score': result.score,
+        'passed': float(result.passed),
+        'error': float(result.error_type is not None),
+    }
+
+
+def verl_rows(names: Sequence[str]) -> list[dict[str, Any]]:
+    """Build verl dataset rows, one per environment name, for :func:`compute_score`.
+
+    Each row has verl's standard fields (``data_source``, ``prompt``, ``ability``,
+    ``reward_model``, ``extra_info``). Repeat rows to train on an environment more often.
+
+    Raises:
+        DeepGymError: If a named environment doesn't exist.
+    """
+    return [
+        {
+            'data_source': name,
+            'prompt': [{'role': 'user', 'content': load_environment(name).task}],
+            'ability': 'coding',
+            'reward_model': {'style': 'rule', 'ground_truth': ''},
+            'extra_info': {'environment': name},
+        }
+        for name in names
+    ]
 
 
 def make_verl_compute_score(
     env: Environment,
     dg: DeepGym | None = None,
-) -> Callable[[str, str, str, Any], float]:
-    """Create a reward function matching verl's compute_score interface.
+) -> Callable[..., float]:
+    """Create a reward function for one fixed environment, matching verl's interface.
 
-    verl calls: compute_score(data_source, solution_str, ground_truth, extra_info)
+    verl calls ``compute_score(data_source=..., solution_str=..., ground_truth=...,
+    extra_info=..., **kwargs)``. Point ``reward.custom_reward_function`` at the
+    module that holds the returned function.
 
     Args:
         env: DeepGym environment with verifier.
         dg: Optional DeepGym client (auto-created if None).
 
     Returns:
-        Callable matching verl's compute_score(data_source, solution_str,
-        ground_truth, extra_info=None) -> float signature.
+        A function returning a score between 0.0 and 1.0; 0.0 if the verifier
+        failed or gave an invalid score.
     """
     _dg = dg or DeepGym(mode='auto')
 
     def compute_score(
         data_source: str,
         solution_str: str,
-        ground_truth: str,
+        ground_truth: Any = None,
         extra_info: Any = None,
+        **kwargs: Any,
     ) -> float:
-        """Score a single solution against the DeepGym environment.
-
-        Args:
-            data_source: Dataset name (unused by DeepGym, passed by verl).
-            solution_str: The model's decoded response string.
-            ground_truth: Expected output (unused — DeepGym verifier handles this).
-            extra_info: Optional context (unused).
-
-        Returns:
-            Score between 0.0 and 1.0; 0.0 if the verifier failed or gave an invalid score.
-        """
-        # run_batch turns verifier errors into a zero score instead of crashing training.
-        return _dg.run_batch(env, [solution_str], max_parallel=1).results[0].score
+        """Score the last fenced code block of *solution_str* (or all of it)."""
+        return _score_one(_dg, env, solution_str).score
 
     return compute_score
 

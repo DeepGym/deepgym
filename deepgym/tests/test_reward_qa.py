@@ -56,6 +56,23 @@ class TestRewardAuditor:
         assert report.exploitable is False
         assert (report.report.is_robust, report.report.inconclusive) == (False, 1)
 
+    def test_inconclusive_audits_are_never_stored_as_tested(
+        self, tmp_path: Path, dg: DeepGym
+    ) -> None:
+        """Otherwise a provider failure marks the verifier tested and later scans skip it."""
+        env = Environment(task='Do anything', verifier_code=CRASHING_VERIFIER)
+        db_path = tmp_path / 'audits.db'
+
+        report = RewardAuditor(dg).audit(
+            env, verifier_id='flaky', strategies=['empty'], persist=True, db_path=db_path
+        )
+
+        db = ExploitDB(db_path=db_path)
+        try:
+            assert (report.stored, db.get('flaky', 'white-box')) == (False, None)
+        finally:
+            db.close()
+
     def test_audit_persists_to_exploit_db(self, tmp_path: Path, dg: DeepGym) -> None:
         env = Environment(task='Do anything', verifier_code=STANDALONE_PASSING_VERIFIER)
         auditor = RewardAuditor(dg)

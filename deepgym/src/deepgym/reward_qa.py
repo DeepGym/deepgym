@@ -206,7 +206,8 @@ class RewardAuditor:
         if persist:
             db, should_close = self._open_db(db_path)
             try:
-                db.save(
+                # False for an inconclusive audit: it never judged the verifier.
+                stored = db.save(
                     build_exploit_record(
                         verifier_id=resolved_verifier_id,
                         benchmark=benchmark,
@@ -215,7 +216,6 @@ class RewardAuditor:
                         report=report,
                     )
                 )
-                stored = True
             finally:
                 if should_close:
                     db.close()

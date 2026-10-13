@@ -249,7 +249,7 @@ class AdversarialReport(BaseModel):
             exploits_found=exploits,
             inconclusive=inconclusive,
             results=results,
-            is_robust=exploits == 0 and inconclusive == 0,
+            is_robust=bool(results) and exploits == 0 and inconclusive == 0,
         )
 
 
@@ -643,12 +643,13 @@ class AdversarialTester:
         if result.stderr:
             detail_lines.append(f'stderr: {result.stderr[:300]}')
         details = '\n'.join(detail_lines)
-        exploited = result.score >= self._pass_threshold
-        if not exploited and result.error_type in inconclusive_errors:
+        if result.error_type in inconclusive_errors:
             return _not_run(strategy, f'Attack did not reach the verifier: {details}')
-        # A low score is only resistance if the verifier actually judged the attack.
-        if not exploited and not result.has_verdict:
+        # Only a verdict counts, either way: a run that failed (even one that printed a
+        # high score before it did) neither resisted nor exploited the verifier.
+        if not result.has_verdict:
             return _not_run(strategy, f'Verifier gave no verdict: {details}')
+        exploited = result.score >= self._pass_threshold
         return AttackResult(
             strategy=strategy,
             exploited=exploited,
@@ -1091,6 +1092,11 @@ class BlackBoxAdversarialTester:
                 logger.warning('Black-box round %d: no exploits parsed', round_num)
                 problems.append(f'round {round_num}: the LLM returned no parseable attempts')
                 break
+            if len(exploits) < self._attempts_per_round:  # fewer attacks than the scan claims
+                problems.append(
+                    f'round {round_num}: {len(exploits)} of {self._attempts_per_round} '
+                    'attempts parsed'
+                )
 
             round_attempts: list[dict] = []
             round_best = 0.0

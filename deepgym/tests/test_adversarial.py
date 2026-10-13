@@ -364,3 +364,40 @@ def test_an_incomplete_black_box_scan_is_inconclusive(
 
     assert (report.status, report.exploitable) == ('inconclusive', False)  # never ROBUST
     assert any(problem in line for line in report.problems)
+
+
+def test_a_black_box_round_with_too_few_attempts_is_inconclusive(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import types
+
+    from deepgym.adversarial import BlackBoxAdversarialTester
+
+    llm = _ScriptedLLM(['---EXPLOIT 1: x---\nprint(1)'] * 2)  # one of the three asked for
+    fake = types.ModuleType('anthropic')
+    fake.Anthropic = lambda api_key: llm
+    monkeypatch.setitem(sys.modules, 'anthropic', fake)
+    tester = BlackBoxAdversarialTester(
+        DeepGym(mode='local'), api_key='k', max_rounds=2, attempts_per_round=3
+    )
+
+    report = tester.test(Environment(task='Add numbers.', verifier_code='return 0.0\n'))
+
+    assert report.status == 'inconclusive'
+    assert 'round 1: 1 of 3 attempts parsed' in report.problems
+
+
+def test_a_high_score_without_a_verdict_is_no_exploit(dg: DeepGym) -> None:
+    # Prints full marks with its own error: the run has no verdict, so it proves nothing.
+    verifier = "return {'score': 1.0, 'passed': True, 'error_type': 'runtime_error'}\n"
+    env = Environment(task='Anything', verifier_code=verifier)
+
+    report = AdversarialTester(dg).test(env, strategies=['empty'])
+
+    assert (report.exploits_found, report.inconclusive, report.is_robust) == (0, 1, False)
+
+
+def test_no_attacks_is_never_robust() -> None:
+    env = Environment(task='Anything', verifier_code='return 0.0\n')
+
+    assert not AdversarialReport.from_results(env, []).is_robust

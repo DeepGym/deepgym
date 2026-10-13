@@ -9,7 +9,7 @@ if str(scripts_dir) not in sys.path:
 
 import run_blackbox_scan  # noqa: E402
 
-from deepgym.adversarial import BlackBoxReport  # noqa: E402
+from deepgym.adversarial import BlackBoxReport, BlackBoxRound  # noqa: E402
 from deepgym.exploit_db import ExploitDB  # noqa: E402
 from deepgym.models import Environment  # noqa: E402
 
@@ -29,11 +29,14 @@ class _Tester:
 
 
 def _report(status: str) -> BlackBoxReport:
+    attempt = {'code': 'x = 1', 'score': 0.0, 'strategy': 's', 'inconclusive': False}
     return BlackBoxReport(
         verifier_id='v',
         status=status,
         exploitable=status == 'exploitable',
         problems=['round 1: overloaded'] if status == 'inconclusive' else [],
+        rounds=[BlackBoxRound(round_num=1, attempts=[attempt])],
+        total_attempts=1,
     )
 
 

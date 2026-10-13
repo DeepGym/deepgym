@@ -524,12 +524,13 @@ class PatchVerifier:
                     before.optionxform = after.optionxform = str
                     before.read_string(old_text)
                     after.read_string(new_text)
-                    # [options] holds metadata and dependencies a real fix may change; only its
-                    # entry-points subsection registers pytest plugins, so that is what counts.
-                    keys = ('tool:pytest', 'options.entry_points', 'nosetests', 'tox:tox')
+                    # [options] holds metadata, dependencies and entry points (console_scripts) a real
+                    # fix may change; only the pytest11 entry-point group registers pytest plugins.
+                    keys = ('tool:pytest', 'nosetests', 'tox:tox')
 
                     def view(cfg):
-                        return {key: dict(cfg[key]) for key in cfg.sections() if key in keys}
+                        plugins = cfg.get('options.entry_points', 'pytest11', fallback=None)
+                        return {key: dict(cfg[key]) for key in cfg.sections() if key in keys}, plugins
 
                     return view(before) != view(after)
                 # cargo.toml / pyproject.toml: _toml_loads parses exactly like the tools (dotted
@@ -559,11 +560,15 @@ class PatchVerifier:
                     changed = {key for key in meta_before.keys() | meta_after.keys() if meta_before.get(key) != meta_after.get(key)}
                     return None if changed - _WORKSPACE_METADATA else False
                 # [tool.tox] is compared whole, so its [testenv] commands count whether they sit
-                # in a legacy_tox_ini string or in env_run_base/env tables.
+                # in a legacy_tox_ini string or in env_run_base/env tables. Of the entry points, only
+                # the pytest11 group registers pytest plugins; console scripts are a fix's business.
                 tool_keys = ('pytest', 'coverage', 'tox', 'nose')
                 before_tool, after_tool = _toml_table(before.get('tool')), _toml_table(after.get('tool'))
-                return any(before_tool.get(key) != after_tool.get(key) for key in tool_keys) or (
-                    before.get('build-system') != after.get('build-system')
+                plugins = [_toml_table(_toml_table(doc.get('project')).get('entry-points')).get('pytest11') for doc in (before, after)]
+                return (
+                    any(before_tool.get(key) != after_tool.get(key) for key in tool_keys)
+                    or before.get('build-system') != after.get('build-system')
+                    or plugins[0] != plugins[1]
                 )
 
 
@@ -631,9 +636,11 @@ class PatchVerifier:
 
 
             def _mode_change_paths(patch_text: str) -> list[str]:
-                # The files whose mode changes or that become symlinks. A real code fix edits
-                # content; a mode flip or a symlink (which can aim a protected path at attacker
-                # content) is refused outright. The numeric mode is parsed so non-canonical git
+                # The files that become or stop being symlinks, or change to a mode other than a
+                # plain file's 100644/100755. A symlink can aim a protected path at attacker content,
+                # so it is refused outright; an exec-bit flip (restoring bin/calc to 100755) is an
+                # ordinary fix unless the path itself is refused, which _infra_reason decides (git
+                # lists a mode-only change). The numeric mode is parsed so non-canonical git
                 # spellings (0120000, trailing space) cannot slip a symlink past an exact match.
                 flagged, current = [], '(file)'
                 for line in patch_text.splitlines():
@@ -644,7 +651,8 @@ class PatchVerifier:
                     if match is None:
                         continue
                     kind, mode = match.group(1), int(match.group(2), 8)
-                    if kind in ('old mode', 'new mode') or (mode & 0o170000) == 0o120000:
+                    plain = mode in (0o100644, 0o100755)
+                    if (mode & 0o170000) == 0o120000 or (kind in ('old mode', 'new mode') and not plain):
                         flagged.append(current)
                 return list(dict.fromkeys(flagged))
 
@@ -968,7 +976,7 @@ class PatchVerifier:
                     exposed = [rel for rel in model_paths if rel not in hidden_set]
                     tampered = {rel: _infra_reason(repo_root, rel) for rel in exposed}
                     for flagged in _mode_change_paths(patch_text):
-                        tampered[flagged] = 'changes a file mode or creates a symlink'
+                        tampered[flagged] = 'creates a symlink or a mode other than 100644/100755'
                     configs = {
                         rel: _read_config(repo_root / rel)
                         for rel in exposed
@@ -1285,8 +1293,9 @@ class RepoPatchEnvironment(Environment):
     diff; the SWE-bench Pro patch runner applies it, puts every file the hidden
     ``test_patch`` touches back to its prior state, applies the test patch, runs
     ``test_command`` and scores 1.0 if it exits 0, else 0.0. A diff that touches any
-    other test infrastructure (tests and their helpers or data, conftest.py, runner
-    config, installed dependencies) scores 0.0 with ``error_type='test_infra_tampering'``.
+    other test infrastructure (tests and their helper code, conftest.py, runner config,
+    installed dependencies) scores 0.0 with ``error_type='test_infra_tampering'``; data
+    fixtures the tests read may change.
 
     The runner and the tests run as root in the sandbox booted from ``image``:
     these test scripts expect root's toolchains and caches (``/root/go``,

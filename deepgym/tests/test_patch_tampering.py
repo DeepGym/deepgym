@@ -136,6 +136,11 @@ _SETUP_CFG = '[metadata]\nname = calc\n\n[tool:pytest]\npython_files = test_*.py
 _SETUP_CFG_CASE = _SETUP_CFG.replace('python_files', 'PYTHON_FILES')
 # A %(...)s value raises during interpolation; the comparison must fail closed, not crash.
 _SETUP_CFG_INTERP = _SETUP_CFG + 'addopts = -p %(missing)s\n'
+# A fix may correct a console script; only the pytest11 entry-point group loads pytest plugins.
+_SETUP_CFG_ENTRY = (
+    '[metadata]\nname = calc\n\n[options.entry_points]\n'
+    'console_scripts =\n    calc = calc.cli:old_main\n'
+)
 # Repointing workspace selection skips the failing package without touching a target table.
 _CARGO_WS = '[workspace]\nmembers = ["core", "decoy"]\ndefault-members = ["core"]\n'
 _CARGO_WS_EDIT = _CARGO_WS.replace('["core"]', '["decoy"]')
@@ -191,6 +196,7 @@ _PY_TOX_LEGACY = _PYPROJECT_PLAIN + (
     '\n[tool.tox]\nlegacy_tox_ini = """\n[testenv]\ncommands = pytest\n"""\n'
 )
 _PY_TOX_NATIVE = _PYPROJECT_PLAIN + '\n[tool.tox.env_run_base]\ncommands = [["pytest"]]\n'
+_PY_ENTRY = _PYPROJECT_PLAIN + '\n[project.scripts]\ncalc = "calc.cli:old_main"\n'
 _PACKAGE_WORKSPACES = _PACKAGE.replace('"version"', '"workspaces": ["packages/*"],\n  "version"')
 
 
@@ -278,6 +284,30 @@ _PACKAGE_WORKSPACES = _PACKAGE.replace('"version"', '"workspaces": ["packages/*"
             {'setup.cfg': _SETUP_CFG_INTERP},
             True,
             id='setup-cfg-interpolation-fails-closed',
+        ),
+        pytest.param(
+            {'setup.cfg': _SETUP_CFG_ENTRY},
+            {'setup.cfg': _SETUP_CFG_ENTRY.replace('old_main', 'main')},
+            False,
+            id='setup-cfg-console-scripts-allowed',
+        ),
+        pytest.param(
+            {'setup.cfg': _SETUP_CFG_ENTRY},
+            {'setup.cfg': _SETUP_CFG_ENTRY + 'pytest11 =\n    dg = dg_plugin\n'},
+            True,
+            id='setup-cfg-pytest11',
+        ),
+        pytest.param(
+            {'pyproject.toml': _PY_ENTRY},
+            {'pyproject.toml': _PY_ENTRY.replace('old_main', 'main')},
+            False,
+            id='pyproject-scripts-allowed',
+        ),
+        pytest.param(
+            {'pyproject.toml': _PY_ENTRY},
+            {'pyproject.toml': _PY_ENTRY + '\n[project.entry-points.pytest11]\ndg = "dg_plugin"\n'},
+            True,
+            id='pyproject-pytest11',
         ),
         pytest.param(
             {'Cargo.toml': _CARGO_WS},
@@ -795,6 +825,21 @@ def test_crafted_and_symlinked_paths_never_forge(tmp_path: Path, sandbox_dg: Dee
         result = sandbox_dg.run(env, diff)
         assert result.score == 0.0, label
         assert not result.passed, label
+
+
+@pytest.mark.parametrize(('name', 'refused'), [('bin/calc', False), ('conftest.py', True)])
+def test_exec_bit_flip_is_refused_only_on_test_infra(
+    tmp_path: Path, sandbox_dg: DeepGym, name: str, refused: bool
+) -> None:
+    # Restoring an executable's 100755 is an ordinary fix; on a test file or test config the
+    # flip is refused with the file itself (git lists a mode-only change).
+    env = _env(tmp_path, {'bin/calc': '#!/bin/sh\n', 'conftest.py': ''})
+    flip = f'diff --git a/{name} b/{name}\nold mode 100644\nnew mode 100755\n'
+
+    result = sandbox_dg.run(env, _diff(Path(env.repo_dir), _FIX) + flip)
+
+    assert result.error_type == ('test_infra_tampering' if refused else None)
+    assert result.score == (0.0 if refused else 1.0)
 
 
 def test_symlink_refusal_names_the_mode_reason(tmp_path: Path, sandbox_dg: DeepGym) -> None:

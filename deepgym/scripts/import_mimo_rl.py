@@ -37,9 +37,9 @@ The repository is checked out at `{repo_dir}`. Reply with a unified diff against
 (as `git diff` prints it, paths relative to the repository root) that resolves the
 issue above. Hidden tests are applied before your diff and decide the score; your
 edits to the files they touch are dropped. Change only the code: a diff that adds,
-edits or deletes tests, test helpers or data, conftest.py, test runner config
-(pytest, tox, jest, vitest, mocha, package.json scripts) or installed dependencies
-scores 0.
+edits or deletes tests, test helper code, conftest.py, test runner config (pytest,
+tox, jest, vitest, mocha, package.json scripts) or installed dependencies scores 0.
+Data fixtures the tests read may change.
 """
 
 

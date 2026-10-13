@@ -453,8 +453,9 @@ result = dg.run(env, '''```diff\n... unified diff ...\n```''')
   the hidden test patch touches is put back as it was, and then the hidden tests are
   applied. The score is 1.0 if the test command exits 0, else 0.0, as in MiMo's
   training. A diff can't edit the hidden tests, and a diff that touches any other test
-  infrastructure (tests and their helpers or data, conftest.py, test runner config,
-  installed dependencies) scores 0 with `error_type='test_infra_tampering'`. It can
+  infrastructure (tests and their helper code, conftest.py, test runner config,
+  installed dependencies) scores 0 with `error_type='test_infra_tampering'`; data
+  fixtures the tests read may change. It can
   still change the code the tests run, so the reward is only as strong as the tests.
 - The tests run as root in that sandbox because the images expect root's toolchains
   and caches, so the sandbox, not `deepgym_solution`, is what isolates them.

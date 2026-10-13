@@ -909,7 +909,7 @@ def test_browser_pin_is_what_setups_path_finds_and_it_launches(
     """The pin is whatever setup's own PATH finds first (chromium, then chromium-browser, then
     google-chrome), with no binary inspected, and launching through it runs that browser: an
     install only under /opt on the image PATH, a compiled launcher, or Debian's wrapper."""
-    from deepgym.sandboxes.daytona.desktop import _PIN_BROWSER
+    from deepgym.sandboxes.daytona.desktop import _DISCOVER_BROWSER
 
     entry = tmp_path / ('opt/chromium' if layout == 'opt_on_image_path' else 'bin')
     entry.mkdir(parents=True)
@@ -925,13 +925,34 @@ def test_browser_pin_is_what_setups_path_finds_and_it_launches(
     elif launched is not None:
         _fake_tool(entry, pinned.name, f"echo 'launched {launched}'")
     image_path = f'{entry}:{tmp_path}/empty'
+    discover = shlex.quote(_DISCOVER_BROWSER.format(path=shlex.quote(image_path)))
     run_pin = '\nif [ -n "$launch" ]; then "$launch" -c "print(\'launched compiled\')"; fi'
-    script = _PIN_BROWSER.format(path=shlex.quote(image_path)) + '\necho "launch=$launch"' + run_pin
+    script = f'launch=$(/bin/sh -c {discover}) || launch=\necho "launch=$launch"' + run_pin
     run = _run_snippet(script)
     assert run.returncode == 0, run.stdout + run.stderr
     assert f'launch={pinned if launched else ""}\n' in run.stdout, run.stdout
     if launched:
         assert f'launched {launched}' in run.stdout, run.stdout
+
+
+@pytest.mark.skipif(os.geteuid() == 0, reason='root can enter any folder')
+def test_browser_discovery_skips_a_path_entry_the_agent_cannot_enter(tmp_path: Path) -> None:
+    """Discovery runs as the agent, so a Chromium in a folder only root can enter (say
+    /root/.local/bin ahead of /usr/bin on PATH) is skipped, as main's lookup did, and the pin
+    is one the agent can launch. Root resolving the same PATH would pin the private one."""
+    from deepgym.sandboxes.daytona.desktop import _DISCOVER_BROWSER
+
+    private, public = tmp_path / 'private', tmp_path / 'public'
+    for folder, label in ((private, 'private'), (public, 'public')):
+        folder.mkdir()
+        _fake_tool(folder, 'chromium', f"echo 'launched {label}'")
+    discover = _DISCOVER_BROWSER.format(path=shlex.quote(f'{private}:{public}'))
+    private.chmod(0o000)  # the agent can't enter it
+    try:
+        run = subprocess.run(['/bin/sh', '-c', discover], capture_output=True, text=True)
+    finally:
+        private.chmod(0o755)
+    assert run.stdout.strip() == str(public / 'chromium'), run.stdout + run.stderr
 
 
 def test_lockdown_writes_the_chromium_policy_to_every_dir_and_inspects_no_binary(
@@ -956,8 +977,8 @@ def test_lockdown_writes_the_chromium_policy_to_every_dir_and_inspects_no_binary
         # The file and the folder holding it are both on the agent's must-not-write list.
         assert directory in unwritable and f'{directory}/deepgym.json' in unwritable
     assert 'is not owned by root' in prepare and 'the agent can still write' in prepare
-    assert 'command -v chromium || command -v chromium-browser || command -v google-chrome' in (
-        prepare
-    )
+    # Discovery runs as the agent (so it skips what only root can reach); root makes the pin.
+    assert 'for name in chromium chromium-browser google-chrome' in prepare
+    assert 'launch=$(/usr/bin/nsenter --net=/opt/deepgym-netns -- /usr/bin/setpriv' in prepare
     for inspection in ('177ELF', 'head -c', 'grep -qF /etc/chromium/policies', 'LIBDIR'):
         assert inspection not in prepare

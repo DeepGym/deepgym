@@ -82,10 +82,14 @@ _POLICY_PATHS = ' '.join(
 # the launch is that binary, not whatever its own PATH would find later.
 _CHROMIUM_PIN = '/usr/local/bin/deepgym-chromium'
 
-# The browser to pin: the first of these names that setup's own PATH finds, the way main ran
-# `chromium` from launch_app.sh, so any image keeps working. Nothing found: $launch is empty.
-_PIN_BROWSER = """launch=$(PATH={path}
-  command -v chromium || command -v chromium-browser || command -v google-chrome) || launch="""
+# Finds the browser to pin, run as the agent: the first of these names that setup's own PATH
+# finds and the agent can run, the way main ran `chromium` from launch_app.sh as the agent.
+# A folder only root can enter (/root/.local/bin ahead of /usr/bin) is skipped, as main's
+# lookup skipped it, so the pin is always one the agent can launch. Prints it, or nothing.
+_DISCOVER_BROWSER = (
+    'PATH={path}; for name in chromium chromium-browser google-chrome; do '
+    'if p=$(command -v "$name") && [ -x "$p" ]; then echo "$p"; exit 0; fi; done; exit 1'
+)
 
 # Proves remote control is off by asking the running x11vnc, not by reading its argv. The
 # probe ignores any rc file (-norc), so an rc "connect" line can't send the query elsewhere.
@@ -133,7 +137,8 @@ for dir in {policy_dirs}; do
   [ "$(stat -c %u "$dir/deepgym.json")" = 0 ] || {{
     echo "$dir/deepgym.json is not owned by root"; exit 1; }}
 done
-{pin_browser}
+# The agent looks the browser up (it skips what only root can reach); root pins the result.
+launch=$({as_agent} /bin/sh -c {discover_browser}) || launch=
 rm -f {chromium_pin}
 if [ -n "$launch" ]; then ln -s "$launch" {chromium_pin}; fi
 # Thunar's custom actions, "Open Terminal Here" included, all come from its uca plugin, and
@@ -260,7 +265,7 @@ class DaytonaDesktop:
             launchers=_LAUNCHERS,
             as_agent=as_agent,
             agent_check=shlex.quote(agent_check),
-            pin_browser=_PIN_BROWSER.format(path=shlex.quote(path)),
+            discover_browser=shlex.quote(_DISCOVER_BROWSER.format(path=shlex.quote(path))),
             chromium_pin=_CHROMIUM_PIN,
             marker=_LOCKED,
         )

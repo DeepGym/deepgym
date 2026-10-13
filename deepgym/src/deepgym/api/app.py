@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import os
 import secrets
@@ -11,15 +12,54 @@ from contextlib import asynccontextmanager
 
 try:
     from fastapi import Depends, FastAPI, HTTPException, Security
+    from fastapi.responses import JSONResponse
     from fastapi.security import APIKeyHeader
+    from starlette.types import ASGIApp, Message, Receive, Scope, Send
 except ImportError as _exc:
     raise ImportError(
         'FastAPI is required for the server. Install with: pip install "deepgym[server]"'
     ) from _exc
 
-from deepgym.api.routes import health_router, v1_router
+from deepgym import __version__
+from deepgym.api.routes import health_router, sweep_sessions, sweep_sessions_forever, v1_router
 
 logger = logging.getLogger(__name__)
+
+MAX_BODY_BYTES = 32 * 1024 * 1024
+"""Largest request body accepted; a bigger one gets 413 before it is read into memory."""
+
+
+class _LimitBodySize:
+    """ASGI middleware that refuses request bodies over MAX_BODY_BYTES with 413.
+
+    A declared Content-Length over the limit is refused before anything is read; a
+    chunked body is counted as it arrives and refused once it passes the limit.
+    """
+
+    def __init__(self, app: ASGIApp) -> None:
+        self.app = app
+
+    async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
+        if scope['type'] != 'http':
+            await self.app(scope, receive, send)
+            return
+        detail = f'Request body is over {MAX_BODY_BYTES} bytes'
+        declared = dict(scope['headers']).get(b'content-length')
+        if declared is not None and int(declared) > MAX_BODY_BYTES:
+            await JSONResponse({'detail': detail}, status_code=413)(scope, receive, send)
+            return
+        read = 0
+
+        async def receive_capped() -> Message:
+            nonlocal read
+            message = await receive()
+            read += len(message.get('body', b''))
+            if read > MAX_BODY_BYTES:
+                raise HTTPException(status_code=413, detail=detail)
+            return message
+
+        await self.app(scope, receive_capped, send)
+
 
 # ---------------------------------------------------------------------------
 # API key authentication
@@ -129,7 +169,13 @@ async def _lifespan(_app: FastAPI) -> AsyncIterator[None]:
         logger.error('Failed to initialize DeepGym client', exc_info=True)
         sys.exit(1)
 
-    yield
+    sweeper = asyncio.create_task(sweep_sessions_forever())
+    try:
+        yield
+    finally:
+        sweeper.cancel()
+        # Close every session so no sandbox outlives the server.
+        await asyncio.to_thread(sweep_sessions, 0)
 
 
 # ---------------------------------------------------------------------------
@@ -139,9 +185,10 @@ async def _lifespan(_app: FastAPI) -> AsyncIterator[None]:
 app = FastAPI(
     title='DeepGym API',
     description='RL training and evaluation infrastructure',
-    version='0.3.0',
+    version=__version__,
     lifespan=_lifespan,
 )
 
+app.add_middleware(_LimitBodySize)
 app.include_router(health_router)
 app.include_router(v1_router, dependencies=[Depends(verify_api_key)])

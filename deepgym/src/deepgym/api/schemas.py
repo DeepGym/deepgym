@@ -4,8 +4,9 @@ from __future__ import annotations
 
 from typing import Literal
 
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
 
+from deepgym import __version__
 from deepgym.benchmark_ops import BenchmarkAuditReport
 from deepgym.computer_use import ComputerUseEnvironment
 from deepgym.models import Environment, MultiTurnEnvironment, Observation, VerifierMode
@@ -49,6 +50,12 @@ class APIEnvironment(BaseModel):
             if len(value) > 10_000:
                 raise ValueError(f'Env var value for {key!r} too long')
         return v
+
+    @model_validator(mode='after')
+    def check_environment(self) -> APIEnvironment:
+        """Reject what Environment would (bad support file names, ...) as a 422, before any work."""
+        self.to_environment()
+        return self
 
     def to_environment(self) -> Environment:
         """Convert to an internal Environment model.
@@ -145,51 +152,6 @@ class EvalRequest(BaseModel):
         return v
 
 
-class CreateEnvironmentRequest(BaseModel):
-    """Request body for creating/registering a new environment."""
-
-    task: str = Field(..., max_length=100_000, description='Task description / prompt.')
-    verifier_code: str = Field(
-        ..., max_length=500_000, description='Python source code of the verifier script.'
-    )
-    language: str = Field(
-        default='python', max_length=50, description='Programming language for the solution.'
-    )
-    timeout: int = Field(
-        default=30, ge=1, le=3600, description='Maximum execution time in seconds.'
-    )
-    difficulty: Literal['easy', 'medium', 'hard'] = Field(
-        default='medium', description='Task difficulty level.'
-    )
-    domain: str = Field(
-        default='coding', max_length=100, description='Task domain (e.g. coding, math, reasoning).'
-    )
-    tags: list[str] = Field(
-        default_factory=list, max_length=20, description='Freeform tags for filtering.'
-    )
-    test_cases: list[dict] | None = Field(
-        default=None,
-        max_length=100,
-        description='Optional list of test-case dicts passed to the verifier.',
-    )
-    env_vars: dict[str, str] | None = Field(
-        default=None, max_length=50, description='Environment variables to inject into the sandbox.'
-    )
-
-    @field_validator('env_vars')
-    @classmethod
-    def validate_env_var_sizes(cls, v: dict[str, str] | None) -> dict[str, str] | None:
-        """Enforce key and value length limits on env vars."""
-        if v is None:
-            return v
-        for key, value in v.items():
-            if len(key) > 100:
-                raise ValueError(f'Env var key too long: {len(key)} chars')
-            if len(value) > 10_000:
-                raise ValueError(f'Env var value for {key!r} too long')
-        return v
-
-
 class CreateSnapshotRequest(BaseModel):
     """Request body for creating a pre-built sandbox snapshot."""
 
@@ -264,7 +226,9 @@ class HealthResponse(BaseModel):
     """Response for the /health endpoint."""
 
     status: str = 'ok'
-    version: str = '0.3.0'
+    version: str = __version__
+    leaked_sandboxes: int = 0
+    """Sandboxes whose delete kept failing and that cleanup gave up on (the newest 1000)."""
 
 
 class CreateEnvironmentResponse(BaseModel):
@@ -277,7 +241,7 @@ class CreateEnvironmentResponse(BaseModel):
 class CapabilitiesResponse(BaseModel):
     """Response describing server capabilities exposed to remote runtimes."""
 
-    version: str = '0.3.0'
+    version: str = __version__
     sync_run: bool = True
     batch_run: bool = True
     async_jobs: bool = True
@@ -328,7 +292,6 @@ __all__ = [  # noqa: F822
     'RegisteredRunRequest',
     'BatchRunRequest',
     'EvalRequest',
-    'CreateEnvironmentRequest',
     'CreateSessionRequest',
     'CreateSnapshotRequest',
     'VerifierAuditRequest',

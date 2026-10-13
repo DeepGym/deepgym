@@ -169,7 +169,8 @@ def _run_verifier(env: ComputerUseEnvironment, work: Path, home: Path) -> dict:
         capture_output=True,
         text=True,
         cwd=work,
-        env={'HOME': str(home)},
+        # The verifier's HOME is its own; the agent's home comes by name, as in a session.
+        env={'HOME': str(work), 'DEEPGYM_AGENT_HOME': str(home)},
         timeout=30,
     )
     assert proc.returncode == 0, proc.stderr

@@ -5,6 +5,7 @@ Live runs on real providers are in test_sandboxes_live.py.
 
 import contextlib
 import importlib
+import shlex
 import subprocess
 import sys
 import types
@@ -350,6 +351,16 @@ def test_session_verifier_runs_as_its_own_user_from_a_private_file() -> None:
     assert '/usr/bin/setpriv --reuid=996 --regid=996' in box.commands[-1]
     assert f'python3 -I {script} 2>/dev/null' in box.commands[-1]
     assert 'print(1)' not in box.commands[-1]
+
+
+def test_session_verifier_has_its_own_home_and_the_agents_by_name() -> None:
+    box = FakeSandbox(network_blocked=True, answers=[_USERS])
+    SandboxBackend(box).verify('print(1)', timeout=5)
+
+    variables = shlex.split(box.commands[-1])[2:]
+    assert 'HOME=/opt/deepgym-verifier' in variables
+    assert 'HOME=/home/dgagent' not in variables
+    assert 'DEEPGYM_AGENT_HOME=/home/dgagent' in variables
 
 
 def test_session_write_file_is_staged_then_written_as_agent() -> None:

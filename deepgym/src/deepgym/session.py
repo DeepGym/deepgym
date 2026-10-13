@@ -423,18 +423,23 @@ class SandboxBackend:
         """Kill every agent process, then return the work directory as a gzipped tar.
 
         Root packs it once nothing of the agent's is left running, so nothing changes
-        mid-archive. Symlinks are stored as links, never followed.
+        mid-archive, and only if the folder still really is the work directory: an agent
+        that can write its parent could have swapped it for a link to somewhere else.
+        Symlinks inside are stored as links, never followed.
 
         Raises:
             SandboxError: If packing fails.
         """
         staged = f'{_STAGING_DIR}/{uuid4().hex}.tgz'
+        quoted = shlex.quote(self._workdir)
         # ponytail: the archive comes back through exec output, so it is held in memory
         # here; a provider download() would stream it if work directories outgrow the cap.
         packed = self._sandbox.exec(
             trusted(
                 f"{self._as_agent} sh -c 'kill -9 -1' >/dev/null 2>&1; "
-                f'tar -C {shlex.quote(self._workdir)} -czf {staged} . && '
+                f'[ "$(realpath {quoted})" = {quoted} ] || '
+                f'{{ echo "the work directory was moved or replaced by a link"; exit 1; }}; '
+                f'tar -C {quoted} -czf {staged} . && '
                 f'size=$(wc -c < {staged}) && if [ "$size" -gt {_MAX_ARCHIVE_BYTES} ]; then '
                 f'echo "the archive is $size bytes, over {_MAX_ARCHIVE_BYTES}"; '
                 f'rm -f {staged}; exit 1; fi'
@@ -459,7 +464,8 @@ class SandboxBackend:
 
         The agent user unpacks it, so a crafted archive can't write where root could.
         Then root takes the files over, as in a freshly built image, so tools that check
-        ownership (git) trust them; links are changed, never followed.
+        ownership (git) trust them, and strips every setuid, setgid and sticky bit; links
+        are changed, never followed.
 
         Raises:
             SandboxError: If unpacking fails.
@@ -471,7 +477,8 @@ class SandboxBackend:
             trusted(
                 f'rm -rf {quoted} && mkdir -p {quoted} && chown {_AGENT_USER}: {quoted} && '
                 f'{self._as_agent} tar -xzpf - -C {quoted} < {staged} && '
-                f'chown -hR 0:0 {quoted}; status=$?; rm -f {staged}; exit $status'
+                f'chown -hR 0:0 {quoted} && chmod -R a-st {quoted}; '
+                f'status=$?; rm -f {staged}; exit $status'
             ),
             timeout=_TRANSFER_TIMEOUT_S,
         )
@@ -506,6 +513,10 @@ class SandboxBackend:
     ) -> ExecResult:
         """Run verifier *code* as the verifier user, from a file only that user can read.
 
+        Its HOME is its own folder, which nobody but root can write: the agent's home holds
+        dotfiles the agent wrote, which tools a verifier runs (git, pip, ...) would obey.
+        ``DEEPGYM_AGENT_HOME`` says where the agent's home is, for verifiers that inspect it.
+
         Raises:
             TimeoutError: If the verifier exceeds *timeout* seconds.
         """
@@ -516,7 +527,13 @@ class SandboxBackend:
             trusted(
                 f'{self._offline}{self._as_verifier} {self.python} -I {script}{stderr}; '
                 f'status=$?; rm -f {script}; exit $status',
-                {**self._env, **self._runtime_env, **(env or {})},
+                {
+                    **self._env,
+                    'HOME': _VERIFIER_DIR,
+                    'DEEPGYM_AGENT_HOME': _AGENT_HOME,
+                    **self._runtime_env,
+                    **(env or {}),
+                },
             ),
             cwd=self._workdir,
             timeout=timeout,

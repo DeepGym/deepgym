@@ -1,5 +1,6 @@
 """Runs with _checks.py (load_state, report) and PARAMS prepended."""
 
+import os
 from pathlib import Path
 
 CONTENTS = {
@@ -8,7 +9,7 @@ CONTENTS = {
     'photo.jpg': 'not really a photo\n',
 }
 
-docs = Path.home() / 'Documents'
+docs = Path(os.environ['DEEPGYM_AGENT_HOME']) / 'Documents'
 folder = docs / PARAMS['folder']
 move, old, new, keep = PARAMS['move'], PARAMS['rename_from'], PARAMS['rename_to'], PARAMS['keep']
 

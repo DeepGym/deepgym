@@ -67,6 +67,10 @@ def test_agent_runs_unprivileged_and_hands_over_only_its_work_directory() -> Non
     assert packed > script
     assert box.commands[packed].startswith('/usr/bin/env -i ')
     assert _inner(box.commands[packed]).startswith(_AS_AGENT)
+    inner = _inner(box.commands[packed])
+    assert (
+        inner.index('kill -9 -1') < inner.index('"$(realpath /app)" = /app') < inner.index('tar -C')
+    )
     assert "--no-new-privs -- sh -c 'kill -9 -1'" in _inner(box.commands[packed])
     assert box.uploads == ['/opt/deepgym-harbor/agent.sh']
     assert not [command for command in box.commands if '/tests' in command or '/logs' in command]
@@ -133,6 +137,9 @@ def test_grader_restores_then_uploads_tests_then_reads_the_reward_separately() -
     assert _AS_AGENT in box.commands[restored]
     assert 'tar -xzpf - -C /app < ' in box.commands[restored]
     assert box.commands[restored].index('chown -hR 0:0 /app') > box.commands[restored].index('tar')
+    assert box.commands[restored].index('chmod -R a-st /app') > box.commands[restored].index(
+        'chown'
+    )
     staged = _index(box, 'rm -rf /tests /logs/verifier')
     tests = _index(box, _RUN_TESTS)
     reward = _index(box, 'for name in reward.json')

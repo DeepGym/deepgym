@@ -455,8 +455,8 @@ result = dg.run(env, '''```diff\n... unified diff ...\n```''')
   training. A diff can't edit the hidden tests, and a diff that touches any other test
   infrastructure (tests and their helper code, conftest.py, test runner config,
   installed dependencies) scores 0 with `error_type='test_infra_tampering'`; data
-  fixtures the tests read may change. It can
-  still change the code the tests run, so the reward is only as strong as the tests.
+  fixtures the tests read may change. It can still change the code the tests run, so
+  the reward is only as strong as the tests.
 - The tests run as root in that sandbox because the images expect root's toolchains
   and caches, so the sandbox, not `deepgym_solution`, is what isolates them.
 - Images are amd64 and up to about 3.4 GB. Pull them first: a sandbox waits at most

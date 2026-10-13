@@ -13,8 +13,10 @@ those fields empty.
 
 from __future__ import annotations
 
+import functools
 import hashlib
 import json
+import operator
 import os
 import subprocess
 import time
@@ -105,7 +107,7 @@ def git_checkout(package: Path, since: float | None = None) -> tuple[str | None,
     if not tracked:
         return None, None
     head = git('rev-parse', '--verify', 'HEAD')
-    status = git('status', '--porcelain', '--', '.')
+    status = git('status', '--porcelain', '--untracked-files=normal', '--', '.')
     if head is None or status is None:
         return None, None
     names = filter(None, tracked.split('\0'))
@@ -431,7 +433,8 @@ class Trace(BaseModel):
         return Trajectory(
             steps=list(zip(shown, (step.action for step in applied))),
             final_observation=shown[-1],
-            total_reward=sum(rewards),
+            # The session's running total: sum() rounds differently from Python 3.12 on.
+            total_reward=functools.reduce(operator.add, rewards, 0.0),
             step_rewards=rewards,
         )
 
@@ -481,15 +484,16 @@ def _grades(trace: Trace) -> tuple[RunResult, ...]:
     return () if trace.result is None else (*trace.prior_results, trace.result)
 
 
-def _progress(trace: Trace) -> tuple[int, int, bool, bool, bool]:
-    """How far a copy got: steps, grades, whether it started and finished, and says why it
-    stopped."""
+def _progress(trace: Trace) -> tuple[int, int, bool, bool, int]:
+    """How far a copy got: steps, grades, whether it started and finished, then what it says
+    stopped it (a real error over the loader's guess that the process died)."""
+    error = trace.error
     return (
         len(trace.steps),
         len(_grades(trace)),
         trace.initial_observation is not None,
         trace.finished_at is not None,
-        trace.error is not None,
+        0 if error is None else 1 if error == UNFINISHED else 2,
     )
 
 
@@ -510,6 +514,8 @@ def _cut_short(copy: Trace, furthest: Trace) -> bool:
         copy = copy.model_copy(update={'prior_results': history[:position]})
     if copy.finished_at is not None:
         return copy == furthest
+    if copy.error != furthest.error and _progress(copy) == _progress(furthest):
+        return False  # neither got further, so neither error is known to be the later one
     grades = _grades(copy)
     steps = furthest.steps if grades else furthest.steps[: len(copy.steps)]
     erred = copy.error not in (None, UNFINISHED)

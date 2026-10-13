@@ -223,6 +223,7 @@ class TestSchema:
 
         assert merge_copies([unstarted, graded, snapshot]) == [graded]
         assert merge_copies([snapshot, crashed]) == [crashed]
+        assert merge_copies([crashed, erred]) == [erred]  # a real error over a guessed crash
         assert merge_copies([graded.model_copy(update=unfinished), regraded]) == [regraded]
         assert merge_copies([erred, erred_again]) == [erred_again]
         for copies in (
@@ -230,6 +231,7 @@ class TestSchema:
             [graded, graded_early],
             [graded, graded.model_copy(update={'task': 'other'})],
             [erred, graded],
+            [erred, erred.model_copy(update={'error': 'VerifierError: timed out'})],
         ):
             with pytest.raises(ValueError, match='trace0001'):
                 merge_copies(copies)
@@ -257,6 +259,19 @@ class TestSchema:
         assert current.turns == [[1, 2], [3]]
         assert legacy.turns == [[1], [2], [3]]
         assert rl_row(current) is not None and rl_row(legacy) is None
+
+    def test_to_trajectory_adds_rewards_as_the_session_does(self) -> None:
+        first, _, last = graded_trace().steps
+        steps = (
+            first.model_copy(update={'reward': 0.1}),
+            first.model_copy(update={'index': 2, 'reward': 0.2}),
+            last.model_copy(update={'reward': 0.3}),
+        )
+
+        trajectory = graded_trace().model_copy(update={'steps': steps}).to_trajectory()
+
+        # A running total, as Session keeps; sum() gives 0.6 here from Python 3.12 on.
+        assert trajectory.total_reward == 0.1 + 0.2 + 0.3
 
     def test_to_trajectory_never_moves_a_reward_to_another_step(self) -> None:
         trace = graded_trace()
@@ -373,6 +388,8 @@ class TestProvenance:
         os.utime(package / '__init__.py', (loaded + 5, loaded + 5))
         assert git_checkout(package, since=loaded) == (head, True)
         (package / 'new.py').write_text('y = 2\n')
+        assert git_checkout(package) == (head, True)
+        git('config', 'status.showUntrackedFiles', 'no')  # must not hide the new module
         assert git_checkout(package) == (head, True)
         (package / 'new.py').unlink()
         (package / '__init__.py').write_text('x = 2\n')

@@ -108,10 +108,14 @@ _CARGO_SWAPPED = (
 _CARGO_NO_AUTOTESTS = _CARGO.replace(
     'version = "1.0.0"\n', 'version = "1.0.0"\nautotests = false\n'
 )
-_PACKAGE_STUB_DEP = _PACKAGE.replace(
+# A real fix may add or bump a dependency; that is not test tampering.
+_PACKAGE_DEP_BUMP = _PACKAGE.replace(
     '"scripts": {"test": "pytest"}\n',
-    '"scripts": {"test": "pytest"},\n  "devDependencies": {"jest": "file:./stub"}\n',
+    '"scripts": {"test": "pytest"},\n  "dependencies": {"left-pad": "^1.3.0"}\n',
 )
+# Repointing a runner dependency to a local stub needs the stub package to declare a bin;
+# that stub package.json is what gets caught (its own bin key), even if the root edit is allowed.
+_STUB_PACKAGE = '{\n  "name": "stub",\n  "version": "1.0.0",\n  "bin": {"jest": "./fake.js"}\n}\n'
 _SETUP_CFG = '[metadata]\nname = calc\n\n[tool:pytest]\npython_files = test_*.py\n'
 # pytest reads option names case-sensitively; ConfigParser lowercases them unless told not to.
 _SETUP_CFG_CASE = _SETUP_CFG.replace('python_files', 'PYTHON_FILES')
@@ -171,9 +175,16 @@ _CARGO_WS_EDIT = _CARGO_WS.replace('["core"]', '["decoy"]')
         ),
         pytest.param(
             {'package.json': _PACKAGE},
-            {'package.json': _PACKAGE_STUB_DEP},
+            {'package.json': _PACKAGE_DEP_BUMP},
+            False,
+            id='package-dep-bump-allowed',
+        ),
+        pytest.param(
+            # The stub package a runner repoint points at must declare a bin; that is caught.
+            {'package.json': _PACKAGE},
+            {'package.json': _PACKAGE, 'stub/package.json': _STUB_PACKAGE},
             True,
-            id='package-dep-repoint',
+            id='package-stub-bin',
         ),
         pytest.param(
             {'setup.cfg': _SETUP_CFG},
@@ -220,25 +231,39 @@ def test_config_edits_outside_the_test_section_are_allowed(
     ('name', 'refused'),
     [
         ('.npmrc', True),
-        ('Makefile', True),
         ('pytest.toml', True),
-        ('package-lock.json', True),
         ('.cargo/config.toml', True),
+        # Build files and lockfiles are often part of a real fix, so they are not refused
+        # (a tampered `make test` or stubbed dependency is caught by the per-test report gate).
+        ('Makefile', False),
+        ('package-lock.json', False),
+        ('go.sum', False),
         ('scripts/latest.sh', False),
     ],
 )
-def test_launcher_and_lockfiles(
+def test_launcher_configs_refused_build_files_allowed(
     tmp_path: Path, sandbox_dg: DeepGym, name: str, refused: bool
 ) -> None:
-    # The test command reads .npmrc / Makefile by convention, pytest.toml is pytest config, and
-    # a lockfile can stub the harness, so a new one is refused; a shell script whose name merely
-    # contains 'test' is not.
+    # .npmrc / pytest.toml / .cargo/config.toml select or configure the test runner, so a new
+    # one is refused; a Makefile, lockfile or unrelated shell script is left to a real fix.
     env = _env(tmp_path)
 
     result = sandbox_dg.run(env, _diff(Path(env.repo_dir), {name: 'x = 1\n', **_FIX}))
 
     assert result.error_type == ('test_infra_tampering' if refused else None)
     assert result.score == (0.0 if refused else 1.0)
+
+
+def test_data_fixture_in_test_dir_is_allowed(tmp_path: Path, sandbox_dg: DeepGym) -> None:
+    # A real fix may change a data fixture under a test directory; only executable code there
+    # is refused. (Weakening a data oracle is a separate problem the report gate addresses.)
+    env = _env(tmp_path)
+    edit = {'tests/data/expected.yml': 'v: 2\n', **_FIX}
+
+    result = sandbox_dg.run(env, _diff(Path(env.repo_dir), edit))
+
+    assert result.error_type is None
+    assert result.score == 1.0
 
 
 def test_production_package_named_test_is_refused_known_false_positive(

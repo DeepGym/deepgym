@@ -302,38 +302,44 @@ class PatchVerifier:
             # reward still trusts. Do not keep growing it indefinitely. The real defence is
             # the per-test report gate (verdict from the runner's own report, fail closed),
             # which supersedes this; add new frameworks there, not here.
+            # Directories whose *executable* contents a runner collects or loads. A data
+            # fixture here (.yml, .json, .golden) is not refused -- real fixes edit those,
+            # and weakening a data oracle is a separate problem the report gate addresses.
+            # 'testing' is left out: it is as often a shipped package (django.test, @proton/
+            # testing) as a test dir, and refusing it gives correct fixes a false zero.
             _TEST_DIRS = {
-                'test', 'tests', 'testing', '__tests__', 'testdata', 'spec', 'specs',
+                'test', 'tests', '__tests__', 'testdata', 'spec', 'specs',
                 '__snapshots__', '__mocks__',
             }
             _HARNESS_DIRS = {
-                'node_modules', 'site-packages', 'dist-packages', 'vendor', '.pytest_cache',
-                '.tox', '.nox', '_pytest', 'pytest', '.venv', 'venv', 'virtualenv', '.cargo',
+                'node_modules', 'site-packages', 'dist-packages', '.pytest_cache',
+                '.tox', '.nox', '_pytest', '.venv', 'venv', 'virtualenv', '.cargo',
             }
             _INFRA_FILES = {
                 'conftest.py', 'pytest.py', 'pytest.ini', '.pytest.ini', 'pytest.toml',
                 '.pytest.toml', 'tox.ini', 'noxfile.py', 'tests.py', 'sitecustomize.py',
                 'usercustomize.py', '.pythonrc', '.pythonrc.py', '.pythonstartup', '.rspec',
-                'rakefile', 'phpunit.xml', 'phpunit.xml.dist', 'phpunit.dist.xml', 'pom.xml',
-                'build.gradle', 'build.gradle.kts', 'settings.gradle', 'settings.gradle.kts',
-                'build.rs', 'makefile', 'gnumakefile', '.npmrc', '.yarnrc', '.yarnrc.yml',
-                'setup.py',
-                # Lockfiles: a repointed or stubbed dependency could replace the test harness,
-                # and a code fix never needs to rewrite one.
-                'package-lock.json', 'npm-shrinkwrap.json', 'yarn.lock', 'pnpm-lock.yaml',
-                'poetry.lock', 'pipfile.lock', 'cargo.lock', 'go.sum', 'gemfile.lock',
+                'phpunit.xml', 'phpunit.xml.dist', 'phpunit.dist.xml',
+                '.npmrc', '.yarnrc', '.yarnrc.yml', 'setup.py',
+            }
+            # Executable extensions: a code file inside a test directory can run at import or
+            # be imported by a test, so it is refused there; a data file is not.
+            _CODE_EXTS = {
+                'py', 'pyi', 'js', 'jsx', 'ts', 'tsx', 'mjs', 'cjs', 'mts', 'cts', 'go', 'rb',
+                'rs', 'java', 'kt', 'kts', 'php', 'sh', 'bash', 'c', 'cc', 'cpp', 'h', 'hpp',
             }
             _JS_TOOLS = {
                 'jest', 'vitest', 'vite', 'karma', 'babel', 'ava', 'playwright', 'cypress',
                 'mocha', 'nyc', 'wdio',
             }
             _JS_EXTS = {'js', 'jsx', 'ts', 'tsx', 'mjs', 'cjs', 'mts', 'cts'}
-            # package.json keys that run or resolve tests; the rest of the file is code. A
-            # dependency change can point the test runner at a stub, so dependency keys count.
+            # package.json keys that run or expose a test runner; the rest of the file, including
+            # the dependency ranges a real fix updates, is left alone. Repointing a runner
+            # dependency to a stub still needs that stub package to declare a 'bin', which this
+            # catches on the stub's own package.json, and the report gate is the backstop.
             _PACKAGE_KEYS = (
-                'scripts', 'jest', 'mocha', 'ava', 'babel', 'nyc', 'c8', 'vitest', 'tap', 'wdio',
-                'bin', 'dependencies', 'devDependencies', 'peerDependencies',
-                'optionalDependencies', 'bundledDependencies', 'resolutions', 'overrides',
+                'scripts', 'bin', 'jest', 'mocha', 'ava', 'babel', 'nyc', 'c8', 'vitest', 'tap',
+                'wdio',
             )
             # Config files that are test infrastructure only in part; _config_tampered decides.
             _CONFIG_FILES = {'pyproject.toml', 'setup.cfg', 'package.json', 'cargo.toml'}
@@ -345,14 +351,28 @@ class PatchVerifier:
                 return [part for part in rel.lower().split('/') if part not in ('', '.')]
 
 
+            def _is_test_file(name: str) -> bool:
+                # Whether *name* (lowercased basename) is itself a test, a test runner config,
+                # or an import hook a runner loads by name -- refused wherever it sits.
+                segments = name.split('.')
+                return (
+                    name in _INFRA_FILES
+                    or name.endswith(('_test.py', '_test.go', '_spec.rb', '.pth'))
+                    or (name.startswith('test_') and name.endswith('.py'))
+                    or (segments[0] in ('test', 'tests', 'spec', 'suite_test') and segments[-1] == 'go')
+                    or (len(segments) > 2 and segments[-2] in ('test', 'spec', 'e2e', 'setup') and segments[-1] in _JS_EXTS)
+                    or (len(segments) > 1 and segments[0] in _JS_TOOLS and segments[1] in ('config', 'conf', 'setup', 'workspace', 'preset'))
+                    or segments[0] in ('setuptests', 'jest', 'vitest')
+                    or name.startswith(('.babelrc', '.mocharc', '.nycrc', '.c8rc'))
+                )
+
+
             def _infra_reason(repo_root: Path, rel: str) -> str | None:
                 # Why *rel* is test infrastructure judging by its path alone, or None.
                 parts = _components(rel)
                 if not parts:
                     return None
                 name, dirs = parts[-1], parts[:-1]
-                if any(part in _TEST_DIRS for part in dirs):
-                    return 'in a test directory'
                 if any(
                     part in _HARNESS_DIRS or part.endswith(('.egg-info', '.dist-info', '.egg'))
                     for part in parts
@@ -361,18 +381,15 @@ class PatchVerifier:
                 raw = rel.split('/')
                 if any((repo_root / Path(*raw[:depth]) / 'pyvenv.cfg').is_file() for depth in range(len(raw))):
                     return 'inside a virtualenv'
-                segments = name.split('.')
-                if (
-                    name in _INFRA_FILES
-                    or name.endswith(('_test.py', '_test.go', '_spec.rb', '.pth', '.gradle', '.gradle.kts'))
-                    or (name.startswith('test_') and name.endswith('.py'))
-                    or (segments[0] in ('test', 'tests', 'spec', 'suite_test') and segments[-1] == 'go')
-                    or (len(segments) > 2 and segments[-2] in ('test', 'spec', 'e2e', 'setup') and segments[-1] in _JS_EXTS)
-                    or (len(segments) > 1 and segments[0] in _JS_TOOLS and segments[1] in ('config', 'conf', 'setup', 'workspace', 'preset'))
-                    or segments[0] in ('setuptests', 'jest', 'vitest')
-                    or name.startswith(('.babelrc', '.mocharc', '.nycrc', '.c8rc'))
-                ):
+                if _is_test_file(name):
                     return 'test file or test configuration'
+                # In a test directory, refuse executable code (a helper a test imports, or a
+                # module that runs at import) and the package marker, but allow data fixtures.
+                if any(part in _TEST_DIRS for part in dirs):
+                    if name == '__init__.py':
+                        return 'test package marker'
+                    if name.rsplit('.', 1)[-1] in _CODE_EXTS and '.' in name:
+                        return 'code in a test directory'
                 return None
 
 
@@ -408,7 +425,9 @@ class PatchVerifier:
                     before.optionxform = after.optionxform = str
                     before.read_string(old_text)
                     after.read_string(new_text)
-                    keys = ('tool:pytest', 'options.entry_points', 'options', 'nosetests', 'tox:tox')
+                    # [options] holds metadata and dependencies a real fix may change; only its
+                    # entry-points subsection registers pytest plugins, so that is what counts.
+                    keys = ('tool:pytest', 'options.entry_points', 'nosetests', 'tox:tox')
 
                     def view(cfg):
                         return {key: dict(cfg[key]) for key in cfg.sections() if key in keys}

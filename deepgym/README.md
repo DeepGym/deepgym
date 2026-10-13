@@ -266,16 +266,22 @@ and std. Under v1 the loop drops the sample like the reward function does.
 
 Then set `actor_rollout_ref.rollout.agent.default_agent_loop=deepgym_single_turn`.
 The rows are the same `verl_rows`. A policy that learns to trigger failures escapes
-their penalty either way, so keep watching `error` and the failed samples.
+their penalty either way, so keep watching `error` and the failed samples; the loop logs
+a warning when more than 5% of a batch is kept out.
 
 For multi-turn agent RL, use DeepGym's agent loop and session tool. verl's stock
 `ToolAgentLoop` creates and releases a tool around every call, so the
 `deepgym_agent` loop keeps one sandbox per rollout, sets `reward_score` from the
-final verifier, and deletes the sandbox. Screenshots come back as images. A rollout
-whose sandbox fails to start, whose action fails for any reason other than the action
-itself (a provider outage; an invalid or disallowed action comes back to the model as
-text), or whose step or final verifier fails, gets no verdict and is kept out of
-training the same way (`error` 1.0); one where the model never calls the tool scores 0.
+final verifier, and deletes the sandbox. Screenshots come back as images. Only failures
+that aren't the policy's doing get no verdict and are kept out of training the same way
+(`error` 1.0): a sandbox that fails to start, a provider or network failure during an
+action or the final verifier (`deepgym.exceptions.is_infrastructure_failure`), and a
+step or final verifier that fails. Everything that follows from the policy's own actions
+is scored. An invalid or disallowed action comes back to the model as text, any other
+failed action as an error while the rollout goes on, and if the final verifier can't run
+in a sandbox the policy killed or hung, the rollout scores 0 with `error_type`
+`policy_sandbox_failure`. One where the model never calls the tool scores 0. This loop
+also warns when more than 5% of a batch is kept out.
 
 ```yaml
 # agent_loop_config_path
@@ -366,10 +372,26 @@ app.include_router(create_openrlhf_router(env, dg))
 OpenRLHF sends one request per rollout, all at once. They run in FastAPI's thread pool,
 so a slow verification doesn't hold up the others.
 
-OpenRLHF can't skip a sample: it trains on whatever `rewards` holds. So a request with
-a sample that got no verdict fails with 503 (422 if a query doesn't contain its prompt)
-instead of sending a 0. OpenRLHF retries it five times; if the failure lasts, the
-rollout has no reward and training stops rather than learn from a fake failure.
+OpenRLHF can't skip a sample: it trains on whatever `rewards` holds, and a failed
+request would stop its training step, so the endpoint never fails one. A failure the
+model caused is judged and scores 0. A run the sandbox provider or the network failed is
+run again after a short pause. If it still has no verdict, or a query doesn't contain its
+prompt, the sample gets the router's `infra_failure_score`:
+
+- `'zero'` (the default): 0.0, logged as a warning with its error type. OpenRLHF trains
+  on it as a failed answer; that is the limit of its API.
+- `'nan'`: NaN. With `--algo.dynamic_filtering_enable`, OpenRLHF drops the sample's whole
+  prompt group (the group's mean score is NaN, which is outside any range). Without
+  dynamic filtering it trains on the NaN and the run breaks, so use it only with dynamic
+  filtering on.
+
+```python
+app.include_router(create_openrlhf_router(env, dg, infra_failure_score='nan'))
+# Train with: --algo.dynamic_filtering_enable --remote_rm_url ...
+```
+
+Either way the sample counts toward a warning logged when more than 5% of a batch gets
+no verdict.
 
 ### lm-evaluation-harness
 

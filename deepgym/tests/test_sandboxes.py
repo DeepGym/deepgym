@@ -423,11 +423,12 @@ def test_judge_trusts_a_provider_that_blocks_the_network() -> None:
     assert run_judge_in_sandbox(box, _JOB).verifier_result.score == 1.0
 
 
-# agent and verifier uid/gid; 0: no sudo, so no deepgym_solution for verifiers; the
-# setpriv, nsenter and sudo paths; then the work directory as realpath prints it.
+# agent and verifier uid/gid; 0 and '- -': no sudo, so no solver and no deepgym_solution
+# for verifiers; the setpriv, nsenter and sudo paths; then the work directory as realpath
+# prints it.
 _USERS = (
     'useradd',
-    '997 997 996 996 0 /usr/bin/setpriv /usr/bin/nsenter /usr/bin/sudo\n/tmp/deepgym',
+    '997 997 996 996 0 - - /usr/bin/setpriv /usr/bin/nsenter /usr/bin/sudo\n/tmp/deepgym',
 )
 
 
@@ -523,7 +524,7 @@ def test_session_write_file_is_staged_then_written_as_agent() -> None:
 
 @pytest.mark.parametrize('ids', ['0 997 996 996', '997 997 996 0'], ids=['agent', 'group'])
 def test_session_refuses_root_ids_for_its_users(ids: str) -> None:
-    output = f'{ids} 0 /usr/bin/setpriv /usr/bin/nsenter /usr/bin/sudo\n/tmp/deepgym'
+    output = f'{ids} 0 - - /usr/bin/setpriv /usr/bin/nsenter /usr/bin/sudo\n/tmp/deepgym'
     box = FakeSandbox(network_blocked=True, answers=[('useradd', output)])
     with pytest.raises(SandboxError, match='root'):
         SandboxBackend(box)
@@ -531,26 +532,45 @@ def test_session_refuses_root_ids_for_its_users(ids: str) -> None:
 
 
 def test_session_setup_requires_ids_no_other_account_holds() -> None:
-    """Setup proves each session user's uid and gid are that account's alone (an allowlist
-    of one), rather than only ruling out root."""
+    """Setup proves each session user's uid and gid are that account's alone and its only
+    group (an allowlist of one), rather than only ruling out root."""
     box = FakeSandbox(network_blocked=True, answers=[_USERS])
     SandboxBackend(box)
     setup = next(c for c in box.commands if 'useradd' in c)
-    assert 'getent passwd' in setup and 'getent group' in setup
+    assert setup.count('getent passwd') == 2 and 'getent group' in setup
+    assert 'id -Gn' in setup
+
+
+def test_session_hardens_its_directories_against_symlinks_and_stale_modes() -> None:
+    """Every harness directory is created through a helper that refuses a symlink or a
+    redirected path and forces root ownership and the mode, which mkdir -p -m would leave."""
+    box = FakeSandbox(network_blocked=True, answers=[('useradd', _DAYTONA_USERS[1])])
+    SandboxBackend(box)
+    setup = next(c for c in box.commands if 'useradd' in c)
+    assert 'is a symlink' in setup and 'resolves elsewhere' in setup
+    assert 'mkdir -p -m' not in setup
+    for directory in ('/opt/deepgym-staging', '/opt/deepgym-verifier', '/opt/deepgym-runtime'):
+        assert f'harden {directory}' in setup
 
 
 def test_session_solver_rule_is_checked_installed_whole_and_pinned() -> None:
-    """The verifier's sudo only starts code as the solver under no-new-privs, and the rule
-    is checked by visudo and renamed into place, never written where sudo reads it."""
+    """The verifier's sudo drops fully to the solver (groups cleared, no-new-privs, empty
+    bounding set), and the rule is checked by visudo and renamed into place, never written
+    where sudo reads it."""
     box = FakeSandbox(network_blocked=True, answers=[('useradd', _DAYTONA_USERS[1])])
     backend = SandboxBackend(box)
     setup = next(c for c in box.commands if 'useradd' in c)
     assert '> /etc/sudoers.d/deepgym' not in setup
     assert 'visudo -cqf' in setup and '/etc/sudoers.d/deepgym' in setup
-    assert 'NOPASSWD: %s --no-new-privs -- *' in setup
+    assert (
+        'NOPASSWD: %s --reuid=%s --regid=%s --clear-groups --inh-caps=-all '
+        '--bounding-set=-all --no-new-privs -- *' in setup
+    )
     prefix = json.loads(backend._runtime_env['DEEPGYM_ISOLATION'])['prefix']
     assert prefix == [
-        '/usr/bin/sudo', '-n', '-u', 'dgsolver', '--', '/usr/bin/setpriv', '--no-new-privs', '--',
+        '/usr/bin/sudo', '-n', '-u', 'root', '--', '/usr/bin/setpriv', '--reuid=995',
+        '--regid=985', '--clear-groups', '--inh-caps=-all', '--bounding-set=-all',
+        '--no-new-privs', '--',
     ]  # fmt: skip
 
 
@@ -732,9 +752,10 @@ def test_async_daytona_judge_provider_failure_is_a_sandbox_error() -> None:
 
 # Daytona's default snapshot runs commands as a sudoer; this is its private upload staging dir.
 _STAGE = ('mktemp -d', '/tmp/tmp.stage')
+# 1 then the solver's uid and gid: sudo exists, so the verifier can start deepgym_solution.
 _DAYTONA_USERS = (
     'useradd',
-    '997 997 996 996 1 /usr/bin/setpriv /usr/bin/nsenter /usr/bin/sudo\n/tmp/deepgym',
+    '997 997 996 996 1 995 985 /usr/bin/setpriv /usr/bin/nsenter /usr/bin/sudo\n/tmp/deepgym',
 )
 
 

@@ -28,7 +28,7 @@ from deepgym.session import SandboxBackend
 from tests.test_harbor import BUILT, HELLO
 from tests.test_sandboxes import FakeSandbox
 
-_IDS = '997 997 996 996 0 /usr/bin/setpriv /usr/bin/nsenter -'
+_IDS = '997 997 996 996 0 - - /usr/bin/setpriv /usr/bin/nsenter -'
 _WORKSPACE = pack_files({'hello.txt': b'hello\n'})
 _ENCODED = ('base64 /opt', base64.b64encode(_WORKSPACE).decode())
 _PASS = ('for name in reward.json', 'reward.txt\n1\n')
@@ -277,7 +277,7 @@ def test_backend_owns_where_the_workdir_really_leads() -> None:
     linked = _box(workdir='/usr/bin')
     with pytest.raises(SandboxError, match="'/app' leads to '/usr/bin'"):
         SandboxBackend(linked, '/app')
-    assert linked.deleted and not [c for c in linked.commands if 'chown' in c]
+    assert linked.deleted and not [c for c in linked.commands if 'chown -R' in c]
 
     spelled = _box()
     with pytest.raises(SandboxError, match='overlaps /usr'):

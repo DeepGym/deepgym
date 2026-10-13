@@ -258,21 +258,45 @@ os.execvp('sleep', ['sleep', 'infinity'])
 """
 
 
-# Lets the verifier user start code as the solver user (deepgym_solution), and nothing else,
-# always under no-new-privs so no setuid binary lifts that code. A printf format: %s is
-# setpriv's path.
-_SUDOERS_RULE = f'{_VERIFIER_USER} ALL=({SOLVER_USER}) NOPASSWD: %s --no-new-privs -- *\\n'
+# Lets the verifier user start the code it loads (deepgym_solution), and nothing else, as the
+# solver with every privilege dropped: sudo runs setpriv as root, which clears the solver's
+# supplementary groups (sudo would otherwise restore an image group membership) and sets
+# no-new-privs and an empty bounding set before exec. The rule pins every setpriv argument
+# but the command, so it can only drop to the solver. A printf format: the %s are setpriv's
+# path and the solver's uid and gid, and it must match :func:`_drop_to` argument for argument.
+_SUDOERS_RULE = (
+    f'{_VERIFIER_USER} ALL=(root) NOPASSWD: '
+    '%s --reuid=%s --regid=%s --clear-groups --inh-caps=-all '
+    '--bounding-set=-all --no-new-privs -- *\\n'
+)
 
-# Each session user's uid and gid must be held by that account and its own group alone,
-# so dropping to them grants that fresh account's rights and nobody else's. Proving that
-# beats ruling out root: a shared id with any other account would carry its rights too.
+# Each session user's uid and gid must be that account's alone and its only group, so dropping
+# to them grants that fresh account's rights and nobody else's. Ruling out root isn't enough:
+# a uid or primary gid shared with any other account, or a supplementary group the image put
+# the user in (a stray ``shadow:x:42:dgsolver`` line), would carry that account's or group's
+# rights too. The passwd gid check catches an account whose primary gid has no group entry.
 _IDS_ARE_EXCLUSIVE = (
     f'for u in {_AGENT_USER} {_VERIFIER_USER} {SOLVER_USER}; do '
     'id "$u" >/dev/null 2>&1 || continue; '
-    '[ "$(getent passwd | cut -d: -f3 | grep -Fcx "$(id -u "$u")")" = 1 ] && '
-    '[ "$(getent group | cut -d: -f3 | grep -Fcx "$(id -g "$u")")" = 1 ] && '
-    '[ "$(id -gn "$u")" = "$u" ] || { echo "$u shares an id with another account"; exit 1; }; '
+    'uid=$(id -u "$u"); gid=$(id -g "$u"); '
+    '[ "$(getent passwd | cut -d: -f3 | grep -Fcx "$uid")" = 1 ] && '
+    '[ "$(getent passwd | cut -d: -f4 | grep -Fcx "$gid")" = 1 ] && '
+    '[ "$(getent group | cut -d: -f3 | grep -Fcx "$gid")" = 1 ] && '
+    '[ "$(id -Gn "$u")" = "$u" ] '
+    '|| { echo "$u shares an id or a group with another account"; exit 1; }; '
     'done'
+)
+
+# Make a root-owned directory the agent can neither redirect nor rewrite. Refuses a symlink
+# or a path that resolves elsewhere (a link anywhere above it), creates it, then forces root
+# ownership and the mode, which ``mkdir -p -m`` leaves untouched on a directory that already
+# exists. Defined once and called for every harness directory.
+_HARDEN_DIR = (
+    'harden() { '
+    'if [ -L "$1" ]; then echo "$1 is a symlink"; exit 1; fi; '
+    'mkdir -p "$1"; '
+    'if [ "$(realpath "$1")" != "$1" ]; then echo "$1 resolves elsewhere"; exit 1; fi; '
+    'chown 0:0 "$1"; chmod "$2" "$1"; }'
 )
 
 
@@ -318,38 +342,51 @@ class SandboxBackend:
             quoted = shlex.quote(self._workdir)
             users = sandbox.exec(
                 trusted(
-                    "command -v setpriv >/dev/null || { echo 'setpriv missing'; exit 1; } && "
+                    'set -eu\n'
+                    "command -v setpriv >/dev/null || { echo 'setpriv missing'; exit 1; }\n"
+                    f'{_HARDEN_DIR}\n'
+                    'harden /opt 755\n'
                     f'useradd --system --create-home --home-dir {_AGENT_HOME} '
-                    f'--shell /usr/sbin/nologin {_AGENT_USER} && chmod 755 {_AGENT_HOME} && '
-                    f'{_ADD_USER} {_VERIFIER_USER} && '
-                    f'mkdir -p -m 700 {_STAGING_DIR} && mkdir -p -m 750 {_VERIFIER_DIR} && '
-                    f'chgrp {_VERIFIER_USER} {_VERIFIER_DIR} && solver=0 && '
-                    'if command -v sudo >/dev/null && [ -d /etc/sudoers.d ]; then '
-                    f'{_ADD_USER} {SOLVER_USER} && '
+                    f'--shell /usr/sbin/nologin {_AGENT_USER}\n'
+                    f'chmod 755 {_AGENT_HOME}\n'
+                    f'{_ADD_USER} {_VERIFIER_USER}\n'
+                    f'harden {_STAGING_DIR} 700\n'
+                    f'harden {_VERIFIER_DIR} 750\n'
+                    f'chgrp {_VERIFIER_USER} {_VERIFIER_DIR}\n'
+                    'solver=0; solver_uid=-; solver_gid=-\n'
+                    'if command -v sudo >/dev/null && [ -d /etc/sudoers.d ]; then\n'
+                    f'  {_ADD_USER} {SOLVER_USER}\n'
+                    f'  solver_uid=$(id -u {SOLVER_USER}); solver_gid=$(id -g {SOLVER_USER})\n'
                     # sudo skips names with a dot, so the rule counts only once visudo has
                     # passed it and a rename puts it in place whole, never through a link.
-                    'rule=$(mktemp /etc/sudoers.d/.deepgym.XXXXXX) && '
-                    f'printf {shlex.quote(_SUDOERS_RULE)} "$(command -v setpriv)" > "$rule" && '
-                    'chmod 440 "$rule" && visudo -cqf "$rule" && '
-                    'mv -f "$rule" /etc/sudoers.d/deepgym && '
-                    f'mkdir -p -m 755 {_RUNTIME_DIR} && solver=1; fi && mkdir -p {quoted} && '
-                    f'{_IDS_ARE_EXCLUSIVE} && '
+                    '  rule=$(mktemp /etc/sudoers.d/.deepgym.XXXXXX)\n'
+                    f'  printf {shlex.quote(_SUDOERS_RULE)} '
+                    '"$(command -v setpriv)" "$solver_uid" "$solver_gid" > "$rule"\n'
+                    '  chmod 440 "$rule"; visudo -cqf "$rule"\n'
+                    '  mv -f "$rule" /etc/sudoers.d/deepgym\n'
+                    f'  harden {_RUNTIME_DIR} 755\n'
+                    '  solver=1\n'
+                    'fi\n'
+                    f'mkdir -p {quoted}\n'
+                    f'{_IDS_ARE_EXCLUSIVE}\n'
                     f'echo "$(id -u {_AGENT_USER}) $(id -g {_AGENT_USER}) '
-                    f'$(id -u {_VERIFIER_USER}) $(id -g {_VERIFIER_USER}) $solver '
+                    f'$(id -u {_VERIFIER_USER}) $(id -g {_VERIFIER_USER}) '
+                    '$solver $solver_uid $solver_gid '
                     '$(command -v setpriv) $(command -v nsenter || echo -) '
-                    '$(command -v sudo || echo -)" && '
-                    f'realpath {quoted}'
+                    '$(command -v sudo || echo -)"\n'
+                    f'realpath {quoted}\n'
                 ),
                 timeout=_TRANSFER_TIMEOUT_S,
             )
             if users.exit_code != 0:
                 raise SandboxError(f'Could not create the session users: {users.output[-500:]}')
             *_, ids, real = users.output.strip().splitlines()
-            agent_uid, agent_gid, verifier_uid, verifier_gid, solver, setpriv, nsenter, sudo = (
-                ids.split()[-8:]
-            )
+            (agent_uid, agent_gid, verifier_uid, verifier_gid, solver, solver_uid, solver_gid,
+             setpriv, nsenter, sudo) = ids.split()[-10:]  # fmt: skip
             # Setup proved them exclusive; this guards the parse before they reach setpriv.
-            user_ids = (agent_uid, agent_gid, verifier_uid, verifier_gid)
+            user_ids = [agent_uid, agent_gid, verifier_uid, verifier_gid]
+            if solver == '1':
+                user_ids += [solver_uid, solver_gid]
             if not all(v.isdecimal() and int(v) > 0 for v in user_ids):
                 raise SandboxError(f'Refusing session users with root or unknown ids: {ids!r}')
             # The folder may be a link in the image: own and use where it really leads.
@@ -371,7 +408,10 @@ class SandboxBackend:
             if solver == '1':
                 runtime = f'{_RUNTIME_DIR}/{RUNTIME_FILE}'
                 sandbox.upload(RUNTIME_SOURCE.encode('utf-8'), runtime)
-                prefix = [sudo, '-n', '-u', SOLVER_USER, '--', setpriv, '--no-new-privs', '--']
+                # sudo runs setpriv as root so it can clear the solver's groups; the pinned
+                # rule allows only this exact drop, so the verifier can't stay root with it.
+                drop = shlex.split(_drop_to(setpriv, solver_uid, solver_gid))
+                prefix = [sudo, '-n', '-u', 'root', '--', *drop]
                 self._runtime_env = {
                     'DEEPGYM_ISOLATION': json.dumps({'kind': 'user', 'prefix': prefix}),
                     'DEEPGYM_RUNTIME': runtime,

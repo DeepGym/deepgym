@@ -135,20 +135,25 @@ _SOLVER_PROBE_VERIFIER = """
 import json, subprocess
 from deepgym_solution import load_solution
 
-nnp = 'NoNewPrivs:\\t1' in load_solution('probe.py').status()
-# The verifier's sudo must start nothing as the solver but no-new-privs code.
+solution = load_solution('probe.py')
+nnp = 'NoNewPrivs:\\t1' in solution.status()
+# No supplementary groups: sudo must not restore an image group membership for the solver.
+nogroups = solution.groups() == []
+# The verifier's sudo must start nothing as the solver directly (the rule runs as root).
 pinned = subprocess.run(['sudo', '-n', '-u', 'dgsolver', '--', 'id'], capture_output=True)
 pinned = pinned.returncode != 0
-ok = nnp and pinned
-print(json.dumps({'score': float(ok), 'passed': ok, 'details': f'nnp={nnp} pinned={pinned}'}))
+ok = nnp and nogroups and pinned
+print(json.dumps({'score': float(ok), 'passed': ok,
+                  'details': f'nnp={nnp} nogroups={nogroups} pinned={pinned}'}))
 """
 
 
 def test_session_solution_cannot_gain_privileges(dg: DeepGym) -> None:
-    """Agent code a session verifier loads runs as the solver with no-new-privs, so no
-    setuid binary (sudo, su, mount, chrome-sandbox, ...) lifts it past the agent's rights."""
+    """Agent code a session verifier loads runs as the solver with no-new-privs and no
+    groups, so no setuid binary and no image group lifts it past the agent's rights."""
     env = MultiTurnEnvironment(task='t', final_verifier_code=_SOLVER_PROBE_VERIFIER, max_steps=2)
-    probe = "def status():\n    return open('/proc/self/status').read()\n"
+    probe = 'import os\ndef status():\n    return open("/proc/self/status").read()\n'
+    probe += 'def groups():\n    return os.getgroups()\n'
     actions = iter([
         Action(action_type='write_file', path='probe.py', content=probe),
         Action(action_type='done'),

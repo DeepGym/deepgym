@@ -18,8 +18,8 @@ from pydantic import Field, PrivateAttr
 from deepgym.exceptions import DeepGymError
 from deepgym.harbor import HarborEnvironment, HarborTask, load_tasks
 from deepgym.integrations.hf import _require_datasets
-from deepgym.models import Environment, RunResult, VerifierResult
-from deepgym.sandbox import _extract_json_line, build_run_result
+from deepgym.models import Environment, RunResult
+from deepgym.sandbox import ExecutionResult, build_run_result, parse_wrapped_output, wrap_stderr
 
 if TYPE_CHECKING:
     from deepgym.core import DeepGym
@@ -167,21 +167,6 @@ def _shell_snippet(value: str) -> str:
     return "'" + value.replace("'", "'\\''") + "'"
 
 
-def _verifier_result_from_output(
-    stdout: str,
-    stderr: str,
-    *,
-    exit_code: int,
-) -> VerifierResult:
-    json_str = _extract_json_line(stdout)
-    if json_str is None:
-        raise ValueError(
-            f'Custom benchmark runner did not emit JSON. exit_code={exit_code}, '
-            f'stdout={stdout!r}, stderr={stderr!r}'
-        )
-    return VerifierResult.model_validate_json(json_str)
-
-
 def _run_sandbox_runner(
     env: Environment,
     dg: DeepGym,
@@ -191,8 +176,18 @@ def _run_sandbox_runner(
     patch_text: str | None = None,
     archive_path: Path | None = None,
     timeout: int,
-) -> tuple[VerifierResult, int, str]:
-    """Run *script* as root in a fresh sandbox from *dg*'s provider, booted from *env*."""
+) -> tuple[ExecutionResult, str]:
+    """Run *script* as root in a fresh sandbox from *dg*'s provider, booted from *env*.
+
+    The verdict is read from the runner's stdout alone, as the judges read theirs: the
+    provider merges the streams, and a JSON line on stderr is no verdict.
+
+    Returns:
+        The parsed run and the sandbox's id.
+
+    Raises:
+        VerifierError: If the runner's stdout has no protocol JSON.
+    """
     sandbox = dg.open_sandbox(env)
     try:
         sandbox.upload(script.encode('utf-8'), _RUNNER_PATH)
@@ -207,9 +202,9 @@ def _run_sandbox_runner(
             sandbox.upload(archive_path.read_bytes(), _ARCHIVE_PATH)
             command += f' {_ARCHIVE_PATH}'
 
+        command, marker = wrap_stderr(command)
         response = sandbox.exec(command, timeout=timeout)
-        result = _verifier_result_from_output(response.output, '', exit_code=response.exit_code)
-        return result, response.exit_code, sandbox.id
+        return parse_wrapped_output(response.output, marker, response.exit_code), sandbox.id
     finally:
         sandbox.delete()
 
@@ -230,9 +225,11 @@ def _execute_runner(
         SandboxError: If *dg* runs locally. These runners apply model-written
             patches and run commands and tests outside any judge isolation, so they
             only ever run inside a container or VM.
+        VerifierError: If the runner prints no protocol JSON or its exit code doesn't
+            back its result.
     """
     start = time.perf_counter()
-    result, exit_code, sandbox_id = _run_sandbox_runner(
+    executed, sandbox_id = _run_sandbox_runner(
         env,
         dg,
         script,
@@ -242,7 +239,13 @@ def _execute_runner(
         timeout=timeout,
     )
     elapsed_ms = (time.perf_counter() - start) * 1000
-    return build_run_result(result, elapsed_ms, sandbox_id, exit_code=exit_code)
+    return build_run_result(
+        executed.verifier_result,
+        elapsed_ms,
+        sandbox_id,
+        stderr=executed.stderr,
+        exit_code=executed.exit_code,
+    )
 
 
 def _vendored_toml_source() -> str:
@@ -276,13 +279,15 @@ class PatchVerifier:
     def build_runner_script() -> str:
         """Return the self-contained patch runner script.
 
-        A vendored TOML parser is inlined as ``_VENDORED_TOML`` and exec'd only when the
-        image's Python lacks ``tomllib`` (3.10), so the config comparison matches the tools
-        either way; see :func:`_vendored_toml_source`. The runner itself needs Python 3.10+:
-        its annotations (``Path | None``) are evaluated as each function is defined, so on an
-        older image the whole runner fails at load, before it emits a result.
+        It runs in the task image's ``python3``, which can be as old as 3.8 (some SWE-bench
+        Pro images), so its annotations are postponed and it uses nothing newer. A vendored
+        TOML parser is inlined as ``_VENDORED_TOML`` and exec'd only when the image's Python
+        lacks ``tomllib`` (before 3.11), so the config comparison matches the tools either
+        way; see :func:`_vendored_toml_source`.
         """
-        return f'_VENDORED_TOML = {_vendored_toml_source()!r}\n\n' + textwrap.dedent(
+        toml = _vendored_toml_source()
+        header = f'from __future__ import annotations\n\n_VENDORED_TOML = {toml!r}\n\n'
+        return header + textwrap.dedent(
             """
             import fnmatch
             import json
@@ -346,6 +351,45 @@ class PatchVerifier:
                     text=True,
                     timeout=timeout,
                 )
+
+
+            # Rustup's layout in the official rust images. An image flattened without its config
+            # (MiMo's on Docker Hub) keeps the toolchain there but loses the ENV that put it on
+            # PATH, so cargo would be "command not found" for every answer, right or wrong.
+            _CARGO_HOME = '/usr/local/cargo'
+            _RUSTUP_HOME = '/usr/local/rustup'
+
+
+            def _restore_rust_env() -> None:
+                # Put that toolchain back when cargo is missing from PATH but installed there.
+                if shutil.which('cargo') or not os.path.isfile(_CARGO_HOME + '/bin/cargo'):
+                    return
+                os.environ.setdefault('CARGO_HOME', _CARGO_HOME)
+                if os.path.isdir(_RUSTUP_HOME):
+                    os.environ.setdefault('RUSTUP_HOME', _RUSTUP_HOME)
+                os.environ['PATH'] = _CARGO_HOME + '/bin' + os.pathsep + (os.environ.get('PATH') or os.defpath)
+
+
+            # pytest's 3 (internal error), 4 (usage error, such as a test id that does not exist)
+            # and 5 (no tests collected) mean it ran no tests. Its 2 does not: pytest exits 2 on a
+            # collection error too, which is how a hidden test importing what the fix adds fails a
+            # wrong or empty patch. Other runners give 2-5 other meanings (mocha exits with its
+            # failure count, make with 2), so these count only for a command that runs pytest.
+            _PYTEST_RE = re.compile(r'(?<![\\w.-])(?:py\\.test|pytest)(?![\\w.-])')
+
+
+            def _never_ran(command: str, code: int) -> str | None:
+                # Why exit *code* of test *command* means its tests never ran, or None if it is a
+                # verdict. The shell could not run it (126 not executable, 127 not found), or it was
+                # killed (SIGKILL by the OOM killer or a timeout, SIGTERM), as the shell reports
+                # that (128 + n) or Python does (-n).
+                if code in (126, 127):
+                    return 'the shell could not run it'
+                if code in (137, 143, -9, -15):
+                    return 'it was killed'
+                if code in (3, 4, 5) and _PYTEST_RE.search(command):
+                    return 'pytest ran no tests'
+                return None
 
 
             # Test infrastructure a model's diff must not touch outside the hidden test
@@ -626,7 +670,7 @@ class PatchVerifier:
                 # under the same suffix rule. A value attached to a short flag (-cci.ini) is tried
                 # without the flag too; --opt=value is split at the '='.
                 base = rel.rsplit('/', 1)[-1]
-                stem = rel[:-3].removesuffix('/__init__') if rel.endswith('.py') else None
+                stem = rel[:-12] if rel.endswith('/__init__.py') else rel[:-3] if rel.endswith('.py') else None
                 words = []
                 for word in filter(None, re.split(r'[\\s\\'"=:;,|&()<>]+', text)):
                     words += [word, word[2:]] if re.match(r'-[A-Za-z].', word) else [word]
@@ -750,7 +794,7 @@ class PatchVerifier:
                 try:
                     for rel, state in saved.items():
                         path = repo_dir / rel
-                        for ancestor in Path(rel).parents[:-1]:
+                        for ancestor in list(Path(rel).parents)[:-1]:
                             folder = repo_dir / ancestor
                             if folder.is_symlink() or (folder.exists() and not folder.is_dir()):
                                 return f'{ancestor} is no longer a directory'
@@ -772,23 +816,31 @@ class PatchVerifier:
 
 
             def main() -> int:
+                _restore_rust_env()
                 task = json.loads(Path(sys.argv[1]).read_text(encoding='utf-8'))
                 patch_path = Path(sys.argv[2])
                 patch_text = patch_path.read_text(encoding='utf-8').strip()
 
-                if not task.get('test_commands'):
-                    # No real test runner: no verdict, so trainers mask the sample
-                    # instead of rewarding a patch nothing checked.
+                test_commands = task.get('test_commands') or []
+                blank = any(not command.strip() for command in test_commands)
+                if blank or not test_commands:
+                    # No real test runner, or a broken task whose blank command would "pass"
+                    # without running a test: no verdict, so trainers mask the sample instead
+                    # of rewarding a patch nothing checked.
                     return _emit(
                         {
                             'schema_version': '1.0',
                             'score': 0.0,
                             'passed': False,
-                            'details': 'No test runner for this task, so it was not scored.',
+                            'details': (
+                                'The task has a blank test command, so it was not run or scored.'
+                                if blank
+                                else 'No test runner for this task, so it was not scored.'
+                            ),
                             'reward_components': {'apply': 0.0, 'tests': 0.0},
                             'metrics': {'pass_fraction': 0.0, 'tests_run': 0},
                             'truncated': False,
-                            'error_type': 'unsupported_runner',
+                            'error_type': 'invalid_task' if blank else 'unsupported_runner',
                             'cases': [],
                         },
                         1,
@@ -811,7 +863,6 @@ class PatchVerifier:
                     )
 
                 timeout = int(task.get('timeout', 1800))
-                test_commands = task['test_commands']
                 setup_commands = task.get('setup_commands', '')
                 test_patch = task.get('test_patch', '')
                 apply_credit = float(task.get('apply_credit', 0.3))
@@ -910,6 +961,24 @@ class PatchVerifier:
                             },
                             1,
                         )
+                    if repo_root is None:
+                        # A missing or broken repo (the image lacks repo_dir, or it is no checkout)
+                        # is the environment's fault, never the patch's, and without the top-level
+                        # the paths can't be checked: no verdict, so trainers mask the sample.
+                        return _emit(
+                            {
+                                'schema_version': '1.0',
+                                'score': 0.0,
+                                'passed': False,
+                                'details': f'git cannot find the repository at {repo_dir}, so the patch was not scored.',
+                                'reward_components': {'apply': 0.0, 'tests': 0.0},
+                                'metrics': {'pass_fraction': 0.0, 'tests_run': 0},
+                                'truncated': False,
+                                'error_type': 'validation_error',
+                                'cases': [],
+                            },
+                            1,
+                        )
                     if hidden is None:
                         return _emit(
                             {
@@ -978,23 +1047,6 @@ class PatchVerifier:
                             },
                             1,
                         )
-                    if repo_root is None:
-                        # Without the top-level the paths can't be checked: no verdict, so
-                        # trainers mask the sample rather than grade an unchecked patch.
-                        return _emit(
-                            {
-                                'schema_version': '1.0',
-                                'score': 0.0,
-                                'passed': False,
-                                'details': 'git cannot find the repository top-level, so the patch was not scored.',
-                                'reward_components': {'apply': 0.0, 'tests': 0.0},
-                                'metrics': {'pass_fraction': 0.0, 'tests_run': 0},
-                                'truncated': False,
-                                'error_type': 'validation_error',
-                                'cases': [],
-                            },
-                            1,
-                        )
                     hidden_set = set(hidden)
                     exposed = [rel for rel in model_paths if rel not in hidden_set]
                     tampered = {rel: _infra_reason(repo_root, rel) for rel in exposed}
@@ -1013,16 +1065,18 @@ class PatchVerifier:
                         timeout=timeout,
                     )
                     if apply_patch.returncode != 0:
+                        # git apply --check passed, so the patch applies: failing to write it is
+                        # the environment's fault (disk, permissions), not the model's.
                         return _emit(
                             {
                                 'schema_version': '1.0',
                                 'score': 0.0,
                                 'passed': False,
-                                'details': f'Patch apply failed: {_tail(apply_patch.stderr or apply_patch.stdout)}',
+                                'details': f'The patch applies but could not be written, so it was not scored: {_tail(apply_patch.stderr or apply_patch.stdout)}',
                                 'reward_components': {'apply': 0.0, 'tests': 0.0},
                                 'metrics': {'pass_fraction': 0.0, 'tests_run': 0},
                                 'truncated': False,
-                                'error_type': 'patch_apply_failed',
+                                'error_type': 'patch_write_failed',
                                 'cases': [],
                             },
                             1,
@@ -1096,6 +1150,25 @@ class PatchVerifier:
                     cases = []
                     for index, command in enumerate(test_commands):
                         proc = _run(command, cwd=repo_dir, timeout=per_command_timeout)
+                        unrun = _never_ran(command, proc.returncode)
+                        if unrun and not uncertain:
+                            # Nothing judged the patch, so there is no verdict to give. After an
+                            # uncertain edit (see below) it counts as a failure instead: the edit
+                            # may be why the tests did not run, and it must gain nothing.
+                            return _emit(
+                                {
+                                    'schema_version': '1.0',
+                                    'score': 0.0,
+                                    'passed': False,
+                                    'details': f'Test command {index} exited {proc.returncode} ({unrun}), so the patch was not scored: {_tail(proc.stderr or proc.stdout)}',
+                                    'reward_components': {'apply': 0.0, 'tests': 0.0},
+                                    'metrics': {'pass_fraction': 0.0, 'tests_run': 0},
+                                    'truncated': False,
+                                    'error_type': 'test_runner_error',
+                                    'cases': [],
+                                },
+                                1,
+                            )
                         passed = proc.returncode == 0
                         if passed:
                             passed_count += 1
@@ -1315,7 +1388,9 @@ class RepoPatchEnvironment(Environment):
     ``repo_dir``, such as the MiMo-V2.6-RL code subset. The model returns a unified
     diff; the SWE-bench Pro patch runner applies it, puts every file the hidden
     ``test_patch`` touches back to its prior state, applies the test patch, runs
-    ``test_command`` and scores 1.0 if it exits 0, else 0.0. A diff that touches any
+    ``test_command`` and scores 1.0 if it exits 0, else 0.0. An exit that says the tests
+    never ran (command not found, killed, pytest running none) has no verdict, nor does a
+    blank ``test_command`` or a ``repo_dir`` the image lacks. A diff that touches any
     other test infrastructure (tests and their helper code, conftest.py, runner config,
     installed dependencies) scores 0.0 with ``error_type='test_infra_tampering'``; data
     fixtures the tests read may change.

@@ -119,15 +119,18 @@ class RunnerSandbox:
     """Fake provider for benchmark runners (SWE-bench Pro, Terminal-Bench, CyberGym, MiMo).
 
     Those runners refuse local mode, so tests reach them through the sandbox code
-    path. Uploads land in a temp dir and the runner runs from there; only the tests'
-    own fixture repos and patches ever run this way.
+    path. Uploads land in a temp dir and the runner runs from there, under *python* as
+    the image's ``python3``; only the tests' own fixture repos and patches ever run this
+    way. Like a real provider, it runs the command with sh and returns stdout and stderr
+    as one stream.
     """
 
     network_blocked = True
 
-    def __init__(self) -> None:
+    def __init__(self, python: str = sys.executable) -> None:
         self.root = Path(tempfile.mkdtemp(prefix='deepgym_fake_sandbox_'))
         self.id = f'fake-{self.root.name}'
+        self.python = python
 
     def _path(self, sandbox_path: str) -> Path:
         return self.root / sandbox_path.lstrip('/')
@@ -144,10 +147,12 @@ class RunnerSandbox:
         env: Mapping[str, str] | None = None,
         timeout: int | None = None,
     ) -> ExecResult:
-        python, *paths = shlex.split(command)  # python3 <runner> <task> [patch] [archive]
-        assert python == 'python3'
-        argv = [sys.executable, *(str(self._path(path)) for path in paths)]
-        proc = subprocess.run(argv, capture_output=True, text=True, timeout=timeout)
+        assert 'python3 /home/user/' in command  # python3 <runner> <task> [patch] [archive]
+        command = command.replace('/home/user/', f'{self.root}/home/user/')
+        command = command.replace('python3 ', f'{shlex.quote(self.python)} ', 1)
+        proc = subprocess.run(
+            ['sh', '-c', command], capture_output=True, text=True, timeout=timeout
+        )
         return ExecResult(proc.returncode, proc.stdout + proc.stderr)
 
     def delete(self) -> None:

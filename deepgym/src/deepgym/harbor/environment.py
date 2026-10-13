@@ -117,4 +117,8 @@ class HarborEnvironment(Environment):
             raise DeepGymError(
                 f'{self.name} has neither [environment].docker_image nor environment/Dockerfile'
             )
-        return build_image(dg.backend, dockerfile.parent)
+        try:
+            context = self.harbor_task.build_context
+        except ValueError as exc:
+            raise DeepGymError(f'{self.name}: {exc}') from exc
+        return build_image(dg.backend, context)

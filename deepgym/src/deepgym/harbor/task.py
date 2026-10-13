@@ -168,6 +168,15 @@ class HarborTask(BaseModel):
         path = self.path / 'environment' / 'Dockerfile'
         return path if path.is_file() else None
 
+    @property
+    def build_context(self) -> Path:
+        """``environment/``, resolved, once it is known to stay inside the task folder.
+
+        Raises:
+            ValueError: If ``environment/`` is a link, or a link inside it leads outside it.
+        """
+        return _build_context(self.path)
+
     @classmethod
     def from_dir(cls, path: Path) -> HarborTask:
         """Read and validate the task folder at *path*.
@@ -181,7 +190,7 @@ class HarborTask(BaseModel):
             instruction = _read(path, 'instruction.md').decode()
             if config.steps or (path / 'steps').is_dir():
                 raise ValueError('multi-step tasks are not supported')
-            return cls(
+            task = cls(
                 name=path.name,
                 path=path,
                 instruction=_LEADING_COMMENTS.sub('', instruction),
@@ -193,8 +202,32 @@ class HarborTask(BaseModel):
                 tests=_read_tree(path, 'tests'),
                 solution=_read_tree(path, 'solution'),
             )
+            context = path / 'environment'
+            if context.is_symlink() or context.exists():
+                _build_context(path)
+            return task
         except (OSError, ValueError) as exc:
             raise ValueError(f'Invalid Harbor task {path}: {exc}') from exc
+
+
+def _build_context(task_dir: Path) -> Path:
+    """Return *task_dir*'s ``environment/`` resolved, if it stays inside the folder.
+
+    A builder sends the whole context to the image and follows a link at its root, so a
+    context that is a link, or holds one leading outside it, could copy host files into
+    the image.
+
+    Raises:
+        ValueError: If ``environment/`` is a link, or a link inside it leads outside it.
+    """
+    context = task_dir / 'environment'
+    if context.is_symlink():
+        raise ValueError('environment/ is a link; it must be a folder in the task')
+    real = context.resolve()
+    for path in context.rglob('*'):
+        if path.is_symlink() and not path.resolve().is_relative_to(real):
+            raise ValueError(f'{path.relative_to(task_dir)} links outside environment/')
+    return real
 
 
 def _read(task_dir: Path, rel: str) -> bytes:

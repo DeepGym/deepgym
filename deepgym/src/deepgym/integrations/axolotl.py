@@ -133,6 +133,9 @@ datasets:
     split: train
 
 val_set_size: 0.02
+# TRL samples 8 completions per eval prompt (the trl.num_generations default), and each
+# eval batch must hold whole groups of them; 8 per GPU does on any number of GPUs.
+eval_batch_size: 8
 
 sequence_len: {sequence_len}
 sample_packing: false

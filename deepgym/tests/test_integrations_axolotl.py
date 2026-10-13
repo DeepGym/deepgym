@@ -98,6 +98,40 @@ def test_generated_grpo_config_scores_with_deepgym() -> None:
     assert config['datasets'] == [{'path': 'data/train.jsonl', 'split': 'train'}]
 
 
+def test_generated_grpo_config_passes_axolotls_batch_checks(tmp_path: Path) -> None:
+    """The default config must train on one GPU, as Axolotl 0.20 builds and checks it.
+
+    Axolotl fills ``eval_batch_size`` with ``micro_batch_size`` (utils/config: normalize_config)
+    and evaluates when ``val_set_size`` and ``evals_per_epoch`` are set. Its own GRPO check
+    (schemas/validation.py: check_grpo_batch_size_divisibility) only runs with an explicit
+    ``trl.num_generations``, and otherwise leaves the default (8) to TRL's GRPOConfig, which
+    Axolotl builds from these values and which also needs every eval batch to hold whole
+    groups of completions. Axolotl pins TRL 1.13, whose checks match 1.14's.
+    """
+    trl = pytest.importorskip('trl')
+    config = yaml.safe_load(generate_axolotl_config(base_model='Qwen/Qwen2.5-0.5B-Instruct'))
+    micro, accumulation = config['micro_batch_size'], config['gradient_accumulation_steps']
+    eval_batch = config.get('eval_batch_size') or micro
+    assert config['val_set_size'] and config['evals_per_epoch']  # so Axolotl evaluates
+    assert config['trl'].get('num_generations') is None  # so Axolotl defers to TRL
+
+    trl.GRPOConfig(
+        output_dir=str(tmp_path),
+        per_device_train_batch_size=micro,
+        gradient_accumulation_steps=accumulation,
+        per_device_eval_batch_size=eval_batch,
+        eval_strategy='steps',
+        eval_steps=1 / config['evals_per_epoch'],
+        report_to='none',
+        use_cpu=True,
+    )
+    # TRL's checks for more GPUs, which this CPU run can't start.
+    generations = trl.GRPOConfig.num_generations
+    for gpus in (2, 4, 8):
+        assert micro * gpus * accumulation % generations == 0
+        assert eval_batch * gpus % generations == 0
+
+
 def test_prm_config_keeps_its_stepwise_dataset() -> None:
     config = yaml.safe_load(generate_axolotl_config(base_model='m', method='prm'))
 

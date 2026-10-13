@@ -712,6 +712,14 @@ _EDITED_INI = '[pytest]\n# edited\n'
         ),
         # calc.py inside tests/test_calc.py is no mention: a plain fix is graded.
         pytest.param('{pytest} -c ci.ini -p localplugin', {}, 'graded', id='fix-only'),
+        # A basename behind another folder names a different file (NodeBB tests its
+        # src/socket.io/posts.js with test/posts.js): the fix is graded.
+        pytest.param(
+            'echo test/posts.js && {pytest}',
+            {'src/socket.io/posts.js': 'module.exports = {};\n'},
+            'graded',
+            id='basename-in-another-folder',
+        ),
     ],
 )
 def test_files_the_test_command_mentions_are_uncertain(

@@ -590,15 +590,19 @@ class PatchVerifier:
 
 
             def _mentioned(rel: str, text: str) -> bool:
-                # Whether the test command text names *rel* by its repo-relative path, basename or,
-                # for Python, module (as `-p plugin` names plugin.py). No shell parsing: a plain
-                # search, except that a match glued to other name characters doesn't count, or
-                # calc.py inside tests/test_calc.py would make every such fix uncertain.
+                # Whether the test command text names *rel*: by its repo-relative path (also as
+                # ./rel or an absolute path), by its bare basename (`-c ci.ini` after a cd) or, for
+                # Python, by module (as `-p plugin` names plugin.py). No shell parsing, just a search
+                # where a match glued to other name characters doesn't count (calc.py inside
+                # test_calc.py), nor a basename or module behind a folder: posts.js in test/posts.js
+                # names a different file than src/socket.io/posts.js.
                 base = rel.rsplit('/', 1)[-1]
-                names = {rel, base}
+                names = [(rel, ''), (base, '/')]
                 if base.endswith('.py'):
-                    names.add(rel[:-3].removesuffix('/__init__').replace('/', '.'))
-                return any(re.search(rf'(?<![\\w.-]){re.escape(name)}(?![\\w.-])', text) for name in names)
+                    names.append((rel[:-3].removesuffix('/__init__').replace('/', '.'), '/'))
+                return any(
+                    re.search(rf'(?<![\\w.{behind}-]){re.escape(name)}(?![\\w.-])', text) for name, behind in names
+                )
 
 
             def _read_config(path: Path) -> bytes | None:

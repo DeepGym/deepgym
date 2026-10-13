@@ -27,7 +27,8 @@ def run_qa(
     Multi-turn and computer-use envs (they need an agent) and benchmark-backed
     envs such as swebench_pro or mimo_code (they score through their own runner)
     get a single 'skipped' check with status 'skip', so the report is neither a
-    pass nor a failure. An environment that fails to load gets a failed 'load' check.
+    pass nor a failure. Harbor tasks with a solution/solve.sh are checked with it as
+    the reference. An environment that fails to load gets a failed 'load' check.
 
     Args:
         name: Registered environment name, e.g. 'coin_change'.
@@ -50,11 +51,15 @@ def run_qa(
         return QAReport(environment=name, checks=[check])
     if isinstance(env, MultiTurnEnvironment):
         return _skipped(name, 'multi-turn/computer-use env needs an agent')
-    # The tests core.run_batch and core.run use to route a run to a benchmark runner.
-    if hasattr(env, 'prepare_batch_requests') or hasattr(env, 'run_with_deepgym'):
+    # The tests core.run_batch and core.run use to route a run to a benchmark runner. One
+    # with a reference solution of its own (a Harbor task's solve.sh) is still checkable.
+    reference = env.reference_solution
+    if hasattr(env, 'prepare_batch_requests') or (
+        hasattr(env, 'run_with_deepgym') and reference is None
+    ):
         return _skipped(name, 'benchmark-backed env scores through its own runner')
 
-    checks = single_turn_checks(env, env.reference_solution, dg, reruns)
+    checks = single_turn_checks(env, reference, dg, reruns)
     checks.append(hack_resistant(env, dg))
     if client is not None:
         checks.append(difficulty_check(env, dg, client, samples))
@@ -66,4 +71,3 @@ def _skipped(name: str, reason: str) -> QAReport:
     details = f'{reason}; the gate checks single-turn envs'
     check = QACheck(name=SKIPPED, status='skip', details=details)
     return QAReport(environment=name, checks=[check])
-

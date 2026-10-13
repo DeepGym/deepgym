@@ -294,10 +294,14 @@ class PatchVerifier:
             # Test infrastructure a model's diff must not touch outside the hidden test
             # patch's own paths (those are put back anyway): the tests, their helpers,
             # data and snapshots, everything a test runner or interpreter loads by name
-            # or from its config, and the installed test harness and dependencies. This
-            # is a denylist and so is necessarily incomplete; the per-test report gate is
-            # the real defence. It cannot stop a diff to the code under test that forces
-            # an exit (os._exit / atexit at import), which the binary reward still trusts.
+            # or from its config, and the installed test harness and dependencies.
+            #
+            # This is a stopgap denylist and can never be complete: there will always be
+            # another file a runner autoloads, and it cannot stop a diff to the code under
+            # test that forces an exit (os._exit / atexit at import), which the exit-code
+            # reward still trusts. Do not keep growing it indefinitely. The real defence is
+            # the per-test report gate (verdict from the runner's own report, fail closed),
+            # which supersedes this; add new frameworks there, not here.
             _TEST_DIRS = {
                 'test', 'tests', 'testing', '__tests__', 'testdata', 'spec', 'specs',
                 '__snapshots__', '__mocks__',

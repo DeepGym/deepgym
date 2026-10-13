@@ -6,6 +6,7 @@ import pytest
 
 from deepgym import Action, DeepGym, load_environment
 from deepgym.models import Environment, MultiTurnEnvironment
+from deepgym.session import _IDS_ARE_EXCLUSIVE
 from tests.test_isolation import LOOPBACK_PROBE, LOOPBACK_PROBE_VERIFIER, WRONG, _env
 from tests.test_session import ALWAYS_EQUAL, FIXED, debug_fix_score
 
@@ -154,6 +155,17 @@ def test_session_solution_cannot_gain_privileges(dg: DeepGym) -> None:
     ])  # fmt: skip
     _, result = dg.run_episode(env, lambda obs: next(actions))
     assert result.passed, result.output
+
+
+def test_session_users_hold_ids_no_other_account_has(dg: DeepGym) -> None:
+    """The setup check passes for the fresh session users, and fails once any other
+    account shares the agent's uid."""
+    with dg.session(MultiTurnEnvironment(task='t')) as session:
+        backend = session._backend
+        assert backend.exec_trusted(_IDS_ARE_EXCLUSIVE, 30).exit_code == 0
+        shared = 'useradd -o -M -u "$(id -u dgagent)" dgshared'
+        assert backend.exec_trusted(shared, 30).exit_code == 0
+        assert backend.exec_trusted(_IDS_ARE_EXCLUSIVE, 30).exit_code != 0
 
 
 def test_judge_temp_files_are_private(dg: DeepGym) -> None:

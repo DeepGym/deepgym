@@ -530,6 +530,15 @@ def test_session_refuses_root_ids_for_its_users(ids: str) -> None:
     assert box.deleted
 
 
+def test_session_setup_requires_ids_no_other_account_holds() -> None:
+    """Setup proves each session user's uid and gid are that account's alone (an allowlist
+    of one), rather than only ruling out root."""
+    box = FakeSandbox(network_blocked=True, answers=[_USERS])
+    SandboxBackend(box)
+    setup = next(c for c in box.commands if 'useradd' in c)
+    assert 'getent passwd' in setup and 'getent group' in setup
+
+
 def test_session_solver_rule_is_checked_installed_whole_and_pinned() -> None:
     """The verifier's sudo only starts code as the solver under no-new-privs, and the rule
     is checked by visudo and renamed into place, never written where sudo reads it."""

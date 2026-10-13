@@ -89,7 +89,7 @@ _PROTECTED_PATHS = tuple(
     for path in (
         '/bin', '/boot', '/dev', '/etc', '/lib', '/lib32', '/lib64', '/libx32', '/proc',
         '/root', '/run', '/sbin', '/sys', '/usr', '/var',
-        SANDBOX_ROOT, _STAGING_DIR, _VERIFIER_DIR, _NETNS,
+        SANDBOX_ROOT, _STAGING_DIR, _VERIFIER_DIR, _RUNTIME_DIR, _NETNS,
     )
 )  # fmt: skip
 # Seconds to take over, pack or unpack a work directory (it may be large).
@@ -263,6 +263,18 @@ os.execvp('sleep', ['sleep', 'infinity'])
 # setpriv's path.
 _SUDOERS_RULE = f'{_VERIFIER_USER} ALL=({SOLVER_USER}) NOPASSWD: %s --no-new-privs -- *\\n'
 
+# Each session user's uid and gid must be held by that account and its own group alone,
+# so dropping to them grants that fresh account's rights and nobody else's. Proving that
+# beats ruling out root: a shared id with any other account would carry its rights too.
+_IDS_ARE_EXCLUSIVE = (
+    f'for u in {_AGENT_USER} {_VERIFIER_USER} {SOLVER_USER}; do '
+    'id "$u" >/dev/null 2>&1 || continue; '
+    '[ "$(getent passwd | cut -d: -f3 | grep -Fcx "$(id -u "$u")")" = 1 ] && '
+    '[ "$(getent group | cut -d: -f3 | grep -Fcx "$(id -g "$u")")" = 1 ] && '
+    '[ "$(id -gn "$u")" = "$u" ] || { echo "$u shares an id with another account"; exit 1; }; '
+    'done'
+)
+
 
 class SandboxBackend:
     """Run actions in a throwaway sandbox from any provider (see :mod:`deepgym.sandboxes`).
@@ -321,6 +333,7 @@ class SandboxBackend:
                     'chmod 440 "$rule" && visudo -cqf "$rule" && '
                     'mv -f "$rule" /etc/sudoers.d/deepgym && '
                     f'mkdir -p -m 755 {_RUNTIME_DIR} && solver=1; fi && mkdir -p {quoted} && '
+                    f'{_IDS_ARE_EXCLUSIVE} && '
                     f'echo "$(id -u {_AGENT_USER}) $(id -g {_AGENT_USER}) '
                     f'$(id -u {_VERIFIER_USER}) $(id -g {_VERIFIER_USER}) $solver '
                     '$(command -v setpriv) $(command -v nsenter || echo -) '
@@ -335,7 +348,7 @@ class SandboxBackend:
             agent_uid, agent_gid, verifier_uid, verifier_gid, solver, setpriv, nsenter, sudo = (
                 ids.split()[-8:]
             )
-            # They go straight into setpriv: a root id would make the agent root.
+            # Setup proved them exclusive; this guards the parse before they reach setpriv.
             user_ids = (agent_uid, agent_gid, verifier_uid, verifier_gid)
             if not all(v.isdecimal() and int(v) > 0 for v in user_ids):
                 raise SandboxError(f'Refusing session users with root or unknown ids: {ids!r}')

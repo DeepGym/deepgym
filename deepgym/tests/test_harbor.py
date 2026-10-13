@@ -181,7 +181,7 @@ def test_check_workdir_accepts_ordinary_folders(path: str) -> None:
         'app', '/', '/app/../logs', '/tests', '/logs', '/logs/x', '/solution',
         '/opt/deepgym-harbor', '/opt/deepgym/judge', '/opt', '/tmp', '/root', '/root/work',
         '/usr/local', '/etc/x', '/var/lib/dpkg', '//usr/bin', '///etc', '/./usr/bin',
-        '/srv/../root', '//', '/app/../../usr',
+        '/srv/../root', '//', '/app/../../usr', '/opt/deepgym-runtime', '/opt/deepgym-runtime/x',
     ],
 )  # fmt: skip
 def test_check_workdir_rejects_paths_root_trusts_or_the_harness_writes(path: str) -> None:

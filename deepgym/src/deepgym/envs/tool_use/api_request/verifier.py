@@ -29,16 +29,41 @@ def _phrase(rng):
     return ' '.join(rng.choice(WORDS).capitalize() for _ in range(rng.randint(2, 4)))
 
 
-def _document(rng):
-    """Return (title, document) with distractor titles and a shuffled key order."""
+def _document(rng, outer_title):
+    """Return (title, document): the slideshow title among decoy titles, keys shuffled.
+
+    *outer_title* puts the top-level decoy ``title`` 'first' or 'last' in the document,
+    or anywhere if None.
+    """
     title = _phrase(rng)
     slides = [{'title': _phrase(rng), 'type': rng.choice(['all', 'intro'])} for _ in range(3)]
     show = [('author', _phrase(rng)), ('date', f'2026-{rng.randint(1, 12):02d}-01')]
     show += [('slides', slides), ('title', title)]
     rng.shuffle(show)
     top = [('slideshow', dict(show)), ('title', f'API v{rng.randint(1, 9)}')]
-    rng.shuffle(top)
+    if outer_title is None:
+        rng.shuffle(top)
+    elif outer_title == 'first':
+        top.reverse()
     return title, dict(top)
+
+
+def documents(seed):
+    """Return (path, title, JSON body) for each document drawn from *seed*.
+
+    Paths are distinct. One document puts a decoy title before ``slideshow.title`` and
+    another puts one after it, so printing the first or the last "title" in the body
+    never gets full credit.
+    """
+    rng = random.Random(seed)
+    first, last = rng.sample(range(DOCUMENTS), 2)
+    served = []
+    for i, doc_id in enumerate(rng.sample(range(10**6), DOCUMENTS)):
+        placement = 'first' if i == first else 'last' if i == last else None
+        title, document = _document(rng, placement)
+        path = f'/api/v{rng.randint(1, 3)}/slideshows/{doc_id}'
+        served.append((path, title, json.dumps(document)))
+    return served
 
 
 class _Handler(http.server.BaseHTTPRequestHandler):
@@ -62,22 +87,16 @@ class _Handler(http.server.BaseHTTPRequestHandler):
 def verify(solution_path, test_cases_path=None):
     """Score the fraction of served documents whose title the solution prints exactly."""
     seed = secrets.randbits(64)  # fresh every run, so earlier runs reveal nothing
-    rng = random.Random(seed)
-    expected = {}
-    routes = {}
-    for _ in range(DOCUMENTS):
-        path = f'/api/v{rng.randint(1, 3)}/slideshows/{rng.randrange(10**6)}'
-        expected[path], document = _document(rng)
-        routes[path] = json.dumps(document).encode('utf-8')
+    served = documents(seed)
 
     server = http.server.ThreadingHTTPServer(('127.0.0.1', 0), _Handler)
-    server.routes = routes
+    server.routes = {path: body.encode('utf-8') for path, _, body in served}
     port = server.server_address[1]
     threading.Thread(target=server.serve_forever, daemon=True).start()
 
     cases = []
     try:
-        for i, (path, title) in enumerate(expected.items()):
+        for i, (path, title, _) in enumerate(served):
             url = f'http://127.0.0.1:{port}{path}'
             case = {'id': f'document_{i}', 'input_summary': path, 'expected_summary': title}
             try:

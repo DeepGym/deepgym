@@ -1,8 +1,12 @@
 """api_request scores what the solution fetches and prints, not what its source says."""
 
+import importlib.util
+import re
+import sys
+
 import pytest
 
-from deepgym import DeepGym, load_environment
+from deepgym import DeepGym, load_environment, solution_runtime
 
 ENV = load_environment('api_request')
 REFERENCE = ENV.verifier_path.with_name('reference_solution.py').read_text(encoding='utf-8')
@@ -34,6 +38,13 @@ import re, sys, urllib.request
 body = urllib.request.urlopen(sys.argv[1], timeout=10).read().decode()
 print(re.search(r'"title": "([^"]*)"', body).group(1))
 """
+
+LAST_TITLE_IN_BODY = FIRST_TITLE_IN_BODY.replace(
+    """re.search(r'"title": "([^"]*)"', body).group(1)""",
+    """re.findall(r'"title": "([^"]*)"', body)[-1]""",
+)
+
+TITLES = re.compile(r'"title": "([^"]*)"')
 
 FIRST_SLIDE_TITLE = REFERENCE.replace(
     "['slideshow']['title']", "['slideshow']['slides'][0]['title']"
@@ -69,10 +80,28 @@ def test_documents_change_every_run_so_a_lookup_table_fails(dg: DeepGym) -> None
 
 @pytest.mark.parametrize(
     'solution',
-    [HARDCODED, KEYWORDS, FIRST_TITLE_IN_BODY, FIRST_SLIDE_TITLE],
-    ids=['hardcoded_print', 'keyword_stuffing', 'first_title_in_body', 'wrong_field'],
+    [HARDCODED, KEYWORDS, FIRST_TITLE_IN_BODY, LAST_TITLE_IN_BODY, FIRST_SLIDE_TITLE],
+    ids=['hardcoded_print', 'keyword_stuffing', 'first_title', 'last_title', 'wrong_field'],
 )
 def test_shortcuts_fail(dg: DeepGym, solution: str) -> None:
     result = dg.run(ENV, solution)
 
     assert (result.passed, result.score < 1.0) == (False, True), result.output
+
+
+def test_every_seed_puts_a_decoy_title_before_and_after_the_answer(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Printing the first or the last "title" in the body never gets full credit, on any seed."""
+    monkeypatch.setitem(sys.modules, 'deepgym_solution', solution_runtime)
+    spec = importlib.util.spec_from_file_location('api_request_verifier', ENV.verifier_path)
+    verifier = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(verifier)
+
+    for seed in range(2000):
+        documents = verifier.documents(seed)
+        titles = [(TITLES.findall(body), title) for _, title, body in documents]
+
+        assert len({path for path, _, _ in documents}) == verifier.DOCUMENTS, seed
+        assert not all(found[0] == title for found, title in titles), seed
+        assert not all(found[-1] == title for found, title in titles), seed

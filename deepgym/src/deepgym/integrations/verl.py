@@ -45,14 +45,20 @@ _SPECIAL_TOKEN = re.compile(r'<\|[\w.-]+\|>|<｜[^｜<>]+｜>|</s>|<eos>|<end_of
 
 
 def _drop_trailing_special_tokens(response: str) -> str:
-    """Return *response* without the special tokens (and whitespace) at its end."""
-    stripped = response.rstrip()
-    start = stripped.rfind('<')
-    while start != -1 and _SPECIAL_TOKEN.fullmatch(stripped, start):
-        response = stripped[:start]
-        stripped = response.rstrip()
-        start = stripped.rfind('<')
-    return response
+    """Return *response* without the special tokens (and whitespace) at its end.
+
+    Walks back by index, so it stays linear in the response length however many
+    tokens there are.
+    """
+    cut = None
+    end = len(response.rstrip())
+    while (start := response.rfind('<', 0, end)) != -1 and _SPECIAL_TOKEN.fullmatch(
+        response, start, end
+    ):
+        cut = end = start
+        while end and response[end - 1].isspace():
+            end -= 1
+    return response if cut is None else response[:cut]
 
 
 def extract_code(response: str) -> str:

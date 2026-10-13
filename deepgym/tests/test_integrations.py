@@ -1,5 +1,6 @@
 """Tests for deepgym.integrations -- TRL, verl, OpenRLHF integration wrappers."""
 
+import time
 from pathlib import Path
 
 import pytest
@@ -273,8 +274,9 @@ class TestRewardFunction:
         assert batch.total == 1
 
 
+OPENRLHF_CONTEXT = '<|im_start|>user\n' + 'Strings are sequences of characters. ' * 12
 OPENRLHF_PROMPT = (
-    '<|im_start|>user\nWrite reverse_string(s). For example:\n'
+    f'{OPENRLHF_CONTEXT}\nWrite reverse_string(s). For example:\n'
     f'```python\n{GOOD_SOLUTION}```<|im_end|>\n<|im_start|>assistant\n'
 )
 """A chat-templated prompt whose fenced example would pass if it were ever scored."""
@@ -340,7 +342,7 @@ class TestOpenRLHFIntegration:
         The response starts after the prompt's tail; a query that doesn't contain its
         prompt at all is not scored.
         """
-        truncated = OPENRLHF_PROMPT[len('<|im_start|>user\nWrite') :]
+        truncated = OPENRLHF_PROMPT[len(OPENRLHF_CONTEXT) // 2 :]
         queries = [
             truncated + 'No idea.<|im_end|>',
             truncated + f'```python\n{GOOD_SOLUTION}```<|im_end|>',
@@ -364,6 +366,47 @@ class TestOpenRLHFIntegration:
         )
         assert response.status_code == 200
         assert response.json()['rewards'] == []
+
+
+class TestUntrustedInputSize:
+    """The reward server takes untrusted bodies: matching and extraction stay linear and capped."""
+
+    def test_one_megabyte_prompt_and_query_match_fast(self) -> None:
+        size = 1_000_000
+        repetitive = OpenRLHFRewardRequest(prompts=['a' * size + 'c'], query=['a' * size + 'b'])
+        prompt = 'ab' * (size // 2)
+        cut = OpenRLHFRewardRequest(prompts=[prompt], query=[prompt[size // 2 :] + 'answer'])
+
+        start = time.perf_counter()
+        responses = repetitive.responses + cut.responses
+        elapsed = time.perf_counter() - start
+
+        assert responses == [None, 'answer']
+        assert elapsed < 0.5
+
+    def test_one_megabyte_of_trailing_tokens_extracts_fast(self) -> None:
+        start = time.perf_counter()
+        code = extract_code('x = 1\n' + '<|im_end|> ' * 100_000)
+        elapsed = time.perf_counter() - start
+
+        assert code == 'x = 1\n'
+        assert elapsed < 0.5
+
+    def test_oversized_texts_are_rejected_before_matching(
+        self, env: Environment, local_dg: DeepGym
+    ) -> None:
+        from deepgym.integrations.openrlhf import MAX_TEXT_CHARS
+
+        app = FastAPI()
+        app.include_router(create_openrlhf_router(env, local_dg))
+        too_long = 'x' * (MAX_TEXT_CHARS + 1)
+
+        response = TestClient(app).post(
+            '/reward/score', json={'query': [too_long], 'prompts': ['p'], 'labels': [None]}
+        )
+
+        assert response.status_code == 422
+        assert 'at most' in response.text
 
 
 class TestOpenRLHFModels:

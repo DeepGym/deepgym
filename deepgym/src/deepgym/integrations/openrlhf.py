@@ -32,6 +32,7 @@ Sources:
 from __future__ import annotations
 
 import logging
+from typing import Annotated
 
 try:
     from fastapi import APIRouter
@@ -52,28 +53,34 @@ PROMPT_MISMATCH = 'prompt_mismatch'
 """error_type of a query whose prompt couldn't be found: it scores 0 instead of risking
 scoring prompt text, such as a fenced example in the prompt."""
 
-_PROBE = 64
-"""Leading query characters that must match the prompt's tail when the prompt was cut."""
+MAX_TEXT_CHARS = 2_000_000
+"""Longest query, prompt or output accepted (about 500k tokens); longer ones get a 422."""
+MAX_BATCH = 1024
+"""Most samples in one request."""
+MAX_REQUEST_CHARS = 64_000_000
+"""Most characters in one request, over every query, prompt and output."""
+
+_TAIL = 256
+"""Characters at the end of a prompt that locate the response when its front was cut."""
+
+_Text = Annotated[str, Field(max_length=MAX_TEXT_CHARS)]
 
 
 def _response(query: str, prompt: str) -> str | None:
     """Return the response part of *query*, or None if its prompt can't be located.
 
-    The query is the prompt and the response decoded together. When the prompt is too
-    long, OpenRLHF drops tokens from its front, so the query starts with the prompt's
-    tail instead, and the response starts after the longest tail of *prompt* that the
-    query starts with (at least ``_PROBE`` characters of it).
+    The query is the prompt and the response decoded together, so it normally starts
+    with the prompt. When the prompt is too long, OpenRLHF drops tokens from its front
+    and keeps its end, so the response starts after the last occurrence of the prompt's
+    final ``_TAIL`` characters. That never takes in prompt text; a response that repeats
+    those characters only loses what comes before the repeat. Linear time: a prefix
+    check and one ``rfind`` of a bounded needle.
     """
     if query.startswith(prompt):
         return query[len(prompt) :]
-    query = query.lstrip('\ufffd')  # leftover bytes of a character the cut split
-    probe = query[:_PROBE]
-    start = prompt.find(probe)
-    while start != -1:
-        if query.startswith(prompt[start:]):
-            return query[len(prompt) - start :]
-        start = prompt.find(probe, start + 1)
-    return None
+    tail = prompt[-_TAIL:]
+    end = query.rfind(tail)
+    return None if end == -1 else query[end + len(tail) :]
 
 
 class OpenRLHFRewardRequest(BaseModel):
@@ -81,20 +88,24 @@ class OpenRLHFRewardRequest(BaseModel):
 
     OpenRLHF's agent client sends ``query`` (each prompt and its response decoded
     together, special tokens included), ``prompts`` and ``labels`` (unused here).
-    Older clients send ``outputs``, the responses alone.
+    Older clients send ``outputs``, the responses alone. Bodies are untrusted, so sizes
+    are capped (``MAX_TEXT_CHARS``, ``MAX_BATCH``, ``MAX_REQUEST_CHARS``).
     """
 
-    prompts: list[str]
-    query: list[str] | None = None
-    outputs: list[str] | None = None
+    prompts: list[_Text] = Field(max_length=MAX_BATCH)
+    query: list[_Text] | None = Field(default=None, max_length=MAX_BATCH)
+    outputs: list[_Text] | None = Field(default=None, max_length=MAX_BATCH)
 
     @model_validator(mode='after')
     def check_responses(self) -> OpenRLHFRewardRequest:
-        """Require ``query`` or ``outputs``, with one prompt per query."""
+        """Require ``query`` or ``outputs``, one prompt per query, and a bounded total size."""
         if self.outputs is None and self.query is None:
             raise ValueError('send query (prompt + response, as OpenRLHF does) or outputs')
         if self.outputs is None and len(self.query) != len(self.prompts):
             raise ValueError('query and prompts must have the same length')
+        texts = (*self.prompts, *(self.query or ()), *(self.outputs or ()))
+        if sum(map(len, texts)) > MAX_REQUEST_CHARS:
+            raise ValueError(f'request should have at most {MAX_REQUEST_CHARS} characters')
         return self
 
     @property

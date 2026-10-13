@@ -4,6 +4,7 @@ The fake records every command and upload; real containers are in test_harbor_li
 """
 
 import base64
+import contextlib
 import io
 import re
 import shlex
@@ -21,7 +22,7 @@ from deepgym.harbor.agent import run_agent
 from deepgym.harbor.grading import grade
 from deepgym.harbor.task import pack_files
 from deepgym.models import Environment
-from deepgym.sandboxes import TRUSTED_PATH, SandboxTimeoutError, build_image
+from deepgym.sandboxes import SandboxTimeoutError, build_image
 from deepgym.sandboxes.docker import DockerContainer
 from deepgym.session import SandboxBackend
 from tests.test_harbor import BUILT, HELLO
@@ -194,57 +195,51 @@ class _EnvBox(FakeSandbox):
         return super().exec(command, env=env, **kwargs)
 
 
-def test_root_never_resolves_a_command_through_the_image_path() -> None:
+def _env_box(*answers: tuple[str, str], blocked: bool = True, workdir: str = '/app') -> _EnvBox:
+    """An _EnvBox whose setup reports the session users and *workdir*."""
+    users = ('useradd', f'{_IDS}\n{workdir}')
+    return _EnvBox(network_blocked=blocked, answers=[users, *answers])
+
+
+def test_tests_run_with_an_allowlisted_env_and_a_resolved_path() -> None:
     task = HarborTask.from_dir(HELLO)
-    agent = _box(_ENCODED, blocked=False)
-    image = '//app/bin:/usr/bin:.:/opt/tools\0C.UTF-8\0\0xterm\0'
-    grader = _EnvBox(
-        network_blocked=False,
-        answers=[
-            ('useradd', f'{_IDS}\n/app'),
-            ("printf '%s", image),
-            # How the grader resolves //app/bin, /usr/bin and /opt/tools (a link into /app).
-            ('realpath -e', '/app/bin\n/usr/bin\n/app/tools'),
-            _PASS,
-        ],
+    agent = _box(_ENCODED)
+    grader = _env_box(
+        # The grader's own image env (session capture), then the probe grading reads for the
+        # tests: PATH //app/bin:/usr/bin:.:/opt/tools, LANG, no LC_ALL, TERM.
+        ('/usr/bin/env -0', 'PATH=/usr/bin\0LD_PRELOAD=/app/x.so\0'),
+        ("printf '%s", '//app/bin:/usr/bin:.:/opt/tools\0C.UTF-8\0\0xterm'),
+        # realpath resolves //app/bin and the /opt/tools link into /app; /usr/bin stays.
+        ('realpath -ez', '/app/bin\0/usr/bin\0/app/tools\0'),
+        _PASS,
     )
 
     run = run_agent(agent, task, 'true')
     grade(grader, task, run.workspace, run.workdir)
 
-    # Provider builtins aside, each command names its first program by absolute path, and
-    # every harness command runs with an empty environment and the trusted PATH.
-    for command in agent.commands + grader.commands:
-        if command == 'pwd' or command.startswith('printf ') or command == '/usr/bin/env -0':
-            continue
-        assert command.startswith('/'), command
-        if command.startswith('/usr/bin/env -i ') and _RUN_TESTS not in command:
-            assert shlex.split(command)[2] == f'PATH={TRUSTED_PATH}', command
-    # The tests get only allowlisted variables, and PATH entries that resolve outside /app.
     tests = shlex.split(grader.commands[_index(grader, _RUN_TESTS)])
     start = tests.index('/usr/bin/env') + 2  # past `env -i`, after the nsenter prefix
     assigned = dict(item.split('=', 1) for item in tests[start : tests.index('/bin/bash')])
     assert assigned == {'LANG': 'C.UTF-8', 'TERM': 'xterm', 'HOME': '/root', 'PATH': '/usr/bin'}
-    assert grader.envs[_index(grader, _RUN_TESTS)] is None
 
 
-def test_backend_refuses_loader_variables_that_point_where_the_agent_writes() -> None:
-    for listing in ('LD_PRELOAD=/app/hook.so', 'LD_LIBRARY_PATH=/usr/lib:', 'GCONV_PATH=lib'):
-        box = _box(('/usr/bin/env -0', f'PATH=/usr/bin\0{listing}\0'), ('realpath -m', '/app/x'))
-        with pytest.raises(SandboxError, match='The image sets'):
-            SandboxBackend(box, '/app')
-        assert box.deleted
+def test_backend_clears_the_whole_image_env_for_root_commands() -> None:
+    box = _env_box(('/usr/bin/env -0', 'PATH=/app/bin:/usr/bin\0LD_PRELOAD=/app/x.so\0LANG=C\0'))
+    backend = SandboxBackend(box, '/app')
 
-    linked = _box(('/usr/bin/env -0', 'LD_LIBRARY_PATH=/opt/lib\0'), ('realpath -m', '/app/lib'))
-    with pytest.raises(SandboxError, match='resolves to /app/lib'):
-        SandboxBackend(linked, '/app')
+    with contextlib.suppress(SandboxError):
+        backend.archive_workdir()  # a privileged root command
+    backend.exec('true', timeout=5)
 
-    fine = _box(
-        ('/usr/bin/env -0', 'LD_PRELOAD=libjemalloc.so.2\0LD_LIBRARY_PATH=/usr/local/cuda/lib64\0'),
-        ('realpath -m', '/usr/local/cuda/lib64'),
-    )
-    SandboxBackend(fine, '/app')
-    assert not fine.deleted
+    cleared = {'PATH': '', 'LD_PRELOAD': '', 'LANG': ''}
+    # Every root command names each image variable but empties it, so nothing it sets
+    # (a loader path, a startup file) reaches the first binary.
+    privileged = [env for cmd, env in zip(box.commands, box.envs) if '-czf ' in cmd]
+    assert privileged and all(env == cleared for env in privileged)
+    # The agent keeps the image PATH and locale, with every loader variable emptied.
+    agent_env = box.envs[-1]
+    assert agent_env['PATH'] == '/app/bin:/usr/bin' and agent_env['LANG'] == 'C'
+    assert agent_env['LD_PRELOAD'] == '' and agent_env['HOME'] == '/home/dgagent'
 
 
 def test_backend_owns_where_the_workdir_really_leads() -> None:

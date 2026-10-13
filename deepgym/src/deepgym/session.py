@@ -92,15 +92,11 @@ _PROTECTED_PATHS = tuple(
 _TRANSFER_TIMEOUT_S = 600
 # Largest gzipped work directory archive_workdir hands back; it is held in memory.
 _MAX_ARCHIVE_BYTES = 256 << 20
-# Image variables naming files the dynamic loader reads before any command root runs:
-# library lists (a bare name is searched in system folders) and folder lists.
-_LOADER_LIBRARIES = frozenset({'LD_PRELOAD', 'LD_AUDIT'})
-_LOADER_FOLDERS = frozenset({
-    'LD_LIBRARY_PATH', 'LD_ORIGIN_PATH', 'LD_DEBUG_OUTPUT', 'LD_PROFILE_OUTPUT',
-    'GCONV_PATH', 'LOCPATH',
-})  # fmt: skip
-# Folders anyone can write, besides the agent's own work directory and home.
-_SHARED_WRITABLE = ('/tmp', '/var/tmp', '/dev/shm')
+# Image variables the agent keeps, besides HOME and PATH: locale and terminal only.
+# Every command here clears the whole image environment at the provider, so no loader or
+# startup variable (LD_*, BASH_ENV, GCONV_PATH, PERL5OPT, ...) can point a root process at
+# a file the agent wrote. An allowlist needs no list of the dangerous names.
+_AGENT_KEEP = ('LANG', 'LC_ALL', 'LC_CTYPE', 'TERM', 'TZ')
 _DISPLAY = ':0'
 _STEP_OUTPUT = '_step_output.txt'
 
@@ -331,7 +327,6 @@ class SandboxBackend:
             self._as_verifier = _drop_to(
                 setpriv, verifier_uid, verifier_gid, allow_sudo=solver == '1'
             )
-            self._env = {'HOME': _AGENT_HOME}
             self._runtime_env: dict[str, str] = {}
             if solver == '1':
                 runtime = f'{_RUNTIME_DIR}/{RUNTIME_FILE}'
@@ -342,11 +337,21 @@ class SandboxBackend:
                     'DEEPGYM_RUNTIME': runtime,
                     'DEEPGYM_PYTHON': self.python,
                 }
-            self._refuse_loader_paths_the_agent_writes()
+            # Every image variable, cleared at the provider so the first binary of each
+            # root command (sh, setpriv, ...) never loads what the image's env names.
+            self._image = _image_env(sandbox)
+            self._clear = dict.fromkeys(self._image, '')
             self._offline = ''
             if not sandbox.network_blocked:
                 self._make_offline_namespace()
                 self._offline = f'{shlex.quote(nsenter)} --net={_NETNS} -- '
+            locale = {name: self._image[name] for name in _AGENT_KEEP if self._image.get(name)}
+            self._agent_env = {
+                'HOME': _AGENT_HOME,
+                'PATH': self._image.get('PATH') or TRUSTED_PATH,
+                **locale,
+            }
+            self._verifier_base = {'DEEPGYM_AGENT_HOME': _AGENT_HOME, **locale}
         except BaseException:
             self.close()
             raise
@@ -355,43 +360,6 @@ class SandboxBackend:
     def workdir(self) -> str:
         """The work directory, as it really is in the sandbox (links resolved)."""
         return self._workdir
-
-    def _refuse_loader_paths_the_agent_writes(self) -> None:
-        """Refuse an image whose loader variables point where the agent can write.
-
-        Every provider starts its commands with the image's environment, so the first
-        program of each root command loads what ``LD_PRELOAD``, ``LD_LIBRARY_PATH`` and
-        the like name. That is safe only while no agent can change those files.
-
-        Raises:
-            SandboxError: If such a variable holds a relative entry, or one that resolves
-                into the work directory, the agent's home or a world-writable folder.
-        """
-        listed = self._sandbox.exec('/usr/bin/env -0', timeout=30).output
-        entries = [
-            (name, entry)
-            for name, _, value in (item.partition('=') for item in listed.split('\0'))
-            if value and (name in _LOADER_LIBRARIES or name in _LOADER_FOLDERS)
-            for entry in value.replace(' ', ':').split(':')
-            if not (name in _LOADER_LIBRARIES and entry and '/' not in entry)
-        ]
-        if not entries:
-            return
-        # An empty or relative entry is looked up from the working folder.
-        relative = [(name, entry) for name, entry in entries if not entry.startswith('/')]
-        if relative:
-            raise SandboxError(f'The image sets {relative} relative to the working folder')
-        resolved = self._sandbox.exec(
-            trusted('; '.join(f'realpath -m -- {shlex.quote(entry)}' for _, entry in entries)),
-            timeout=30,
-        ).output.splitlines()
-        writable = [self._workdir, _AGENT_HOME, *_SHARED_WRITABLE]
-        for (name, entry), real in zip(entries, resolved, strict=False):
-            if any(PurePosixPath(real).is_relative_to(folder) for folder in writable):
-                raise SandboxError(
-                    f'The image sets {name}={entry}, which resolves to {real}, a folder the '
-                    'agent can write; root would load it'
-                )
 
     def _make_offline_namespace(self) -> None:
         """Make a loopback-only network namespace and bind-mount it at ``_NETNS``.
@@ -411,6 +379,7 @@ class SandboxBackend:
                 f'touch {_NETNS} && mount --bind /proc/$pid/ns/net {_NETNS} && '
                 f'nsenter --net={_NETNS} true'
             ),
+            env=self._clear,
             timeout=30,
         )
         if made.exit_code != 0:
@@ -428,7 +397,7 @@ class SandboxBackend:
         return self._sandbox.exec(
             f'{self._offline}{self._as_agent} bash -c {shlex.quote(command)}',
             cwd=self._workdir,
-            env={**self._env, **(env or {})},
+            env={**self._clear, **self._agent_env, **(env or {})},
             timeout=timeout,
         )
 
@@ -450,6 +419,7 @@ class SandboxBackend:
         return self._sandbox.exec(
             f'{prefix}/usr/bin/env -i {variables} /bin/bash -c {shlex.quote(command)}',
             cwd=self._workdir,
+            env=self._clear,
             timeout=timeout,
         )
 
@@ -460,7 +430,9 @@ class SandboxBackend:
         Raises:
             TimeoutError: If the command exceeds *timeout* seconds.
         """
-        return self._sandbox.exec(trusted(command), cwd=self._workdir, timeout=timeout)
+        return self._sandbox.exec(
+            trusted(command), cwd=self._workdir, env=self._clear, timeout=timeout
+        )
 
     def archive_workdir(self) -> bytes:
         """Kill every agent process, then return the work directory as a gzipped tar.
@@ -487,12 +459,14 @@ class SandboxBackend:
                 f'echo "the archive is $size bytes, over {_MAX_ARCHIVE_BYTES}"; '
                 f'rm -f {staged}; exit 1; fi'
             ),
+            env=self._clear,
             timeout=_TRANSFER_TIMEOUT_S,
         )
         if packed.exit_code != 0:
             raise SandboxError(f'Failed to archive {self._workdir}: {packed.output[-500:]}')
         encoded = self._sandbox.exec(
             trusted(f'base64 {staged}; status=$?; rm -f {staged}; exit $status'),
+            env=self._clear,
             timeout=_TRANSFER_TIMEOUT_S,
         )
         try:
@@ -523,6 +497,7 @@ class SandboxBackend:
                 f'chown -hR 0:0 {quoted} && chmod -R a-st {quoted}; '
                 f'status=$?; rm -f {staged}; exit $status'
             ),
+            env=self._clear,
             timeout=_TRANSFER_TIMEOUT_S,
         )
         if done.exit_code != 0:
@@ -546,6 +521,7 @@ class SandboxBackend:
                 f'{self._as_agent} sh -c {shlex.quote(write)} write {target} < {staged}; '
                 f'status=$?; rm -f {staged}; exit $status'
             ),
+            env=self._clear,
             timeout=60,
         )
         if done.exit_code != 0:
@@ -570,15 +546,10 @@ class SandboxBackend:
             trusted(
                 f'{self._offline}{self._as_verifier} {self.python} -I {script}{stderr}; '
                 f'status=$?; rm -f {script}; exit $status',
-                {
-                    **self._env,
-                    'HOME': _VERIFIER_DIR,
-                    'DEEPGYM_AGENT_HOME': _AGENT_HOME,
-                    **self._runtime_env,
-                    **(env or {}),
-                },
+                {'HOME': _VERIFIER_DIR, **self._verifier_base, **self._runtime_env, **(env or {})},
             ),
             cwd=self._workdir,
+            env=self._clear,
             timeout=timeout,
         )
 
@@ -592,7 +563,7 @@ class SandboxBackend:
         self._need_desktop('Desktop environments').start(
             f'{self._offline}{self._as_agent}', _AGENT_HOME
         )
-        self._env['DISPLAY'] = _DISPLAY
+        self._agent_env['DISPLAY'] = _DISPLAY
 
     def act(self, action: Action) -> None:
         """Apply a GUI action.
@@ -619,6 +590,38 @@ class SandboxBackend:
         if self._desktop is None:
             raise DeepGymError(f'{what} need the Daytona backend')
         return self._desktop
+
+
+def _image_env(sandbox: Sandbox) -> dict[str, str]:
+    """Return the image's environment (every NAME=VALUE), read NUL-delimited.
+
+    NUL separators, not newlines, so a value with a newline can't look like two variables.
+    """
+    listed = sandbox.exec('/usr/bin/env -0', timeout=30).output
+    return dict(item.split('=', 1) for item in listed.split('\0') if '=' in item)
+
+
+def resolve_outside(backend: SandboxBackend, path: str, *writable: str) -> str:
+    """Return a PATH of *path*'s entries that resolve, in the sandbox, outside writable trees.
+
+    Each entry is realpath-resolved by the sandbox with NUL-delimited output, so every
+    spelling (``//app/bin``) and every link is seen as the kernel sees it, with no parser
+    differential. Relative and empty entries (the shell reads them against the working
+    folder) don't start with ``/`` and are dropped, as are entries resolving into the work
+    directory or any of *writable*. Falls back to :data:`~deepgym.sandboxes.TRUSTED_PATH`.
+    """
+    entries = [entry for entry in path.split(':') if entry.startswith('/')]
+    if not entries:
+        return TRUSTED_PATH
+    lookups = ' '.join(f'realpath -ez -- {shlex.quote(entry)} 2>/dev/null;' for entry in entries)
+    resolved = backend.exec_trusted(lookups, 30).output.split('\0')
+    blocked = (backend.workdir, *writable)
+    kept = [
+        real
+        for real in resolved
+        if real.startswith('/') and not any(PurePosixPath(real).is_relative_to(b) for b in blocked)
+    ]
+    return ':'.join(dict.fromkeys(kept)) or TRUSTED_PATH
 
 
 def check_workdir(workdir: str, reserved: Sequence[str] = ()) -> str:

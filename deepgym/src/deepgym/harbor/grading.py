@@ -26,14 +26,13 @@ import json
 import math
 import shlex
 import statistics
-from pathlib import PurePosixPath
 
 from deepgym.exceptions import SandboxError, VerifierError
 from deepgym.harbor.task import STAGING_DIR, HarborTask, pack_files
 from deepgym.models import SCORE_TOLERANCE, VerifierResult, checked_score
 from deepgym.sandbox import ExecutionResult
-from deepgym.sandboxes import TRUSTED_PATH, ExecResult, Sandbox
-from deepgym.session import SandboxBackend
+from deepgym.sandboxes import ExecResult, Sandbox
+from deepgym.session import SandboxBackend, resolve_outside
 
 TESTS_DIR = '/tests'
 REWARD_DIR = '/logs/verifier'
@@ -98,32 +97,8 @@ def _test_env(backend: SandboxBackend, task: HarborTask, image: dict[str, str]) 
         **basics,
         'HOME': '/root',
         **task.verifier_env,
-        'PATH': safe_path(backend, image.get('PATH', '')),
+        'PATH': resolve_outside(backend, image.get('PATH', '')),
     }
-
-
-def safe_path(backend: SandboxBackend, path: str) -> str:
-    """Return the PATH value *path* with each entry resolved in the sandbox, keeping only
-    those that exist outside the work directory.
-
-    Resolving catches every spelling (``//app/bin``) and every link into the work directory,
-    which the agent filled; relative entries name the working folder, so they go too.
-    """
-    entries = [entry for entry in path.split(':') if entry.startswith('/')]
-    if not entries:
-        return TRUSTED_PATH
-    resolved = backend.exec_trusted(
-        '; '.join(
-            f'realpath -e -- {shlex.quote(entry)} 2>/dev/null || echo -' for entry in entries
-        ),
-        timeout=30,
-    ).output.splitlines()
-    kept = [
-        real
-        for real in resolved
-        if real.startswith('/') and not PurePosixPath(real).is_relative_to(backend.workdir)
-    ]
-    return ':'.join(dict.fromkeys(kept)) or TRUSTED_PATH
 
 
 def read_reward_command(directory: str) -> str:

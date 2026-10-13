@@ -1,5 +1,6 @@
 """The patch runner refuses diffs that touch test infrastructure outside the hidden tests,
-and reports harness failures (tests that never ran, a broken repo or task) without a verdict.
+reports an environment, repo or task it finds broken before the patch without a verdict,
+and scores every outcome after the patch.
 
 Runs through the sandbox code path (``sandbox_dg``); local mode refuses patch tasks.
 """
@@ -611,9 +612,6 @@ def test_vendored_toml_source_needs_no_getsource(monkeypatch: pytest.MonkeyPatch
         # Guessing the top-level instead could check the wrong, missing files and grade a
         # patch that edits the real ones.
         pytest.param('git_root', True, 'validation_error', id='git-root-unknown'),
-        # git apply --check passed, so the patch applies: failing to write it is the disk's
-        # or the permissions' fault, never the model's.
-        pytest.param('apply', True, 'patch_write_failed', id='patch-write-fails'),
     ],
 )
 def test_validation_faults_have_no_verdict(
@@ -636,7 +634,6 @@ def test_validation_faults_have_no_verdict(
         'test_patch': lambda args: '--numstat' in args and args[-1].endswith('test_patch.diff'),
         'model_patch': lambda args: '--numstat' in args and args[-1] == str(patch_file),
         'git_root': lambda args: 'rev-parse' in args,
-        'apply': lambda args: args[-2:] == ['apply', str(patch_file)],
     }[target]
     real_run = subprocess.run
 
@@ -709,7 +706,7 @@ _EDITED_INI = '[pytest]\n# edited\n'
         # A file the test command mentions may be what it loads. The tests still run: a failure
         # is the normal, trained 0, and only a pass, which the edit may have caused, is masked.
         pytest.param('{pytest} -c ci.ini', {'ci.ini': _EDITED_INI}, 'masked', id='tests-pass'),
-        # So is a run the edit stopped (pytest collects nothing, exit 5): no mask to gain.
+        # So is a run the edit stopped (pytest then collects nothing, exit 5).
         pytest.param(
             '{pytest} -c ci.ini',
             {'ci.ini': '[pytest]\naddopts = -k nothing\n'},
@@ -921,46 +918,180 @@ def test_qa_marks_unappliable_tampering_attack_inconclusive(
     assert not report.is_robust
 
 
-# Harness failures come back without a verdict, for trainers to mask, never as a score.
+# A harness that can't run, found before the patch, has no verdict; after it, all is scored.
 
 _PYTEST = f'PYTHONPATH=. "{sys.executable}" -m pytest -q'
 
 
 @pytest.mark.parametrize(
-    ('command', 'verdict'),
+    'command',
     [
-        # The tests never ran: the shell could not run the command, it was killed (the OOM
-        # killer, a timeout), or pytest ran none (a usage error such as a missing file, or
-        # nothing collected). Nothing judged the patch.
-        pytest.param('no-such-test-runner', False, id='127-not-found'),
-        pytest.param('/dev/null', False, id='126-not-executable'),
-        pytest.param('kill -KILL $$', False, id='sigkill'),
-        pytest.param('exit 137', False, id='137-killed'),
-        pytest.param('exit 143', False, id='143-terminated'),
-        pytest.param('{pytest} tests/test_gone.py', False, id='pytest-4-usage-error'),
-        pytest.param('{pytest} tests/test_calc.py -k nothing', False, id='pytest-5-none-collected'),
-        # Failing tests keep their verdict. pytest's 2 is a collection error, which is how a
-        # hidden test that imports what the fix adds fails a wrong patch; and 3-5 from other
-        # runners are failure counts (mocha), so only pytest's 3-5 mean nothing ran.
-        pytest.param('exit 1', True, id='1-tests-failed'),
-        pytest.param('exit 3', True, id='3-not-pytest'),
-        pytest.param(
-            "printf 'from calc import sub\\n' > tests/test_sub.py && {pytest} tests/test_sub.py",
-            True,
-            id='pytest-2-collection-error',
-        ),
+        # Each would exit 127, 126 or 1 (no module) before running a test, whatever the patch.
+        pytest.param('no-such-test-runner -q', id='runner-not-on-path'),
+        pytest.param('cd tests && no-such-test-runner', id='runner-after-cd'),
+        pytest.param('if true; then no-such-test-runner; fi', id='runner-in-if'),
+        pytest.param(f'"{sys.executable}" -m no_such_test_module', id='module-not-importable'),
+        pytest.param('/opt/no-such-dir/runner', id='absolute-path-missing'),
+        pytest.param('/dev/null', id='absolute-path-not-executable'),
+        pytest.param('pytest (', id='unparseable'),
     ],
 )
-def test_tests_that_never_ran_have_no_verdict(
-    tmp_path: Path, sandbox_dg: DeepGym, command: str, verdict: bool
+def test_environment_that_cannot_run_the_tests_has_no_verdict(
+    tmp_path: Path, sandbox_dg: DeepGym, command: str
+) -> None:
+    # The preflight, before the patch is applied: a missing runner, toolchain or module is the
+    # environment's fault, so trainers mask the sample.
+    env = _env(tmp_path).model_copy(update={'test_command': command})
+
+    result = sandbox_dg.run(env, _diff(Path(env.repo_dir), _FIX))
+
+    assert (result.error_type, result.has_verdict) == ('preflight_failed', False)
+
+
+@pytest.mark.parametrize(
+    'command',
+    [
+        pytest.param(f'{_PYTEST} tests/test_calc.py', id='pytest'),
+        pytest.param(
+            f'cd tests && PYTHONPATH=.. "{sys.executable}" -m pytest -q test_calc.py', id='after-cd'
+        ),
+        pytest.param(f'true > /dev/null 2>&1 && {_PYTEST} tests/test_calc.py', id='redirects'),
+        pytest.param(f'2>/dev/null {_PYTEST} tests', id='leading-redirect'),
+        pytest.param(f'case x in x) true ;; esac; {_PYTEST} tests', id='case'),
+        pytest.param(f'for f in tests; do echo "$f"; done; {_PYTEST} tests', id='loop'),
+        pytest.param(f'PATH="./bin:$PATH" bin-runner 2>&-; {_PYTEST} tests', id='path-change'),
+        pytest.param(f'./run.sh 2>/dev/null; {_PYTEST} tests/test_calc.py', id='repo-script'),
+    ],
+)
+def test_preflight_passes_runnable_commands(
+    tmp_path: Path, sandbox_dg: DeepGym, command: str
+) -> None:
+    # Builtins, loops, redirection targets and repo paths are no programs to look up, and what
+    # follows a PATH change is looked up elsewhere; the fix is graded.
+    env = _env(tmp_path).model_copy(update={'test_command': command})
+
+    result = sandbox_dg.run(env, _diff(Path(env.repo_dir), _FIX))
+
+    assert (result.score, result.error_type) == (1.0, None)
+
+
+@pytest.mark.parametrize(
+    ('command', 'edit'),
+    [
+        # The environment ran the command before the patch, so whatever happens after it is the
+        # patch's to own: no tests collected, a usage error, 127, a kill, any exit code.
+        pytest.param('{pytest} tests/test_calc.py -k nothing', {}, id='pytest-5-none-collected'),
+        pytest.param('{pytest} tests/test_gone.py', {}, id='pytest-4-usage-error'),
+        pytest.param("sh -c 'exit 127'", {}, id='127'),
+        pytest.param('exit 137', {}, id='137'),
+        pytest.param('kill -KILL $$', {}, id='sigkill'),
+        pytest.param('exit 3', {}, id='3'),
+        # Test output that is not UTF-8 once crashed the runner.
+        pytest.param("printf '\\377\\n'; exit 1", {}, id='not-utf8'),
+        pytest.param(
+            "printf 'from calc import sub\\n' > tests/test_sub.py && {pytest} tests/test_sub.py",
+            {},
+            id='pytest-2-collection-error',
+        ),
+        # Code under test that forces what looks like a harness failure (Codex review).
+        pytest.param('{pytest} tests', {'calc.py': 'import os\nos._exit(127)\n'}, id='code-127'),
+        pytest.param(
+            '{pytest} tests',
+            {'calc.py': 'import os, signal\nos.kill(os.getpid(), signal.SIGTERM)\n'},
+            id='code-sigterms',
+        ),
+        pytest.param('{pytest} tests', {'calc.py': 'raise SystemExit(1)\n'}, id='code-pytest-3'),
+    ],
+)
+def test_failures_after_the_patch_are_scored(
+    tmp_path: Path, sandbox_dg: DeepGym, command: str, edit: dict[str, str]
 ) -> None:
     env = _env(tmp_path)
     env = env.model_copy(update={'test_command': command.format(pytest=_PYTEST)})
 
+    result = sandbox_dg.run(env, _diff(Path(env.repo_dir), edit or _FIX))
+
+    assert (result.score, result.error_type, result.has_verdict) == (0.0, None, True)
+
+
+def _run_main(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture,
+    runner: dict,
+    task: dict,
+) -> tuple[int, VerifierResult]:
+    """Run *runner*'s main() in this process on _env's repo, the fix and *task*.
+
+    Returns:
+        Its exit code and its verdict, the last line it printed.
+    """
+    env = _env(tmp_path)
+    patch_file = tmp_path / 'candidate.diff'
+    patch_file.write_text(_diff(Path(env.repo_dir), _FIX))
+    task_file = tmp_path / 'task.json'
+    base = {'repo_dir': env.repo_dir, 'test_patch': env.test_patch, 'apply_credit': 0.0}
+    task_file.write_text(json.dumps({**base, **task}))
+    monkeypatch.setattr(sys, 'argv', ['runner', str(task_file), str(patch_file)])
+    exit_code = runner['main']()
+    return exit_code, VerifierResult.model_validate_json(capsys.readouterr().out.splitlines()[-1])
+
+
+@pytest.mark.parametrize(
+    ('task', 'outcome'),
+    [
+        # A test the patch made hang: the runner kills it at the time limit, before the provider
+        # would, and scores 0 (a hang used to crash the runner, which masked the sample).
+        pytest.param({'timeout': 3, 'test_commands': ['sleep 30']}, (None, True), id='test-hangs'),
+        # Setup that runs past the limit, or leaves the tests no time: the harness's doing.
+        pytest.param(
+            {'timeout': 2, 'setup_commands': 'sleep 30', 'test_commands': ['true']},
+            ('setup_failed', False),
+            id='setup-hangs',
+        ),
+        pytest.param(
+            {'timeout': 3, 'setup_commands': 'sleep 2.2', 'test_commands': ['true']},
+            ('validation_timeout', False),
+            id='no-time-left',
+        ),
+    ],
+)
+def test_time_limit(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture,
+    task: dict,
+    outcome: tuple[str | None, bool],
+) -> None:
+    exit_code, result = _run_main(tmp_path, monkeypatch, capsys, _runner(), task)
+
+    assert (result.error_type, is_verdict(exit_code, result.error_type)) == outcome
+    assert result.score == 0.0
+
+
+def test_runner_stopped_by_the_tests_is_scored(tmp_path: Path, sandbox_dg: DeepGym) -> None:
+    # Code the patch wrote runs in the runner's process group and can kill it, here the test
+    # command killing its parent. The runner had said the tests were running, so the patch
+    # scores 0 instead of the sample being masked.
+    env = _env(tmp_path).model_copy(update={'test_command': 'kill -KILL $PPID'})
+
     result = sandbox_dg.run(env, _diff(Path(env.repo_dir), _FIX))
 
-    assert (result.score, result.has_verdict) == (0.0, verdict)
-    assert result.error_type == (None if verdict else 'test_runner_error')
+    outcome = (result.score, result.error_type, result.has_verdict)
+    assert outcome == (0.0, 'policy_sandbox_failure', True)
+
+
+def test_patch_that_cannot_be_written_is_the_patch_fault(
+    tmp_path: Path, sandbox_dg: DeepGym
+) -> None:
+    # git apply --check passes a diff adding both foo and foo/bar, but writing it fails: the
+    # patch's doing, so a scored 0, never a masked write error (Codex review).
+    env = _env(tmp_path)
+    diff = _diff(Path(env.repo_dir), _FIX) + new_files_diff({'foo': 'x\n', 'foo/bar': 'y\n'})
+
+    result = sandbox_dg.run(env, diff)
+
+    assert (result.error_type, result.has_verdict) == ('patch_apply_failed', True)
 
 
 def test_missing_repo_is_not_blamed_on_the_patch(tmp_path: Path, sandbox_dg: DeepGym) -> None:
@@ -1086,7 +1217,6 @@ def test_flattened_image_gets_its_rust_toolchain_back(
     # MiMo's Docker Hub images are flattened: rustup's /usr/local/cargo and /usr/local/rustup
     # are there, but the ENV that put them on PATH is gone, so every answer, right or wrong,
     # failed with "cargo: command not found". An image whose PATH has a cargo keeps it.
-    env = _env(tmp_path)
     toolchain = tmp_path / 'toolchain'
     rustup_cargo = _fake_cargo(toolchain / 'cargo' / 'bin' / 'cargo')
     image_ran = _fake_cargo(tmp_path / 'image' / 'cargo')
@@ -1098,16 +1228,10 @@ def test_flattened_image_gets_its_rust_toolchain_back(
         monkeypatch.setenv(name, '')
         monkeypatch.delenv(name)
     monkeypatch.setenv('PATH', path)
-    patch_file = tmp_path / 'candidate.diff'
-    patch_file.write_text(_diff(Path(env.repo_dir), _FIX))
-    task_file = tmp_path / 'task.json'
-    task = {'repo_dir': env.repo_dir, 'test_patch': env.test_patch, 'apply_credit': 0.0}
-    task_file.write_text(json.dumps({**task, 'timeout': 60, 'test_commands': ['cargo test']}))
-    monkeypatch.setattr(sys, 'argv', ['runner', str(task_file), str(patch_file)])
+    task = {'timeout': 60, 'test_commands': ['cargo test']}
 
-    exit_code = runner['main']()
+    exit_code, result = _run_main(tmp_path, monkeypatch, capsys, runner, task)
 
-    result = VerifierResult.model_validate_json(capsys.readouterr().out)
     assert (result.score, exit_code) == (1.0, 0)
     if image_cargo:
         assert image_ran.read_text() == 'CARGO_HOME= RUSTUP_HOME=\n'

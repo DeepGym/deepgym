@@ -18,8 +18,16 @@ from pydantic import Field, PrivateAttr
 from deepgym.exceptions import DeepGymError
 from deepgym.harbor import HarborEnvironment, HarborTask, load_tasks
 from deepgym.integrations.hf import _require_datasets
-from deepgym.models import Environment, RunResult
-from deepgym.sandbox import ExecutionResult, build_run_result, parse_wrapped_output, wrap_stderr
+from deepgym.judge import DEADLINE_GRACE_S
+from deepgym.models import Environment, RunResult, VerifierResult
+from deepgym.sandbox import (
+    ExecutionResult,
+    _extract_json_line,
+    build_run_result,
+    parse_wrapped_output,
+    split_wrapped_output,
+    wrap_stderr,
+)
 
 if TYPE_CHECKING:
     from deepgym.core import DeepGym
@@ -28,6 +36,9 @@ _RUNNER_PATH = '/home/user/deepgym_runner.py'
 _TASK_PATH = '/home/user/deepgym_task.json'
 _PATCH_PATH = '/home/user/deepgym_candidate.diff'
 _ARCHIVE_PATH = '/home/user/deepgym_task.tar.gz'
+# The patch runner prints this line, flushed, just before it runs the tests: the first time
+# anything the patch wrote executes, and in the runner's process group.
+_TESTS_STARTED = 'deepgym-runner: running the tests'
 
 _PATCH_BLOCK_RE = re.compile(r'```(?:diff|patch)?\s*\n(.*?)```', re.DOTALL | re.IGNORECASE)
 _JSON_LIST_RE = re.compile(r'^\s*\[', re.DOTALL)
@@ -167,6 +178,31 @@ def _shell_snippet(value: str) -> str:
     return "'" + value.replace("'", "'\\''") + "'"
 
 
+def _parse_runner_output(output: str, marker: str, exit_code: int) -> ExecutionResult:
+    """Parse a runner's verdict from its stdout alone, as the judges read theirs.
+
+    The provider merges the streams, and a JSON line on stderr is no verdict. A runner that
+    stopped without a usable verdict (no JSON, or an exit code other than its 0 or 1) after
+    printing :data:`_TESTS_STARTED` was stopped by what the patch ran: the environment had
+    run every step before, so that is a judged 0, ``policy_sandbox_failure``.
+
+    Raises:
+        VerifierError: If the runner stopped without a verdict before its tests ran.
+    """
+    stdout, stderr = split_wrapped_output(output, marker)
+    unusable = exit_code not in (0, 1) or _extract_json_line(stdout) is None
+    if unusable and _TESTS_STARTED in stdout.splitlines():
+        result = VerifierResult(
+            score=0.0,
+            passed=False,
+            details=f'The runner stopped without a verdict (exit {exit_code}) while running '
+            'the tests, so the patch scores 0.',
+            error_type='policy_sandbox_failure',
+        )
+        return ExecutionResult(result, stderr=stderr, exit_code=1)
+    return parse_wrapped_output(output, marker, exit_code)
+
+
 def _run_sandbox_runner(
     env: Environment,
     dg: DeepGym,
@@ -179,14 +215,14 @@ def _run_sandbox_runner(
 ) -> tuple[ExecutionResult, str]:
     """Run *script* as root in a fresh sandbox from *dg*'s provider, booted from *env*.
 
-    The verdict is read from the runner's stdout alone, as the judges read theirs: the
-    provider merges the streams, and a JSON line on stderr is no verdict.
+    The runner keeps to *timeout* itself; the provider allows a grace period on top, so a
+    test the runner kills at its limit is still scored by the runner.
 
     Returns:
-        The parsed run and the sandbox's id.
+        The parsed run (see :func:`_parse_runner_output`) and the sandbox's id.
 
     Raises:
-        VerifierError: If the runner's stdout has no protocol JSON.
+        VerifierError: If the runner stopped without a verdict before its tests ran.
     """
     sandbox = dg.open_sandbox(env)
     try:
@@ -203,8 +239,8 @@ def _run_sandbox_runner(
             command += f' {_ARCHIVE_PATH}'
 
         command, marker = wrap_stderr(command)
-        response = sandbox.exec(command, timeout=timeout)
-        return parse_wrapped_output(response.output, marker, response.exit_code), sandbox.id
+        response = sandbox.exec(command, timeout=timeout + DEADLINE_GRACE_S)
+        return _parse_runner_output(response.output, marker, response.exit_code), sandbox.id
     finally:
         sandbox.delete()
 
@@ -225,8 +261,7 @@ def _execute_runner(
         SandboxError: If *dg* runs locally. These runners apply model-written
             patches and run commands and tests outside any judge isolation, so they
             only ever run inside a container or VM.
-        VerifierError: If the runner prints no protocol JSON or its exit code doesn't
-            back its result.
+        VerifierError: If the runner stopped without a verdict before its tests ran.
     """
     start = time.perf_counter()
     executed, sandbox_id = _run_sandbox_runner(
@@ -286,7 +321,10 @@ class PatchVerifier:
         way; see :func:`_vendored_toml_source`.
         """
         toml = _vendored_toml_source()
-        header = f'from __future__ import annotations\n\n_VENDORED_TOML = {toml!r}\n\n'
+        header = (
+            'from __future__ import annotations\n\n'
+            f'_TESTS_STARTED = {_TESTS_STARTED!r}\n_VENDORED_TOML = {toml!r}\n\n'
+        )
         return header + textwrap.dedent(
             """
             import fnmatch
@@ -294,10 +332,12 @@ class PatchVerifier:
             import os
             import posixpath
             import re
+            import shlex
             import shutil
             import subprocess
             import sys
             import tempfile
+            import time
             from pathlib import Path
 
 
@@ -343,14 +383,21 @@ class PatchVerifier:
 
 
             def _run(command: str, *, cwd: Path | None = None, timeout: int = 300) -> subprocess.CompletedProcess[str]:
-                return subprocess.run(
-                    command,
-                    shell=True,
-                    cwd=str(cwd) if cwd is not None else None,
-                    capture_output=True,
-                    text=True,
-                    timeout=timeout,
-                )
+                # A command still running after *timeout* seconds is killed (SIGKILL) and reported
+                # as exit -9: a setup step then fails, and a test the patch made hang scores 0.
+                # Output that is not UTF-8 is decoded with replacements rather than crashing.
+                try:
+                    return subprocess.run(
+                        command,
+                        shell=True,
+                        cwd=str(cwd) if cwd is not None else None,
+                        capture_output=True,
+                        encoding='utf-8',
+                        errors='replace',
+                        timeout=timeout,
+                    )
+                except subprocess.TimeoutExpired:
+                    return subprocess.CompletedProcess(command, -9, '', f'timed out after {timeout}s')
 
 
             # Rustup's layout in the official rust images. An image flattened without its config
@@ -370,25 +417,80 @@ class PatchVerifier:
                 os.environ['PATH'] = _CARGO_HOME + '/bin' + os.pathsep + (os.environ.get('PATH') or os.defpath)
 
 
-            # pytest's 3 (internal error), 4 (usage error, such as a test id that does not exist)
-            # and 5 (no tests collected) mean it ran no tests. Its 2 does not: pytest exits 2 on a
-            # collection error too, which is how a hidden test importing what the fix adds fails a
-            # wrong or empty patch. Other runners give 2-5 other meanings (mocha exits with its
-            # failure count, make with 2), so these count only for a command that runs pytest.
-            _PYTEST_RE = re.compile(r'(?<![\\w.-])(?:py\\.test|pytest)(?![\\w.-])')
+            # Reserved words that come before a simple command's program, and ones whose simple
+            # command runs none (a loop header, a compound command's end). After `case` the
+            # patterns look like commands, so nothing more is checked.
+            _LEADERS = {'!', '{', 'if', 'then', 'else', 'elif', 'while', 'until', 'do'}
+            _NO_PROGRAM = {'for', 'in', 'fi', 'done', 'esac', '}', 'function'}
+            _IMPORTABLE = 'import importlib.util, sys; sys.exit(importlib.util.find_spec(sys.argv[1]) is None)'
 
 
-            def _never_ran(command: str, code: int) -> str | None:
-                # Why exit *code* of test *command* means its tests never ran, or None if it is a
-                # verdict. The shell could not run it (126 not executable, 127 not found), or it was
-                # killed (SIGKILL by the OOM killer or a timeout, SIGTERM), as the shell reports
-                # that (128 + n) or Python does (-n).
-                if code in (126, 127):
-                    return 'the shell could not run it'
-                if code in (137, 143, -9, -15):
-                    return 'it was killed'
-                if code in (3, 4, 5) and _PYTEST_RE.search(command):
-                    return 'pytest ran no tests'
+            def _preflight(command: str, cwd: Path, repo_root: Path) -> str | None:
+                # Why this environment cannot run test *command*, checked before the patch, or None.
+                # The shell must parse it, the program starting each simple command must be
+                # installed (on PATH, or an executable outside the repo), and the module a
+                # `python -m` names importable. A path in the repo is the repo's own (the hidden
+                # tests may add it), and nothing after a PATH change, a here-document or a `case` is
+                # looked up. Best effort: what a wrapper script runs is not seen, so its failure
+                # after the patch is scored like any other.
+                if subprocess.run(['/bin/sh', '-n', '-c', command], capture_output=True).returncode:
+                    return 'the shell cannot parse it'
+                lexer = shlex.shlex(command, posix=True, punctuation_chars='();<>|&\\n')
+                lexer.whitespace, lexer.whitespace_split = ' \\t\\r', True
+                try:
+                    tokens = iter(list(lexer))
+                except ValueError:  # shlex is stricter than sh, which parsed it
+                    return None
+                segments, words = [], []
+                for token in tokens:
+                    if token.startswith('<<'):
+                        break
+                    if set(token) <= set('<>&|') and set(token) & set('<>'):
+                        if words and words[-1].isdigit():
+                            words.pop()  # the redirected descriptor, as in 2>/dev/null
+                        next(tokens, None)  # and the redirection's target
+                    elif set(token) <= set('();|&\\n'):
+                        segments.append(words)
+                        words = []
+                    else:
+                        words.append(token)
+                segments.append(words)
+                repo_dirs = {str(repo_root), str(cwd)}
+                names, modules = [], []
+                for words in segments:
+                    if any(word.startswith('PATH=') for word in words):
+                        break
+                    assigned = {}
+                    while words and (words[0] in _LEADERS or re.match(r'[A-Za-z_][A-Za-z0-9_]*=', words[0])):
+                        name, _, value = words.pop(0).partition('=')
+                        if value and not re.search('[$`]', value):
+                            assigned[name] = value
+                    if words[:1] in (['.'], ['source'], ['case']):
+                        break
+                    if not words or words[0] in _NO_PROGRAM or re.search(r'[$`*?~\\[]', words[0]):
+                        continue
+                    program = words[0]
+                    if program.startswith('/'):
+                        if any(program == base or program.startswith(base + '/') for base in repo_dirs):
+                            continue
+                        if not (os.path.isfile(program) and os.access(program, os.X_OK)):
+                            return f'{program} is not an executable file'
+                    elif '/' in program:
+                        continue
+                    else:
+                        names.append(program)
+                    if re.fullmatch(r'python[0-9.]*', posixpath.basename(program)) and words[1:2] == ['-m'] and words[2:3]:
+                        modules.append((program, words[2], assigned))
+                if names:
+                    lookup = 'for w; do command -v "$w" >/dev/null 2>&1 || echo "$w"; done'
+                    found = subprocess.run(['/bin/sh', '-c', lookup, 'sh', *names], cwd=str(cwd), capture_output=True, text=True)
+                    missing = found.stdout.split()
+                    if missing:
+                        return 'not found: ' + ', '.join(dict.fromkeys(missing))
+                for python, module, assigned in modules:
+                    env = dict(os.environ, **assigned)
+                    if subprocess.run([python, '-c', _IMPORTABLE, module], cwd=str(cwd), env=env, capture_output=True).returncode:
+                        return f'{python} cannot import {module}'
                 return None
 
 
@@ -816,6 +918,7 @@ class PatchVerifier:
 
 
             def main() -> int:
+                started = time.monotonic()
                 _restore_rust_env()
                 task = json.loads(Path(sys.argv[1]).read_text(encoding='utf-8'))
                 patch_path = Path(sys.argv[2])
@@ -863,6 +966,9 @@ class PatchVerifier:
                     )
 
                 timeout = int(task.get('timeout', 1800))
+                # The whole run keeps to the timeout, so the runner, not the provider, stops a
+                # test that hangs (the provider allows a few seconds more).
+                deadline = started + timeout
                 setup_commands = task.get('setup_commands', '')
                 test_patch = task.get('test_patch', '')
                 apply_credit = float(task.get('apply_credit', 0.3))
@@ -994,6 +1100,25 @@ class PatchVerifier:
                             },
                             1,
                         )
+                    for index, command in enumerate(test_commands):
+                        broken = _preflight(command, repo_dir, repo_root)
+                        if broken:
+                            # Found before the patch is applied, so the environment's fault, never
+                            # the model's: no verdict. After the patch, every outcome is scored.
+                            return _emit(
+                                {
+                                    'schema_version': '1.0',
+                                    'score': 0.0,
+                                    'passed': False,
+                                    'details': f'Test command {index} cannot run in this environment ({broken}), so the patch was not scored.',
+                                    'reward_components': {'apply': 0.0, 'tests': 0.0},
+                                    'metrics': {'pass_fraction': 0.0, 'tests_run': 0},
+                                    'truncated': False,
+                                    'error_type': 'preflight_failed',
+                                    'cases': [],
+                                },
+                                1,
+                            )
                     saved = _snapshot(repo_dir, hidden)
 
                     check = subprocess.run(
@@ -1065,18 +1190,16 @@ class PatchVerifier:
                         timeout=timeout,
                     )
                     if apply_patch.returncode != 0:
-                        # git apply --check passed, so the patch applies: failing to write it is
-                        # the environment's fault (disk, permissions), not the model's.
                         return _emit(
                             {
                                 'schema_version': '1.0',
                                 'score': 0.0,
                                 'passed': False,
-                                'details': f'The patch applies but could not be written, so it was not scored: {_tail(apply_patch.stderr or apply_patch.stdout)}',
+                                'details': f'Patch apply failed: {_tail(apply_patch.stderr or apply_patch.stdout)}',
                                 'reward_components': {'apply': 0.0, 'tests': 0.0},
                                 'metrics': {'pass_fraction': 0.0, 'tests_run': 0},
                                 'truncated': False,
-                                'error_type': 'patch_write_failed',
+                                'error_type': 'patch_apply_failed',
                                 'cases': [],
                             },
                             1,
@@ -1145,30 +1268,33 @@ class PatchVerifier:
                                 1,
                             )
 
-                    per_command_timeout = max(1, timeout // max(len(test_commands), 1))
+                    if deadline - time.monotonic() < 1:
+                        # The steps before the tests used up the time: the harness's doing.
+                        return _emit(
+                            {
+                                'schema_version': '1.0',
+                                'score': 0.0,
+                                'passed': False,
+                                'details': 'The time limit ran out before the tests started, so the patch was not scored.',
+                                'reward_components': {'apply': 0.0, 'tests': 0.0},
+                                'metrics': {'pass_fraction': 0.0, 'tests_run': 0},
+                                'truncated': False,
+                                'error_type': 'validation_timeout',
+                                'cases': [],
+                            },
+                            1,
+                        )
+                    # From here on, code the patch wrote runs, in this process group: if it stops the
+                    # runner, this line tells the host the tests had started (a scored 0).
+                    print(_TESTS_STARTED, flush=True)
                     passed_count = 0
                     cases = []
                     for index, command in enumerate(test_commands):
-                        proc = _run(command, cwd=repo_dir, timeout=per_command_timeout)
-                        unrun = _never_ran(command, proc.returncode)
-                        if unrun and not uncertain:
-                            # Nothing judged the patch, so there is no verdict to give. After an
-                            # uncertain edit (see below) it counts as a failure instead: the edit
-                            # may be why the tests did not run, and it must gain nothing.
-                            return _emit(
-                                {
-                                    'schema_version': '1.0',
-                                    'score': 0.0,
-                                    'passed': False,
-                                    'details': f'Test command {index} exited {proc.returncode} ({unrun}), so the patch was not scored: {_tail(proc.stderr or proc.stdout)}',
-                                    'reward_components': {'apply': 0.0, 'tests': 0.0},
-                                    'metrics': {'pass_fraction': 0.0, 'tests_run': 0},
-                                    'truncated': False,
-                                    'error_type': 'test_runner_error',
-                                    'cases': [],
-                                },
-                                1,
-                            )
+                        # The preflight found the environment able to run this command before the
+                        # patch, so whatever it does now (no tests collected, a crash, a kill) is
+                        # the patch's to own: every exit is scored.
+                        budget = max(1, int(deadline - time.monotonic()) // (len(test_commands) - index))
+                        proc = _run(command, cwd=repo_dir, timeout=budget)
                         passed = proc.returncode == 0
                         if passed:
                             passed_count += 1
@@ -1388,9 +1514,10 @@ class RepoPatchEnvironment(Environment):
     ``repo_dir``, such as the MiMo-V2.6-RL code subset. The model returns a unified
     diff; the SWE-bench Pro patch runner applies it, puts every file the hidden
     ``test_patch`` touches back to its prior state, applies the test patch, runs
-    ``test_command`` and scores 1.0 if it exits 0, else 0.0. An exit that says the tests
-    never ran (command not found, killed, pytest running none) has no verdict, nor does a
-    blank ``test_command`` or a ``repo_dir`` the image lacks. A diff that touches any
+    ``test_command`` and scores 1.0 if it exits 0, else 0.0. An environment that can't run
+    the tests, found before the patch is applied (the image lacks ``repo_dir`` or the
+    command's runner, toolchain or module), has no verdict, nor does a blank
+    ``test_command``; after the patch, every exit is scored. A diff that touches any
     other test infrastructure (tests and their helper code, conftest.py, runner config,
     installed dependencies) scores 0.0 with ``error_type='test_infra_tampering'``; data
     fixtures the tests read may change.

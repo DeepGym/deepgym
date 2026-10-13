@@ -24,7 +24,7 @@ from deepgym import ComputerUseEnvironment, DeepGym
 from deepgym.exceptions import DeepGymError, SandboxError, VerifierError
 from deepgym.judge import JudgeJob
 from deepgym.models import Action, Environment, MultiTurnEnvironment
-from deepgym.sandbox import build_run_result, run_judge_in_sandbox
+from deepgym.sandbox import build_run_result, run_judge_in_sandbox, split_wrapped_output
 from deepgym.sandboxes import ExecResult, SandboxTimeoutError, open_sandbox
 from deepgym.sandboxes.apple import AppleContainer
 from deepgym.sandboxes.cli import DEFAULT_IMAGE
@@ -672,6 +672,14 @@ def test_judge_marker_cannot_be_forged(tmp_path: Path) -> None:
 
     assert executed.verifier_result.score == 0.0
     assert executed.stderr.startswith(_PASS) and 'deepgym-stderr-' in executed.stderr
+
+
+def test_marker_line_with_a_shell_message_counts_as_stdout() -> None:
+    # A provider that returns stderr last may append the shell's own message (bash's "Killed"
+    # for a SIGKILLed command) to the marker line: nothing to decode, so all of it is stdout.
+    output = f'{_PASS}\n\ndeepgym-stderr-x sh: line 1: 7 Killed: 9  python3 judge.py\n'
+
+    assert split_wrapped_output(output, 'deepgym-stderr-x') == (output, '')
 
 
 # A tool planted on the image's PATH that would print a better score after the verifier.

@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import binascii
 import json
 import logging
 import re
@@ -187,13 +188,18 @@ def split_wrapped_output(output: str, marker: str) -> tuple[str, str]:
     """Return (stdout, stderr) of a command wrapped by :func:`wrap_stderr`.
 
     Only the last line can carry the marker; an earlier copy is just stdout. Without it
-    (the wrapper didn't finish) the whole output counts as stdout.
+    (the wrapper didn't finish), or with more than base64 after it (a provider that returns
+    stderr last appended the shell's own message, such as bash's "Killed" for the command),
+    the whole output counts as stdout.
     """
     stdout, _, last = output.rstrip('\n').rpartition('\n')
     tag, _, encoded = last.partition(' ')
     if tag != marker:
         return output, ''
-    return stdout, base64.b64decode(encoded).decode('utf-8', 'replace').strip()
+    try:
+        return stdout, base64.b64decode(encoded, validate=True).decode('utf-8', 'replace').strip()
+    except binascii.Error:
+        return output, ''
 
 
 def parse_wrapped_output(output: str, marker: str, exit_code: int) -> ExecutionResult:

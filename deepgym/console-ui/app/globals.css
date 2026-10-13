@@ -7,7 +7,7 @@
 @custom-variant rtl (&:dir(rtl));
 @custom-variant ltr (&:dir(ltr));
 
-/* Console tokens: one accent ramp (#7aa2f7 at 400), Inter Tight for display headings. */
+/* Console tokens: one accent ramp (#7aa2f7 at 400), Inter Tight for display headings, Geist for the wordmark. */
 @theme {
   --color-accent-50: #f1f5fe;
   --color-accent-100: #e2eafd;
@@ -22,6 +22,7 @@
   --color-accent-950: #1b2747;
 
   --font-display: var(--font-inter-tight), var(--font-inter), ui-sans-serif, system-ui, sans-serif;
+  --font-wordmark: var(--font-geist-sans), var(--font-inter), ui-sans-serif, sans-serif;
 }
 
 @utility text-mono-label {

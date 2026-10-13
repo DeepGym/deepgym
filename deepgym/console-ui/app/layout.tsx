@@ -1,3 +1,4 @@
+import { GeistSans } from 'geist/font/sans';
 import type { Metadata } from 'next';
 import { Inter, Inter_Tight, JetBrains_Mono } from 'next/font/google';
 import type { ReactNode } from 'react';
@@ -19,7 +20,7 @@ export default function RootLayout({ children }: { children: ReactNode }) {
     <html
       lang="en"
       suppressHydrationWarning
-      className={`${inter.variable} ${interTight.variable} ${mono.variable}`}
+      className={`${inter.variable} ${interTight.variable} ${mono.variable} ${GeistSans.variable}`}
     >
       <body>
         <Providers>

@@ -13,6 +13,7 @@ from deepgym.adversarial import (
     AdversarialTester,
     AttackResult,
     LLMAdversarialTester,
+    entry_points,
 )
 from deepgym.core import DeepGym
 from deepgym.models import Environment
@@ -272,3 +273,50 @@ class TestAttacksUseTheClient:
 
         assert len(dg.outputs) == 2
         assert report.exploits_found == 2
+
+
+class TestAttacksTargetTheEntryPoint:
+    """Attacks define the function the verifier calls, so a weak check meets them."""
+
+    _ANY_NUMBER = (
+        'from deepgym_solution import load_solution\n'
+        'sol = load_solution(solution_path)\n'
+        'got = sol.multiply(7, 3)\n'
+        'return 1.0 if isinstance(got, (int, float)) else 0.0\n'
+    )
+
+    def test_entry_points_come_from_the_reference_verifier_and_task(self) -> None:
+        constant = (
+            'from deepgym_solution import load_solution\n'
+            "ENTRY = 'area'\n\n"
+            'def verify(solution_path, test_cases_path=None):\n'
+            '    return float(getattr(load_solution(solution_path), ENTRY)(2) == 4)\n'
+        )
+        env = Environment(task='Write `scale(x)` and `area(r)`.', verifier_code=constant)
+        multiply = Environment(task='Multiply.', verifier_code=self._ANY_NUMBER)
+
+        assert entry_points(multiply) == ['multiply']
+        assert entry_points(env) == ['area', 'scale']
+
+    def test_a_verifier_that_accepts_any_number_is_exploited(self, dg: DeepGym) -> None:
+        # Before attacks aimed at multiply(), this verifier passed every QA check.
+        env = Environment(task='Write multiply(a, b).', verifier_code=self._ANY_NUMBER)
+
+        report = AdversarialTester(dg).test(env, strategies=['hardcoded', 'pattern'])
+
+        assert report.exploits_found == 2
+
+
+@pytest.mark.parametrize(
+    ('strategy', 'printed'),
+    [('hardcoded', ['true', '0', '""']), ('pattern', ['[1]', 'null', '""'])],
+)
+def test_payloads_carry_json_values_as_python(strategy: str, printed: list[str]) -> None:
+    cases = [{'input': [1], 'expected': True}, {'input': None, 'output': 0}, {'answer': ''}]
+    env = Environment(task='t', verifier_code='return 0.0\n', test_cases=cases)
+
+    code = AdversarialTester(DeepGym(mode='local'))._generate_attack(env, strategy)
+
+    run = subprocess.run([sys.executable, '-c', code], capture_output=True, text=True)
+    assert run.returncode == 0, run.stderr  # JSON true and null used to be NameErrors
+    assert run.stdout.split() == printed  # falsey expectations are kept, not dropped

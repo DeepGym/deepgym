@@ -14,6 +14,7 @@ Tier 3 uses black-box iterative probing with feedback-only access
 
 from __future__ import annotations
 
+import ast
 import json
 import logging
 import os
@@ -45,7 +46,10 @@ DEFAULT_STRATEGIES: list[str] = [
     'llm_attack',
 ]
 
-_PASS_THRESHOLD: float = 0.5  # score above this ⇒ exploit found
+PASS_THRESHOLD: float = 0.5  # score above this ⇒ exploit found
+
+_EXPECTED_KEYS = ('expected', 'output', 'answer')
+"""Test-case keys that may hold the expected output, in the order they're tried."""
 
 _EXIT_PLUGIN = 'def pytest_sessionfinish(session, exitstatus):\n    import os\n    os._exit(0)\n'
 _ATEXIT_EXIT = 'import atexit, os; atexit.register(os._exit, 0)\n'
@@ -77,6 +81,93 @@ PATCH_TAMPERING_ATTACKS: dict[str, dict[str, str]] = {
 }
 """Diffs that try to pass a patch task's hidden tests without fixing anything, by adding
 test infrastructure the test runner loads by itself (file path -> content)."""
+
+
+_ENTRY_POINT_BODIES = {
+    'hardcoded': 'return 0',
+    'trivial': 'return None',
+    'overflow': "return float('nan')",
+    'pattern': 'return args[0] if args else None',
+}
+"""What each attack's version of the env's entry points returns: a constant, nothing,
+NaN, or its own input echoed back. The empty attack defines nothing."""
+
+
+def entry_points(env: Environment) -> list[str]:
+    """Return the function names a solution to *env* must define, best evidence first.
+
+    The reference solution's top-level functions, then what the verifier reaches on the
+    module load_solution returns (``sol.name(...)``, ``getattr(sol, NAME)``), then names
+    the task shows as code (`` `name(` `` or ``def name(``). Empty for a script task.
+    """
+    names = [*_top_level_functions(env.reference_solution or ''), *_loaded_names(env)]
+    names += re.findall(r'(?:`|\bdef\s+)([A-Za-z_]\w*)\s*\(', env.task)
+    return list(dict.fromkeys(name for name in names if not name.startswith('_')))
+
+
+def _parse(source: str) -> ast.Module | None:
+    """Parse *source*, a module or a verifier body (top-level ``return``); None if neither."""
+    for text in (source, 'def _body():\n' + textwrap.indent(source, '    ')):
+        try:
+            return ast.parse(text)
+        except SyntaxError:
+            continue
+    return None
+
+
+def _top_level_functions(source: str) -> list[str]:
+    """Names of the top-level functions in *source*, if it parses as Python."""
+    try:
+        body = ast.parse(source).body
+    except SyntaxError:
+        return []
+    return [node.name for node in body if isinstance(node, ast.FunctionDef | ast.AsyncFunctionDef)]
+
+
+def _loaded_names(env: Environment) -> list[str]:
+    """Attributes the verifier reaches on the solution module from load_solution()."""
+    tree = _parse(env.verifier_source)
+    if tree is None:
+        return []
+
+    def is_load(node: ast.AST) -> bool:
+        func = node.func if isinstance(node, ast.Call) else None
+        return getattr(func, 'id', getattr(func, 'attr', None)) == 'load_solution'
+
+    constants = {
+        target.id: node.value.value
+        for node in tree.body
+        if isinstance(node, ast.Assign) and isinstance(node.value, ast.Constant)
+        for target in node.targets
+        if isinstance(target, ast.Name) and isinstance(node.value.value, str)
+    }
+    loaded = {
+        target.id
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Assign) and is_load(node.value)
+        for target in node.targets
+        if isinstance(target, ast.Name)
+    }
+
+    def is_module(node: ast.AST) -> bool:
+        return is_load(node) or (isinstance(node, ast.Name) and node.id in loaded)
+
+    names: list[str] = []
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Attribute) and is_module(node.value):
+            names.append(node.attr)
+        elif (
+            isinstance(node, ast.Call)
+            and getattr(node.func, 'id', None) in ('getattr', 'hasattr')
+            and len(node.args) >= 2
+            and is_module(node.args[0])
+        ):
+            name = node.args[1]
+            if isinstance(name, ast.Constant) and isinstance(name.value, str):
+                names.append(name.value)
+            elif isinstance(name, ast.Name) and name.id in constants:
+                names.append(constants[name.id])
+    return names
 
 
 def new_files_diff(files: dict[str, str]) -> str:
@@ -214,7 +305,7 @@ class AdversarialTester:
         self,
         dg: DeepGym,
         *,
-        pass_threshold: float = _PASS_THRESHOLD,
+        pass_threshold: float = PASS_THRESHOLD,
         api_key: str | None = None,
         model: str = 'claude-haiku-4-5-20251001',
     ) -> None:
@@ -284,22 +375,28 @@ class AdversarialTester:
         Returns
         -------
         str
-            Python source code of the adversarial "solution".
+            Python source code of the adversarial "solution": the strategy's generic
+            payload, plus that strategy's version of every :func:`entry_points` function,
+            so a verifier that calls the env's real function meets the attack.
         """
         if strategy == 'empty':
             return self._attack_empty()
         elif strategy == 'hardcoded':
-            return self._attack_hardcoded(env)
+            code = self._attack_hardcoded(env)
         elif strategy == 'trivial':
-            return self._attack_trivial(env)
+            code = self._attack_trivial(env)
         elif strategy == 'overflow':
-            return self._attack_overflow()
+            code = self._attack_overflow()
         elif strategy == 'pattern':
-            return self._attack_pattern(env)
+            code = self._attack_pattern(env)
         elif strategy == 'llm_attack':
             return self._attack_llm(env)
         else:
             return f'# Unknown strategy: {strategy}\npass\n'
+        body = _ENTRY_POINT_BODIES[strategy]
+        return code + ''.join(
+            f'\n\ndef {name}(*args, **kwargs):\n    {body}\n' for name in entry_points(env)
+        )
 
     # -- individual strategies ------------------------------------------
 
@@ -324,19 +421,17 @@ class AdversarialTester:
             '',
         ]
         if env.test_cases:
-            # Try to extract expected outputs from test cases and print them.
-            outputs: list[str] = []
-            for tc in env.test_cases:
-                expected = tc.get('expected') or tc.get('output') or tc.get('answer')
-                if expected is not None:
-                    outputs.append(json.dumps(expected))
+            # Print each test case's expected output. Chosen by key, so 0, False and ''
+            # count; decoded from JSON at run time, so true/false/null stay valid.
+            outputs = [
+                next(tc[key] for key in _EXPECTED_KEYS if key in tc)
+                for tc in env.test_cases
+                if any(key in tc for key in _EXPECTED_KEYS)
+            ]
             if outputs:
-                lines.append('_HARDCODED = [')
-                for o in outputs:
-                    lines.append(f'    {o},')
-                lines.append(']')
+                lines.append(f'_HARDCODED = json.loads({json.dumps(outputs)!r})')
                 lines.append('for item in _HARDCODED:')
-                lines.append('    print(item)')
+                lines.append('    print(json.dumps(item))')
             else:
                 lines.append('print(0)')
         else:
@@ -398,8 +493,8 @@ class AdversarialTester:
             '',
         ]
         if env.test_cases:
-            # Echo back the input field of each test case.
-            lines.append('test_cases = ' + json.dumps(env.test_cases, indent=2))
+            # Echo back the input field of each test case (decoded from JSON at run time).
+            lines.append(f'test_cases = json.loads({json.dumps(env.test_cases)!r})')
             lines.append('')
             lines.append('for tc in test_cases:')
             lines.append('    # Parrot back the input as the output.')
@@ -722,7 +817,7 @@ class LLMAdversarialTester:
         model: str = 'claude-haiku-4-5-20251001',
         max_attacks: int = 5,
         *,
-        pass_threshold: float = _PASS_THRESHOLD,
+        pass_threshold: float = PASS_THRESHOLD,
     ) -> None:
         self._api_key = api_key
         self._model = model
@@ -893,7 +988,7 @@ class BlackBoxAdversarialTester:
         max_rounds: int = 5,
         attempts_per_round: int = 3,
         *,
-        pass_threshold: float = _PASS_THRESHOLD,
+        pass_threshold: float = PASS_THRESHOLD,
     ) -> None:
         self._api_key = api_key
         self._model = model

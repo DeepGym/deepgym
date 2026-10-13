@@ -211,12 +211,15 @@ def _find_env_dir(name: str) -> Path | None:
 
 
 def _name_tokens(name: str) -> set[str]:
-    """Generate normalized lookup tokens for an environment name."""
+    """Generate normalized lookup tokens for an environment name.
+
+    No basename token: 'other_benchmark/coin_change' must not match plain 'coin_change'.
+    """
     normalized = name.replace('\\', '/').strip()
     tokens = {normalized, normalized.lower()}
     if '/' in normalized:
         safe = normalized.replace('/', '_')
-        tokens.update({safe, safe.lower(), Path(normalized).name, Path(normalized).name.lower()})
+        tokens.update({safe, safe.lower()})
     return {token for token in tokens if token}
 
 

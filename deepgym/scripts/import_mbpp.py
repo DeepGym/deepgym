@@ -11,11 +11,10 @@ a DeepGym-compatible environment directory for each one, including:
 Also generates environments/mbpp/registry.json indexing all problems.
 """
 
+import ast
 import json
 import re
 from pathlib import Path
-
-from datasets import load_dataset
 
 
 def extract_entry_point(code: str) -> str:
@@ -24,37 +23,68 @@ def extract_entry_point(code: str) -> str:
     return match.group(1) if match else 'solution'
 
 
+def trusted_names(reference_code: str, test_code: str) -> tuple[str, list[str]]:
+    """Return (the reference's import statements, the names the tests take from a solution).
+
+    Tests may call any function the reference defines, not only its first one, and a
+    few test a function named like a builtin (``sum``). So the names a solution must
+    supply are those the tests load that the reference binds at top level; every other
+    name, builtins included, resolves to trusted code.
+    """
+    reference = ast.parse(reference_code)
+    imports = '\n'.join(
+        ast.get_source_segment(reference_code, node)
+        for node in reference.body
+        if isinstance(node, (ast.Import, ast.ImportFrom))
+    )
+    defined = set()
+    for node in reference.body:
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+            defined.add(node.name)
+        elif isinstance(node, ast.Assign):
+            defined.update(target.id for target in node.targets if isinstance(target, ast.Name))
+    loaded = {
+        node.id
+        for node in ast.walk(ast.parse(test_code))
+        if isinstance(node, ast.Name) and isinstance(node.ctx, ast.Load)
+    }
+    return imports, sorted(defined & loaded)
+
+
 def generate_verifier(
     task_id: str,
-    entry_point: str,
     test_list: list[str],
     challenge_test_list: list[str],
     test_setup_code: str,
+    reference_code: str,
 ) -> str:
     """Generate a DeepGym-compatible verifier from MBPP test assertions.
 
-    MBPP tests are simple assert strings (e.g. ``assert foo(1) == 2``).
-    The verifier loads the solution module, injects its namespace, and
-    executes each assertion.
+    MBPP tests are simple assert strings (e.g. ``assert foo(1) == 2``). The
+    verifier runs them against the solution's proxy, in a namespace holding only
+    the reference's imports and the solution names the tests call: a solution
+    that exported its own ``set`` or ``math`` could otherwise rig the asserts.
     """
     # Combine regular and challenge tests
     all_tests = list(test_list)
     if challenge_test_list:
         all_tests.extend(challenge_test_list)
 
-    all_tests_repr = repr(all_tests)
-    test_setup_repr = repr(test_setup_code)
+    imports, required = trusted_names(reference_code, '\n'.join([*all_tests, test_setup_code]))
 
     return f'''#!/usr/bin/env python3
 """DeepGym verifier for MBPP_{task_id}."""
 import sys
 import json
-from deepgym_solution import load_solution, solution_namespace
+from deepgym_solution import load_solution
 
 
 # MBPP test assertions
-_TESTS = {all_tests_repr}
-_TEST_SETUP = {test_setup_repr}
+_TESTS = {all_tests!r}
+_TEST_SETUP = {test_setup_code!r}
+# The reference solution's imports (trusted) and the names the tests take from the solution.
+_IMPORTS = {imports!r}
+_REQUIRED = {required!r}
 
 
 def verify(solution_path):
@@ -66,11 +96,13 @@ def verify(solution_path):
     except Exception as e:
         return {{"score": 0.0, "passed": False, "details": f"Import error: {{type(e).__name__}}: {{e}}"}}
 
-    if not hasattr(mod, {entry_point!r}):
-        return {{"score": 0.0, "passed": False, "details": "Missing function: {entry_point}"}}
+    missing = [name for name in _REQUIRED if not hasattr(mod, name)]
+    if missing:
+        return {{"score": 0.0, "passed": False, "details": f"Missing function: {{', '.join(missing)}}"}}
 
-    # Build namespace from the solution module
-    ns = solution_namespace(mod)
+    ns = {{}}
+    exec(_IMPORTS, ns)
+    ns.update({{name: getattr(mod, name) for name in _REQUIRED}})
 
     # Run optional test setup code
     if _TEST_SETUP:
@@ -101,20 +133,19 @@ def verify(solution_path):
 
 
 if __name__ == "__main__":
-    if len(sys.argv) < 2:
-        print(json.dumps({{"score": 0.0, "passed": False, "details": "Usage: verifier.py <solution_path>"}}))
-        sys.exit(1)
-
     try:
         result = verify(sys.argv[1])
     except Exception as e:
-        result = {{"score": 0.0, "passed": False, "details": f"Verifier error: {{type(e).__name__}}: {{e}}"}}
-
+        # The judge failed, not the solution: report a verifier error, never a score.
+        print(json.dumps({{"score": 0.0, "passed": False, "details": f"Verifier error: {{type(e).__name__}}: {{e}}", "error_type": "runtime_error"}}))
+        sys.exit(2)
     print(json.dumps(result))
 '''
 
 
 def main():
+    from datasets import load_dataset
+
     output_dir = Path.home() / '.deepgym' / 'environments' / 'mbpp'
     output_dir.mkdir(parents=True, exist_ok=True)
 
@@ -146,7 +177,7 @@ def main():
 
         # verifier.py
         verifier_src = generate_verifier(
-            task_id, entry_point, test_list, challenge_test_list, test_setup_code
+            task_id, test_list, challenge_test_list, test_setup_code, code
         )
         (env_dir / 'verifier.py').write_text(verifier_src, encoding='utf-8')
 

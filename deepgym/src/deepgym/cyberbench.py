@@ -9,6 +9,7 @@ exploits.
 from __future__ import annotations
 
 import json
+import math
 import re
 from collections import Counter
 from dataclasses import asdict, dataclass, field
@@ -55,8 +56,12 @@ class CyberSeedSpec:
     split: str = 'train'
 
     def to_json_line(self) -> str:
-        """Serialize as stable JSONL."""
-        return json.dumps(asdict(self), sort_keys=True, ensure_ascii=False)
+        """Serialize as stable JSONL.
+
+        Raises:
+            ValueError: If a value is NaN or infinite, which strict JSON can't hold.
+        """
+        return json.dumps(asdict(self), sort_keys=True, ensure_ascii=False, allow_nan=False)
 
 
 def classify_vulnerability_family(description: str) -> str:
@@ -112,7 +117,11 @@ def validate_seed_spec(spec: CyberSeedSpec) -> list[str]:
     errors: list[str] = []
     if not spec.seed_id:
         errors.append('seed_id is required')
-    if abs(sum(spec.reward_components.values()) - 1.0) > 1e-6:
+    weights = spec.reward_components.values()
+    # Checked one by one: NaN fails every comparison, and {-1, 2} still sums to 1.0.
+    if not all(math.isfinite(weight) and 0.0 <= weight <= 1.0 for weight in weights):
+        errors.append('reward_components must be finite weights in [0, 1]')
+    elif abs(sum(weights) - 1.0) > 1e-6:
         errors.append('reward_components must sum to 1.0')
     scanned = {
         'title': spec.title,

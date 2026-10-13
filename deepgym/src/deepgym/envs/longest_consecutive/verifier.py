@@ -118,29 +118,20 @@ def verify(solution_path, test_cases_path=None):
 
 
 if __name__ == '__main__':
-    if len(sys.argv) < 2:
+    try:
+        result = verify(sys.argv[1])
+    except Exception as e:
+        # The judge failed, not the solution: report a verifier error, never a score.
         print(
             json.dumps(
                 {
                     'schema_version': '1.0',
                     'score': 0.0,
                     'passed': False,
-                    'cases': [],
-                    'details': 'Usage: verifier.py <solution_path>',
+                    'details': f'Verifier error: {type(e).__name__}: {e}',
+                    'error_type': 'runtime_error',
                 }
             )
         )
-        sys.exit(1)
-
-    try:
-        result = verify(sys.argv[1])
-    except Exception as e:
-        result = {
-            'schema_version': '1.0',
-            'score': 0.0,
-            'passed': False,
-            'cases': [],
-            'details': f'Verifier error: {type(e).__name__}: {e}',
-        }
-
+        sys.exit(2)
     print(json.dumps(result))

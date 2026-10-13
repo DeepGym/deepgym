@@ -14,33 +14,29 @@ Also generates environments/humaneval/registry.json indexing all problems.
 import json
 from pathlib import Path
 
-from datasets import load_dataset
 
-
-def generate_verifier(task_id: str, entry_point: str, test_code: str) -> str:
+def generate_verifier(task_id: str, entry_point: str, prompt: str, test_code: str) -> str:
     """Generate a DeepGym-compatible verifier from HumanEval test code.
 
     HumanEval tests define a ``check(candidate)`` function that runs assertions.
     The verifier loads the solution module, extracts the entry-point function,
     and passes it as ``candidate``.
 
-    Some test snippets reference helper functions (e.g. ``poly``, ``encode_cyclic``)
-    that are defined in the prompt/solution module.  We use ``exec()`` with the
-    module namespace so those names are available.
+    A few tests call helpers the prompt defines (e.g. ``poly``, ``encode_cyclic``)
+    or the entry point by name. The tests run in a namespace built from the
+    dataset's own prompt plus the solution's entry point, and nothing else the
+    solution defines: its own ``range`` or ``encode_cyclic`` could rig the asserts.
     """
-    # Escape the test code for embedding as a Python string literal.
-    # Use repr to safely embed it.
-    test_code_repr = repr(test_code)
-
     return f'''#!/usr/bin/env python3
 """DeepGym verifier for {task_id}."""
 import sys
 import json
-from deepgym_solution import load_solution, solution_namespace
+from deepgym_solution import load_solution
 
 
-# HumanEval test code (stored as string, executed with solution namespace).
-_TEST_CODE = {test_code_repr}
+# HumanEval prompt (trusted helpers and imports) and test code, run in the judge.
+_PROMPT = {prompt!r}
+_TEST_CODE = {test_code!r}
 
 
 def verify(solution_path):
@@ -57,9 +53,10 @@ def verify(solution_path):
 
     candidate = getattr(mod, {entry_point!r})
 
-    # Build a namespace with all solution-level names so the test code
-    # can reference helper functions defined in the prompt.
-    ns = solution_namespace(mod)
+    # Helpers come from the prompt; only the entry point comes from the solution.
+    ns = {{}}
+    exec(_PROMPT, ns)
+    ns[{entry_point!r}] = candidate
 
     try:
         # Execute the test code (defines check(candidate)) in the solution namespace
@@ -74,20 +71,19 @@ def verify(solution_path):
 
 
 if __name__ == "__main__":
-    if len(sys.argv) < 2:
-        print(json.dumps({{"score": 0.0, "passed": False, "details": "Usage: verifier.py <solution_path>"}}))
-        sys.exit(1)
-
     try:
         result = verify(sys.argv[1])
     except Exception as e:
-        result = {{"score": 0.0, "passed": False, "details": f"Verifier error: {{type(e).__name__}}: {{e}}"}}
-
+        # The judge failed, not the solution: report a verifier error, never a score.
+        print(json.dumps({{"score": 0.0, "passed": False, "details": f"Verifier error: {{type(e).__name__}}: {{e}}", "error_type": "runtime_error"}}))
+        sys.exit(2)
     print(json.dumps(result))
 '''
 
 
 def main():
+    from datasets import load_dataset
+
     output_dir = Path.home() / '.deepgym' / 'environments' / 'humaneval'
     output_dir.mkdir(parents=True, exist_ok=True)
 
@@ -116,7 +112,7 @@ def main():
         )
 
         # verifier.py
-        verifier_src = generate_verifier(task_id, entry_point, test_code)
+        verifier_src = generate_verifier(task_id, entry_point, prompt, test_code)
         (env_dir / 'verifier.py').write_text(verifier_src, encoding='utf-8')
 
         # metadata.json

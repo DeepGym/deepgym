@@ -6,7 +6,6 @@ import re
 import sys
 
 EXPECTED_IPS = {'203.0.113.42', '198.51.100.77'}
-BENIGN_IPS = {'198.51.100.10', '192.0.2.55'}
 REQUIRED_TERMS = {'cve-2021-44228', 'log4shell'}
 REQUIRED_PAYLOAD_TERMS = {'jndi', 'ldap', 'dns'}
 
@@ -17,7 +16,8 @@ def _read_output(solution_path):
         text = re.sub(r'^```(?:json)?\s*', '', text)
         text = re.sub(r'\s*```$', '', text)
     try:
-        return json.loads(text), text
+        data = json.loads(text)
+        return (data if isinstance(data, dict) else {}), text
     except json.JSONDecodeError:
         match = re.search(r'\{.*\}', text, re.DOTALL)
         if match:
@@ -51,9 +51,8 @@ def verify(solution_path, test_cases_path=None):
     cases = []
     score = 0.0
 
-    ip_score = len(ips & EXPECTED_IPS) / len(EXPECTED_IPS)
-    if ips & BENIGN_IPS:
-        ip_score = max(0.0, ip_score - 0.5)
+    # Every IP that didn't probe (a benign one, or one not in the log) costs credit.
+    ip_score = len(ips & EXPECTED_IPS) / len(ips | EXPECTED_IPS)
     score += 0.4 * ip_score
     cases.append({'id': 'source_ips', 'passed': ip_score == 1.0, 'score': ip_score})
 

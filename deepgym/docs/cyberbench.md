@@ -92,22 +92,23 @@ needs a synthetic target, a deterministic verifier, and a reference solution.
 
 For real RL diagnostics, use artifact-backed patch tasks instead of metadata-only
 prompts. The runner downloads `repo-vul.tar.gz` and `patch.diff`, creates a
-`CyberGymPatchEnvironment`, applies a candidate unified diff inside DeepGym, and
+`CyberGymPatchEnvironment`, applies a candidate unified diff inside a sandbox, and
 returns shaped rewards:
 
 - `apply` — candidate patch applies to the extracted vulnerable repo;
-- `file_overlap` — candidate touches files expected by the reference patch;
+- `file_overlap` — candidate changes files expected by the reference patch;
 - `line_similarity` — changed-line similarity to the reference repair;
 - `minimality` — candidate is not much broader than the reference patch;
 - `safety` — candidate avoids obviously unsafe payload patterns.
 
-Validate top-100 importer/verifier behavior locally:
+Overlap and similarity are measured on what the patch actually changed in the
+repository, not on its text. A patch with changed lines outside a hunk, a path
+outside the repository, or no effect at all scores 0.
 
-```bash
-python scripts/run_cybergym_artifact_eval.py --count 100 --mode local --max-parallel 12
-```
-
-Run through Daytona for sandbox-backed execution:
+The runner applies model-written patches, so it never runs locally: in Python, use
+`DeepGym(mode='docker')`, `'apple'`, `'modal'`, `'e2b'` or `'daytona'`. Validate
+top-100 importer/verifier behavior through Daytona (the script's default mode;
+`--mode auto` also resolves to Daytona when `DAYTONA_API_KEY` is set):
 
 ```bash
 python scripts/run_cybergym_artifact_eval.py --count 100 --mode daytona --max-parallel 10
@@ -119,7 +120,8 @@ Use GLM patch attempts when rate limits allow:
 python scripts/run_cybergym_artifact_eval.py --count 20 --answer-source glm --fallback-to-reference
 ```
 
-Current diagnostic from the first 100 CyberGym rows with reference patches:
+Diagnostic from the first 100 CyberGym rows with reference patches, measured
+when the runner still allowed local execution and scored the patch text:
 
 - local artifact verifier: 69/100 pass, average score 0.69;
 - Daytona smoke: 4/5 pass, average score 0.80.

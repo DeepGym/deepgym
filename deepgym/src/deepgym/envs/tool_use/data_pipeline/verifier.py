@@ -22,10 +22,19 @@ Henry,50,Portland
 Ivy,29,Miami
 Jack,38,Dallas
 """
+FIELDS = ('name', 'age', 'city')
+
+
+def _records(rows):
+    """Return CSV rows as sorted (name, age, city) tuples, whitespace-trimmed."""
+    return sorted(tuple((row.get(field) or '').strip() for field in FIELDS) for row in rows)
 
 
 def verify(solution_path, test_cases_path=None):
     """Verify the solution filters CSV rows correctly."""
+    reader = csv.DictReader(io.StringIO(INPUT_CSV))
+    expected = _records(row for row in reader if int(row['age']) > 30)
+
     # Create a temp directory with input.csv.
     work_dir = tempfile.mkdtemp(prefix='deepgym_data_pipeline_')
     input_path = os.path.join(work_dir, 'input.csv')
@@ -54,35 +63,19 @@ def verify(solution_path, test_cases_path=None):
     try:
         output_text = read_output(output_path, work_dir)
         checks['output_exists'] = True
-    except OSError:
+    except (OSError, ValueError):  # missing, a symlink, or not UTF-8 text
         checks['output_exists'] = False
 
-    if checks['output_exists']:
-        rows = list(csv.DictReader(io.StringIO(output_text)))
-
-        # Expected: Bob(35), Charlie(40), Eve(45), Grace(33), Henry(50), Jack(38)
-        expected_names = {'Bob', 'Charlie', 'Eve', 'Grace', 'Henry', 'Jack'}
-
-        actual_names = {row.get('name', '').strip() for row in rows}
-        checks['correct_count'] = len(rows) == 6
-        checks['correct_names'] = actual_names == expected_names
-
-        # Check all ages are > 30.
-        try:
-            checks['all_ages_valid'] = all(int(row.get('age', '0').strip()) > 30 for row in rows)
-        except ValueError:
-            checks['all_ages_valid'] = False
-
-        # Check headers are present.
-        if rows:
-            checks['has_headers'] = set(rows[0].keys()) >= {'name', 'age', 'city'}
-        else:
-            checks['has_headers'] = False
-    else:
-        checks['correct_count'] = False
-        checks['correct_names'] = False
-        checks['all_ages_valid'] = False
-        checks['has_headers'] = False
+    try:
+        rows = list(csv.DictReader(io.StringIO(output_text))) if checks['output_exists'] else []
+    except csv.Error:
+        rows = []
+    records = _records(rows)
+    checks['correct_count'] = len(records) == len(expected)
+    checks['correct_names'] = {name for name, _, _ in records} == {name for name, _, _ in expected}
+    # Every field of every row: altered ages or cities are not the filtered data.
+    checks['correct_records'] = records == expected
+    checks['has_headers'] = bool(rows) and set(rows[0]) >= set(FIELDS)
 
     # Check stdout reports the count.
     checks['prints_count'] = '6' in proc.stdout.strip()
@@ -113,39 +106,29 @@ def verify(solution_path, test_cases_path=None):
     return {
         'schema_version': '1.0',
         'score': score,
-        # Threshold < 1.0: pipeline tasks use discrete output checks where minor
-        # formatting differences (e.g. missing count print) should not fail an
-        # otherwise correct filtering solution.
-        'passed': score >= 0.8,
+        # Threshold < 1.0: a minor miss (e.g. the count print) doesn't fail an
+        # otherwise correct solution, but the written rows must be exactly right.
+        'passed': checks['correct_records'] and score >= 0.8,
         'details': f'{passed_count}/{total} checks passed. ' + ', '.join(details_parts),
         'cases': cases,
     }
 
 
 if __name__ == '__main__':
-    if len(sys.argv) < 2:
+    try:
+        result = verify(sys.argv[1])
+    except Exception as e:
+        # The judge failed, not the solution: report a verifier error, never a score.
         print(
             json.dumps(
                 {
                     'schema_version': '1.0',
                     'score': 0.0,
                     'passed': False,
-                    'cases': [],
-                    'details': 'Usage: verifier.py <solution_path>',
+                    'details': f'Verifier error: {type(e).__name__}: {e}',
+                    'error_type': 'runtime_error',
                 }
             )
         )
-        sys.exit(1)
-
-    try:
-        result = verify(sys.argv[1])
-    except Exception as e:
-        result = {
-            'schema_version': '1.0',
-            'score': 0.0,
-            'passed': False,
-            'cases': [],
-            'details': f'Verifier error: {type(e).__name__}: {e}',
-        }
-
+        sys.exit(2)
     print(json.dumps(result))

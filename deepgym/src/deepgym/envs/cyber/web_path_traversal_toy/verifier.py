@@ -19,6 +19,8 @@ def _parse_candidate(solution_path):
     try:
         data = json.loads(raw)
     except json.JSONDecodeError:
+        data = None
+    if not isinstance(data, dict):
         match = re.search(r'(/download\?file=[^\s"\']+)', raw)
         data = {'method': 'GET', 'path': match.group(1) if match else raw}
     return data, raw

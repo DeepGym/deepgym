@@ -75,6 +75,9 @@ def verify(solution_path, test_cases_path=None):
                 tree.append(None)
         if tree:
             tree[0] = rng.randint(1, 200)  # root must exist
+        for j in range(1, size):
+            if tree[(j - 1) // 2] is None:
+                tree[j] = None  # a missing node has no children
         test_cases.append((tree, ref_level_order(tree)))
 
     passed = 0
@@ -131,29 +134,20 @@ def verify(solution_path, test_cases_path=None):
 
 
 if __name__ == '__main__':
-    if len(sys.argv) < 2:
+    try:
+        result = verify(sys.argv[1])
+    except Exception as e:
+        # The judge failed, not the solution: report a verifier error, never a score.
         print(
             json.dumps(
                 {
                     'schema_version': '1.0',
                     'score': 0.0,
                     'passed': False,
-                    'cases': [],
-                    'details': 'Usage: verifier.py <solution_path>',
+                    'details': f'Verifier error: {type(e).__name__}: {e}',
+                    'error_type': 'runtime_error',
                 }
             )
         )
-        sys.exit(1)
-
-    try:
-        result = verify(sys.argv[1])
-    except Exception as e:
-        result = {
-            'schema_version': '1.0',
-            'score': 0.0,
-            'passed': False,
-            'cases': [],
-            'details': f'Verifier error: {type(e).__name__}: {e}',
-        }
-
+        sys.exit(2)
     print(json.dumps(result))

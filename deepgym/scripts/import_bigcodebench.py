@@ -16,8 +16,6 @@ import json
 import textwrap
 from pathlib import Path
 
-from datasets import load_dataset
-
 
 # Runs inside the isolated solution process: loads the solution, runs the
 # BigCodeBench unittest code against it, prints one JSON result line.
@@ -35,8 +33,8 @@ def main():
     real_stdout = sys.stdout
     sys.stdout, sys.stderr = io.StringIO(), io.StringIO()
 
-    def report(score, passed, details):
-        real_stdout.write(json.dumps({"score": score, "passed": passed, "details": details}) + "\\n")
+    def report(score, passed, details, **extra):
+        real_stdout.write(json.dumps({"score": score, "passed": passed, "details": details, **extra}) + "\\n")
         real_stdout.flush()
 
     try:
@@ -57,9 +55,12 @@ def main():
         if suite.countTestCases() == 0:
             return report(1.0, True, "Direct assertion tests passed")
         result = unittest.TextTestRunner(stream=io.StringIO(), verbosity=0).run(suite)
-        failed = len(result.failures) + len(result.errors)
-        score = (result.testsRun - failed) / result.testsRun if result.testsRun else 0.0
-        report(score, score >= 0.8, f"{result.testsRun - failed}/{result.testsRun} tests passed")
+        skipped = len(result.skipped)
+        if skipped == result.testsRun:
+            return report(0.0, False, f"all {skipped} tests were skipped", error_type="no_tests_run")
+        # A skipped test proved nothing, so it counts against the score like a failure.
+        ok = result.testsRun - len(result.failures) - len(result.errors) - skipped
+        report(ok / result.testsRun, ok == result.testsRun, f"{ok}/{result.testsRun} tests passed, {skipped} skipped")
     except AssertionError as e:
         report(0.0, False, f"Assertion failed: {e}")
     except Exception as e:
@@ -120,24 +121,28 @@ def verify(solution_path):
         results = [line for line in proc.stdout.splitlines() if line.startswith("{{")]
         if not results:
             return {{"score": 0.0, "passed": False, "details": f"No result: {{proc.stderr[-500:]}}"}}
-        return json.loads(results[-1])
+        result = json.loads(results[-1])
+        if result.get("error_type"):
+            raise RuntimeError(result["details"])  # e.g. every test skipped: no verdict
+        return result
     finally:
         shutil.rmtree(work, ignore_errors=True)
 
 
 if __name__ == "__main__":
-    if len(sys.argv) < 2:
-        print(json.dumps({{"score": 0.0, "passed": False, "details": "Usage: verifier.py <solution_path>"}}))
-        sys.exit(1)
     try:
         result = verify(sys.argv[1])
     except Exception as e:
-        result = {{"score": 0.0, "passed": False, "details": f"Verifier error: {{type(e).__name__}}: {{e}}"}}
+        # The judge failed, not the solution: report a verifier error, never a score.
+        print(json.dumps({{"score": 0.0, "passed": False, "details": f"Verifier error: {{type(e).__name__}}: {{e}}", "error_type": "runtime_error"}}))
+        sys.exit(2)
     print(json.dumps(result))
 '''
 
 
 def main():
+    from datasets import load_dataset
+
     output_dir = Path.home() / ".deepgym" / "environments" / "bigcodebench"
     output_dir.mkdir(parents=True, exist_ok=True)
 

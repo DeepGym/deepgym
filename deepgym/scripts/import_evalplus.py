@@ -8,6 +8,7 @@ Each verifier is fully self-contained: expected outputs are computed at import
 time by running the reference solution, then embedded in the verifier file.
 """
 
+import copy
 import json
 import sys
 import traceback
@@ -62,8 +63,10 @@ def compute_expected_outputs(prompt, canonical_solution, entry_point, inputs):
     outputs = []
     for inp in inputs:
         try:
-            result = func(*inp)
-            outputs.append(result)
+            # Copies: a reference that mutates its arguments (or returns a value it
+            # mutates later) must not change the inputs and outputs we embed.
+            result = func(*copy.deepcopy(inp))
+            outputs.append(copy.deepcopy(result))
         except Exception:
             outputs.append("__REFERENCE_ERROR__")
     return outputs
@@ -199,7 +202,9 @@ def verify(solution_path):
                 details.append(f"Test {{i}}: {{type(e).__name__}}: {{e}}")
 
     effective_total = total - skipped
-    score = passed / effective_total if effective_total > 0 else 0.0
+    if effective_total == 0:
+        raise RuntimeError("the reference errored on every input, so nothing can be scored")
+    score = passed / effective_total
     effective_base = NUM_BASE - sum(
         1 for e in EXPECTED_OUTPUTS[:NUM_BASE] if e == "__REFERENCE_ERROR__"
     )
@@ -207,9 +212,10 @@ def verify(solution_path):
         1 for e in EXPECTED_OUTPUTS[NUM_BASE:] if e == "__REFERENCE_ERROR__"
     )
 
+    # The score keeps partial credit; passing means every scored test passed.
     return {{
         "score": score,
-        "passed": score >= 0.8,
+        "passed": passed == effective_total,
         "details": (
             f"{{passed}}/{{effective_total}} passed "
             f"(base: {{base_passed}}/{{effective_base}}, "
@@ -224,15 +230,14 @@ def verify(solution_path):
 
 
 if __name__ == "__main__":
-    if len(sys.argv) < 2:
-        print(json.dumps({{"score": 0.0, "passed": False,
-                          "details": "Usage: verifier.py <solution_path>"}}))
-        sys.exit(1)
     try:
         result = verify(sys.argv[1])
     except Exception as e:
-        result = {{"score": 0.0, "passed": False,
-                  "details": f"Verifier error: {{type(e).__name__}}: {{e}}"}}
+        # The judge failed, not the solution: report a verifier error, never a score.
+        print(json.dumps({{"score": 0.0, "passed": False,
+                          "details": f"Verifier error: {{type(e).__name__}}: {{e}}",
+                          "error_type": "runtime_error"}}))
+        sys.exit(2)
     print(json.dumps(result))
 '''
 

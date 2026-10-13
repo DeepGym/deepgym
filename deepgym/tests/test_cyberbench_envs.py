@@ -1,5 +1,6 @@
 """CyberBench-style built-in environment tests."""
 
+import json
 from pathlib import Path
 
 import pytest
@@ -46,3 +47,25 @@ def test_cyberbench_bad_answer_gets_partial_or_zero_reward(dg: DeepGym) -> None:
 
     assert result.passed is False
     assert result.score < 0.5
+
+
+_TRIAGE = {
+    'cve': 'CVE-2021-44228',
+    'vulnerability': 'Log4Shell JNDI injection',
+    'source_ips': ['198.51.100.77', '203.0.113.42'],
+    'payload_indicators': ['jndi:ldap lookup', 'jndi:dns lookup'],
+    'recommended_action': 'Patch Log4j, block both sources and search the logs for ${jndi:.',
+}
+
+
+@pytest.mark.parametrize('extra_ip', ['8.8.8.8', '198.51.100.10'])
+def test_log_triage_penalizes_every_ip_that_did_not_probe(dg: DeepGym, extra_ip: str) -> None:
+    env = load_environment('cyber/cve_2021_44228_log_triage')
+    padded = {**_TRIAGE, 'source_ips': [*_TRIAGE['source_ips'], extra_ip]}
+
+    correct = dg.run(env, json.dumps(_TRIAGE))
+    wrong = dg.run(env, json.dumps(padded))
+
+    assert correct.score == pytest.approx(1.0)
+    assert wrong.passed is False
+    assert wrong.score < correct.score

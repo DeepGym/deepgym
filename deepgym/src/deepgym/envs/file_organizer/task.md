@@ -6,7 +6,9 @@ Create a directory structure and populate it with files.
 
 Write a Python script that:
 
-1. Create the following directory structure under `/tmp/project`:
+1. Create the following directory structure under the directory named by the
+   `PROJECT_DIR` environment variable. It sits inside the current working
+   directory, the only place the script may write, and doesn't exist yet:
    - `src/`
    - `tests/`
    - `docs/`

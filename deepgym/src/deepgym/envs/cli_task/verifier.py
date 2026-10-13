@@ -33,11 +33,14 @@ def _read_repo(repo_dir, root):
         if name.startswith('refs/heads/'):
             branches[name[len('refs/heads/') :]] = sha.strip()
     heads = os.path.join(git_dir, 'refs', 'heads')
-    if os.path.isdir(heads) and not os.path.islink(heads):
-        for name in os.listdir(heads):
-            sha = read(os.path.join('refs', 'heads', name))
-            if sha is not None:
-                branches[name] = sha.decode('ascii', 'replace').strip()
+    try:
+        names = [] if os.path.islink(heads) else os.listdir(heads)
+    except OSError:  # missing, or made unreadable by the solution
+        names = []
+    for name in names:
+        sha = read(os.path.join('refs', 'heads', name))
+        if sha is not None:
+            branches[name] = sha.decode('ascii', 'replace').strip()
 
     messages, seen, todo = [], set(), list(branches.values())
     while todo and len(seen) < 1000:
@@ -95,7 +98,7 @@ def verify(solution_path, test_cases_path=None):
         content = read_output(os.path.join(repo_dir, 'hello.txt'), work_dir).strip()
         checks['hello_file_exists'] = True
         checks['hello_content_correct'] = content == 'Hello, DeepGym!'
-    except OSError:
+    except (OSError, ValueError):  # missing, a symlink, or not UTF-8 text
         checks['hello_file_exists'] = False
         checks['hello_content_correct'] = False
 
@@ -139,29 +142,20 @@ def verify(solution_path, test_cases_path=None):
 
 
 if __name__ == '__main__':
-    if len(sys.argv) < 2:
+    try:
+        result = verify(sys.argv[1])
+    except Exception as e:
+        # The judge failed, not the solution: report a verifier error, never a score.
         print(
             json.dumps(
                 {
                     'schema_version': '1.0',
                     'score': 0.0,
                     'passed': False,
-                    'cases': [],
-                    'details': 'Usage: verifier.py <solution_path>',
+                    'details': f'Verifier error: {type(e).__name__}: {e}',
+                    'error_type': 'runtime_error',
                 }
             )
         )
-        sys.exit(1)
-
-    try:
-        result = verify(sys.argv[1])
-    except Exception as e:
-        result = {
-            'schema_version': '1.0',
-            'score': 0.0,
-            'passed': False,
-            'cases': [],
-            'details': f'Verifier error: {type(e).__name__}: {e}',
-        }
-
+        sys.exit(2)
     print(json.dumps(result))

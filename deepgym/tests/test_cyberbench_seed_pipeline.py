@@ -3,7 +3,10 @@
 from __future__ import annotations
 
 import json
+import math
 from pathlib import Path
+
+import pytest
 
 from deepgym.cyberbench import (
     classify_vulnerability_family,
@@ -39,6 +42,29 @@ def test_builds_valid_seed_from_cybergym_row() -> None:
     assert spec.family == 'memory-safety'
     assert spec.reward_components['evidence_or_patch_correctness'] == 0.45
     assert validate_seed_spec(spec) == []
+
+
+@pytest.mark.parametrize(
+    'weights',
+    [
+        {'patch': math.nan, 'safety': 1.0},  # NaN fails every comparison, so the sum check passed
+        {'patch': -1.0, 'safety': 2.0},  # sums to 1.0
+        {'patch': math.inf, 'safety': -math.inf},
+    ],
+)
+def test_rejects_weights_that_are_not_finite_shares(weights: dict[str, float]) -> None:
+    spec = cyber_seed_from_hf_row(_row(), index=0)
+    spec.reward_components = weights
+
+    assert 'reward_components must be finite weights in [0, 1]' in validate_seed_spec(spec)
+
+
+def test_never_writes_nan_as_json() -> None:
+    spec = cyber_seed_from_hf_row(_row(), index=0)
+    spec.reward_components = {'patch': math.nan, 'safety': 1.0}
+
+    with pytest.raises(ValueError):
+        spec.to_json_line()  # 'NaN' isn't JSON; strict readers reject the whole file
 
 
 def test_glm_prompt_keeps_generation_synthetic() -> None:

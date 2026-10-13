@@ -2,7 +2,7 @@
 
 import os
 
-PROJECT_DIR = os.environ.get('PROJECT_DIR', '/tmp/project')
+PROJECT_DIR = os.environ['PROJECT_DIR']
 
 DIRS = {
     'src': '# Source Code\nMain application source files.',

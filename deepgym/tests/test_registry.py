@@ -213,3 +213,20 @@ class TestBenchmarkRouting:
         with pytest.raises(ValueError, match='ambiguous') as exc:
             load_environment(name)
         assert 'humaneval_plus/HumanEval_0' in str(exc.value)
+
+    @pytest.mark.parametrize('name', ['mbpp/HumanEval_0', 'humaneval_pls/HumanEval_0'])
+    def test_unknown_namespace_does_not_fall_back_to_the_basename(
+        self, caches: Path, name: str
+    ) -> None:
+        with pytest.raises(ValueError, match='not found'):
+            load_environment(name)
+
+
+@pytest.mark.parametrize('name', ['nonexistent_benchmark/coin_change', 'cyber/coin_change'])
+def test_qualified_name_never_loads_a_builtin_by_basename(name: str) -> None:
+    with pytest.raises(ValueError, match='not found'):
+        load_environment(name)
+
+
+def test_nested_builtin_still_loads_by_its_path() -> None:
+    assert load_environment('tool_use/data_pipeline').name == 'data_pipeline'

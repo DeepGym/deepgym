@@ -3,6 +3,8 @@
 import sys
 from pathlib import Path
 
+import pytest
+
 from deepgym import DeepGym
 from deepgym.models import Environment
 
@@ -11,7 +13,55 @@ scripts_dir = Path(__file__).resolve().parent.parent / 'scripts'
 if str(scripts_dir) not in sys.path:
     sys.path.insert(0, str(scripts_dir))
 
-from import_evalplus import _has_large_int, generate_evalplus_verifier  # noqa: E402
+from import_evalplus import (  # noqa: E402
+    _has_large_int,
+    compute_expected_outputs,
+    generate_evalplus_verifier,
+)
+
+
+def _verifier_env(entry_point: str, inputs: list, outputs: list) -> Environment:
+    code = generate_evalplus_verifier('t', entry_point, inputs, [], outputs, atol=0)
+    return Environment(task='t', verifier_code=code)
+
+
+class TestEvalPlusScoring:
+    """Imported cases stay true to the reference, and passing means every scored test passed."""
+
+    def test_mutating_reference_keeps_the_embedded_inputs(self) -> None:
+        inputs = [[[1, 2]], [[5, 6, 7]]]
+        outputs = compute_expected_outputs(
+            '', 'def pop_first(xs):\n    return xs.pop(0)\n', 'pop_first', inputs
+        )
+
+        env = _verifier_env('pop_first', inputs, outputs)
+        dg = DeepGym(mode='local')
+        correct = dg.run(env, 'def pop_first(xs):\n    return xs[0]\n')
+        wrong = dg.run(env, 'def pop_first(xs):\n    return xs[-1]\n')
+
+        assert inputs == [[[1, 2]], [[5, 6, 7]]]
+        assert outputs == [1, 5]
+        assert correct.score == 1.0
+        assert wrong.score == 0.0
+
+    def test_partial_credit_is_not_a_pass(self) -> None:
+        inputs = [[n] for n in range(5)]
+        env = _verifier_env('square', inputs, [n * n for n in range(5)])
+
+        result = DeepGym(mode='local').run(
+            env, 'def square(n):\n    return n * n if n < 4 else 0\n'
+        )
+
+        assert result.score == pytest.approx(0.8)
+        assert result.passed is False
+
+    def test_reference_errors_on_every_input_is_a_verifier_error(self) -> None:
+        env = _verifier_env('f', [[1], [2]], ['__REFERENCE_ERROR__'] * 2)
+
+        result = DeepGym(mode='local').run(env, 'def f(x):\n    return x\n')
+
+        assert result.exit_code == 2
+        assert result.has_verdict is False
 
 
 class TestEvalPlusLargeIntHandling:

@@ -1,8 +1,7 @@
 """Verifier for the String Manipulation task.
 
-Checks both output correctness AND implementation approach.
-Solutions that rely on trivial slice reversal ([::-1]) with split/join
-are penalised since the task expects loop-based character-level logic.
+Scores output correctness only: the task allows any implementation, so an
+idiomatic split-and-slice solution earns the same reward as a loop.
 """
 
 import json
@@ -11,7 +10,7 @@ import string
 import sys
 import time
 
-from deepgym_solution import load_solution, solution_source
+from deepgym_solution import load_solution
 
 
 def _reference_transform(s: str) -> str:
@@ -33,45 +32,8 @@ def _reference_transform(s: str) -> str:
     return ''.join(result)
 
 
-def _check_implementation(source: str) -> tuple[bool, str]:
-    """Check if the solution uses a genuine implementation vs trivial shortcuts.
-
-    Returns
-    -------
-    tuple[bool, str]
-        (is_genuine, reason).
-    """
-    # Count non-comment, non-blank lines in the function body
-    body_lines = [
-        ln.strip()
-        for ln in source.splitlines()
-        if ln.strip()
-        and not ln.strip().startswith('#')
-        and not ln.strip().startswith('def ')
-        and not ln.strip().startswith('"""')
-        and not ln.strip().startswith("'''")
-    ]
-
-    # Trivial one/two-liner using [::-1] with split/join
-    uses_slice_reverse = '[::-1]' in source
-    uses_split = '.split(' in source
-    if uses_slice_reverse and uses_split and len(body_lines) <= 4:
-        return False, 'Trivial split+slice-reverse one-liner'
-
-    # Pure [::-1] without any loop-based logic
-    if uses_slice_reverse and 'for ' not in source and 'while ' not in source:
-        return False, 'Uses [::-1] without loop-based reversal'
-
-    # Must have some iterative logic (loop or character-by-character processing)
-    has_loop = 'for ' in source or 'while ' in source
-    if not has_loop and len(body_lines) <= 3:
-        return False, 'No iterative logic found -- likely a trivial shortcut'
-
-    return True, 'Implements character-level logic'
-
-
 def verify(solution_path, test_cases_path=None):
-    """Verify a string manipulation solution for correctness and implementation quality."""
+    """Verify a string manipulation solution for correctness."""
     # Load the solution module
     try:
         solution = load_solution(solution_path)
@@ -92,10 +54,6 @@ def verify(solution_path, test_cases_path=None):
             'cases': [],
             'details': 'Missing transform function',
         }
-
-    # --- Implementation analysis ---
-    source = solution_source(solution_path, 'transform')
-    is_genuine, impl_reason = _check_implementation(source)
 
     # Static test cases: (input, expected_output)
     test_cases = [
@@ -180,63 +138,35 @@ def verify(solution_path, test_cases_path=None):
 
         cases.append(case)
 
-    correctness_score = passed / total
-
-    # Combine correctness (70%) and implementation quality (30%).
-    if is_genuine:
-        impl_score = 1.0
-    else:
-        impl_score = 0.0
-        details.append(f'Implementation check failed: {impl_reason}')
-
-    score = round(correctness_score * 0.7 + impl_score * 0.3, 4)
-    if not is_genuine:
-        score = min(score, 0.3)
-
+    score = passed / total
     return {
         'schema_version': '1.0',
         'score': score,
         'passed': score == 1.0,
-        'details': (
-            f'{passed}/{total} correctness tests passed. '
-            f'Implementation: {impl_reason}. ' + ('; '.join(details) if details else '')
-        ),
-        'reward_components': {
-            'correctness': correctness_score,
-            'implementation_quality': impl_score,
-        },
+        'details': f'{passed}/{total} passed. ' + '; '.join(details)
+        if details
+        else f'{passed}/{total} passed',
         'cases': cases,
         'seed': seed,
     }
 
 
 if __name__ == '__main__':
-    if len(sys.argv) < 2:
+    test_cases_path = sys.argv[2] if len(sys.argv) > 2 else None
+    try:
+        result = verify(sys.argv[1], test_cases_path)
+    except Exception as e:
+        # The judge failed, not the solution: report a verifier error, never a score.
         print(
             json.dumps(
                 {
                     'schema_version': '1.0',
                     'score': 0.0,
                     'passed': False,
-                    'cases': [],
-                    'details': 'Usage: verifier.py <solution_path> [test_cases_path]',
+                    'details': f'Verifier error: {type(e).__name__}: {e}',
+                    'error_type': 'runtime_error',
                 }
             )
         )
-        sys.exit(1)
-
-    solution_path = sys.argv[1]
-    test_cases_path = sys.argv[2] if len(sys.argv) > 2 else None
-
-    try:
-        result = verify(solution_path, test_cases_path)
-    except Exception as e:
-        result = {
-            'schema_version': '1.0',
-            'score': 0.0,
-            'passed': False,
-            'cases': [],
-            'details': f'Verifier error: {type(e).__name__}: {e}',
-        }
-
+        sys.exit(2)
     print(json.dumps(result))

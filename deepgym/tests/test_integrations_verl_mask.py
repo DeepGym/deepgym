@@ -158,11 +158,17 @@ def test_broken_patch_is_trained_on_as_zero(
     assert set(output.response_mask) == {1}
 
 
-def test_the_loop_scores_with_the_configured_reward_function(verl: types.ModuleType) -> None:
+def test_the_loop_scores_with_the_configured_reward_function(
+    verl: types.ModuleType, monkeypatch: pytest.MonkeyPatch
+) -> None:
     """reward.custom_reward_function may hold one environment (make_verl_compute_score).
 
-    The loop scores with it, as verl's reward step would, and keeps its failures out too.
+    The loop scores with it, as verl's reward step would, keeps its failures out too, and
+    reports each sample to the masked-rate warning.
     """
+    reports: list[bool] = []
+    recorder = types.SimpleNamespace(record=lambda *, masked: reports.append(masked))
+    monkeypatch.setattr(verl, '_MASKED', recorder)
     local = DeepGym(mode='local')
     always = Environment(task='t', verifier_code='return 1.0')
     passes = verl_reward.make_verl_compute_score(always, local)
@@ -177,6 +183,7 @@ def test_the_loop_scores_with_the_configured_reward_function(verl: types.ModuleT
     assert masked.response_mask == [0] * len('anything')
     with pytest.raises(DeepGymError, match='No verdict'):
         _rollout(verl, 'anything', use_v1=True, reward_fn=fails)
+    assert reports == [False, True, True]
 
 
 def test_generated_dapo_config_scores_with_this_loop(verl: types.ModuleType) -> None:

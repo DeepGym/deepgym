@@ -11,13 +11,21 @@ before then), so prompts should tell the model to begin with a screenshot.
 verl turns a tool's exception into tool-error text and the rollout goes on
 (``ToolAgentLoop._call_tool``), so a sandbox that fails to start, or a provider that
 fails mid-action, would otherwise end the rollout with a final verifier judging a state
-the model never got to shape. The tool remembers any such failure instead: a rollout
-whose sandbox failed to start, whose action failed for any reason other than the action
-itself (an invalid or disallowed action comes back as text), or whose step or final
-verifier failed, gets no verdict. Like :mod:`deepgym.integrations.verl_mask`, the loop
-keeps it out of training (see :func:`~deepgym.integrations.verl_mask.exclude_unscored`)
-and logs ``error`` 1.0 in ``reward_extra_info``. A rollout where the model never called
-the tool scores 0.0.
+the model never got to shape. The tool remembers such a failure instead, and the rollout
+gets no verdict: like :mod:`deepgym.integrations.verl_mask`, the loop keeps it out of
+training (see :func:`~deepgym.integrations.verl_mask.exclude_unscored`) and logs
+``error`` 1.0 in ``reward_extra_info``. Only failures that aren't the policy's doing are
+kept out (see :func:`~deepgym.exceptions.is_infrastructure_failure`): a sandbox that
+fails to start, a provider or network failure during an action or the final verifier,
+and a step or final verifier that fails, as the session reports.
+
+Everything that follows from the policy's own actions is scored. An invalid or
+disallowed action comes back to the model as text, and any other failure of an action
+(a failed write, a sandbox the policy killed) comes back as tool-error text while the
+rollout goes on to its final verifier. If that verifier can't run because of what the
+policy did (the sandbox died or hung), the rollout scores 0 with ``error_type``
+``policy_sandbox_failure``. A rollout where the model never called the tool scores 0.0.
+The share of rollouts kept out is watched (:class:`~deepgym.integrations.reward.MaskedRate`).
 
 Agent loop config (``actor_rollout_ref.rollout.agent.agent_loop_config_path``)::
 
@@ -60,7 +68,14 @@ from verl.experimental.agent_loop.tool_agent_loop import ToolAgentLoop
 from verl.tools.base_tool import BaseTool, OpenAIFunctionToolSchema, ToolResponse
 
 from deepgym.core import DeepGym
-from deepgym.exceptions import ActionError, DeepGymError, SandboxError
+from deepgym.exceptions import (
+    ActionError,
+    DeepGymError,
+    SandboxError,
+    VerifierError,
+    is_infrastructure_failure,
+)
+from deepgym.integrations.reward import MaskedRate
 from deepgym.integrations.verl_mask import exclude_unscored
 from deepgym.models import Action, ActionType, MultiTurnEnvironment, Observation, RunResult
 from deepgym.registry import load_environment
@@ -68,6 +83,8 @@ from deepgym.sandbox import error_result
 from deepgym.session import Session
 
 logger = logging.getLogger(__name__)
+
+_MASKED = MaskedRate('verl deepgym_agent')
 
 _STARTED_NOTE = (
     'Episode started. Your action was not applied; this is the starting screen. '
@@ -156,10 +173,12 @@ class DeepGymSessionTool(BaseTool):
         """Apply one action. Bad calls come back as text so the model can correct itself.
 
         Raises:
-            Exception: Whatever starting the sandbox, or applying a valid action, raised
-                (a provider outage, a failed step verifier). verl shows it to the model as
-                tool-error text; the episode is remembered as failed, gets no verdict, and
-                takes no more actions.
+            Exception: Whatever starting the sandbox, or applying a valid action, raised.
+                verl shows it to the model as tool-error text. A failed start, or a provider
+                or network failure (see :func:`~deepgym.exceptions.is_infrastructure_failure`),
+                marks the episode failed: it gets no verdict and takes no more actions. Any
+                other failure follows from the policy's actions, so the episode goes on and
+                is scored.
         """
         episode = self._episode_of[instance_id]
         async with self._locks.setdefault(episode, asyncio.Lock()):
@@ -184,7 +203,8 @@ class DeepGymSessionTool(BaseTool):
             except ActionError as exc:
                 return ToolResponse(text=str(exc)), 0.0, {}
             except Exception as exc:
-                self._failed[episode] = _no_verdict(exc)
+                if is_infrastructure_failure(exc):
+                    self._failed[episode] = _no_verdict(exc)
                 raise
             return _to_response(obs), reward, {'done': done}
 
@@ -197,8 +217,11 @@ class DeepGymSessionTool(BaseTool):
 
         Returns:
             The final verifier's result; a result without a verdict if the sandbox failed
-            to start, an action failed (see :meth:`execute`) or the verifier raised; None
-            if the episode never started (the model made no tool call) or *score* is False.
+            to start, a provider or network failure hit an action or the verifier, or the
+            verifier failed (``VerifierError``); a 0 with ``error_type``
+            ``policy_sandbox_failure`` if the verifier couldn't run for any other reason,
+            which follows from the policy's actions (a dead or hung sandbox). None if the
+            episode never started (the model made no tool call) or *score* is False.
         """
         self._specs.pop(episode, None)
         self._locks.pop(episode, None)
@@ -212,7 +235,12 @@ class DeepGymSessionTool(BaseTool):
                 return failed
             return await asyncio.to_thread(session.score)
         except Exception as exc:
-            return _no_verdict(exc)
+            if is_infrastructure_failure(exc) or isinstance(exc, VerifierError):
+                return _no_verdict(exc)
+            logger.debug('DeepGym episode broke its sandbox, scored 0: %s', exc)
+            return error_result(exc, session.sandbox_id).model_copy(
+                update={'error_type': 'policy_sandbox_failure'}
+            )
         finally:
             if session is not None:
                 try:
@@ -273,6 +301,7 @@ class DeepGymAgentLoop(ToolAgentLoop):
         finished = [await tool.finish(episode, score=True) for tool in tools]
         results = [result for result in finished if result is not None]
         failed = [result for result in results if not result.has_verdict]
+        _MASKED.record(masked=bool(failed))
         output.reward_score = sum((result.score for result in results), 0.0)
         output.extra_fields['reward_extra_info'] = {
             'score': output.reward_score,

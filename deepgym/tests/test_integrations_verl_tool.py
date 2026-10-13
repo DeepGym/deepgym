@@ -16,6 +16,7 @@ from typing import Any
 import pytest
 
 from deepgym.exceptions import DeepGymError, SandboxError
+from deepgym.exceptions import TimeoutError as DeepGymTimeout
 from deepgym.models import MultiTurnEnvironment
 from deepgym.session import LocalBackend, Session
 
@@ -248,23 +249,37 @@ def test_a_step_verifier_failure_is_not_a_zero(
     assert output.response_mask == [0, 0, 0]
 
 
+@pytest.fixture()
+def masked(verl: types.ModuleType, monkeypatch: pytest.MonkeyPatch) -> list[bool]:
+    """What the loop reports to the masked-rate warning, one entry per rollout."""
+    reports: list[bool] = []
+    recorder = types.SimpleNamespace(record=lambda *, masked: reports.append(masked))
+    monkeypatch.setattr(verl, '_MASKED', recorder)
+    return reports
+
+
+def _fail_writing_out_txt(monkeypatch: pytest.MonkeyPatch, error: Exception) -> None:
+    """Make the model's command that writes out.txt fail with *error*."""
+    real_exec = LocalBackend.exec
+
+    def exec_(backend: LocalBackend, command: str, timeout: int, env: Any = None) -> Any:
+        if 'out.txt' in command:
+            raise error
+        return real_exec(backend, command, timeout, env)
+
+    monkeypatch.setattr(LocalBackend, 'exec', exec_)
+
+
 @pytest.mark.parametrize('use_v1', [True, False])
 def test_a_provider_outage_during_an_action_is_not_a_zero(
-    verl: types.ModuleType, monkeypatch: pytest.MonkeyPatch, use_v1: bool
+    verl: types.ModuleType, monkeypatch: pytest.MonkeyPatch, masked: list[bool], use_v1: bool
 ) -> None:
     """An outage blocks the model's correct command; the state it left is not a verdict.
 
     verl shows the error to the model and the rollout goes on to 'done', so the tool must
     remember the failure, or the final verifier would grade the unwritten file as a 0.
     """
-    real_exec = LocalBackend.exec
-
-    def exec_(backend: LocalBackend, command: str, timeout: int, env: Any = None) -> Any:
-        if 'out.txt' in command:
-            raise ConnectionError('provider unavailable')  # SDKs raise their own errors
-        return real_exec(backend, command, timeout, env)
-
-    monkeypatch.setattr(LocalBackend, 'exec', exec_)
+    _fail_writing_out_txt(monkeypatch, ConnectionError('provider unavailable'))
     tool = _tool(verl)
     loop = verl.DeepGymAgentLoop([tool], WRITE_AND_FINISH, use_v1)
 
@@ -279,6 +294,67 @@ def test_a_provider_outage_during_an_action_is_not_a_zero(
         verl._FAILED_NOTE
     ]
     assert not tool._sessions
+    assert masked == [True]
+
+
+def test_an_action_the_policy_broke_is_scored(
+    verl: types.ModuleType, monkeypatch: pytest.MonkeyPatch, masked: list[bool]
+) -> None:
+    """A failure that follows from the policy's own action is shown to it, then judged.
+
+    Masking it would let a policy escape its 0 by breaking its sandbox.
+    """
+    _fail_writing_out_txt(monkeypatch, SandboxError('Sandbox local-session is not running'))
+
+    _, output, responses = _rollout(verl, WRITE_AND_FINISH)
+
+    assert responses[1] == "Error executing tool 'computer': Sandbox local-session is not running"
+    assert responses[2] == '(no output)'  # 'done' still runs
+    assert output.reward_score == 0.0
+    assert output.extra_fields['reward_extra_info']['error'] == 0.0
+    assert output.response_mask == [1, 1, 1]
+    assert masked == [False]
+
+
+@pytest.mark.parametrize(
+    ('failure', 'kept_out'),
+    [
+        (ConnectionError('provider unavailable'), True),
+        (SandboxError('Sandbox local-session is not running'), False),  # the policy killed it
+        (DeepGymTimeout('Verifier exceeded 30s'), False),  # the policy left it hanging
+    ],
+    ids=['provider_outage', 'sandbox_killed', 'sandbox_hung'],
+)
+def test_a_final_verifier_that_cannot_run(
+    verl: types.ModuleType,
+    monkeypatch: pytest.MonkeyPatch,
+    masked: list[bool],
+    failure: Exception,
+    kept_out: bool,
+) -> None:
+    """Only a provider failure keeps the rollout out; a sandbox the policy broke scores 0."""
+
+    def verify(backend: LocalBackend, code: str, timeout: int, env: Any = None) -> Any:
+        raise failure
+
+    monkeypatch.setattr(LocalBackend, 'verify', verify)
+    real_finish = verl.DeepGymSessionTool.finish
+    results: list = []
+
+    async def finish(tool: Any, episode: str, *, score: bool) -> Any:
+        results.append(await real_finish(tool, episode, score=score))
+        return results[-1]
+
+    monkeypatch.setattr(verl.DeepGymSessionTool, 'finish', finish)
+
+    _, output, _ = _rollout(verl, WRITE_AND_FINISH, use_v1=False)
+
+    assert output.reward_score == 0.0
+    assert output.extra_fields['reward_extra_info']['error'] == float(kept_out)
+    assert output.response_mask == ([0, 0, 0] if kept_out else [1, 1, 1])
+    assert results[0].has_verdict is not kept_out
+    assert results[0].error_type == ('unknown_error' if kept_out else 'policy_sandbox_failure')
+    assert masked == [kept_out]
 
 
 def test_a_failed_sandbox_delete_keeps_the_score(

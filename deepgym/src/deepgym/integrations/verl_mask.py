@@ -32,8 +32,9 @@ step because ``reward_score`` is set. A sample whose reward function raised
   so its siblings' advantages shift as if it had failed.
 
 Either way a policy that learns to trigger failures escapes their penalty, so keep
-watching the ``error`` metric and the failed-sample logs. Line numbers in the two items
-are from verl main at 76e837e; the v1 ones still match verl 0.9.1.
+watching the ``error`` metric and the failed-sample logs; the loop logs a warning when more
+than 5% of a batch is kept out (:class:`~deepgym.integrations.reward.MaskedRate`). Line
+numbers in the two items are from verl main at 76e837e; the v1 ones still match verl 0.9.1.
 
 Agent loop config (``actor_rollout_ref.rollout.agent.agent_loop_config_path``)::
 
@@ -57,11 +58,14 @@ from verl.experimental.agent_loop.single_turn_agent_loop import SingleTurnAgentL
 from verl.trainer.ppo.reward import get_custom_reward_fn
 
 from deepgym.exceptions import DeepGymError, NoVerdictError
+from deepgym.integrations.reward import MaskedRate
 from deepgym.integrations.verl import compute_score
 from deepgym.sandboxes import Provider
 
 if TYPE_CHECKING:
     from omegaconf import DictConfig
+
+_MASKED = MaskedRate('verl deepgym_single_turn')
 
 
 def exclude_unscored(output: AgentLoopOutput, trainer_config: DictConfig, why: str) -> None:
@@ -115,10 +119,12 @@ class DeepGymSingleTurnAgentLoop(SingleTurnAgentLoop):
         try:
             result = await asyncio.to_thread(self._score, output.response_ids, kwargs)
         except NoVerdictError as exc:
+            _MASKED.record(masked=True)
             output.reward_score = 0.0
             output.extra_fields['reward_extra_info'] = {'score': 0.0, 'passed': 0.0, 'error': 1.0}
             exclude_unscored(output, self.config, f'scoring {kwargs["data_source"]}: {exc}')
             return output
+        _MASKED.record(masked=False)
         output.reward_score = result['score']
         output.extra_fields['reward_extra_info'] = result
         return output

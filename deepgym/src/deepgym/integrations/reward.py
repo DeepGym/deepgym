@@ -18,6 +18,8 @@ The reward functions here and in the TRL, Axolotl and DAPO adapters share two ru
 
 from __future__ import annotations
 
+import logging
+import threading
 from collections.abc import Mapping, Sequence
 
 from deepgym.async_core import AsyncDeepGym
@@ -25,8 +27,54 @@ from deepgym.core import DeepGym
 from deepgym.integrations.verl import extract_code
 from deepgym.models import BatchResult, Environment, RunResult
 
+logger = logging.getLogger(__name__)
+
 Completion = str | Sequence[Mapping[str, object]]
 """One completion: decoded text, or a conversation of message dicts (as TRL passes them)."""
+
+MASKED_WARN_RATE = 0.05
+"""Share of a batch kept out of training (no verdict) above which :class:`MaskedRate` warns."""
+
+MASKED_BATCH = 100
+"""Samples in a batch for that warning: trainers hand samples over one at a time."""
+
+
+class MaskedRate:
+    """Count samples kept out of training for lack of a verdict, and warn above 5% of a batch.
+
+    Only failures that aren't the policy's doing are masked (see
+    :func:`~deepgym.exceptions.is_infrastructure_failure`), so a masked rate that climbs
+    means a provider outage, or a policy that found a way to get its failures masked and
+    escape their penalty. A batch is the last ``MASKED_BATCH`` samples recorded.
+    """
+
+    def __init__(self, source: str) -> None:
+        self._source = source
+        self._lock = threading.Lock()
+        self._masked = self._total = self._batch_masked = self._batch_total = 0
+
+    def record(self, *, masked: bool) -> None:
+        """Count one sample; warn when the batch it completes had more than 5% masked."""
+        with self._lock:
+            self._masked += masked
+            self._total += 1
+            self._batch_masked += masked
+            self._batch_total += 1
+            if self._batch_total < MASKED_BATCH:
+                return
+            batch_masked, run_masked, run_total = self._batch_masked, self._masked, self._total
+            self._batch_masked = self._batch_total = 0
+        if batch_masked > MASKED_WARN_RATE * MASKED_BATCH:
+            logger.warning(
+                '%s: %d of the last %d samples got no verdict and were kept out of training '
+                '(%d of %d this run). Check the sandbox provider, and whether the policy found '
+                'a way to get its failures masked.',
+                self._source,
+                batch_masked,
+                MASKED_BATCH,
+                run_masked,
+                run_total,
+            )
 
 
 def _answer_text(completion: Completion) -> str:

@@ -23,8 +23,10 @@ MODEL_FAULT_ERRORS = frozenset(
     {'invalid_patch', 'patch_apply_failed', 'test_infra_tampering', 'policy_sandbox_failure'}
 )
 """error_type values that are the model's own fault (a patch that is malformed, doesn't
-apply, or touches test infrastructure, or code it wrote that killed the grading harness
-once its tests ran): a real 0 to learn from, not a missing verdict."""
+apply, or touches test infrastructure; code it wrote that killed the grading harness once
+its tests ran, or a sandbox it broke, hung or exhausted, see
+:func:`~deepgym.exceptions.is_infrastructure_failure`): a real 0 to learn from, not a
+missing verdict."""
 
 
 def is_verdict(exit_code: int | None, error_type: str | None) -> bool:

@@ -39,10 +39,29 @@ from deepgym.registry import load_environment
 from deepgym.sandboxes import Provider
 
 _FENCED_BLOCK = re.compile(r'```[\w+-]*\n(.*?)```', re.DOTALL)
+# End-of-turn/EOS tokens a decoder leaves when it keeps special tokens: <|im_end|>,
+# <|endoftext|>, <|eot_id|>, <|end|>, </s>, <eos>, <end_of_turn>, DeepSeek's <｜...｜>.
+_SPECIAL_TOKEN = re.compile(r'<\|[\w.-]+\|>|<｜[^｜<>]+｜>|</s>|<eos>|<end_of_turn>')
+
+
+def _drop_trailing_special_tokens(response: str) -> str:
+    """Return *response* without the special tokens (and whitespace) at its end."""
+    stripped = response.rstrip()
+    start = stripped.rfind('<')
+    while start != -1 and _SPECIAL_TOKEN.fullmatch(stripped, start):
+        response = stripped[:start]
+        stripped = response.rstrip()
+        start = stripped.rfind('<')
+    return response
 
 
 def extract_code(response: str) -> str:
-    """Return the last fenced code block in *response*, or *response* unchanged if none."""
+    """Return the last fenced code block in *response*, or the whole response if none.
+
+    Special tokens at the end (e.g. ``<|im_end|>``, ``</s>``), which decoding with
+    ``skip_special_tokens=False`` leaves, are dropped first.
+    """
+    response = _drop_trailing_special_tokens(response)
     blocks = _FENCED_BLOCK.findall(response)
     return blocks[-1] if blocks else response
 

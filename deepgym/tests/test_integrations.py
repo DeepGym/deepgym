@@ -147,6 +147,33 @@ class TestVerlIntegration:
         assert extract_code('a\n```python\nx = 1\n```\nb\n```\ny = 2\n```') == 'y = 2\n'
         assert extract_code('def f(): pass') == 'def f(): pass'
 
+    @pytest.mark.parametrize(
+        'tokens',
+        [
+            '<|im_end|>',
+            '<|endoftext|>',
+            '</s>',
+            '<|eot_id|>',
+            '<|eot_id|>\n<|end_of_text|>',
+            '<end_of_turn>',
+            '<｜end▁of▁sentence｜>',
+        ],
+    )
+    def test_extract_code_drops_trailing_special_tokens(self, tokens: str) -> None:
+        """Decoding with skip_special_tokens=False leaves EOS tokens after unfenced code."""
+        assert extract_code(f'{GOOD_SOLUTION}{tokens}\n') == GOOD_SOLUTION
+        assert extract_code(f'```python\n{GOOD_SOLUTION}```\n{tokens}') == GOOD_SOLUTION
+
+    def test_unfenced_code_before_an_eos_token_scores_in_every_adapter(
+        self, env: Environment, local_dg: DeepGym
+    ) -> None:
+        trl = make_trl_reward_fn(env=env, dg=local_dg)(completions=[f'{GOOD_SOLUTION}</s>'])
+        verl = make_verl_compute_score(env=env, dg=local_dg)('ds', f'{GOOD_SOLUTION}<|eot_id|>')
+        query = f'{OPENRLHF_PROMPT}{GOOD_SOLUTION}<|im_end|>'
+        openrlhf = _openrlhf_score(env, local_dg, [query])['rewards']
+
+        assert (trl, verl, openrlhf) == ([1.0], 1.0, [1.0])
+
     def test_package_compute_score_picks_env_per_row(self) -> None:
         reference = (
             Path(__file__).resolve().parent.parent

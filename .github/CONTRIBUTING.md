@@ -50,3 +50,6 @@ tells you if it works. Also check that an obviously wrong solution scores below 
 2. Make the change with tests.
 3. Run `pytest` and `ruff`.
 4. Open a PR that says what changed and how you tested it.
+
+By opening a PR you agree that your contribution is licensed to DeepGym under the
+MIT License, so it can ship under both the noncommercial and the commercial license.

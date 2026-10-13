@@ -1,5 +1,9 @@
 # Changelog
 
+## Unreleased
+
+- **License:** DeepGym is now under the PolyForm Noncommercial License 1.0.0. Commercial use needs a license (contact@deepgym.io). Releases up to 0.4.0 stay MIT.
+
 ## 0.4.0 (2026-10-13)
 
 - **Console:** `deepgym console` (alias `deepgym web`) serves a management UI and a JSON API under `/api`: searchable environments with task/verifier/reference views, background runs and small evals on any provider with per-case results, episode replay with screenshots, live Docker/Apple sandboxes with kill, and QA reports from `~/.deepgym/qa/`. Runs and episodes persist in `~/.deepgym/console.db`; `deepgym.console.record_episode(trajectory, result)` stores an episode from any agent loop. The API needs a per-launch token written into the served pages, refuses cross-origin writes and non-JSON bodies, and runs pasted solutions locally only with `--allow-local-exec`. Wheels ship the built UI. Replaces the single-page `deepgym web` debug UI (`deepgym.web` is removed).

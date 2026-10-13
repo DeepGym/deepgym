@@ -2,7 +2,7 @@
 
 [![PyPI](https://img.shields.io/pypi/v/deepgym)](https://pypi.org/project/deepgym/)
 [![CI](https://github.com/DeepGym/deepgym/actions/workflows/deepgym-ci.yml/badge.svg)](https://github.com/DeepGym/deepgym/actions/workflows/deepgym-ci.yml)
-[![License: MIT](https://img.shields.io/badge/license-MIT-blue)](https://github.com/DeepGym/deepgym/blob/main/LICENSE)
+[![License: PolyForm Noncommercial](https://img.shields.io/badge/license-PolyForm%20Noncommercial-blue)](https://github.com/DeepGym/deepgym/blob/main/LICENSE)
 [![GitHub stars](https://img.shields.io/github/stars/DeepGym/deepgym?style=social)](https://github.com/DeepGym/deepgym)
 
 RL training environments with verifiable rewards for coding and computer-use agents.
@@ -80,7 +80,9 @@ together: verl loads DeepGym's reward function with one config line (see [verl](
 
 ## For teams and enterprises
 
-If your team needs more than the open-source package, we can help with:
+DeepGym is free for personal, research and other noncommercial use. Any commercial
+use, including inside a company or in a product you sell, needs a commercial license
+from us. We can also help with:
 
 - Custom environments and verifiers for your tasks
 - Private or self-hosted deployment
@@ -763,7 +765,13 @@ If DeepGym is useful to you, a star helps other people find it.
 
 ## License
 
-MIT. See [LICENSE](https://github.com/DeepGym/deepgym/blob/main/LICENSE).
+[PolyForm Noncommercial License 1.0.0](https://github.com/DeepGym/deepgym/blob/main/LICENSE).
+Commercial use needs a license: email [contact@deepgym.io](mailto:contact@deepgym.io).
+
+We changed the license after 0.4.0 to protect the new work going into DeepGym.
+Releases up to 0.4.0 stay under MIT. The vendored UI kits in
+`console-ui/components/base` and `console-ui/components/primitives` keep their own
+MIT licenses.
 
 ---
 

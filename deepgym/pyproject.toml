@@ -7,7 +7,7 @@ name = "deepgym"
 version = "0.4.0"
 description = "RL training environments with verifiable rewards for coding agents"
 readme = "README.md"
-license = {text = "MIT"}
+license = {text = "PolyForm-Noncommercial-1.0.0"}
 requires-python = ">=3.10"
 authors = [
     {name = "Abhishek Gahlot", email = "me@abhishek.it"},
@@ -17,7 +17,7 @@ classifiers = [
     "Development Status :: 3 - Alpha",
     "Intended Audience :: Developers",
     "Intended Audience :: Science/Research",
-    "License :: OSI Approved :: MIT License",
+    "License :: Other/Proprietary License",
     "Programming Language :: Python :: 3",
     "Programming Language :: Python :: 3.10",
     "Programming Language :: Python :: 3.11",

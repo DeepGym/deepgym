@@ -2,19 +2,26 @@
 
 The stand-in SingleTurnAgentLoop does what verl's does for this loop's purposes: one
 generation, returned as token ids with a response_mask of ones, and the trainer config
-as ``self.config``. Scoring is real (local DeepGym).
+as ``self.config``. verl's ``get_custom_reward_fn`` returns the configured reward function
+with its ``reward_kwargs`` bound; the stand-in config holds that function as is. Scoring is
+real (local DeepGym).
 """
 
 import asyncio
 import importlib
 import sys
 import types
+from collections.abc import Callable
+from pathlib import Path
 
 import pytest
+import yaml
 
 from deepgym import load_environment
+from deepgym.core import DeepGym
 from deepgym.exceptions import DeepGymError
 from deepgym.integrations import verl as verl_reward
+from deepgym.integrations.dapo import generate_dapo_verl_config
 from deepgym.models import MODEL_FAULT_ERRORS, Environment
 
 
@@ -26,14 +33,22 @@ class _Tokenizer:
         return ''.join(chr(i) for i in ids)
 
 
+class _TrainerConfig:
+    """verl's trainer config (a DictConfig, hashable) as far as the loop reads it."""
+
+    def __init__(self, use_v1: bool, reward_fn: Callable | None) -> None:
+        # verl >= 0.9 defaults trainer.use_v1 to true.
+        self.trainer = {'use_v1': use_v1}
+        self.reward = {'custom_reward_function': reward_fn}
+
+
 class _SingleTurnAgentLoop:
     """Mimic verl's SingleTurnAgentLoop: one response, every token trainable."""
 
-    def __init__(self, response: str, use_v1: bool) -> None:
+    def __init__(self, response: str, use_v1: bool, reward_fn: Callable | None = None) -> None:
         self.tokenizer = _Tokenizer()
         self.response = response
-        # AgentLoopBase keeps the trainer config; verl >= 0.9 defaults trainer.use_v1 to true.
-        self.config = types.SimpleNamespace(trainer={'use_v1': use_v1})
+        self.config = _TrainerConfig(use_v1, reward_fn)  # AgentLoopBase keeps it
 
     async def run(self, sampling_params: dict, **kwargs: object) -> types.SimpleNamespace:
         ids = self.tokenizer.encode(self.response)
@@ -52,8 +67,17 @@ def verl(monkeypatch: pytest.MonkeyPatch) -> types.ModuleType:
         'verl.experimental.agent_loop.single_turn_agent_loop': {
             'SingleTurnAgentLoop': _SingleTurnAgentLoop
         },
+        'verl.trainer.ppo.reward': {
+            'get_custom_reward_fn': lambda config: config.reward['custom_reward_function']
+        },
     }
-    for name in ('verl', 'verl.experimental', 'verl.experimental.agent_loop'):
+    for name in (
+        'verl',
+        'verl.experimental',
+        'verl.experimental.agent_loop',
+        'verl.trainer',
+        'verl.trainer.ppo',
+    ):
         package = types.ModuleType(name)
         package.__path__ = []
         monkeypatch.setitem(sys.modules, name, package)
@@ -66,8 +90,10 @@ def verl(monkeypatch: pytest.MonkeyPatch) -> types.ModuleType:
     return importlib.import_module('deepgym.integrations.verl_mask')
 
 
-def _rollout(verl: types.ModuleType, response: str, use_v1: bool = True) -> types.SimpleNamespace:
-    loop = verl.DeepGymSingleTurnAgentLoop(response, use_v1, mode='local')
+def _rollout(
+    verl: types.ModuleType, response: str, use_v1: bool = True, reward_fn: Callable | None = None
+) -> types.SimpleNamespace:
+    loop = verl.DeepGymSingleTurnAgentLoop(response, use_v1, reward_fn, mode='local')
     row = {'data_source': 'coin_change', 'extra_info': {'environment': 'coin_change'}}
     return asyncio.run(loop.run({}, raw_prompt=[], priority=0, **row))
 
@@ -130,3 +156,35 @@ def test_broken_patch_is_trained_on_as_zero(
     assert output.reward_score == 0.0
     assert output.extra_fields['reward_extra_info']['error'] == 0.0
     assert set(output.response_mask) == {1}
+
+
+def test_the_loop_scores_with_the_configured_reward_function(verl: types.ModuleType) -> None:
+    """reward.custom_reward_function may hold one environment (make_verl_compute_score).
+
+    The loop scores with it, as verl's reward step would, and keeps its failures out too.
+    """
+    local = DeepGym(mode='local')
+    always = Environment(task='t', verifier_code='return 1.0')
+    passes = verl_reward.make_verl_compute_score(always, local)
+    broken = Environment(task='t', verifier_code='raise SystemExit(3)\n', verifier_mode='script')
+    fails = verl_reward.make_verl_compute_score(broken, local)
+
+    scored = _rollout(verl, 'anything', reward_fn=passes)
+    masked = _rollout(verl, 'anything', use_v1=False, reward_fn=fails)
+
+    assert scored.extra_fields['reward_extra_info'] == {'score': 1.0, 'passed': 1.0, 'error': 0.0}
+    assert masked.extra_fields['reward_extra_info'] == {'score': 0.0, 'passed': 0.0, 'error': 1.0}
+    assert masked.response_mask == [0] * len('anything')
+    with pytest.raises(DeepGymError, match='No verdict'):
+        _rollout(verl, 'anything', use_v1=True, reward_fn=fails)
+
+
+def test_generated_dapo_config_scores_with_this_loop(verl: types.ModuleType) -> None:
+    """The DAPO config must pick the agent loop that masks, not verl's own reward step."""
+    config = yaml.safe_load(generate_dapo_verl_config(train_files='train.parquet'))
+    agent = config['actor_rollout_ref']['rollout']['agent']
+    loops = yaml.safe_load(Path(agent['agent_loop_config_path']).read_text(encoding='utf-8'))
+    target = {loop['name']: loop['_target_'] for loop in loops}[agent['default_agent_loop']]
+    module, _, name = target.rpartition('.')
+
+    assert getattr(importlib.import_module(module), name) is verl.DeepGymSingleTurnAgentLoop

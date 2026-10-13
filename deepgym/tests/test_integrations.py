@@ -12,6 +12,8 @@ from fastapi.testclient import TestClient
 
 from deepgym.async_core import AsyncDeepGym
 from deepgym.core import DeepGym
+from deepgym.exceptions import NoVerdictError
+from deepgym.integrations import verl as verl_module
 from deepgym.integrations.dapo import (
     generate_dapo_reward_module,
     generate_dapo_verl_config,
@@ -139,11 +141,30 @@ class TestVerlIntegration:
         fn = make_verl_compute_score(env=env)
         assert callable(fn)
 
-    def test_verl_compute_score_returns_float(self, env: Environment, local_dg: DeepGym) -> None:
+    def test_verl_compute_score_returns_what_compute_score_does(
+        self, env: Environment, local_dg: DeepGym
+    ) -> None:
         fn = make_verl_compute_score(env=env, dg=local_dg)
-        score = fn('dataset', GOOD_SOLUTION, '')
-        assert isinstance(score, float)
-        assert score >= 0.5
+        assert fn('dataset', GOOD_SOLUTION, '') == {'score': 1.0, 'passed': 1.0, 'error': 0.0}
+
+    def test_no_verdict_never_reaches_verl_as_a_reward(
+        self, local_dg: DeepGym, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """verl's reward functions can't mark a sample unscored, so a failed run raises.
+
+        verl's v1 trainer then drops the sample; the batch function marks it None.
+        """
+        monkeypatch.setattr(verl_module, '_environment', lambda name, variant: MIXED)
+        monkeypatch.setattr(verl_module, '_client', lambda mode: local_dg)
+        fixed = make_verl_compute_score(MIXED, local_dg)
+
+        judged_zero = {'score': 0.0, 'passed': 0.0, 'error': 0.0}
+        assert fixed('ds', 'wrong') == compute_score('ds', 'wrong') == judged_zero
+        for score in (fixed, compute_score):
+            with pytest.raises(NoVerdictError, match='runtime_error'):
+                score('ds', 'boom')
+        batch = make_verl_reward_fn(MIXED, local_dg)({'responses': ['right', 'wrong', 'boom']})
+        assert batch == [1.0, 0.0, None]
 
     def test_make_verl_reward_fn_returns_callable(self, env: Environment) -> None:
         fn = make_verl_reward_fn(env=env)
@@ -170,7 +191,7 @@ class TestVerlIntegration:
             extra_info={},
             reward_router_address=None,
         )
-        assert score >= 0.5
+        assert score['score'] >= 0.5
 
     def test_extract_code_takes_last_block_or_whole_text(self) -> None:
         assert extract_code('a\n```python\nx = 1\n```\nb\n```\ny = 2\n```') == 'y = 2\n'
@@ -197,7 +218,7 @@ class TestVerlIntegration:
         self, env: Environment, local_dg: DeepGym
     ) -> None:
         trl = make_trl_reward_fn(env=env, dg=local_dg)(completions=[f'{GOOD_SOLUTION}</s>'])
-        verl = make_verl_compute_score(env=env, dg=local_dg)('ds', f'{GOOD_SOLUTION}<|eot_id|>')
+        verl = make_verl_compute_score(env, local_dg)('ds', f'{GOOD_SOLUTION}<|eot_id|>')['score']
         query = f'{OPENRLHF_PROMPT}{GOOD_SOLUTION}<|im_end|>'
         openrlhf = _openrlhf_score(env, local_dg, [query])['rewards']
 
@@ -210,7 +231,7 @@ class TestVerlIntegration:
         scores = {
             'trl': make_trl_reward_fn(env=env, dg=local_dg)(completions=[FENCED]),
             'dapo': make_dapo_reward_fn(env, local_dg)(completions=[FENCED]),
-            'verl': [make_verl_compute_score(env, local_dg)('ds', FENCED)],
+            'verl': [make_verl_compute_score(env, local_dg)('ds', FENCED)['score']],
             'verl_batch': make_verl_reward_fn(env, local_dg)({'responses': [FENCED]}),
             'reward_function': RewardFunction(env, local_dg)([FENCED]),
             'openrlhf': _openrlhf_score(env, local_dg, [OPENRLHF_PROMPT + FENCED])['rewards'],
@@ -290,9 +311,9 @@ class TestDAPOIntegration:
     def test_generate_dapo_verl_config_contains_expected_fields(self) -> None:
         config = generate_dapo_verl_config(train_files='data/train.parquet')
         assert 'adv_estimator: grpo' in config
-        assert 'reward:\n  reward_manager:\n    name: dapo\n' in config
         assert '    path: pkg://deepgym.integrations.verl\n    name: compute_score\n' in config
         assert 'actor_rollout_ref:\n  rollout:\n    n: 8\n' in config
+        assert '      default_agent_loop: deepgym_single_turn\n' in config
 
     def test_generate_dapo_reward_module_defines_per_sample_compute_score(self) -> None:
         module_text = generate_dapo_reward_module('coin_change')

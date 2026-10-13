@@ -1,0 +1,3 @@
+# verl agent loop config (actor_rollout_ref.rollout.agent.agent_loop_config_path).
+- name: deepgym_single_turn
+  _target_: deepgym.integrations.verl_mask.DeepGymSingleTurnAgentLoop

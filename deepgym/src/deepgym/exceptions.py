@@ -25,6 +25,10 @@ class ActionError(DeepGymError):
     """Raise when the environment rejects an agent's action (not allowed, unknown key)."""
 
 
+class NoVerdictError(DeepGymError):
+    """Raise when a run got no verdict (its sandbox or verifier failed), so it has no reward."""
+
+
 def error_type_for(exc: BaseException) -> str:
     """Name the failure for a zero-score result."""
     if isinstance(exc, TimeoutError):

@@ -12,9 +12,12 @@ and each dataset row names its environment::
 Build the rows with :func:`verl_rows` and save them with
 ``pandas.DataFrame(rows).to_parquet(path)``.
 
-A failed sandbox or verifier scores 0.0 with ``error: 1.0``, and verl trains on it.
-To keep those samples out of training, use the agent loop in
-:mod:`deepgym.integrations.verl_mask` instead of the reward function.
+A run whose sandbox or verifier failed has no verdict, so the reward functions raise
+:class:`~deepgym.exceptions.NoVerdictError` instead of returning a 0 that verl would
+train on. verl's v1 trainer (the default since 0.9) then drops the sample; the legacy
+trainer can't drop one from a reward function, so it stops. The agent loop in
+:mod:`deepgym.integrations.verl_mask` drops the sample under v1 and masks it under the
+legacy trainer.
 
 For a fixed environment in your own reward module, use
 :func:`make_verl_compute_score`; for custom training loops,
@@ -34,6 +37,7 @@ from collections.abc import Callable, Mapping, Sequence
 from typing import Any, Literal
 
 from deepgym.core import DeepGym
+from deepgym.exceptions import NoVerdictError
 from deepgym.models import Environment, RunResult
 from deepgym.registry import load_environment
 from deepgym.sandboxes import Provider
@@ -96,8 +100,19 @@ def row_environment(data_source: str, extra_info: Mapping[str, Any] | None) -> E
 
 
 def _score_one(dg: DeepGym, env: Environment, response: str) -> RunResult:
-    # run_batch turns verifier and sandbox errors into a zero score instead of crashing training.
+    # run_batch turns verifier and sandbox errors into a result without a verdict.
     return dg.run_batch(env, [extract_code(response)], max_parallel=1).results[0]
+
+
+def _reward(result: RunResult) -> dict[str, float]:
+    """Return what verl records for *result*: ``score``, ``passed`` and ``error`` (0.0).
+
+    Raises:
+        NoVerdictError: If *result* got no verdict, so it has no reward to give.
+    """
+    if not result.has_verdict:
+        raise NoVerdictError(f'{result.error_type}: {result.output}')
+    return {'score': result.score, 'passed': float(result.passed), 'error': 0.0}
 
 
 def compute_score(
@@ -125,23 +140,20 @@ def compute_score(
 
     Returns:
         The same keys for every row, as verl requires to batch them: ``score``,
-        ``passed`` (1.0 or 0.0), and ``error``, which is 1.0 when no verdict was
-        produced (sandbox or verifier failure, timeout, invalid score; see
-        ``RunResult.has_verdict``). The score is then 0.0;
-        :mod:`deepgym.integrations.verl_mask` keeps such samples out of training.
-        A patch that is malformed, doesn't apply or touches test infrastructure is the
-        model's fault (``MODEL_FAULT_ERRORS``), so it scores 0.0 with ``error`` 0.0 and
-        is trained on.
+        ``passed`` (1.0 or 0.0), and ``error``: 0.0 here, and 1.0 where DeepGym's agent
+        loops keep a sample without a verdict out of training. A patch that is malformed,
+        doesn't apply or touches test infrastructure is the model's fault
+        (``MODEL_FAULT_ERRORS``), so it scores 0.0 and is trained on.
 
     Raises:
+        NoVerdictError: If the run got no verdict (sandbox or verifier failure, timeout,
+            invalid score; see ``RunResult.has_verdict``), so verl keeps the sample out of
+            training (see :mod:`deepgym.integrations.verl_mask`).
         DeepGymError: If the named environment doesn't exist.
     """
-    result = _score_one(_client(mode), row_environment(data_source, extra_info), solution_str)
-    return {
-        'score': result.score,
-        'passed': float(result.passed),
-        'error': float(not result.has_verdict),
-    }
+    return _reward(
+        _score_one(_client(mode), row_environment(data_source, extra_info), solution_str)
+    )
 
 
 def verl_rows(names: Sequence[str]) -> list[dict[str, Any]]:
@@ -168,20 +180,21 @@ def verl_rows(names: Sequence[str]) -> list[dict[str, Any]]:
 def make_verl_compute_score(
     env: Environment,
     dg: DeepGym | None = None,
-) -> Callable[..., float]:
+) -> Callable[..., dict[str, float]]:
     """Create a reward function for one fixed environment, matching verl's interface.
 
     verl calls ``compute_score(data_source=..., solution_str=..., ground_truth=...,
     extra_info=..., **kwargs)``. Point ``reward.custom_reward_function`` at the
-    module that holds the returned function.
+    module that holds the returned function; the ``deepgym_single_turn`` agent loop
+    (:mod:`deepgym.integrations.verl_mask`) scores with it too.
 
     Args:
         env: DeepGym environment with verifier.
         dg: Optional DeepGym client (auto-created if None).
 
     Returns:
-        A function returning a score between 0.0 and 1.0; 0.0 if the verifier
-        failed or gave an invalid score.
+        A function returning what :func:`compute_score` returns, and raising
+        :class:`~deepgym.exceptions.NoVerdictError` as it does.
     """
     _dg = dg or DeepGym(mode='auto')
 
@@ -191,9 +204,9 @@ def make_verl_compute_score(
         ground_truth: Any = None,
         extra_info: Any = None,
         **kwargs: Any,
-    ) -> float:
+    ) -> dict[str, float]:
         """Score the last fenced code block of *solution_str* (or all of it)."""
-        return _score_one(_dg, env, solution_str).score
+        return _reward(_score_one(_dg, env, solution_str))
 
     return compute_score
 
@@ -201,7 +214,7 @@ def make_verl_compute_score(
 def make_verl_reward_fn(
     env: Environment,
     dg: DeepGym | None = None,
-) -> Callable[[dict], list[float]]:
+) -> Callable[[dict], list[float | None]]:
     """Create a batch reward function for verl custom training loops.
 
     For use when you have direct access to the training loop and want
@@ -212,12 +225,14 @@ def make_verl_reward_fn(
         dg: Optional DeepGym client (auto-created if None).
 
     Returns:
-        Callable taking a data batch dict and returning list of scores; like
+        Callable taking a data batch dict and returning one score per output, or None
+        for an output that got no verdict (its sandbox or verifier failed): leave that
+        sample out of the loss and of its group's statistics. Like
         :func:`compute_score`, it runs each response's last fenced code block.
     """
     _dg = dg or DeepGym(mode='auto')
 
-    def reward_fn(data_batch: dict) -> list[float]:
+    def reward_fn(data_batch: dict) -> list[float | None]:
         """Score a verl data batch against the DeepGym environment.
 
         Args:
@@ -225,7 +240,7 @@ def make_verl_reward_fn(
                         containing decoded output strings.
 
         Returns:
-            List of scores, one per output.
+            One score per output; None where there was no verdict.
         """
         outputs = data_batch.get('responses', data_batch.get('completions', []))
         if not outputs:
@@ -234,6 +249,6 @@ def make_verl_reward_fn(
             raise ValueError('Token ID inputs not yet supported. Pass decoded strings.')
         solutions = [extract_code(output) for output in outputs]
         batch = _dg.run_batch(env, solutions, max_parallel=min(len(outputs), 32))
-        return [r.score for r in batch.results]
+        return [r.score if r.has_verdict else None for r in batch.results]
 
     return reward_fn

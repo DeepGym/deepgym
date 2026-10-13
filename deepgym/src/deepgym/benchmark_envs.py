@@ -286,6 +286,7 @@ class PatchVerifier:
             """
             import json
             import os
+            import posixpath
             import re
             import shutil
             import subprocess
@@ -646,10 +647,19 @@ class PatchVerifier:
                 return Path(top) if proc.returncode == 0 and top else None
 
 
+            def _normalize(path: str) -> str | None:
+                # The one spelling every comparison uses: git's raw -z path through normpath, case
+                # as-is, so ./x, a/../x and x/ are all x. None when that is no plain path inside
+                # the repo (absolute, '..', empty); the caller treats such a path as uncertain.
+                norm = posixpath.normpath(path)
+                return None if norm.startswith(('/', '../')) or norm in ('.', '..') else norm
+
+
             def _patch_paths(repo_dir: Path, patch_file: Path, timeout: int) -> list[str] | None:
                 # Every path a patch reads or writes, as git's own parser sees it: --numstat
                 # names each post-image path, -R --numstat each pre-image one, and -z emits raw
-                # (unquoted) bytes so non-ASCII names are not mis-parsed.
+                # (unquoted) bytes so non-ASCII names are not mis-parsed. Each is returned in its
+                # _normalize form, or raw if it has none.
                 paths = []
                 for reverse in ([], ['-R']):
                     proc = subprocess.run(
@@ -668,7 +678,7 @@ class PatchVerifier:
                             paths.append(fields[2])
                         elif len(fields) == 1 and record:
                             paths.append(record)
-                return list(dict.fromkeys(paths))
+                return list(dict.fromkeys(_normalize(path) or path for path in paths))
 
 
             def _snapshot(repo_dir: Path, paths: list[str]) -> dict:
@@ -982,11 +992,14 @@ class PatchVerifier:
                             'Patch changes test infrastructure, so it was not tested: ',
                             tampered,
                         )
-                    # Not clearly tampering, not clearly safe: a file the (trusted) test command
-                    # mentions may be what it loads. The tests still run; see below.
+                    # Not clearly tampering, not clearly safe: a path with no clean form, or a file
+                    # the (trusted) test command mentions, which it may load. The tests still run;
+                    # see below.
                     command_text = '\\n'.join(test_commands)
                     for rel in exposed:
-                        if rel not in uncertain and _mentioned(rel, command_text):
+                        if _normalize(rel) is None:
+                            uncertain[rel] = 'the path does not normalize to one inside the repo'
+                        elif rel not in uncertain and _mentioned(rel, command_text):
                             uncertain[rel] = 'the test command mentions it'
 
                     blocked = _restore(repo_dir, saved)

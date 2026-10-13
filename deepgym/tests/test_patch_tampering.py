@@ -623,6 +623,27 @@ def test_validation_faults_have_no_verdict(
     assert not is_verdict(exit_code, result.error_type)
 
 
+def test_patch_paths_have_one_spelling(tmp_path: Path) -> None:
+    # Every comparison uses git's -z path through normpath: ./ci.ini, sub/../ci.ini and ci.ini/
+    # are all ci.ini. A path that leaves the repo has no such form; it stays raw, and the
+    # runner treats it as uncertain.
+    runner = _runner()
+    env = _env(tmp_path, {'ci.ini': '[pytest]\n'})
+    patch_file = tmp_path / 'spellings.diff'
+    patch_file.write_text(
+        ''.join(
+            f'diff --git a/{name} b/{name}\n--- a/{name}\n+++ b/{name}\n'
+            '@@ -1 +1,2 @@\n [pytest]\n+# edited\n'
+            for name in ('./ci.ini', 'sub/../ci.ini', 'ci.ini/', '../ci.ini')
+        )
+    )
+
+    paths = runner['_patch_paths'](Path(env.repo_dir), patch_file, 60)
+
+    assert paths == ['ci.ini', '../ci.ini']
+    assert [runner['_normalize'](path) for path in paths] == ['ci.ini', None]
+
+
 def test_unlisted_workspace_package_key_has_no_verdict(tmp_path: Path, sandbox_dg: DeepGym) -> None:
     # Only known metadata in [workspace.package] is a plain release bump; edition (or any key
     # off that list) could change how members build, so the edit is uncertain and the pass it
@@ -684,6 +705,10 @@ _EDITED_INI = '[pytest]\n# edited\n'
             {'sub/ci.ini': _EDITED_INI},
             'masked',
             id='subshell-cd-sub',
+        ),
+        # The command may spell the path another way; ci.ini is still mentioned.
+        pytest.param(
+            '{pytest} -c ./sub/../ci.ini', {'ci.ini': _EDITED_INI}, 'masked', id='spelled-path'
         ),
         # calc.py inside tests/test_calc.py is no mention: a plain fix is graded.
         pytest.param('{pytest} -c ci.ini -p localplugin', {}, 'graded', id='fix-only'),

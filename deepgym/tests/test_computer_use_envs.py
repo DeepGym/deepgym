@@ -207,8 +207,18 @@ CHROMIUM_FLAGS = {
 
 def test_chromium_flags_stay_on_the_allowlist() -> None:
     script = load_environment('settings_tabs').files['_shared/launch_app.sh']
-    command = script[script.index('nohup chromium') : script.index('http://')]
+    command = script[
+        script.index('nohup /usr/local/bin/deepgym-chromium') : script.index('http://')
+    ]
     assert set(re.findall(r'--[a-z-]+', command)) == CHROMIUM_FLAGS
+
+
+def test_launch_runs_exactly_the_chromium_the_lockdown_checked() -> None:
+    """launch_app.sh runs the link the desktop lockdown pins to the Chromium it checked, never
+    whatever its own PATH would find (setup keeps the image's PATH, the check doesn't)."""
+    script = load_environment('settings_tabs').files['_shared/launch_app.sh']
+    assert 'nohup /usr/local/bin/deepgym-chromium ' in script
+    assert not re.search(r'nohup chromium\b', script)
 
 
 def test_computer_use_suite_is_separate() -> None:

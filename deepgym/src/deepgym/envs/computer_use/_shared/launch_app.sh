@@ -9,9 +9,14 @@
 # offline from loopback, and Chromium runs as the unprivileged agent, which already drives
 # the whole desktop, so the verifier/root boundary doesn't rest on it. Kiosk mode shows no
 # warning bar for the flag, so nothing needs hiding.
+#
+# /usr/local/bin/deepgym-chromium is the Chromium the desktop lockdown checked reads its
+# managed policy, linked there by the lockdown. Running it, not `chromium` through this
+# script's PATH (the image's), means the launch can't pick a different, unchecked binary.
 set -euo pipefail
+[ -x /usr/local/bin/deepgym-chromium ] || { echo 'the desktop lockdown found no Chromium' >&2; exit 1; }
 (setsid nohup python3 _shared/state_server.py >/tmp/deepgym_server.log 2>&1 &)
-(setsid nohup chromium --no-first-run --no-default-browser-check --disable-gpu \
+(setsid nohup /usr/local/bin/deepgym-chromium --no-first-run --no-default-browser-check --disable-gpu \
   --disable-features=Translate --password-store=basic --kiosk --no-sandbox \
   --remote-debugging-port=9222 --user-data-dir=/tmp/deepgym_chrome \
   http://127.0.0.1:8000/ >/tmp/deepgym_chrome.log 2>&1 &)

@@ -817,8 +817,12 @@ def test_daytona_desktop_runs_as_the_agent_and_is_locked_down(
     check = next(c for c in events[started:] if 'ps -C xfce4-session' in c)
     # x11vnc may run only with the flags Daytona starts it with, not "anything but a list".
     assert 'x11vncrc' in check and '-display -forever -shared -rfbport' in check
-    assert '-norc' not in check
     assert '2>/dev/null' not in check, 'a failed check must stop the desktop, not compare empty'
+    # The probe ignores any rc file, so only the display's own channel can answer it.
+    assert 'x11vnc -norc -display' in check
+    # launch_app.sh runs exactly the Chromium the lockdown checked, through one pinned link.
+    assert 'rm -f /usr/local/bin/deepgym-chromium' in prepare
+    assert 'ln -s "$launch" /usr/local/bin/deepgym-chromium' in prepare
 
 
 @pytest.mark.parametrize(
@@ -853,17 +857,25 @@ def _run_snippet(snippet: str, path: str = '') -> subprocess.CompletedProcess[st
     )  # fmt: skip
 
 
-# What `x11vnc -Q ping` printed and exited with, measured live as root on a Daytona desktop.
+# What `x11vnc -norc -Q ping` printed and exited with, measured live as root on a Daytona
+# desktop. Every fake first refuses to answer as if it read an rc file unless given -norc.
+_NORC = "case \" $* \" in *' -norc '*) ;; *) echo 'read an .x11vncrc' >&2; exit 1;; esac\n"
 _SENT = 'echo \'>>> sending remote command: "qry=ping" via X11VNC_REMOTE X property.\' >&2\n'
+_OFF_AT = "echo 'error: could not connect to an x11vnc server at {}  (rc=1)' >&2\nexit 1"
 _X11VNC_PROBES = {
-    'remote_off': (
-        _SENT + "echo 'error: could not connect to an x11vnc server at :0  (rc=1)' >&2\nexit 1",
-        True,
-    ),
-    'remote_on': (_SENT + "echo 'ans=ping:c4f57cef:1'\nexit 0", False),
-    'no_display': ("echo '*** XOpenDisplay failed (:0)' >&2\nexit 1", False),
-    'timed_out': (_SENT + 'exit 124', False),
+    'remote_off': (_NORC + _SENT + _OFF_AT.format(':0'), True),
+    'remote_on': (_NORC + _SENT + "echo 'ans=ping:c4f57cef:1'\nexit 0", False),
+    'no_display': (_NORC + "echo '*** XOpenDisplay failed (:0)' >&2\nexit 1", False),
+    'timed_out': (_NORC + _SENT + 'exit 124', False),
     'not_installed': (None, False),
+    # An rc "connect" line sends the query to a file, not the display's X property channel.
+    'file_channel': (
+        _NORC
+        + 'echo \'>>> sending remote command: "qry=ping" via file /tmp/x.\' >&2\n'
+        + _OFF_AT.format(':0'),
+        False,
+    ),
+    'other_display': (_NORC + _SENT + _OFF_AT.format(':1'), False),
 }
 
 
@@ -871,8 +883,9 @@ _X11VNC_PROBES = {
 def test_x11vnc_probe_counts_silence_as_off_only_once_it_reached_the_display(
     tmp_path: Path, body: str | None, accepted: bool
 ) -> None:
-    """Only "query sent, no x11vnc server answering" (exit 1) means remote control is off.
-    A probe that never ran (exit 127), never reached the display, or timed out fails closed."""
+    """Only "query sent over this display's X property, no x11vnc server answering" (exit 1),
+    from a probe that ignores any rc file (-norc), means remote control is off. A probe that
+    never ran, never reached the display, timed out, used another channel or display, fails."""
     from deepgym.sandboxes.daytona.desktop import _X11VNC_REMOTE_OFF
 
     _fake_tool(tmp_path, 'timeout', 'shift; exec "$@"')
@@ -885,29 +898,54 @@ def test_x11vnc_probe_counts_silence_as_off_only_once_it_reached_the_display(
 _ELF = b'\x7fELF\x02\x01\x01'
 
 
+# The lines that identify Debian's own /usr/bin/chromium wrapper, as on the Daytona image.
+_DEBIAN_WRAPPER = 'APPNAME=chromium\nLIBDIR=/usr/lib/$APPNAME\nexec $LIBDIR/$APPNAME "$@"'
+
+
+def _browser(path: Path, policy: bytes) -> Path:
+    """Write a fake Chromium build that reads *policy* as its managed policy dir."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_bytes(_ELF + b'x' + policy + b'x')
+    path.chmod(0o755)
+    return path
+
+
 @pytest.mark.parametrize(
     ('layout', 'accepted'),
-    [('debian', True), ('relocated', True), ('other_policy_dir', False), ('absent', True)],
-)
+    [
+        ('debian', True), ('debian_missing_lib', False), ('relocated', True),
+        ('wrapper_chain', True), ('wrapper_chain_other_policy', False),
+        ('unfollowable_wrapper', True), ('other_policy_dir', False), ('absent', True),
+    ],
+)  # fmt: skip
 def test_chromium_policy_check_follows_the_binary_path_finds(
     tmp_path: Path, layout: str, accepted: bool
 ) -> None:
-    """The check reads the Chromium the session's PATH runs: Debian's wrapper script and its
-    ../lib binary, or a build relocated under /opt behind a link, not one fixed path."""
+    """The check reads the Chromium the session's PATH runs and names it for launch_app.sh to
+    run exactly: a link resolves; only Debian's own wrapper (matched by its LIBDIR line) maps
+    to ../lib; any other script is followed through its `exec /path`, and one that can't be
+    followed falls back to the policy dir every Chromium build reads."""
     from deepgym.sandboxes.daytona.desktop import _CHROMIUM_READS_POLICY
 
     bindir = tmp_path / 'bin'
     bindir.mkdir()
-    if layout == 'debian':
-        (tmp_path / 'lib' / 'chromium').mkdir(parents=True)
-        (tmp_path / 'lib' / 'chromium' / 'chromium').write_bytes(_ELF + b'x/etc/chromium/policiesx')
-        _fake_tool(bindir, 'chromium', 'exec "$(dirname "$0")/../lib/chromium/chromium" "$@"')
+    hit = bindir / 'chromium'
+    good, other = b'/etc/chromium/policies', b'/etc/opt/chrome/policies'
+    if layout.startswith('debian'):
+        _fake_tool(bindir, 'chromium', _DEBIAN_WRAPPER)
+        if layout == 'debian':
+            _browser(tmp_path / 'lib' / 'chromium' / 'chromium', good)
     elif layout in ('relocated', 'other_policy_dir'):
-        (tmp_path / 'opt' / 'chromium').mkdir(parents=True)
-        real = tmp_path / 'opt' / 'chromium' / 'chromium'
-        policy = b'/etc/chromium/policies' if layout == 'relocated' else b'/etc/opt/chrome/policies'
-        real.write_bytes(_ELF + b'x' + policy + b'x')
-        real.chmod(0o755)
-        (bindir / 'chromium').symlink_to(real)
-    run = _run_snippet(_CHROMIUM_READS_POLICY.format(session_path=bindir))
+        real = _browser(tmp_path / 'opt' / 'chromium' / 'chromium', good if accepted else other)
+        hit.symlink_to(real)
+    elif layout.startswith('wrapper_chain'):
+        real = _browser(tmp_path / 'opt' / 'chrome-real', good if accepted else other)
+        _fake_tool(bindir, 'chromium', f'exec {real} --no-first-run "$@"')
+    elif layout == 'unfollowable_wrapper':
+        _fake_tool(bindir, 'chromium', 'exec "$BROWSER" "$@"')
+    script = _CHROMIUM_READS_POLICY.format(session_path=bindir) + '\necho "launch=$launch"'
+    run = _run_snippet(script)
     assert ('ACCEPTED' in run.stdout) is accepted, run.stdout + run.stderr
+    if accepted:
+        launch = os.path.realpath(hit) if layout != 'absent' else ''
+        assert f'launch={launch}\n' in run.stdout, run.stdout

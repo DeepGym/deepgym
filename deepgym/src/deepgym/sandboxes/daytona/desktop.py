@@ -59,31 +59,53 @@ _LAUNCHERS = (
 # Printed last by both scripts below. Without it the desktop counts as not locked down.
 _LOCKED = 'deepgym-desktop-locked'
 
-# The Chromium the agent's session PATH would run must read the managed policy dir the
-# lockdown writes. Debian's /usr/bin/chromium is a wrapper script that runs
-# ../lib/chromium/chromium, so a file that isn't ELF is followed there; a build relocated
-# under /opt behind a link resolves through realpath. No Chromium on that PATH: nothing to do.
-_CHROMIUM_READS_POLICY = """if path=$(PATH={session_path}; command -v chromium); then
-  bin=$(realpath "$path")
-  if [ "$(head -c 4 "$bin")" != "$(printf '\\177ELF')" ]; then
-    bin="$(dirname "$bin")/../lib/chromium/chromium"
-  fi
-  if ! [ -f "$bin" ] || ! grep -qF /etc/chromium/policies "$bin"; then
-    echo "the Chromium at $path does not read /etc/chromium/policies"; exit 1
+# Where the lockdown links the Chromium it checked. launch_app.sh runs exactly this path, so
+# the check and the launch can't resolve different binaries (setup keeps the image's PATH).
+_CHROMIUM_PIN = '/usr/local/bin/deepgym-chromium'
+
+# Find the Chromium the agent's session PATH would run, set $launch to it for the pin, and
+# check that the build it ends in reads the managed policy dir the lockdown writes. A link
+# resolves through realpath. Only Debian's own wrapper (matched by its LIBDIR line) maps to
+# ../lib/chromium/chromium; any other script is followed through a plain `exec /path` line,
+# a few hops at most. A wrapper that can't be followed falls back to the policy dir every
+# Chromium build reads, which the lockdown has written. No Chromium on that PATH: nothing.
+_CHROMIUM_READS_POLICY = """launch=
+if hit=$(PATH={session_path}; command -v chromium); then
+  launch=$(realpath "$hit")
+  bin=$launch
+  hops=0
+  follow='s/^[[:space:]]*exec[[:space:]][[:space:]]*"*\\([^[:space:]"]*\\).*/\\1/p'
+  while [ -n "$bin" ] && [ "$(head -c 4 "$bin")" != "$(printf '\\177ELF')" ]; do
+    hops=$((hops + 1))
+    if [ "$hops" -gt 4 ]; then bin=; break; fi
+    if grep -qF 'LIBDIR=/usr/lib/$APPNAME' "$bin"; then
+      bin="$(dirname "$bin")/../lib/chromium/chromium"
+      if ! [ -f "$bin" ]; then echo "Debian's Chromium wrapper has no $bin"; exit 1; fi
+    else
+      next=$(sed -n "$follow" "$bin" | head -n 1)
+      case "$next" in /*) ;; *) next=;; esac
+      if [ -n "$next" ] && [ -e "$next" ]; then bin=$(realpath "$next"); else bin=; fi
+    fi
+  done
+  if [ -n "$bin" ] && ! grep -qF /etc/chromium/policies "$bin"; then
+    echo "the Chromium at $hit does not read /etc/chromium/policies"; exit 1
   fi
 fi"""
 
-# Proves remote control is off by asking the running x11vnc, not by reading its argv. Only
-# the answer measured on a locked desktop means "off": the query went out over the display
-# and no x11vnc server took it (exit 1). An answer means it's on. Anything else (x11vnc
-# missing, no display, a timeout) means the probe proved nothing, so the desktop is refused.
+# Proves remote control is off by asking the running x11vnc, not by reading its argv. The
+# probe ignores any rc file (-norc), so an rc "connect" line can't send the query elsewhere.
+# Only the answer measured on a locked desktop means "off": the query went out over this
+# display's X11VNC_REMOTE property and no x11vnc server at this display took it (exit 1). An
+# answer means it's on; anything else means the probe proved nothing, so the desktop is refused.
 _X11VNC_REMOTE_OFF = """probe_rc=0
-probe=$(timeout 8 x11vnc -display {display} -Q ping 2>&1) || probe_rc=$?
+probe=$(timeout 8 x11vnc -norc -display {display} -Q ping 2>&1) || probe_rc=$?
 case "$probe" in *ans=*)
   echo 'x11vnc still answers remote control, so -noremote did not take effect'; exit 1;;
 esac
+sent='"qry=ping" via X11VNC_REMOTE X property'
+none='could not connect to an x11vnc server at {display} '
 case "$probe_rc:$probe" in
-  "1:"*'sending remote command'*'could not connect to an x11vnc server'*) ;;
+  "1:"*"$sent"*"$none"*) ;;
   *) echo "the x11vnc remote-control probe proved nothing (exit $probe_rc): $probe"; exit 1;;
 esac"""
 
@@ -108,6 +130,8 @@ chmod 600 "$home/.x11vncrc"
 mkdir -p /etc/chromium/policies/managed
 printf %s {policy} > /etc/chromium/policies/managed/deepgym.json
 {chromium_check}
+rm -f {chromium_pin}
+if [ -n "$launch" ]; then ln -s "$launch" {chromium_pin}; fi
 # Thunar's custom actions, "Open Terminal Here" included, all come from its uca plugin, and
 # every GLib "Open With" launch, a typed custom command included, runs through
 # gio-launch-desktop: find both wherever the image keeps them.
@@ -223,6 +247,7 @@ class DaytonaDesktop:
             as_agent=as_agent,
             agent_check=shlex.quote(agent_check),
             chromium_check=_CHROMIUM_READS_POLICY.format(session_path=_SESSION_PATH),
+            chromium_pin=_CHROMIUM_PIN,
             marker=_LOCKED,
         )
         _confirm('lockdown', as_root(lockdown, 60))

@@ -1,6 +1,6 @@
 """DeepGym — Managed RL training and evaluation infrastructure."""
 
-__version__ = '0.4.1'
+__version__ = '0.4.2'
 
 from deepgym.async_core import AsyncDeepGym
 from deepgym.benchmark_envs import (

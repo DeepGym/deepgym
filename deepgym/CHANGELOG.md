@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.4.2 (2026-10-13)
 
 - **Security: repo, terminal and cyber tasks no longer run on the host.** SWE-bench Pro, Terminal-Bench, CyberGym patch tasks and MiMo code tasks apply the model's patch or run its commands, then run tests, with no judge isolation. In `mode='local'` (and `auto` without Daytona) they used to do that on your machine; now they raise `SandboxError` and ask for `docker`, `apple`, `modal`, `e2b` or `daytona`. There is no opt-out. They also start their sandbox from the client's provider instead of always Daytona, and `scripts/run_cybergym_artifact_eval.py` drops `--mode local`.
 - **Security: patches can't edit hidden tests.** The SWE-bench Pro patch runner used to apply the hidden test patch first and the model's diff after it. A diff could then still edit a hidden test file, for example through the source of a renamed test. Now the model's diff goes first. Every path the test patch touches, as listed by git's own parser (`git apply --numstat -z`, forwards and reversed), is put back to its state before the diff, and the test patch goes last. A diff that fails `git apply --check` still scores 0.

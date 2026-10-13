@@ -1,8 +1,11 @@
 """Tests for deepgym.integrations -- TRL, verl, DAPO, OpenRLHF integration wrappers."""
 
 import asyncio
+import logging
+import math
 import threading
 import time
+import types
 from pathlib import Path
 
 import httpx
@@ -12,7 +15,8 @@ from fastapi.testclient import TestClient
 
 from deepgym.async_core import AsyncDeepGym
 from deepgym.core import DeepGym
-from deepgym.exceptions import NoVerdictError
+from deepgym.exceptions import NoVerdictError, SandboxError
+from deepgym.integrations import openrlhf
 from deepgym.integrations import verl as verl_module
 from deepgym.integrations.dapo import (
     generate_dapo_reward_module,
@@ -26,7 +30,12 @@ from deepgym.integrations.openrlhf import (
     OpenRLHFRewardResponse,
     create_openrlhf_router,
 )
-from deepgym.integrations.reward import AsyncRewardFunction, RewardFunction
+from deepgym.integrations.reward import (
+    MASKED_BATCH,
+    AsyncRewardFunction,
+    MaskedRate,
+    RewardFunction,
+)
 from deepgym.integrations.trl import make_trl_async_reward_fn, make_trl_reward_fn
 from deepgym.integrations.verl import (
     compute_score,
@@ -35,7 +44,8 @@ from deepgym.integrations.verl import (
     make_verl_reward_fn,
     verl_rows,
 )
-from deepgym.models import Environment
+from deepgym.models import Environment, RunResult
+from deepgym.sandbox import error_result
 
 ENVS_DIR = Path(__file__).resolve().parent.parent / 'src' / 'deepgym' / 'envs'
 REVERSE_DIR = ENVS_DIR / 'reverse_string'
@@ -361,6 +371,23 @@ class TestRewardFunction:
         assert rf.per_test_rewards(outputs) == [{'overall': 1.0}, None]
 
 
+def test_masked_rate_warns_when_a_batch_passes_five_percent(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """A policy that finds a way to get masked must show up, not escape quietly."""
+    rate = MaskedRate('test trainer')
+
+    with caplog.at_level(logging.WARNING, logger='deepgym.integrations.reward'):
+        for i in range(MASKED_BATCH):
+            rate.record(masked=i < 5)  # 5%: fine
+        assert not caplog.records
+        for i in range(MASKED_BATCH):
+            rate.record(masked=i < 6)
+
+    assert f'test trainer: 6 of the last {MASKED_BATCH} samples got no verdict' in caplog.text
+    assert f'(11 of {2 * MASKED_BATCH} this run)' in caplog.text
+
+
 OPENRLHF_CONTEXT = '<|im_start|>user\n' + 'Strings are sequences of characters. ' * 12
 OPENRLHF_PROMPT = (
     f'{OPENRLHF_CONTEXT}\nWrite reverse_string(s). For example:\n'
@@ -386,6 +413,50 @@ def _openrlhf_score(env: Environment, dg: DeepGym, queries: list[str]) -> dict:
     response = TestClient(app).post('/reward/score', json=payload)
     assert response.status_code == 200, response.text
     return response.json()
+
+
+def _post(env: Environment, dg: DeepGym, payload: dict, **router_kwargs: str) -> dict:
+    """POST *payload* to a fresh reward router; the request must succeed."""
+    app = FastAPI()
+    app.include_router(create_openrlhf_router(env, dg, **router_kwargs))
+    response = TestClient(app).post('/reward/score', json=payload)
+    assert response.status_code == 200, response.text
+    return response.json()  # json.loads, which reads NaN as OpenRLHF's client does
+
+
+class _FlakyDeepGym(DeepGym):
+    """A client whose provider fails outputs marked 'outage' on its first *failing_calls* calls.
+
+    Other outputs are judged 1.0 if they say 'right', else 0.0, without running anything.
+    """
+
+    def __init__(self, failing_calls: int) -> None:
+        super().__init__(mode='local')
+        self.failing_calls = failing_calls
+        self.calls: list[list[str]] = []
+
+    def run_batch(self, env: Environment, outputs: list[str], **kwargs: object) -> object:
+        self.calls.append(list(outputs))
+        outage = len(self.calls) <= self.failing_calls
+        judged = [
+            RunResult(
+                score=float('right' in output),
+                passed='right' in output,
+                output='',
+                stderr='',
+                exit_code=0,
+                execution_time_ms=0.0,
+                sandbox_id='fake',
+            )
+            for output in outputs
+        ]
+        unavailable = error_result(SandboxError('provider unavailable'))
+        return types.SimpleNamespace(
+            results=[
+                unavailable if outage and 'outage' in output else result
+                for output, result in zip(outputs, judged, strict=True)
+            ]
+        )
 
 
 class _GatedDeepGym(DeepGym):
@@ -458,35 +529,64 @@ class TestOpenRLHFIntegration:
 
         assert data == {'rewards': [0.0, 1.0], 'error_types': [None, None]}
 
-    @pytest.mark.parametrize(
-        ('payload', 'status', 'error_types'),
-        [
-            # The verifier crashes on 'boom': no verdict for that sample.
-            ({'prompts': ['p'] * 3, 'outputs': ['right', 'wrong', 'boom']}, 503,
-             [None, None, 'runtime_error']),
-            # A query that doesn't contain its prompt can't be split into a response.
-            ({'prompts': [OPENRLHF_PROMPT] * 2,
-              'query': [OPENRLHF_PROMPT + 'right', 'A query that lost its prompt.']}, 422,
-             [None, 'prompt_mismatch']),
-        ],
-        ids=['verifier_failed', 'prompt_mismatch'],
-    )  # fmt: skip
-    def test_a_sample_without_a_verdict_fails_the_whole_request(
-        self, local_dg: DeepGym, payload: dict, status: int, error_types: list
-    ) -> None:
-        """OpenRLHF can't skip a sample and trains on whatever ``rewards`` holds.
+    def test_failures_the_model_triggers_never_fail_the_request(self, local_dg: DeepGym) -> None:
+        """A failed request stops OpenRLHF's training step, so no output may cause one.
 
-        Its agent calls ``raise_for_status()``, retries, then leaves the rollout without a
-        reward, so a failure must be an HTTP error, never a 200 carrying a 0.
+        The verifier crashes on 'boom', and the last query lost its prompt: each scores 0.
         """
-        app = FastAPI()
-        app.include_router(create_openrlhf_router(MIXED, local_dg))
+        payload = {
+            'prompts': [OPENRLHF_PROMPT] * 3,
+            'query': [OPENRLHF_PROMPT + 'right', OPENRLHF_PROMPT + 'boom', 'A lost prompt.'],
+        }
 
-        response = TestClient(app).post('/reward/score', json=payload)
+        data = _post(MIXED, local_dg, payload)
 
-        assert response.status_code == status
-        assert 'rewards' not in response.json()
-        assert response.json()['detail']['error_types'] == error_types
+        assert data == {
+            'rewards': [1.0, 0.0, 0.0],
+            'error_types': [None, 'runtime_error', 'prompt_mismatch'],
+        }
+
+    def test_a_provider_failure_is_run_again(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setattr(openrlhf, '_RETRY_DELAYS_S', (0.0, 0.0))
+        dg = _FlakyDeepGym(failing_calls=1)
+
+        data = _post(MIXED, dg, {'prompts': ['p'] * 2, 'outputs': ['right # outage', 'wrong']})
+
+        assert data == {'rewards': [1.0, 0.0], 'error_types': [None, None]}
+        assert dg.calls == [['right # outage', 'wrong'], ['right # outage']]
+
+    @pytest.mark.parametrize('infra_failure_score', ['zero', 'nan'])
+    def test_a_lasting_provider_failure_gets_the_configured_reward(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        caplog: pytest.LogCaptureFixture,
+        infra_failure_score: str,
+    ) -> None:
+        """0 by default; NaN on request, which OpenRLHF's dynamic filtering drops."""
+        monkeypatch.setattr(openrlhf, '_RETRY_DELAYS_S', (0.0, 0.0))
+        dg = _FlakyDeepGym(failing_calls=99)
+        payload = {'prompts': ['p'] * 2, 'outputs': ['right # outage', 'right']}
+
+        with caplog.at_level(logging.WARNING, logger='deepgym.integrations.openrlhf'):
+            data = _post(MIXED, dg, payload, infra_failure_score=infra_failure_score)
+
+        failed, judged = data['rewards']
+        assert (failed == 0.0) if infra_failure_score == 'zero' else math.isnan(failed)
+        assert judged == 1.0
+        assert data['error_types'] == ['sandbox_error', None]
+        assert len(dg.calls) == 3  # the first run and two more
+        assert 'got no verdict (sandbox_error)' in caplog.text
+
+    def test_lasting_failures_count_toward_the_masked_rate_warning(
+        self, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        monkeypatch.setattr(openrlhf, '_RETRY_DELAYS_S', ())
+        outputs = ['right # outage'] * 6 + ['right'] * (MASKED_BATCH - 6)
+
+        with caplog.at_level(logging.WARNING, logger='deepgym.integrations.reward'):
+            _post(MIXED, _FlakyDeepGym(failing_calls=99), {'prompts': outputs, 'outputs': outputs})
+
+        assert f'6 of the last {MASKED_BATCH} samples got no verdict' in caplog.text
 
     async def test_a_slow_verification_does_not_hold_up_other_requests(
         self, env: Environment

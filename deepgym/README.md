@@ -3,21 +3,35 @@
 [![PyPI](https://img.shields.io/pypi/v/deepgym)](https://pypi.org/project/deepgym/)
 [![CI](https://github.com/DeepGym/deepgym/actions/workflows/deepgym-ci.yml/badge.svg)](https://github.com/DeepGym/deepgym/actions/workflows/deepgym-ci.yml)
 [![License: PolyForm Noncommercial](https://img.shields.io/badge/license-PolyForm%20Noncommercial-blue)](https://github.com/DeepGym/deepgym/blob/main/LICENSE)
-[![GitHub stars](https://img.shields.io/github/stars/DeepGym/deepgym?style=social)](https://github.com/DeepGym/deepgym)
 
-RL training environments with verifiable rewards for coding and computer-use agents.
+**RL environments with verifiable rewards you can trust.**
 
-DeepGym runs model output in a sandbox, checks it with a verifier and returns a
-score. The score plugs into TRL, verl, OpenRLHF or your own GRPO/DAPO/PPO loop.
+DeepGym runs a model's answer (code, a patch, shell commands or desktop actions) in a
+sandbox and scores it with a verifier kept apart from that answer. When a sandbox or
+verifier fails, the run gets no verdict and stays out of training instead of counting as
+a 0. It's for teams training and evaluating coding and computer-use agents with verl,
+TRL, OpenRLHF, Axolotl or their own GRPO loop.
 
-For agents, it keeps one sandbox alive for the whole episode (a shell or a full
-desktop), applies actions step by step, then scores the state the agent left behind.
-
-## Quick Start
+## Install
 
 ```bash
 pip install deepgym
 ```
+
+Python 3.10 or later. Optional extras:
+
+| Extra | Adds |
+|---|---|
+| `deepgym[daytona]`, `deepgym[modal]`, `deepgym[e2b]` | Those sandbox providers |
+| `deepgym[server]` | `deepgym serve` and `deepgym console` |
+| `deepgym[hf]` | Hugging Face Hub sharing and dataset loaders |
+| `deepgym[lm_eval]` | lm-evaluation-harness tasks |
+| `deepgym[traces]` | Parquet trace export |
+| `deepgym[all]` | Everything above except `lm_eval` |
+
+## Quickstart
+
+Score a solution to a built-in task. This runs as is, on your machine:
 
 ```python
 from deepgym import DeepGym, load_environment
@@ -36,194 +50,122 @@ def coin_change(coins, amount):
 '''
 
 result = dg.run(env, model_output=solution)
-print(f'Score: {result.score}, Passed: {result.passed}')
+print(f'Score: {result.score}, Passed: {result.passed}')   # Score: 1.0, Passed: True
+
+wrong = dg.run(env, model_output='def coin_change(coins, amount):\n    return -1\n')
+print(wrong.score, wrong.passed)   # 0.12 False: 3 of 25 cases pass, each in wrong.cases
 ```
 
-Optional extras: `deepgym[daytona]`, `deepgym[modal]` or `deepgym[e2b]` for those sandboxes, `deepgym[server]` for
-`deepgym serve`, `deepgym[hf]` for the Hugging Face Hub, `deepgym[lm_eval]` for
-lm-evaluation-harness, `deepgym[all]` for everything.
+`mode='local'` is for trying things out. For model-generated code, switch to a sandbox
+provider such as `mode='docker'`; nothing else changes.
+
+## Core concepts
+
+- **Environment:** a task prompt plus a verifier. Single-turn (`Environment`: the model
+  answers once), multi-turn (`MultiTurnEnvironment`: one live sandbox per episode) or
+  computer use (a desktop). Load one by name with `load_environment`, or scaffold your
+  own with `deepgym new`.
+- **Verifier:** Python that scores an answer and prints JSON: a score in [0, 1], a pass
+  flag, and every test case with a reason. It reaches the answer only through the
+  `deepgym_solution` helpers, which run it in a separate, isolated process with no
+  network.
+- **Sandbox providers:** where answers run, picked with `mode`. Every sandbox mode gives
+  the same isolation.
+
+  | `mode` | Runs on | Setup |
+  |---|---|---|
+  | `local` | This machine, under `sandbox-exec` (macOS) or `bwrap` (Linux) | None; for development only, and repo, terminal and cyber tasks refuse it |
+  | `docker` | A throwaway container with no network | A running Docker daemon |
+  | `apple` | A throwaway Linux VM from Apple's `container` CLI (macOS) | `brew install container`, then `container system start` |
+  | `daytona` | A Daytona sandbox, cloud or self-hosted; desktops need it | `deepgym[daytona]` and `DAYTONA_API_KEY` (self-hosted: also `DAYTONA_API_URL`) |
+  | `modal` | A Modal sandbox | `deepgym[modal]`, then `modal token set` |
+  | `e2b` | An E2B sandbox | `deepgym[e2b]` and `E2B_API_KEY` |
+  | `auto` (default) | Daytona when `DAYTONA_API_KEY` is set, otherwise `local` | |
+
+- **Reward contract:**
+  - *Infrastructure failures give no verdict.* When the sandbox, the provider or the
+    verifier fails instead of judging, `result.has_verdict` is false, and every trainer
+    integration keeps that sample out of training instead of training on a 0.
+  - *Failures caused by the policy are scored.* Failing tests, a malformed patch or a
+    patch that touches test infrastructure is a real 0.
+  - *Headline totals stay conservative.* Batch and eval totals count a run without a
+    verdict as a failed 0, and judged-only numbers sit beside them.
+- **Traces:** `dg.trace()` records an episode with its provenance as it runs, and
+  `deepgym traces export` writes it as JSONL, Parquet rows for verl and TRL, or ATIF.
+
+More in [core concepts][concepts] and [the reward contract][reward-contract].
 
 ## What's in the box
 
-- 31 built-in environments that ship with the package: coding, tool-use, cyber
-  and 5 computer-use tasks
-- Computer-use episodes on a real Daytona desktop: screenshots in, mouse and keyboard out
-- Live multi-turn sessions from Python (`dg.session()`) or HTTP (`/v1/sessions`)
-- Importers for HumanEval, MBPP, BigCodeBench and EvalPlus
-- SWE-bench Pro (repo-level patches), Terminal-Bench 2.0 (shell tasks) and
-  CyberGym (artifact-backed cyber patches)
-- `MixedEnvironment` to train on several benchmarks behind one reward function
-- Per-test-case results, not just pass/fail, so you see which tests broke
-- Seeded verifiers: the same input gets the same score
-- Batch scoring for GRPO (score N completions in parallel)
-- Reward functions for TRL, verl, OpenRLHF and Axolotl, plus a verl multi-turn agent loop
-- lm-evaluation-harness tasks and Hugging Face Hub sharing
-- Gymnasium-style `reset`/`step`/`state` API
-- Runs locally or in sandboxes from Daytona, Modal, E2B, Docker or Apple container
+- **31 built-in environments:** 22 coding, 5 computer-use, 2 tool-use and 2 cyber tasks
+  ([list][built-ins]).
+- **Benchmark importers:** HumanEval, MBPP, EvalPlus, BigCodeBench, CyberGym, SWE-bench
+  Pro, MiMo-V2.6-RL code tasks and Harbor datasets such as Terminal-Bench 2.0
+  ([importers][importers]).
+- **Computer use:** desktop tasks with 8 seeded variants each; screenshots in, mouse and
+  keyboard out, scored on the state the agent leaves ([computer use][computer-use]).
+- **Multi-turn sessions:** one live sandbox per episode, from Python (`dg.session()`) or
+  HTTP (`/v1/sessions`) ([sessions][sessions]).
+- **QA gate:** `deepgym qa` checks that the reference passes and that empty, stub,
+  reward-hack and mutated answers earn nothing ([QA gate][qa-gate]).
+- **Environment authoring:** `deepgym new`, `deepgym check` and `deepgym qa --approve`,
+  from an idea to an approved environment folder ([authoring][authoring],
+  [approvals][approvals]).
+- **Trace export:** JSONL, Parquet (verl and TRL rows) and ATIF ([traces][traces]).
+- **Trainer integrations:** [verl][verl] (reward function and agent loops), [TRL][trl],
+  [OpenRLHF][openrlhf], [lm-evaluation-harness][lm-eval] and [Axolotl][axolotl].
+- **Sandboxes:** Docker, Apple container, Daytona, Modal and E2B ([sandboxes][sandboxes]).
+- **Also:** Hugging Face Hub sharing, `MixedEnvironment` for several benchmarks behind one
+  reward function, a Gymnasium-style `reset`/`step` API, and a local web console.
 
-## DeepGym and verl
+## Examples
 
-verl trains the model. DeepGym gives it tasks and scores the answers. Use them
-together: verl loads DeepGym's reward function with one config line (see [verl](#verl)).
+### Score a batch for GRPO
 
-| | verl | DeepGym |
-|---|---|---|
-| What it is | RL training framework | RL environments and verifiable rewards |
-| Does the training | Yes: rollouts on vLLM/SGLang, updates on FSDP/Megatron, PPO, GRPO, DAPO and more | No, it plugs into verl, TRL, OpenRLHF or your own loop |
-| Tasks | You bring the dataset and write the reward function | 31 built-in environments, HumanEval/MBPP/BigCodeBench/EvalPlus importers, SWE-bench Pro, Terminal-Bench 2.0 |
-| Running model code | Your reward function, or a remote Sandbox Fusion service | Every run in a sandbox: Daytona, Modal, E2B, Docker, Apple container, or locally under sandbox-exec/bwrap |
-| Reward hacking | Up to your reward function | The solution runs apart from the verifier with no network, so it can't read the tests or forge the score; `deepgym qa` checks that empty, stub and hack solutions fail before you train |
-| Multi-turn agents | Agent loop and tool interface | One live sandbox per episode (shell or desktop), with a verl agent loop and session tool |
-| Computer use | Not built in | Desktop tasks, scored on the state the agent leaves behind |
-| Failed runs | A reward function can't drop a sample | A verl agent loop keeps failed runs out of training |
-| Managing it | Training logs (wandb, TensorBoard) | `deepgym console`: environments, runs, episode replay, sandboxes, QA reports |
-
-## For teams and enterprises
-
-DeepGym is free for personal, research and other noncommercial use. Any commercial
-use, including inside a company or in a product you sell, needs a commercial license
-from us. We can also help with:
-
-- Custom environments and verifiers for your tasks
-- Private or self-hosted deployment
-- Setting up and running RL training
-
-Email [contact@deepgym.io](mailto:contact@deepgym.io) or visit [deepgym.io](https://deepgym.io).
-
-## How it works
-
-```
-prompt --> model --> DeepGym sandbox --> verifier --> score --> training loop
-                        |                  |
-                     Daytona / Modal /  JSON protocol:
-                     E2B / Docker /     score, passed, cases
-                     Apple / local
-```
-
-The verifier prints JSON with a score and a per-test breakdown
-(see Output protocol below).
-
-### Runtime modes
-
-- `local`: a subprocess on your machine. Fine for development. Repo, terminal and
-  cyber benchmark tasks refuse it (see below).
-- `daytona`: a Daytona sandbox, cloud or self-hosted.
-- `modal`: a Modal sandbox (`pip install 'deepgym[modal]'`, then `modal token set`).
-- `e2b`: an E2B sandbox (`pip install 'deepgym[e2b]'`, set `E2B_API_KEY`).
-- `docker`: a local Docker container with no network.
-- `apple`: a throwaway Linux VM from Apple's container CLI on macOS.
-- `auto` (default): Daytona when `DAYTONA_API_KEY` is set, local otherwise.
+Score a group of completions in parallel and keep runs without a verdict out of the group
+statistics (continues the quickstart):
 
 ```python
-dg = DeepGym(mode='modal')   # same for AsyncDeepGym and dg.session()
+completions = [solution, 'def coin_change(coins, amount):\n    return -1\n']
+batch = dg.run_batch(env, completions, max_parallel=8)
+
+rewards = [r.score if r.has_verdict else None for r in batch.results]   # [1.0, 0.12]
+print(batch.avg_score, batch.judged_count, batch.no_verdict_count)      # 0.56 2 0
 ```
 
-Every sandbox mode gives the same isolation, for single runs and shell sessions.
-For anything shared or untrusted, use one of them instead of `local`.
-Computer-use (desktop) environments need Daytona.
+`batch.avg_score` and `batch.passed` count a run without a verdict as a failed 0;
+`judged_mean_score` and `judged_pass_rate` leave it out. `RewardFunction(env)` wraps the
+same thing for any framework. More in [the reward contract][reward-contract].
 
-Each provider is one folder in `src/deepgym/sandboxes/` implementing a small
-`Sandbox` protocol (run a command as root, upload a file, delete). Adding a
-provider means adding a folder.
-
-### Daytona setup
-
-Cloud: get a key from [app.daytona.io](https://app.daytona.io) and set `DAYTONA_API_KEY`.
-
-Self-hosted:
-
-```bash
-git clone https://github.com/daytonaio/daytona
-cd daytona
-docker compose -f docker/docker-compose.yaml up -d
-# Set DAYTONA_API_URL and DAYTONA_API_KEY
-```
-
-### Docker and Apple container (local)
-
-Each run or session gets a throwaway container (Docker) or Linux VM (Apple's
-[container](https://github.com/apple/container) CLI on macOS). Same isolation as
-the cloud sandboxes, no API key. For Docker, start the daemon. For Apple container:
-
-```bash
-brew install container
-container system start
-```
+### Train with TRL
 
 ```python
-dg = DeepGym(mode='apple')   # or AsyncDeepGym(mode='apple')
-dg.run(env, solution)
-```
+from datasets import Dataset
+from trl import GRPOConfig, GRPOTrainer
 
-- Image: `python:3.12-slim`, override with `DEEPGYM_CONTAINER_IMAGE` or per
-  environment (below).
-- Sessions run offline; servers inside the sandbox still work on localhost.
-- Stop Apple's service with `container system stop`.
-
-### Per-environment images
-
-Set `image` on an environment, or in its `metadata.json`, to boot its sandbox from
-an image with the task's dependencies already installed:
-
-```python
-env = Environment(task=..., verifier_code=..., image='python:3.11-slim')
-```
-
-- Docker, Apple container, Modal and Daytona pull it from a registry; E2B treats it
-  as a template id. On Daytona a `snapshot` wins.
-- The image must run as root and have python3, bash, useradd and util-linux
-  (setpriv, unshare, nsenter, mount). Debian and Ubuntu images do; Alpine doesn't.
-- Root in the sandbox runs the image's binaries, so only use images you trust. The
-  HTTP API refuses caller-chosen images.
-
-## Scoring and training
-
-### Score a single solution
-
-```python
 from deepgym import DeepGym, load_environment
-
-dg = DeepGym(mode='local')
-env = load_environment('two_sum')
-
-result = dg.run(env, model_output='def two_sum(nums, target): ...')
-print(result.score, result.passed, result.reward_components)
-```
-
-### Batch scoring for GRPO
-
-```python
-solutions = [model.generate(prompt) for _ in range(8)]
-batch = dg.run_batch(env, solutions, max_parallel=8)
-
-scores = [r.score for r in batch.results]
-# GRPO advantage: (r - mean) / std
-mean = sum(scores) / len(scores)
-std = (sum((s - mean) ** 2 for s in scores) / len(scores)) ** 0.5
-advantages = [(s - mean) / (std + 1e-8) for s in scores]
-```
-
-### TRL
-
-```python
 from deepgym.integrations.trl import make_trl_reward_fn
-from trl import GRPOTrainer
 
-reward_fn = make_trl_reward_fn(env)
-trainer = GRPOTrainer(model=model, reward_funcs=[reward_fn])
+env = load_environment('coin_change')
+reward_fn = make_trl_reward_fn(env, DeepGym(mode='docker'))
+
+trainer = GRPOTrainer(
+    model='Qwen/Qwen2.5-0.5B-Instruct',
+    reward_funcs=[reward_fn],
+    args=GRPOConfig(output_dir='grpo-coin-change'),
+    train_dataset=Dataset.from_list([{'prompt': env.task}] * 64),
+)
 trainer.train()
 ```
 
-It runs the last fenced code block of each completion, plain or conversational. A
-completion whose sandbox or verifier failed gets `None`, not 0.0: TRL 1.6+ leaves it out
-of its group's baseline and gives it no advantage, so an outage neither penalizes it nor
-shifts its siblings' advantages. `component='correctness'` returns one reward component
-instead of the score.
+The reward function runs the last fenced code block of each completion, plain text or
+conversation, and returns `None` for a completion whose sandbox or verifier failed, which
+TRL 1.6+ leaves out of the group's baseline. More in [TRL][trl].
 
-### verl
+### Train with verl
 
-verl loads DeepGym's reward function from the package. Each dataset row names
-its environment, so one run can mix environments:
+verl loads DeepGym's reward function from the package, and each dataset row names its
+environment:
 
 ```python
 import pandas as pd
@@ -237,169 +179,33 @@ reward:
   custom_reward_function:
     path: pkg://deepgym.integrations.verl
     name: compute_score
-    reward_kwargs: {mode: daytona}   # or auto, local, modal, e2b, docker, apple
+    reward_kwargs: {mode: docker}   # or daytona, modal, e2b, apple, auto, local
 ```
 
-It runs the last fenced code block of each response and logs `score`, `passed`
-and `error`. For one fixed environment in your own module, use
-`make_verl_compute_score(env)`.
+A run without a verdict raises `NoVerdictError`, which verl's v1 trainer turns into a
+dropped sample. For the legacy trainer and for multi-turn agents, DeepGym ships agent
+loops; see [verl][verl].
 
-A verl reward function can't mark a sample as unscored, so when the sandbox or
-verifier fails, DeepGym's raises `NoVerdictError` instead of returning a 0. verl's v1
-trainer (`trainer.use_v1`, the default since verl 0.9) scores inside the sample's
-agent-loop session, so the raise drops the sample: verl records its prompt group as
-failed and computes the group's GRPO mean and std from the other samples (the async
-trainers replace the whole group). verl's legacy trainer can't mask a sample a reward
-function scored, so there the raise stops training, and the error says so. With the
-legacy trainer, let DeepGym's single-turn agent loop score the rows (the generated DAPO
-config already does), so the sample is masked instead. The loop calls the reward
-function above (`reward.custom_reward_function`, as verl would), verl skips its own
-reward step because the score is already set, and under the legacy trainer the loop
-zeroes a failed sample's response mask and logs `error` 1.0. That sample gets no
-gradient and adds no tokens to the loss, but its 0 still counts toward its group's mean
-and std. Under v1 the loop drops the sample like the reward function does.
-
-```yaml
-# actor_rollout_ref.rollout.agent.agent_loop_config_path
-- name: deepgym_single_turn
-  _target_: deepgym.integrations.verl_mask.DeepGymSingleTurnAgentLoop
-  mode: daytona   # used without reward.custom_reward_function: auto, local, modal, ...
-```
-
-Then set `actor_rollout_ref.rollout.agent.default_agent_loop=deepgym_single_turn`.
-The rows are the same `verl_rows`. A policy that learns to trigger failures escapes
-their penalty either way, so keep watching `error` and the failed samples; the loop logs
-a warning when more than 5% of a batch is kept out.
-
-For multi-turn agent RL, use DeepGym's agent loop and session tool. verl's stock
-`ToolAgentLoop` creates and releases a tool around every call, so the
-`deepgym_agent` loop keeps one sandbox per rollout, sets `reward_score` from the
-final verifier, and deletes the sandbox. Screenshots come back as images. Only failures
-that aren't the policy's doing get no verdict and are kept out of training the same way
-(`error` 1.0): a sandbox that fails to start, a provider or network failure during an
-action or the final verifier (`deepgym.exceptions.is_infrastructure_failure`), and a
-step or final verifier that fails before it runs the agent's code. Everything that
-follows from the policy's own actions is scored. An invalid or disallowed action comes
-back to the model as text. Any other failed action (a failed write, a sandbox the policy
-killed) comes back as an error and ends the episode with a 0, `error_type`
-`policy_sandbox_failure`, as does a final verifier that can't run in a sandbox the
-policy killed or hung. One where the model never calls the tool scores 0. This loop also
-warns when more than 5% of a batch is kept out.
-
-```yaml
-# agent_loop_config_path
-- name: deepgym_agent
-  _target_: deepgym.integrations.verl_tool.DeepGymAgentLoop
-
-# multi_turn.tool_config_path
-tools:
-  - class_name: deepgym.integrations.verl_tool.DeepGymSessionTool
-    config: {type: native, environment: signup_form, mode: daytona}
-```
-
-- Dataset rows set `agent_name: deepgym_agent`.
-- The first tool call starts the episode and returns the starting screen, so
-  prompt the model to begin with a screenshot.
-- Pick the env and variant per row with
-  `extra_info.tools_kwargs.computer.create_kwargs: {environment: todo_list, variant: 3}`.
-- verl cuts tool output to 256 characters by default; raise
-  `actor_rollout_ref.rollout.multi_turn.max_tool_response_length` for shell output.
-- Written against verl 0.9.1. CI runs the loop against a stand-in for verl's; it was also
-  run on Daytona sandboxes through verl 0.9.1's own `ToolAgentLoop._call_tool`.
-
-### DAPO
-
-```python
-from deepgym.integrations.dapo import make_dapo_reward_fn
-
-reward_fn = make_dapo_reward_fn(env)
-scores = reward_fn(completions=['def solve(x): return x'])
-```
-
-These are the TRL reward functions: the last fenced code block runs, and a completion
-that got no verdict scores `None`, so leave it out of the loss and of its group's
-statistics.
-
-For verl-based DAPO recipes, generate a reward module and a minimal config snippet:
-
-```python
-from deepgym.integrations.dapo import (
-    generate_dapo_reward_module,
-    generate_dapo_verl_config,
-)
-
-reward_module = generate_dapo_reward_module('coin_change')
-config_yaml = generate_dapo_verl_config(
-    train_files='data/train.parquet',
-    reward_module_path='reward_module.py',
-)
-```
-
-The config scores through the `deepgym_single_turn` agent loop above, listed in a file
-that ships with deepgym, so a sample without a verdict is dropped or masked rather than
-trained on as a 0. verl's reward manager, and with it DAPO's overlong penalty, doesn't
-run on samples the loop scored.
-
-### Axolotl
-
-Axolotl trains GRPO with TRL, so `make_axolotl_reward_fn(env)` is the TRL reward
-function. For a config with no code, save `verl_rows` as JSON lines and point
-`trl.reward_funcs` at `deepgym.integrations.axolotl.row_reward_fn`, which scores each
-row with the environment it names:
-
-```python
-import pandas as pd
-from deepgym.integrations.axolotl import generate_axolotl_config
-from deepgym.integrations.verl import verl_rows
-
-rows = pd.DataFrame(verl_rows(['coin_change', 'two_sum']) * 64)
-rows.to_json('data/train.jsonl', orient='records', lines=True)
-config = generate_axolotl_config(base_model='Qwen/Qwen2.5-Coder-7B-Instruct')
-# write config to axolotl.yaml, then: axolotl train axolotl.yaml
-```
-
-`row_reward_fn` scores in Daytona when `DAYTONA_API_KEY` is set, otherwise locally.
-
-### OpenRLHF
+### Serve rewards to OpenRLHF
 
 ```python
 from fastapi import FastAPI
+from deepgym import DeepGym, load_environment
 from deepgym.integrations.openrlhf import create_openrlhf_router
 
 app = FastAPI()
-app.include_router(create_openrlhf_router(env, dg, infra_failure_score='nan'))
-# Run with: uvicorn app:app --port 8000
-# Train with: --remote_rm_url http://localhost:8000/reward/score --algo.dynamic_filtering_enable
+app.include_router(create_openrlhf_router(
+    load_environment('coin_change'), DeepGym(mode='docker'), infra_failure_score='nan'
+))
+# uvicorn app:app --port 8000
+# OpenRLHF: --remote_rm_url http://localhost:8000/reward/score --algo.dynamic_filtering_enable
 ```
 
-OpenRLHF sends one request per rollout, all at once. A request waits for its runs
-without holding a thread, so a slow verification doesn't hold up the others.
+OpenRLHF can't skip a sample, so `infra_failure_score` decides what one DeepGym couldn't
+grade gets: `'nan'` (dynamic filtering then drops its group) or `'zero'`. More in
+[OpenRLHF][openrlhf].
 
-OpenRLHF can't skip a sample: it trains on whatever `rewards` holds, and a failed
-request would stop its training step, so the endpoint never fails one. A failure the
-model caused is judged and scores 0, and so does any run without a verdict that the
-model's output may have caused (a verifier failure, a timeout); those are never run
-again. A run the sandbox provider or the network failed
-(`deepgym.exceptions.is_infrastructure_failure`) is graded once more after a short pause.
-Every run, first or second, takes one of the router's `max_parallel` slots (32 by
-default), and no request waits past 150 s (OpenRLHF gives up at 180 s); a first run
-still going then scores 0, since the model's code may be what slows it. If the second
-grading fails too or doesn't finish in time, the first one never got a slot in time, or a
-query doesn't contain its prompt, the sample gets the router's `infra_failure_score`,
-never a score from a run that didn't finish. It has no default: creating the router
-without it raises an error, so the choice is made at setup, where no policy can reach it.
-
-- `'nan'` (recommended): NaN. With `--algo.dynamic_filtering_enable`, OpenRLHF drops
-  the sample's whole prompt group (the group's mean score is NaN, which is outside any
-  range). Without dynamic filtering it trains on the NaN and the run breaks, so use it
-  only with dynamic filtering on.
-- `'zero'`: 0.0. OpenRLHF trains on DeepGym's failure as a failed answer, an accepted
-  leak.
-
-Either way the sample is logged as a warning with its error type, and counts toward a
-warning logged when more than 5% of a batch gets no verdict.
-
-### lm-evaluation-harness
+### Evaluate with lm-evaluation-harness
 
 ```python
 import lm_eval
@@ -412,54 +218,148 @@ results = lm_eval.simple_evaluate(
 )
 ```
 
-lm-eval (0.4.9+) has no registry for Python tasks, so pass the task objects;
-`lm_eval --tasks` can't name them. The last fenced code block of the generation runs.
 `deepgym_score` and `deepgym_pass` average the environments that got a verdict, and
-`deepgym_verdict` is the fraction that did, so a sandbox or verifier failure doesn't
-count as a wrong answer.
+`deepgym_verdict` is the share that did. More in [lm-eval][lm-eval].
 
-### Hugging Face Hub
+### Run a multi-turn session
+
+One sandbox stays alive for the whole episode. This one runs locally as is:
 
 ```python
-from deepgym.integrations.hf import push_environment_to_hub, load_environment_from_hub
+from deepgym import Action, DeepGym, MultiTurnEnvironment
 
-revision = push_environment_to_hub(
-    env, repo_id='your-org/deepgym-coin-change', env_name='coin_change'
+env = MultiTurnEnvironment(
+    task='Write the word hello into notes.txt, then send done.',
+    final_verifier_code=(
+        'import json, pathlib\n'
+        'p = pathlib.Path("notes.txt")\n'
+        'ok = p.is_file() and p.read_text().strip() == "hello"\n'
+        'print(json.dumps({"score": float(ok), "passed": ok}))\n'
+    ),
 )
-env = load_environment_from_hub('your-org/deepgym-coin-change', revision=revision)
+
+dg = DeepGym(mode='local')   # local sessions aren't isolated: use a sandbox for real agents
+with dg.session(env) as session:
+    obs = session.start()
+    obs, reward, done = session.step(Action(action_type='bash', content='echo hello > notes.txt'))
+    obs, reward, done = session.step(Action(action_type='done'))
+    result = session.score()
+print(result.score)   # 1.0
 ```
 
-A round trip gives back the environment that was pushed: verifier source, support
-files, test cases, timeouts, verifier mode, image. Pass `revision` (the commit a push
-returns); without it you get whatever `main` holds now. Only a plain `Environment`
-round-trips; subclasses (repo-patch, benchmark and mixed environments) are refused.
-Every environment needs an `env_name` of its own: a push refuses a blank one, and
-loading by name or loading all refuses a dataset with a blank or repeated name rather
-than drop an environment.
+Agents act with `code`, `bash`, `write_file` and `done`; an optional step verifier rewards
+each step. `dg.run_episode(env, agent)` runs a whole episode in one call. More in
+[sessions][sessions].
 
-A Hub dataset is untrusted, so pushes and loads run the same checks and a row can't
-change how its environment runs: fields must be known and of the right type, the
-verifier is inlined (no host path), there are no `env_vars` (they reach the verifier and
-the solution, and may hold credentials), `verifier_mode` must match the verifier,
-support file names are plain relative paths, and a custom `image` or `snapshot` loads
-only with `trust_image=True`.
+### Drive a desktop
 
-## Repo, terminal and cyber tasks
-
-These tasks apply the model's patch, or run its commands, and then run tests, all
-outside the judge isolation that `deepgym_solution` gives single-file solutions. So
-they only run in a sandbox: with `mode='local'` (or `auto` without Daytona) they raise
-`SandboxError`. Use `docker`, `apple`, `modal`, `e2b` or `daytona`.
-
-### SWE-bench Pro
-
-Clones the repo, checks out the base commit, applies the model's patch, runs the
-tests and scores by pass fraction.
+Computer-use tasks boot a locked-down desktop on Daytona and score what the agent changed,
+never pixels:
 
 ```python
 from deepgym import DeepGym, load_environment
 
-dg = DeepGym(mode='daytona')  # clones the repo, so the sandbox needs network
+dg = DeepGym(mode='daytona')
+env = load_environment('settings_tabs', variant=3)
+
+trajectory, result = dg.run_episode(env, my_agent)   # my_agent(obs) -> Action(...)
+print(result.score, result.output)                   # e.g. "3/3 changes made"
+```
+
+`obs.screenshot` is a base64 PNG, and actions are clicks, typing, keys, scrolls and drags
+in screenshot pixels. More in [computer use][computer-use].
+
+### Record and export traces
+
+Record an episode as training data while it runs, then export it (continues the session
+example):
+
+```python
+from deepgym.traces import AgentMeta, TraceMessage
+
+agent = AgentMeta(name='react-shell', model='Qwen/Qwen3-8B', sampling={'temperature': 0.7})
+with dg.trace(env, agent) as tr:
+    obs = tr.start()
+    reply = [TraceMessage(role='assistant', content='echo hello > notes.txt')]
+    tr.step(Action(action_type='bash', content='echo hello > notes.txt'), reply)
+    tr.step(Action(action_type='done'))
+    tr.score()
+```
+
+```bash
+deepgym traces export --format jsonl --out traces.jsonl             # whole traces
+deepgym traces export --format parquet --rows rl --out rl.parquet   # verl / TRL rows
+deepgym traces export --format atif --out atif/ --only-valid        # ATIF documents
+```
+
+Each event is written to `~/.deepgym/traces/` as it happens, so a crash keeps the steps
+taken so far. A trace without a verdict is flagged, or left out with `--only-valid`.
+Parquet needs `deepgym[traces]`. More in [traces][traces].
+
+### Write an environment
+
+```bash
+deepgym new word_stats --kind function   # or script, repo-patch, multi-turn
+deepgym check word_stats                 # passes as generated
+# edit task.md, the reference, expected() in verifier.py and variants.py, then:
+deepgym check word_stats
+deepgym qa word_stats                    # reference, determinism, empty, stub, reward hacks
+deepgym qa word_stats --mutants --mode docker --approve --by "Jane Doe"
+```
+
+`deepgym new` writes a working example that passes every check, so you start green and
+change one thing at a time. `--mutants` fails a verifier that passes any small mutation
+of the reference (locally it needs `bwrap` on Linux; elsewhere use `docker`, `modal` or
+`e2b`). `--approve` writes a read-only `approval.json` with the QA report and a hash of
+every file, and `deepgym check` fails once the folder changes. More in
+[authoring][authoring], [the QA gate][qa-gate] and [approvals][approvals].
+
+### Write a verifier
+
+```python
+from deepgym import DeepGym, Environment
+
+env = Environment(
+    task='Write a function `add(a, b)` that returns the sum of two numbers.',
+    verifier_code=(
+        'from deepgym_solution import load_solution\n'
+        'sol = load_solution(solution_path)\n'
+        'return 1.0 if hasattr(sol, "add") and sol.add(2, 3) == 5 else 0.0\n'
+    ),
+)
+result = DeepGym(mode='local').run(env, model_output='def add(a, b):\n    return a + b\n')
+print(result.score)   # 1.0
+```
+
+`load_solution` runs the answer in a separate, isolated process and only plain data comes
+back, so it can't read the expected answers, print a fake score or patch the verifier.
+More in [verifiers][verifiers].
+
+### Import a code benchmark
+
+From a clone of this repo, in the `deepgym/` folder (`pip install datasets`):
+
+```bash
+python scripts/import_humaneval.py      # 164 problems
+python scripts/import_mbpp.py           # 500 problems
+python scripts/import_bigcodebench.py   # 1,140 problems
+python scripts/import_evalplus.py       # HumanEval+ and MBPP+ (pip install evalplus)
+```
+
+```python
+env = load_environment('humaneval/HumanEval_0')   # a qualified name picks one problem
+```
+
+Imported problems land in `~/.deepgym/environments/` and load like built-ins. More in
+[importers][importers].
+
+### Score a repo-level patch
+
+SWE-bench Pro and MiMo tasks apply the model's diff to a real repository and run its
+tests, so they need a sandbox provider:
+
+```python
+dg = DeepGym(mode='daytona')   # clones the repo, so the sandbox needs network
 env = load_environment('swebench_pro')
 
 result = dg.run(
@@ -471,625 +371,68 @@ result = dg.run(
     fail_to_pass=['tests/test_bug.py::test_fix'],
     pass_to_pass=['tests/test_smoke.py::test_smoke'],
 )
-print(result.score)
 ```
 
-### MiMo-V2.6-RL code tasks
+The hidden tests are restored after the diff, and a diff that touches tests or test
+infrastructure scores 0 with `error_type='test_infra_tampering'`. More in
+[importers][importers].
 
-[XiaomiMiMo/MiMo-V2.6-RL-oss](https://huggingface.co/datasets/XiaomiMiMo/MiMo-V2.6-RL-oss)
-(Apache-2.0) is the RL data behind MiMo-V2.6. Its code subset has 2,698 repo-level
-tasks, each with its own Docker image, hidden test patch and test command.
+### Import Harbor tasks
+
+Harbor task folders (`instruction.md`, `task.toml`, `tests/test.sh`, an image or
+Dockerfile) run as environments whose answer is a bash script:
 
 ```bash
-pip install datasets
-python scripts/import_mimo_rl.py   # writes ~/.deepgym/environments/mimo_code/
-docker pull docker.io/xiaomimimo/mimo-v2.6-rl-oss:format-code-task-001457
+deepgym harbor export coin_change two_sum --out ./harbor-tasks   # built-ins as Harbor tasks
+deepgym harbor import ./harbor-tasks --register mine             # validate, load as mine/<task>
+deepgym qa mine/coin_change --mode docker                        # solve.sh passes, a no-op fails
+deepgym harbor import harborframework/terminal-bench-2.0 --limit 5   # or a dataset from the Hub
 ```
 
-```python
-from deepgym import DeepGym, load_environment
-
-dg = DeepGym(mode='docker')
-env = load_environment('mimo_code/format-code-task-001457')
-result = dg.run(env, '''```diff\n... unified diff ...\n```''')
-```
-
-- The sandbox boots from the task's image. The model's diff is applied, every file
-  the hidden test patch touches is put back as it was, and then the hidden tests are
-  applied. The score is 1.0 if the test command exits 0, else 0.0, as in MiMo's
-  training. An image that can't run the test command at all (its repo, runner or
-  toolchain is missing, checked before the diff is applied) gives no verdict instead;
-  after the diff, every outcome is scored. A diff can't edit the hidden tests, and a
-  diff that touches any other test infrastructure (tests and their helper code,
-  conftest.py, test runner config, installed dependencies) scores 0 with
-  `error_type='test_infra_tampering'`; data fixtures the tests read may change. It can
-  still change the code the tests run, so the reward is only as strong as the tests.
-- The tests run as root in that sandbox because the images expect root's toolchains
-  and caches, so the sandbox, not `deepgym_solution`, is what isolates them.
-- Images are amd64 and up to about 3.4 GB. Pull them first: a sandbox waits at most
-  5 minutes for its image. Docker sandboxes are capped at 2 CPUs and 2 GB, which some
-  builds exceed.
-- The other subsets aren't imported because their rewards can't be reproduced here:
-  cyber grades with a submit script inside each image, general with LLM-judged
-  rubrics against mock apps, webdev with a visual grader, and music with MiMo's
-  statistical style scorer.
-
-### Terminal-Bench 2.0
-
-Terminal-Bench 2.0 is a Harbor dataset, so each run works like the Harbor tasks below:
-the model's shell commands run in the task's image and its tests grade the result. Its
-tests download their tools while grading and its images are amd64-only, so run it on
-Daytona.
-
-```python
-from deepgym import DeepGym, load_environment
-
-dg = DeepGym(mode='daytona')
-env = load_environment('terminal_bench_2')
-
-result = dg.run(
-    env,
-    model_output='python solve.py --input data.txt > output.txt',
-    task_id='log-summary-date-ranges',
-)
-print(result.score)
-```
-
-### Harbor tasks
-
-[Harbor](https://harborframework.com) tasks are folders with `instruction.md`,
-`task.toml`, `tests/test.sh` and an image or `environment/Dockerfile`. Import a dataset
-from a folder, a git URL or a Hugging Face dataset; `--register` makes the valid tasks
-loadable by name:
-
-```bash
-deepgym harbor import harborframework/terminal-bench-2.0 --limit 5   # list and validate
-deepgym harbor import ./my-tasks --register mine
-deepgym qa mine/hello-world --mode docker   # reference solve.sh passes, no-op fails
-```
-
-Each task is an environment whose model output is a bash script:
-
-```python
-from deepgym import DeepGym
-from deepgym.harbor import HarborEnvironment, load_tasks
-
-env = HarborEnvironment.from_task(load_tasks('./my-tasks')[0])
-result = DeepGym(mode='apple').run(env, 'echo hello > /app/hello.txt')
-```
-
-The script runs as an unprivileged user with no network, in a sandbox from the task's
-image. The grader is a fresh sandbox from the same image that gets only a copy of the
-work directory; `tests/` is uploaded there at grading time and the reward is read from
-its `/logs/verifier/` after `test.sh` exits. Nothing the agent writes can reach the tests
-or the reward file. This holds on every provider.
-
-- Docker and Apple container also build `environment/Dockerfile` tasks; Modal, E2B and
-  Daytona need a prebuilt `docker_image`.
-- Tests get the network unless the task says `no-network`, but Docker, Modal and E2B
-  sandboxes never have one.
-- On Apple container and Daytona the image needs python3 and util-linux to cut the agent
-  off the network.
-- The agent owns the work directory (`[environment].workdir`, else the image's WORKDIR),
-  so it can't be `/`, `/tmp`, `/root` or a system folder, however it is spelled or linked.
-- Every command DeepGym runs as root clears the whole image environment at the provider,
-  so no image variable (`LD_PRELOAD`, `BASH_ENV`, `GCONV_PATH`, ...) can point root at a
-  file the agent wrote. `test.sh` gets only PATH entries that resolve, in the sandbox,
-  outside the work directory, plus HOME, the image's locale and TERM, and `[verifier].env`
-  from task.toml. The agent keeps the image PATH and locale but no loader variable. As in
-  Harbor, `reward.json` wins over `reward.txt`; tests that run the agent's code as root
-  trust it.
-- `mode='local'` runs on your machine without isolation, for tasks that use relative
-  paths only.
-
-Export built-in environments as Harbor tasks. The agent writes `/app/solution.py` as a
-non-root user and a separate offline verifier runs the DeepGym verifier on it:
-
-```bash
-deepgym harbor export coin_change two_sum --out ./harbor-tasks
-```
-
-### Mix benchmarks behind one reward function
-
-```python
-from deepgym import MixedEnvironment, load_environment
-from deepgym.integrations.trl import make_trl_reward_fn
-
-mixed = MixedEnvironment(environments=[
-    (load_environment('swebench_pro'), 0.6),
-    (load_environment('terminal_bench_2'), 0.2),
-    (load_environment('coin_change'), 0.2),
-])
-
-reward_fn = make_trl_reward_fn(mixed)
-```
-
-### CyberBench/CyberGym
-
-DeepGym turns CyberGym Hugging Face metadata and artifacts into CyberBench-style
-RL tasks for defensive cyber training: local patch repair, log triage, forensics
-and synthetic CTF-style tasks. The reward comes from a deterministic verifier,
-not from live targets.
-
-The scripts below run from a clone of this repo, in the `deepgym/` folder:
-
-```bash
-pip install "deepgym[hf,daytona]"
-cp .env.example .env
-# edit .env with DAYTONA_API_KEY, ZAI_API_KEY, ZAI_API_BASE, ZAI_MODEL
-```
-
-Generate CyberBench seed specs from CyberGym metadata. `--use-zai` lets GLM/Z.ai
-enrich the seed plans while keeping the local-only safety constraints:
-
-```bash
-python scripts/inspect_cybergym_hf.py --repo-id sunblaze-ucb/cybergym --limit 100
-python scripts/generate_cyberbench_seeds.py --count 100 --use-zai
-```
-
-For RL, use artifact-backed patch tasks rather than metadata-only prompts. The
-runner downloads the vulnerable repository archive and reference patch, applies
-a model-produced unified diff in a sandbox, then scores application, touched-file
-overlap, changed-line similarity, minimality and safety scope.
-
-```bash
-# Daytona-isolated execution for model outputs
-python scripts/run_cybergym_artifact_eval.py --count 20 --mode daytona --max-parallel 4
-
-# Ask GLM for candidate patches when rate limits allow
-python scripts/run_cybergym_artifact_eval.py --count 20 --answer-source glm --fallback-to-reference
-```
-
-Inside a trainer, score completions like any other environment:
-
-```python
-from deepgym import DeepGym
-from deepgym.cybergym_artifacts import CyberGymPatchEnvironment, load_cybergym_rows
-
-dg = DeepGym(mode='daytona')
-row = load_cybergym_rows(count=1)[0]
-env = CyberGymPatchEnvironment.from_row(row)
-
-candidate_patch = model.generate(env.task)  # return a unified diff
-result = dg.run(env, model_output=candidate_patch)
-reward = result.score
-```
-
-Use the generated `data/cyberbench/*.jsonl` files as curriculum inputs for
-TRL/verl/OpenRLHF. Keep training and evaluation splits separate, use Daytona for
-untrusted completions, and don't train on metadata-only scores. See
-[docs/cyberbench.md](https://github.com/DeepGym/deepgym/blob/main/deepgym/docs/cyberbench.md)
-for the full workflow and current diagnostic numbers.
-
-## Agents and sessions
-
-### Computer-use agents
-
-Computer-use environments boot Daytona's desktop (xfce + Chromium), run a setup
-script, and hand the agent a screenshot. Actions are clicks, typing, keys, scrolls
-and drags in screenshot pixels. The verifier runs in the same sandbox and checks
-what the agent changed (saved app state, files), never pixels. Needs `DAYTONA_API_KEY`.
-
-```python
-from deepgym import Action, DeepGym, load_environment
-
-dg = DeepGym(mode='daytona')
-env = load_environment('settings_tabs')
-
-with dg.session(env) as session:
-    obs = session.start()                     # obs.screenshot is a base64 PNG
-    while not session.done:
-        action = my_agent(obs)                # e.g. Action(action_type='click', x=376, y=121)
-        obs, reward, done = session.step(action)
-    result = session.score()
-print(result.score, result.output)            # "3/3 changes made"
-```
-
-Or in one call: `trajectory, result = dg.run_episode(env, my_agent)`.
-
-Each task has 8 seeded variants (different names, values, files) so a policy
-can't memorize one answer: `load_environment('todo_list', variant=3)`. The count
-is in `list_environments()` under `variants`.
-
-Verifiers split checks into *progress* (the changes the task asked for) and
-*guards* (work was saved, nothing else broke, no duplicate rows). Any failed
-guard scores 0, so neither doing nothing nor clicking Save on untouched state
-earns reward. The desktop and every app on it run as an unprivileged user with
-no network and no sudo, separate from the verifier's user, so anything the agent
-starts from the GUI can't reach root, the internet or the score. The desktop is
-locked down before setup runs: no terminal, run dialog, browser devtools, Thunar
-custom actions, or "Open With" launches (custom commands included).
-
-The same session API runs shell-based multi-turn tasks (`MultiTurnEnvironment`),
-and the local backend works for those without Daytona. Session verifiers that
-grade the agent's code load it with `load_solution` too, so it runs isolated from
-the verifier: locally in the same sandbox as single runs, and in sandbox images
-with sudo (Daytona's default has it) as a third user. A score only counts if the
-verifier exits cleanly. A verifier that crashes has no verdict until it has started
-the agent's code, and scores 0 after that, since the crash came from handling it;
-one that is killed has no verdict.
-
-### Sessions over HTTP
-
-`deepgym serve` exposes sessions to trainers in any language:
-
-```
-POST   /v1/sessions                {"environment": "todo_list", "variant": 3}  -> session_id, observation
-POST   /v1/sessions/{id}/step      {"action_type": "type", "content": "Pay rent"}
-POST   /v1/sessions/{id}/score     -> RunResult
-DELETE /v1/sessions/{id}
-```
-
-`environment` can also be an inline `MultiTurnEnvironment` spec. Idle sessions
-are closed after 30 minutes; at most 100 run at once.
-
-### Traces
-
-`dg.trace()` records an episode while it runs, as training data. A trace holds its
-provenance (environment name, variant and seed; hashes of the environment, task,
-verifiers and reference; the image the sandbox booted with the digest its provider
-resolved, or why there is none; deepgym version and the git commit of the deepgym
-checkout, null for an installed package, with whether it had local changes; provider;
-and the agent, model and sampling config you pass), every step (the action, the model
-messages behind it with optional token ids and logprobs, what came back, the step reward
-with the step verifier's output, exit code, error) and every result of `score()`: the
-last is the verdict, with `has_verdict`, and earlier ones stay in `prior_results`.
-
-```python
-from deepgym.traces import AgentMeta
-
-agent = AgentMeta(name='react-shell', model='Qwen/Qwen3-8B', sampling={'temperature': 0.7})
-with dg.trace(env, agent, variant=3) as tr:
-    obs = tr.start()
-    while not tr.done:
-        action, messages = my_agent(obs)   # messages: this turn's new TraceMessages
-        obs = tr.step(action, messages).observation
-    tr.score()
-```
-
-When one model reply issues several actions, step each one and pass the reply's
-messages with the first only; the others belong to the same turn (`trace.turns`).
-
-Each event is appended to `~/.deepgym/traces/<trace_id>.jsonl` (or
-`$DEEPGYM_TRACES_DIR`) as it happens, so a crash keeps the steps taken so far, and a
-trace that was never scored is `incomplete`. `record_episode(tr.trace)` also stores it
-in the console.
-
-```bash
-deepgym traces export --format jsonl --out traces.jsonl             # whole traces
-deepgym traces export --format parquet --rows rl --out rl.parquet   # verl / TRL rows
-deepgym traces export --format atif --out atif/ --only-valid        # ATIF documents
-```
-
-Export reads the console database and the traces directory, or the sources named
-with `--db` and `--traces`; a trace stored in both is exported once, and refused if the
-copies disagree. A trace without a verdict is exported with `has_verdict: false` and a
-null reward, or left out with `--only-valid`. `--rows rl` writes one conversation per
-trace (`messages`, `reward`, `step_rewards`, and `steps`: every action with its
-observation text and screenshot, step reward and the index of the reply that produced
-it) and skips traces with a turn that has no model messages. Parquet needs
-`pip install "deepgym[traces]"`. The ATIF mapping is documented in
-`deepgym/traces/atif.py`.
-
-## Environments
-
-### Built-in (31, ship with the package)
-
-**Coding (22):**
-- Array/String: reverse_string, palindrome_check, anagram_check, max_subarray, rotate_array, remove_duplicates, valid_parentheses
-- Hash Map: group_anagrams, longest_consecutive, top_k_frequent
-- DP: climbing_stairs, coin_change, longest_common_subsequence, house_robber
-- Graph/Tree: binary_search, merge_intervals, level_order_traversal
-- Practical: fizzbuzz, roman_to_integer, matrix_spiral
-- Filesystem/CLI scripting: file_organizer, cli_task
-
-**Computer-use (5, multi-turn, Daytona desktop):** signup_form, todo_list, settings_tabs, expense_sheet, file_manager
-
-**Tool-use (2):** api_request, data_pipeline
-
-**Cyber (2):** cyber/cve_2021_44228_log_triage, cyber/web_path_traversal_toy
-
-```python
-from deepgym import load_environment
-env = load_environment('coin_change')
-```
-
-### Importable benchmarks
-
-From a clone of this repo, in the `deepgym/` folder:
-
-```bash
-python scripts/import_humaneval.py      # 164 problems
-python scripts/import_evalplus.py       # HumanEval+ and MBPP+
-python scripts/import_mbpp.py           # 500 problems
-python scripts/import_bigcodebench.py   # 1,140 problems
-python scripts/import_mimo_rl.py        # 2,698 MiMo-V2.6-RL code tasks
-```
-
-Imported problems are then available through `load_environment()`.
-`swebench_pro` and `terminal_bench_2` load the same way (see
-Repo, terminal and cyber tasks above).
-
-## Write your own environment
-
-From an idea to a QA-approved environment folder:
-
-```bash
-deepgym new word_stats --kind function   # or script, repo-patch, multi-turn
-deepgym check word_stats                 # passes as generated
-# edit word_stats/: task.md, the reference, expected() in verifier.py, variants.py
-deepgym check word_stats
-deepgym qa word_stats --mutants          # adds reward-hack attacks and mutation testing
-deepgym qa word_stats --mutants --approve --by "Jane Doe"
-```
-
-`deepgym new` writes a working example (the longest strictly increasing run in a
-list) that passes every check, so you start green and change one thing at a time:
-
-| File | What it is |
-|---|---|
-| `task.md` | The prompt the model sees. |
-| `verifier.py` | Scores a solution. It runs the solution only through `deepgym_solution`, computes each expected answer with its own `expected()`, and reports every case with a reason. |
-| `reference_solution.py` | Must score 1.0. A `.diff` for repo-patch, `reference_actions.json` for multi-turn. |
-| `variants.py` | `generate(seed, count)`: edge cases plus seeded random inputs. The fixed seed keeps runs reproducible. |
-| `metadata.json` | Name, type, difficulty, tags and the `support_files` the verifier imports. Unknown keys are rejected. |
-
-Kinds:
-
-- `function`: the verifier calls a function through `load_solution`.
-- `script`: the verifier runs a stdin/stdout script through `run_solution`.
-- `repo-patch`: the model answers with a unified diff. The verifier applies it to
-  the files in `repo/` with `apply_patch` (in memory, only to files you list; a
-  diff that creates, deletes, renames or copies a file is refused) and imports the
-  result with `load_files`, the way Python would import it from a checkout. It
-  isn't tagged `patch`: that tag adds attacks whose diffs add test files, which this
-  verifier can never apply; tag it once you let patches add files.
-- `multi-turn`: an agent works in a directory that starts with the folder's other
-  files (here `runs.py`), then the final verifier tests the result. Only fixes
-  earn reward: cases the shipped `runs.py` already gets right must keep passing
-  (breaking one zeroes the score), and the score is the share of the cases it got
-  wrong that now pass, so an agent that changes nothing earns nothing.
-  `reference_actions.json` is the scripted episode that must score 1.0. A file
-  that links outside the folder is refused rather than copied in. Local
-  sessions aren't isolated; use a sandbox mode for untrusted agents. The final
-  verifier loads the agent's code with `load_solution`, which a sandbox session
-  provides only on an image with `sudo` (a separate user runs that code).
-
-`deepgym check PATH` validates the files, the metadata schema and that the
-verifier parses. Then it runs the reference twice and an empty and a stub
-solution once, and checks the output: protocol JSON, a `cases` list on the
-reference run and a reason on every failed case. It exits 0, 1 if a check failed,
-or 2 if one is inconclusive (say, the verifier crashed on the empty solution).
-
-It also prints warnings from an advisory lint over the judge code: a verifier
-that never calls `load_solution`, `run_solution`, `load_files` or
-`solution_source`, that hands the solution path to anything else (such as
-`open`), or that uses something able to run code itself (`exec`, `eval`,
-`importlib`, `runpy`, `pickle`, `timeit`, subprocesses, `sys.path`). Warnings
-never change the result, and a clean lint proves nothing: a pattern check can
-always be dodged. The isolation is the judge reaching the solution only through
-those helpers.
-
-`--mutants` adds mutation testing to `deepgym qa`. It edits the reference one
-small step at a time with the `ast` module (an integer off by one, `<` for `<=`,
-a computed return replaced by a constant, an if/else swapped, a statement
-dropped) and runs each mutant like a model solution. Every mutant must score
-below the pass threshold; one that passes points at behavior the verifier never
-checks. The report gives the mutation score and each survivor by line. A mutant
-that behaves exactly like the reference (a redundant guard dropped, say) can't
-fail; mark its line `# pragma: no mutate`. Locally, mutation runs need `bwrap`
-(Linux): each mutant's whole judge run goes inside its sandbox, so mutants stay
-contained even if a verifier runs them in-process, and its PID namespace takes
-down everything the run started (sandboxes don't nest, so within the run a mutant
-isn't kept from the judge's files; mutants are edits of your reference, not
-attacks). macOS's `sandbox-exec` can't reap a process a mutant detaches, so on
-macOS, or without `bwrap`, use `--mode docker`, `modal` or `e2b`, which keep the
-whole sandbox offline; `apple` and `daytona` leave the judge online, so there the
-check is inconclusive and no mutant runs.
-
-`--approve --by NAME` writes `approval.json` once QA passes with at least one
-rerun and every check you asked for (`--mutants`, `--model`) passed: the full
-report, a sha256 and the permission bits of every file and directory in the
-folder (hidden ones too, so even a `.DS_Store` Finder adds makes it stale), the
-deepgym version and the time. QA runs on a private copy of the folder, so the
-hashes describe exactly the files it tested; the folder must be self-contained
-(no symlinks, no support files outside it). Checks that didn't run are listed
-with it, never counted as passed. It is written once, read-only; delete it to
-approve again.
-`deepgym check` fails when the files no longer match (Harbor task folders
-included), so an environment pack carries proof of exactly what was tested. Lint
-warnings ride along under `lint`, marked `"advisory": true`: information for the
-reader, never evidence that the verifier isolates the solution.
-
-## Write your own verifier
-
-```python
-from deepgym import DeepGym, Environment
-
-dg = DeepGym(mode='local')
-env = Environment(
-    task='Write a function `add(a, b)` that returns the sum of two numbers.',
-    verifier_code=(
-        'from deepgym_solution import load_solution\n'
-        'sol = load_solution(solution_path)\n'
-        'return 1.0 if hasattr(sol, "add") and sol.add(2, 3) == 5 else 0.0\n'
-    ),
-)
-
-result = dg.run(env, model_output='def add(a, b):\n    return a + b\n')
-```
-
-### Running the solution
-
-Never import or run the solution yourself. Use the helpers in `deepgym_solution`:
-
-- `load_solution(path)` starts it in a separate, isolated process and returns a
-  proxy: `sol.add(2, 3)` runs there and returns plain data.
-- `run_solution(path, cwd=..., env=...)` runs it as a script, writing only inside
-  `cwd`. Pass `allow_subprocess=True` if the script needs to start other programs
-  (macOS blocks forking otherwise), and `loopback_port=port` to let it reach a
-  server the verifier runs on `127.0.0.1:port` (nothing else on the network).
-- `read_output(path, cwd)` reads its files back and refuses symlinks.
-- `solution_source(path, name=None)` reads the source for static checks without running it.
-- `apply_patch(diff, files)` applies a unified diff to a dict of file texts in
-  memory, and `load_files(files, entry)` imports the result like `load_solution`.
-  Together they score repo-patch answers.
-
-When the machine can't start the solution at all (out of processes, say), these
-raise `LaunchError`. Let it propagate: the run ends as a verifier error with no
-verdict, instead of scoring the solution 0. It isn't an `Exception`, so an
-`except Exception` doesn't catch it. Once solution code has run, the same failure
-is the solution's (it may have used up the disk or processes) and scores 0.
-
-Each call is bounded by `case_timeout` (default 10s) and by the run's `timeout`,
-so a slow case fails on its own and the run still returns partial credit. Whatever the
-solution starts is killed when the verifier ends, however it ends.
-
-Whatever the solution does once it runs (raise, exit, hang, return garbage) is its own
-failure: if the verifier doesn't handle it, the run scores 0, not a verifier error, so
-a solution can't dodge its score by breaking the verifier. Each such failure reaches the
-verifier as a `deepgym_solution.SolutionError`, still of the builtin type the solution
-raised, and a hang past the time limit scores 0 with `error_type='solution_timeout'`.
-Load test data before the solution, since a verifier that fails after starting it
-scores 0 too.
-
-### Isolation
-
-- **Sandboxes (Daytona, Modal, E2B, Docker, Apple container):** the solution runs as
-  a separate Linux user that can't read the judge's files, touch the judge's
-  process, or write to its output, with no network.
-- **Locally:** it runs under `sandbox-exec` on macOS or `bwrap` on Linux, with the
-  judge directory, the deepgym package, your home directory and `/run` (daemon
-  sockets) hidden. If neither is available, you still get process separation and
-  a warning.
-
-What this blocks:
-
-- Only plain data crosses the boundary, so an object that claims to equal
-  everything can't fake a pass.
-- A fake score line printed by the solution never reaches the judge's output.
-- Patching the verifier at runtime has no effect.
-
-### Verifier shapes
-
-Detected by parsing, or set explicitly with `verifier_mode`:
-
-- `script`: has a `__main__` block that prints protocol JSON.
-- `verify_function`: defines `verify(solution_path, test_cases_path=None)`.
-- `body` (the example above): the body of that function.
-
-Return a float, bool or dict; the wrapper normalizes it. `from __future__`
-imports are fine in any mode.
-
-Shared helper code goes in `support_files` (name to content). These files sit
-next to the verifier, are importable by it, and are hidden from the solution. In
-a registry env, list paths in `metadata.json`, for example
-`"support_files": ["../_shared/scoring.py"]`.
-
-### Output protocol
-
-Verifiers print JSON to stdout:
-
-```json
-{
-  "schema_version": "1.0",
-  "score": 0.85,
-  "passed": true,
-  "details": "12/14 tests passed",
-  "cases": [
-    {"id": "test_0", "passed": true, "score": 1.0, "input_summary": "coins=[1,2,5] amount=11"},
-    {"id": "test_1", "passed": false, "score": 0.0, "error": "expected 3, got -1"}
-  ],
-  "seed": 42
-}
-```
-
-`cases` tells you which tests passed and failed, so your training loop gets a
-denser signal than 0 or 1. A verifier that returns a float or bool is wrapped
-into this format automatically.
-
-## Quality gate
-
-Check environments before you train on them:
-
-```bash
-deepgym qa coin_change two_sum          # or --all
-deepgym qa ./word_stats --mutants       # an environment folder
-deepgym qa --all --mode daytona --reruns 5   # computer-use envs too: they need a desktop
-OPENAI_BASE_URL=http://localhost:8000/v1 OPENAI_API_KEY=EMPTY \
-  deepgym qa coin_change --mode docker --model Qwen/Qwen3-8B --samples 8
-```
-
-Each single-turn environment must pass:
-
-- `reference_passes`: its `reference_solution.py` scores 1.0.
-- `deterministic`: the reference scores the same on every rerun. Skipped with
-  `--reruns 0`, since one run proves nothing.
-- `empty_fails`, `stub_fails`: an empty file, and a stub of the reference's
-  functions that return `None`, both earn nothing: any reward above float noise
-  fails, since a verifier that pays for doing nothing teaches a policy to do
-  nothing. `stub_fails` is skipped when the reference is a script with no
-  top-level function. A verifier that crashes on them instead of scoring them is
-  inconclusive, not a pass.
-- `hack_resistant`: none of the heuristic reward-hack attacks behind
-  `deepgym audit` reaches the exploit threshold (0.50). The attacks define the
-  env's own entry point (from the reference, the functions the verifier calls, or
-  the task) returning a constant, nothing, NaN or its input. If none got through
-  but some crashed or couldn't run, the check is inconclusive, not passed. The attacks are
-  Python solutions, so the check is skipped where they can't apply: a Harbor task
-  runs bash, and a verifier that rejects every attack as a malformed answer (a
-  repo-patch env takes diffs) was never attacked. A skipped check counts neither
-  way, and the report lists it under `not_run`.
-- `mutants_killed` (with `--mutants`): every AST mutant of the reference scores
-  below the pass threshold (see Write your own environment).
-- `difficulty` (with `--model`): pass@1, pass@k, and the mean and spread of the
-  rewards over k samples from an OpenAI-compatible endpoint. Reported, never
-  gated: it passes once measured and flags `too_easy` (every sample solved),
-  `too_hard` (no sample earned anything) and `no_variance` (every sample earned
-  the same), since group-relative RL learns nothing from equal rewards. Partial
-  rewards are variance: `[0.2, 0.8]` is neither too hard nor flat. Rate limits
-  (429), timeouts and 5xx are retried with backoff; if a sample never comes back,
-  or the verifier couldn't judge one, the check is inconclusive. A refused
-  request (a bad key or model) stops the run.
-
-`--model` runs model-generated code, so with `--mode local` (the default) or
-`auto` (which can fall back to local) it refuses to start unless you pass
-`--allow-local-exec`. Use a sandboxed mode instead.
-
-Each check and each environment gets a `status`: `pass`, `fail`, `inconclusive`
-or `skip`. An environment fails if any check fails, is inconclusive if any check
-is, and passes otherwise; skipped checks don't count either way.
-
-A multi-turn environment with a `reference_actions.json` (the computer-use
-built-ins ship one per variant) replays it for `reference_passes` and
-`deterministic`, then runs three scripted agents that act without working on the
-task, each of which must earn nothing: `empty_fails` quits at once, `busy_fails`
-uses every allowed action in turn and `random_fails` acts at random (seeded), the
-last two for the whole step budget. A verifier that pays for activity instead of
-the outcome fails. Computer-use envs need a desktop, so they run with
-`--mode daytona` and are skipped elsewhere. Every report lists the checks that
-`ran` and those `not_run`. Multi-turn envs without a reference, and
-benchmark-backed ones, are skipped: neither passed nor failed. The command exits 0
-when the checked environments pass (skipped ones
-alongside are fine), 1 if any fails, and 2 if none fails but some are
-inconclusive or none could be checked. It writes one report per environment to
-`~/.deepgym/qa/<env>.json` (set `DEEPGYM_QA_DIR` to change it):
-
-```json
-{
-  "environment": "coin_change",
-  "status": "pass",
-  "passed": true,
-  "ran": ["reference_passes", "deterministic", "empty_fails", "stub_fails", "hack_resistant"],
-  "not_run": [],
-  "checks": [
-    {"name": "reference_passes", "status": "pass", "passed": true, "details": "score 1.00 (25/25 passed)"}
-  ],
-  "created_at": "2026-10-12T16:45:34Z"
-}
-```
+The script runs as an unprivileged user with no network, and a fresh sandbox from the same
+image grades a copy of its work directory, so nothing the agent writes reaches the tests
+or the reward file. More in [importers][importers-harbor].
+
+## DeepGym and verl
+
+verl trains the model. DeepGym gives it tasks and scores the answers. Use them together:
+verl loads DeepGym's reward function with one config line (see
+[Train with verl](#train-with-verl)).
+
+| | verl | DeepGym |
+|---|---|---|
+| What it is | RL training framework | RL environments and verifiable rewards |
+| Does the training | Yes: rollouts on vLLM/SGLang, updates on FSDP/Megatron, PPO, GRPO, DAPO and more | No, it plugs into verl, TRL, OpenRLHF or your own loop |
+| Tasks | You bring the dataset and write the reward function | 31 built-in environments; importers for HumanEval, MBPP, EvalPlus, BigCodeBench, SWE-bench Pro, MiMo, CyberGym and Harbor datasets such as Terminal-Bench 2.0 |
+| Running model code | Your reward function, or a remote code sandbox service | Every run in a sandbox: Daytona, Modal, E2B, Docker, Apple container, or locally under sandbox-exec/bwrap |
+| Reward hacking | Up to your reward function | The solution runs apart from the verifier with no network, so it can't read the expected answers or print a fake score; `deepgym qa` checks that empty, stub and reward-hack solutions earn nothing before you train |
+| Multi-turn agents | Agent loop and tool interface | One live sandbox per episode (shell or desktop), with a verl agent loop and session tool |
+| Computer use | Not built in | Desktop tasks, scored on the state the agent leaves behind |
+| Failed runs | A reward function returns a score; it can't mark a sample as unscored | A run whose sandbox or verifier failed has no verdict: verl's v1 trainer drops the sample, and DeepGym's agent loops drop or mask it |
+| Managing it | Training logs (wandb, TensorBoard) | `deepgym console`: environments, runs, episode replay, sandboxes, QA reports |
+
+## For teams and labs
+
+DeepGym is free for personal, research and other noncommercial use. Commercial use,
+including inside a company or in a product you sell, needs a commercial license. We also
+build private environments and verifiers for your tasks, deploy DeepGym privately or
+self-hosted, and help set up and run RL training. Email
+[contact@deepgym.io](mailto:contact@deepgym.io) or visit [deepgym.io](https://deepgym.io).
 
 ## CLI
+
+| Command | What it does |
+|---|---|
+| `deepgym run`, `run-batch` | Score one solution, or a folder of them, against a task and verifier |
+| `deepgym eval` | Score solutions against a suite of built-in environments |
+| `deepgym qa` | Quality-gate environments before training on them |
+| `deepgym new`, `check` | Scaffold and validate an environment folder |
+| `deepgym audit`, `benchmark-audit` | Audit a verifier for reward hacking, or a benchmark for split leakage |
+| `deepgym harbor import`, `export` | Import Harbor tasks, or export environments as Harbor tasks |
+| `deepgym traces export` | Export recorded traces as training data |
+| `deepgym create` | Print an environment as JSON for `POST /v1/environments` |
+| `deepgym serve` | Start the HTTP API |
+| `deepgym console` | Launch the local web console (alias `deepgym web`) |
 
 ```bash
 deepgym run --task task.md --verifier verifier.py --solution solution.py
@@ -1101,95 +444,85 @@ DEEPGYM_NO_AUTH=true deepgym serve --host 127.0.0.1 --port 8000 --allow-local-ex
 DEEPGYM_API_KEY=your-key DAYTONA_API_KEY=your-key deepgym serve --port 8000
 ```
 
-The server won't start without auth configured. Set `DEEPGYM_API_KEY` for
-production or `DEEPGYM_NO_AUTH=true` for local development.
-`--allow-local-exec` is required when running without Daytona.
-
-Other commands: `run-batch`, `eval`, `create`, `new`, `check`, `audit`, `qa`, `harbor`,
-`benchmark-audit`, `traces export` and `console`. Run `deepgym <command> --help` for
-options.
+The server won't start without auth configured: set `DEEPGYM_API_KEY` for production or
+`DEEPGYM_NO_AUTH=true` for local development. Without `DAYTONA_API_KEY` it runs code on
+the host, so it also needs `--allow-local-exec`. Run `deepgym <command> --help` for
+options, and see [the CLI reference][cli] and [the API server][api-server].
 
 ## Console
 
-A local web console for the environments, runs, episodes, sandboxes and QA reports
-on your machine (`pip install "deepgym[server]"`):
+A local web console for the environments, runs, episodes, sandboxes and QA reports on
+your machine (`pip install "deepgym[server]"`):
 
 ```bash
 deepgym console --port 8080 --allow-local-exec   # http://127.0.0.1:8080
 ```
 
-- **Environments:** search and filter the registry; open one to read its task,
-  verifier, reference solution and metadata.
-- **Runs:** score a pasted solution or the reference against one environment or a
-  small eval, on any provider (`local`, `docker`, `apple`, `daytona`, `modal`, `e2b`).
-  Runs execute in the background; the run page shows per-case results and a diff
-  against the reference.
-- **Episodes:** replay recorded trajectories step by step, with screenshots for
-  computer-use tasks. Record one from your agent loop:
+- **Environments:** search the registry and read each task, verifier, reference and
+  metadata.
+- **Runs:** score a pasted solution or the reference against one environment or a small
+  eval, on any provider, with per-case results and a diff against the reference.
+- **Episodes:** replay recorded trajectories and traces step by step, with screenshots
+  for computer-use tasks. Store one from your agent loop with
+  `deepgym.console.record_episode(trajectory, result, environment=...)` or
+  `record_episode(tr.trace)`.
+- **Sandboxes:** live `deepgym-*` containers from Docker and Apple `container`, with kill.
+- **QA:** the reports `deepgym qa` writes.
 
-  ```python
-  from deepgym.console import record_episode
-  trajectory, result = dg.run_episode(env, agent)
-  record_episode(trajectory, result, environment='todo_list')
-  ```
-
-  `record_episode(tr.trace)` stores a [trace](#traces) the same way, and keeps it for
-  `deepgym traces export`.
-
-- **Sandboxes:** live `deepgym-*` containers from Docker and Apple `container`,
-  with kill. Cloud sandboxes are not listed.
-- **QA:** the verdicts `deepgym qa` writes to `~/.deepgym/qa/` (or `$DEEPGYM_QA_DIR`).
-
-Runs and episodes are stored in `~/.deepgym/console.db`. Reference solutions may
-run locally, but a pasted solution only runs on your machine with
-`--allow-local-exec`; otherwise pick a sandbox provider. The console has no login,
-so other websites can't drive it: every `/api` call needs the per-launch token the
-console writes into its pages (`X-DeepGym-Token`), writes from other origins are
-refused, and when bound to `127.0.0.1` it only answers requests addressed to
-localhost. `deepgym web` is an alias.
-
-The UI lives in `console-ui/` (Next.js static export, built with bun) and ships
-prebuilt in wheels. From a clone, build it once with
-`cd console-ui && bun install && bun run build`.
+Runs and episodes are stored in `~/.deepgym/console.db`. A pasted solution only runs on
+your machine with `--allow-local-exec`; otherwise pick a sandbox provider. The console has
+no login, so every `/api` call needs a per-launch token the console writes into its pages,
+and writes from other origins are refused. More in [the console docs][console].
 
 ## Development
 
 From the `deepgym/` folder of a clone:
 
 ```bash
-pip install -e ".[dev]"   # install with test deps
+pip install -e ".[dev]"     # install with test deps
 pytest
-ruff check src/           # lint
-ruff format src/          # format
+ruff check src/ tests/      # lint
+ruff format src/ tests/     # format
 ```
 
-### Release
+The console UI lives in `console-ui/` (Next.js static export, built with bun) and ships
+prebuilt in wheels. From a clone, build it once with
+`cd console-ui && bun install && bun run build`.
 
-PyPI publishing is tag-driven in GitHub Actions. Bump `version` in
-`pyproject.toml`, then push a `v*` tag:
-
-```bash
-git tag vX.Y.Z
-git push origin vX.Y.Z
-```
-
-Branch pushes and PRs run CI only. A `v*` tag also runs the publish job.
+Releases are tag-driven: bump `version` in `pyproject.toml`, then push a `v*` tag
+(`git tag vX.Y.Z && git push origin vX.Y.Z`). Branch pushes and PRs run CI only; a tag
+also publishes to PyPI, and fails if the tag isn't the built version or that version is
+already on PyPI.
 
 ## Contributing
 
-New environments, verifiers, benchmark importers and integrations are all welcome.
-Start with a [good first issue](https://github.com/DeepGym/deepgym/issues?q=is%3Aissue+is%3Aopen+label%3A%22good+first+issue%22)
+New environments, verifiers, benchmark importers and integrations are all welcome. Start
+with a [good first issue](https://github.com/DeepGym/deepgym/issues?q=is%3Aissue+is%3Aopen+label%3A%22good+first+issue%22)
 and see [CONTRIBUTING.md](https://github.com/DeepGym/deepgym/blob/main/.github/CONTRIBUTING.md).
-We're in Hacktoberfest: merged PRs get the `hacktoberfest-accepted` label.
-
-If DeepGym is useful to you, a star helps other people find it.
 
 ## License
 
 [PolyForm Noncommercial License 1.0.0](https://github.com/DeepGym/deepgym/blob/main/LICENSE).
-Commercial use needs a license: email [contact@deepgym.io](mailto:contact@deepgym.io).
+Commercial use needs a license: [contact@deepgym.io](mailto:contact@deepgym.io).
 
----
-
-Need custom environments, a private deployment or help with RL training?
-Email [contact@deepgym.io](mailto:contact@deepgym.io) or visit [deepgym.io](https://deepgym.io).
+[concepts]: https://github.com/DeepGym/deepgym/blob/main/deepgym/docs/concepts.md
+[reward-contract]: https://github.com/DeepGym/deepgym/blob/main/deepgym/docs/training/reward-contract.md
+[built-ins]: https://github.com/DeepGym/deepgym/blob/main/deepgym/docs/environments/built-ins.md
+[importers]: https://github.com/DeepGym/deepgym/blob/main/deepgym/docs/environments/importers.md
+[importers-harbor]: https://github.com/DeepGym/deepgym/blob/main/deepgym/docs/environments/importers.md#harbor-tasks
+[computer-use]: https://github.com/DeepGym/deepgym/blob/main/deepgym/docs/environments/computer-use.md
+[sessions]: https://github.com/DeepGym/deepgym/blob/main/deepgym/docs/environments/sessions.md
+[authoring]: https://github.com/DeepGym/deepgym/blob/main/deepgym/docs/authoring/new-check-qa.md
+[verifiers]: https://github.com/DeepGym/deepgym/blob/main/deepgym/docs/authoring/verifiers.md
+[qa-gate]: https://github.com/DeepGym/deepgym/blob/main/deepgym/docs/authoring/qa-gate.md
+[approvals]: https://github.com/DeepGym/deepgym/blob/main/deepgym/docs/authoring/approvals.md
+[verl]: https://github.com/DeepGym/deepgym/blob/main/deepgym/docs/training/verl.md
+[trl]: https://github.com/DeepGym/deepgym/blob/main/deepgym/docs/training/trl.md
+[openrlhf]: https://github.com/DeepGym/deepgym/blob/main/deepgym/docs/training/openrlhf.md
+[lm-eval]: https://github.com/DeepGym/deepgym/blob/main/deepgym/docs/training/lm-eval.md
+[axolotl]: https://github.com/DeepGym/deepgym/blob/main/deepgym/docs/training/axolotl.md
+[traces]: https://github.com/DeepGym/deepgym/blob/main/deepgym/docs/traces.md
+[sandboxes]: https://github.com/DeepGym/deepgym/blob/main/deepgym/docs/sandboxes.md
+[cli]: https://github.com/DeepGym/deepgym/blob/main/deepgym/docs/cli.md
+[api-server]: https://github.com/DeepGym/deepgym/blob/main/deepgym/docs/api-server.md
+[console]: https://github.com/DeepGym/deepgym/blob/main/deepgym/docs/console.md

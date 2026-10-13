@@ -15,7 +15,9 @@ Tier 3 uses black-box iterative probing with feedback-only access
 from __future__ import annotations
 
 import ast
+import builtins
 import json
+import keyword
 import logging
 import os
 import re
@@ -101,8 +103,19 @@ def entry_points(env: Environment) -> list[str]:
     the task shows as code (`` `name(` `` or ``def name(``). Empty for a script task.
     """
     names = [*_top_level_functions(env.reference_solution or ''), *_loaded_names(env)]
-    names += re.findall(r'(?:`|\bdef\s+)([A-Za-z_]\w*)\s*\(', env.task)
-    return list(dict.fromkeys(name for name in names if not name.startswith('_')))
+    # A task also shows syntax (`if(x)`) and builtins (`sorted()`): never entry points.
+    names += [
+        name
+        for name in re.findall(r'(?:`|\bdef\s+)([A-Za-z_]\w*)\s*\(', env.task)
+        if not hasattr(builtins, name)
+    ]
+    return list(
+        dict.fromkeys(
+            name
+            for name in names
+            if name.isidentifier() and not keyword.iskeyword(name) and not name.startswith('_')
+        )
+    )
 
 
 def _parse(source: str) -> ast.Module | None:

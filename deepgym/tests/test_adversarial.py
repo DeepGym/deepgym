@@ -295,8 +295,11 @@ class TestAttacksTargetTheEntryPoint:
         env = Environment(task='Write `scale(x)` and `area(r)`.', verifier_code=constant)
         multiply = Environment(task='Multiply.', verifier_code=self._ANY_NUMBER)
 
+        syntax = Environment(task='Use `if(x)` and `sorted(xs)` in `solve(xs)`.', verifier_code='0')
+
         assert entry_points(multiply) == ['multiply']
         assert entry_points(env) == ['area', 'scale']
+        assert entry_points(syntax) == ['solve']  # no keywords or builtins
 
     def test_a_verifier_that_accepts_any_number_is_exploited(self, dg: DeepGym) -> None:
         # Before attacks aimed at multiply(), this verifier passed every QA check.

@@ -1,7 +1,7 @@
-"""Every sandbox provider gives the same isolation guarantees as Daytona.
+"""Every sandbox provider gives the same isolation guarantees.
 
 Local providers (Apple container, Docker) run when their CLI is up. Cloud providers
-cost money, so they run only when named, e.g. DEEPGYM_LIVE_PROVIDERS=modal,e2b.
+cost money, so they run only when named, e.g. DEEPGYM_LIVE_PROVIDERS=modal,e2b,daytona.
 """
 
 import asyncio
@@ -44,6 +44,7 @@ _PROVIDERS = [
         ('docker', DockerContainer.available()),
         ('modal', 'modal' in _CLOUD),
         ('e2b', 'e2b' in _CLOUD),
+        ('daytona', 'daytona' in _CLOUD and bool(os.getenv('DAYTONA_API_KEY'))),
     ]
 ]
 # Lists container names, to check no sandbox outlives its run or session.
@@ -247,6 +248,8 @@ def test_session_verifiers_are_out_of_the_agents_reach(dg: DeepGym) -> None:
 
 
 def test_desktop_env_is_refused(dg: DeepGym) -> None:
+    if dg.backend == 'daytona':
+        pytest.skip('Daytona has a desktop; see test_computer_use_live.py')
     with dg.session(ComputerUseEnvironment(task='t')) as session:
         with pytest.raises(DeepGymError, match='Daytona'):
             session.start()
@@ -255,5 +258,5 @@ def test_desktop_env_is_refused(dg: DeepGym) -> None:
 def test_async_client(dg: DeepGym) -> None:
     env = load_environment('coin_change')
     reference = env.verifier_path.with_name('reference_solution.py').read_text()
-    result = asyncio.run(AsyncDeepGym(mode=dg._provider).run(env, reference))
+    result = asyncio.run(AsyncDeepGym(mode=dg.backend).run(env, reference))
     assert result.score == 1.0

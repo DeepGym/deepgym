@@ -55,7 +55,7 @@ def test_daytona_judge_boots_the_image_unless_a_snapshot_is_set() -> None:
 
 def test_daytona_session_boots_the_image_offline() -> None:
     daytona = pytest.importorskip('daytona')
-    from deepgym.session import DaytonaBackend
+    from deepgym.sandboxes.daytona import DaytonaSandbox
 
     seen: list[object] = []
 
@@ -64,10 +64,14 @@ def test_daytona_session_boots_the_image_offline() -> None:
             seen.append(params)
             raise RuntimeError('stop after create')
 
+        def list(self, query: object) -> list[object]:
+            return []
+
     with pytest.raises(SandboxError, match='stop after create'):
-        DaytonaBackend(Client(), MultiTurnEnvironment(task='t', image='python:3.11-slim'))
+        DaytonaSandbox(Client(), MultiTurnEnvironment(task='t', image='python:3.11-slim'))
 
     params = seen[0]
     assert isinstance(params, daytona.CreateSandboxFromImageParams)
     assert params.image.dockerfile() == 'FROM python:3.11-slim\n'
     assert params.network_block_all is True
+    assert params.labels  # so a create that fails after allocating can be found and deleted

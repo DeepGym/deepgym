@@ -4,6 +4,7 @@ import asyncio
 import os
 import threading
 import time
+from pathlib import Path
 
 import pytest
 from pydantic import ValidationError
@@ -273,6 +274,27 @@ class TestLocalEpisodes:
         with pytest.raises(ProcessLookupError):
             os.kill(pid, 0)
 
+    def test_step_score_printed_before_a_crash_is_an_error(self, dg: DeepGym) -> None:
+        crashes = 'print(1.0, flush=True)\nraise RuntimeError("verifier bug")\n'
+        env = MultiTurnEnvironment(task='t', max_steps=2, step_verifier_code=crashes)
+        with dg.session(env) as session:
+            session.start()
+            with pytest.raises(VerifierError):
+                session.step(Action(content='print(1)'))
+        assert session.trajectory.total_reward == 0.0
+
+    def test_final_score_printed_before_a_crash_is_an_error(self, dg: DeepGym) -> None:
+        crashes = PASS_VERIFIER + 'import sys\nsys.stdout.flush()\nraise RuntimeError("bug")\n'
+        env = MultiTurnEnvironment(task='t', max_steps=1, final_verifier_code=crashes)
+        with pytest.raises(VerifierError):
+            dg.run_episode(env, _scripted(Action(action_type='done')))
+
+    def test_protocol_fail_exit_keeps_partial_credit(self, dg: DeepGym) -> None:
+        failed = 'import sys\nprint(\'{"score": 0.4, "passed": false}\')\nsys.exit(1)\n'
+        env = MultiTurnEnvironment(task='t', max_steps=1, final_verifier_code=failed)
+        _, result = dg.run_episode(env, _scripted(Action(action_type='done')))
+        assert result.score == 0.4
+
     def test_step_timeout_becomes_observation(self, dg: DeepGym) -> None:
         env = MultiTurnEnvironment(task='t', max_steps=1, timeout_per_step=1)
         with dg.session(env) as session:
@@ -280,6 +302,47 @@ class TestLocalEpisodes:
             obs, _, done = session.step(Action(action_type='bash', content='sleep 5'))
         assert 'timed out' in obs.content
         assert done is True
+
+
+DEBUG_FIX = Path(__file__).resolve().parent.parent / 'src/deepgym/envs/multi_turn/debug_fix'
+ALWAYS_EQUAL = (
+    'class AlwaysEqual:\n'
+    '    def __eq__(self, other):\n'
+    '        return True\n\n'
+    'def sum_evens(numbers):\n'
+    '    return AlwaysEqual()\n'
+)
+FIXED = 'def sum_evens(numbers):\n    return sum(n for n in numbers if n % 2 == 0)\n'
+
+
+def debug_fix_score(dg: DeepGym, buggy: str) -> float:
+    """Score a debug_fix episode whose agent writes *buggy* as buggy.py."""
+    env = MultiTurnEnvironment(
+        task=(DEBUG_FIX / 'task.md').read_text(),
+        files={'buggy.py': (DEBUG_FIX / 'buggy.py').read_text()},
+        final_verifier_code=(DEBUG_FIX / 'verifier.py').read_text(),
+        max_steps=2,
+    )
+    agent = _scripted(
+        Action(action_type='write_file', path='buggy.py', content=buggy),
+        Action(action_type='done'),
+    )
+    return dg.run_episode(env, agent)[1].score
+
+
+class TestDebugFixEnvironment:
+    """The debug_fix verifier runs the agent's code outside the judge."""
+
+    def test_fixed_code_passes(self, dg: DeepGym) -> None:
+        assert debug_fix_score(dg, FIXED) == 1.0
+
+    def test_always_equal_object_fails(self, dg: DeepGym) -> None:
+        assert debug_fix_score(dg, ALWAYS_EQUAL) < 1.0
+
+    def test_verifier_never_imports_the_agents_code(self) -> None:
+        source = (DEBUG_FIX / 'verifier.py').read_text()
+        assert 'load_solution' in source
+        assert 'import buggy' not in source and 'from buggy' not in source
 
 
 class TestSessionGuards:

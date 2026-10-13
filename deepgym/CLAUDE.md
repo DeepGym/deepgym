@@ -13,7 +13,7 @@ src/deepgym/
 ├── sandboxes/           # Sandbox protocol + one folder per provider (daytona, modal, e2b, docker, apple)
 ├── judge.py             # Judge/solution layout and isolation (sandbox user, sandbox-exec, bwrap)
 ├── solution_runtime.py  # Shipped as deepgym_solution: load_solution/run_solution proxy + server
-├── session.py           # Live multi-turn sessions (Local, Daytona desktop, any-provider SandboxBackend)
+├── session.py           # Live multi-turn sessions (Local, or SandboxBackend on any provider; Daytona adds a desktop)
 ├── computer_use.py      # ComputerUseEnvironment (desktop, GUI-only actions)
 ├── verifier.py          # Verifier model + protocol validation
 ├── verifier_template.py # Detect verifier shape (AST) and wrap it to print the JSON protocol

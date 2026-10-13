@@ -30,8 +30,8 @@ from deepgym.models import (
 )
 from deepgym.sandbox import LocalExecutor, build_run_result, run_judge_in_sandbox
 from deepgym.sandboxes import PROVIDERS, Provider, Sandbox, check_provider, open_sandbox
-from deepgym.sandboxes.daytona import DaytonaSandbox
-from deepgym.session import DaytonaBackend, LocalBackend, SandboxBackend, Session, run_episode
+from deepgym.sandboxes.daytona import DaytonaDesktop, DaytonaSandbox
+from deepgym.session import LocalBackend, SandboxBackend, Session, run_episode
 
 logger = logging.getLogger(__name__)
 
@@ -170,13 +170,15 @@ class DeepGym:
             An unstarted Session. Call start(), then step() until done, then score().
 
         Raises:
-            SandboxError: If the Daytona sandbox cannot be created.
+            SandboxError: If the sandbox cannot be created.
         """
         if self._provider:
             return Session(env, SandboxBackend(open_sandbox(self._provider, env.image)))
         if self._local_executor is not None:
             return Session(env, LocalBackend())
-        return Session(env, DaytonaBackend(self._daytona, env))
+        box = DaytonaSandbox(self._daytona, env)
+        desktop = DaytonaDesktop(box, env.timeout_per_step, env.setup_timeout)
+        return Session(env, SandboxBackend(box, desktop if env.desktop else None))
 
     def run_episode(
         self, env: MultiTurnEnvironment, agent: Callable[[Observation], Action]

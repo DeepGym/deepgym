@@ -1,53 +1,49 @@
 """Final verifier for the debug_fix multi-turn environment.
 
-Check that buggy.py has been fixed so all tests pass.
+Check that buggy.py has been fixed so all tests pass. The agent's buggy.py runs
+through ``load_solution``, in its own isolated process, so it can't patch this
+verifier or hand back an object that equals everything.
 
 NOTE: This environment needs a multi-turn session and cannot be used via the
-standard single-turn dg.run() path. The verifier imports sibling files
-(buggy.py, test_buggy.py) that must be present in the working directory.
-It is intentionally NOT registered in registry.json.
+standard single-turn dg.run() path. It reads buggy.py from the session's
+working directory. It is intentionally NOT registered in registry.json.
 """
 
 import json
-import sys
-from pathlib import Path
 
-work_dir = Path.cwd()
+from deepgym_solution import load_solution
+
+TESTS = [
+    ([], 0),
+    ([2, 4, 6], 12),
+    ([1, 3, 5], 0),
+    ([1, 2, 3, 4, 5, 6], 12),
+    ([-2, -3, -4], -6),
+]
 
 
 def run_tests():
-    """Import and run all tests, return (passed, total)."""
-    # Re-import buggy from the working directory.
-    sys.path.insert(0, str(work_dir))
-
-    # Force reimport in case it was cached.
-    if 'buggy' in sys.modules:
-        del sys.modules['buggy']
-
-    from buggy import sum_evens
-
-    tests = [
-        ([], 0),
-        ([2, 4, 6], 12),
-        ([1, 3, 5], 0),
-        ([1, 2, 3, 4, 5, 6], 12),
-        ([-2, -3, -4], -6),
-    ]
+    """Run every test against the agent's sum_evens; return (passed, total, details)."""
+    try:
+        solution = load_solution('buggy.py')
+    except Exception as e:
+        return 0, len(TESTS), f'Import error: {type(e).__name__}: {e}'
     passed = 0
-    for nums, expected in tests:
-        if sum_evens(nums) == expected:
-            passed += 1
-    return passed, len(tests)
+    for nums, expected in TESTS:
+        try:
+            passed += solution.sum_evens(nums) == expected
+        except Exception:
+            pass
+    return passed, len(TESTS), f'{passed}/{len(TESTS)} tests passed'
 
 
 if __name__ == '__main__':
-    passed, total = run_tests()
-    score = passed / total if total > 0 else 0.0
+    passed, total, details = run_tests()
     output = {
         'schema_version': '1.0',
-        'score': score,
+        'score': passed / total,
         'passed': passed == total,
         'cases': [],
-        'details': f'{passed}/{total} tests passed',
+        'details': details,
     }
     print(json.dumps(output))

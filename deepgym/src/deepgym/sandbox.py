@@ -72,6 +72,28 @@ class ExecutionResult:
         self.exit_code = exit_code
 
 
+def check_exit(exit_code: int, score: float, passed: bool | None) -> None:
+    """Accept a verifier's result only if its exit code backs it.
+
+    Protocol exit codes: 0 passed, 1 failed, 2 verifier error. A failed run keeps
+    its partial score but can't claim a pass, a reported verifier error carries no
+    reward, and any other code (killed, timed out, crashed) means the verifier
+    never finished, whatever it printed first. *passed* is None for a bare float,
+    which only exit 0 backs.
+
+    Raises:
+        VerifierError: If the exit code doesn't back the result.
+    """
+    if exit_code == 0:
+        return
+    if passed is False and (exit_code == 1 or (exit_code == 2 and score == 0.0)):
+        return
+    raise VerifierError(
+        f'Verifier exited {exit_code} after reporting score={score}, passed={passed}; '
+        'only a clean exit (0, or 1 for a failed run) counts'
+    )
+
+
 def build_run_result(
     verifier_result: VerifierResult,
     elapsed_ms: float,
@@ -90,7 +112,11 @@ def build_run_result(
 
     Returns:
         A fully populated RunResult.
+
+    Raises:
+        VerifierError: If *exit_code* doesn't back the result (see :func:`check_exit`).
     """
+    check_exit(exit_code, verifier_result.score, verifier_result.passed)
     return RunResult(
         score=verifier_result.score,
         passed=verifier_result.passed,

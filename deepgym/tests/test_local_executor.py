@@ -4,9 +4,10 @@ from pathlib import Path
 
 import pytest
 
+from deepgym import DeepGym
 from deepgym.exceptions import SandboxError, TimeoutError, VerifierError
 from deepgym.judge import JudgeJob
-from deepgym.models import VerifierResult
+from deepgym.models import Environment, VerifierResult
 from deepgym.sandbox import ExecutionResult, LocalExecutor
 
 ENVS_DIR = Path(__file__).resolve().parent.parent / 'src' / 'deepgym' / 'envs'
@@ -113,6 +114,22 @@ class TestLocalExecutorRun:
                     timeout=10,
                 )
             )
+
+    @pytest.mark.parametrize(
+        'ending',
+        ['os.kill(os.getpid(), signal.SIGKILL)', 'os._exit(137)', 'os._exit(1)'],
+        ids=['killed', 'exit_137', 'exit_1_claiming_pass'],
+    )
+    def test_pass_printed_before_a_bad_exit_is_an_error(self, ending: str) -> None:
+        verifier = (
+            'import os, signal\n'
+            'if __name__ == "__main__":\n'
+            '    print(\'{"score": 1.0, "passed": true}\', flush=True)\n'
+            f'    {ending}\n'
+        )
+        env = Environment(task='t', verifier_code=verifier)
+        with pytest.raises(VerifierError, match='exited'):
+            DeepGym(mode='local').run(env, '')
 
     def test_result_is_execution_result_instance(self, executor: LocalExecutor) -> None:
         verifier_code = _standalone_verifier(

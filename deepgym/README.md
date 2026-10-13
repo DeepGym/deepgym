@@ -523,13 +523,19 @@ is in `list_environments()` under `variants`.
 Verifiers split checks into *progress* (the changes the task asked for) and
 *guards* (work was saved, nothing else broke, no duplicate rows). Any failed
 guard scores 0, so neither doing nothing nor clicking Save on untouched state
-earns reward. Setup locks the desktop down before the agent starts: no terminal,
-run dialog or browser devtools, and browser tasks get no file manager.
-Known gap: Thunar's "Open with custom command" still runs commands in the
-file-manager task.
+earns reward. The desktop and every app on it run as an unprivileged user with
+no network and no sudo, separate from the verifier's user, so anything the agent
+starts from the GUI can't reach root, the internet or the score. The desktop is
+locked down before setup runs: no terminal, run dialog, browser devtools, Thunar
+custom actions, or "Open With" launches (custom commands included).
 
 The same session API runs shell-based multi-turn tasks (`MultiTurnEnvironment`),
-and the local backend works for those without Daytona.
+and the local backend works for those without Daytona. Session verifiers that
+grade the agent's code load it with `load_solution` too, so it runs isolated from
+the verifier: locally in the same sandbox as single runs, and in sandbox images
+with sudo (Daytona's default has it) as a third user. A score only counts if the
+verifier exits cleanly; printing one and then crashing or being killed is a
+verifier error.
 
 ### Sessions over HTTP
 

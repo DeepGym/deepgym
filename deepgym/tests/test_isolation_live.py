@@ -7,6 +7,7 @@ import pytest
 from deepgym import DeepGym, load_environment
 from deepgym.models import Environment
 from tests.test_isolation import WRONG, _env
+from tests.test_session import ALWAYS_EQUAL, FIXED, debug_fix_score
 
 pytestmark = pytest.mark.skipif(
     not os.getenv('DAYTONA_API_KEY'), reason='needs DAYTONA_API_KEY for live sandboxes'
@@ -122,6 +123,11 @@ def test_setsid_daemon_dies_with_its_script(dg: DeepGym) -> None:
         '    os._exit(0)\n'
     )
     assert dg.run(Environment(task='t', verifier_code=verifier), solution).passed
+
+
+def test_session_verifier_loads_agent_code_as_another_user(dg: DeepGym) -> None:
+    for buggy, expected in ((FIXED, 1.0), (ALWAYS_EQUAL, 0.0)):
+        assert debug_fix_score(dg, buggy) == expected
 
 
 def test_judge_temp_files_are_private(dg: DeepGym) -> None:

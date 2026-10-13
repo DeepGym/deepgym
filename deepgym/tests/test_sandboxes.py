@@ -3,6 +3,7 @@
 Live runs on real providers are in test_sandboxes_live.py.
 """
 
+import contextlib
 import importlib
 import subprocess
 import sys
@@ -11,10 +12,11 @@ from collections.abc import Mapping
 
 import pytest
 
-from deepgym.exceptions import DeepGymError, SandboxError
+from deepgym import ComputerUseEnvironment, DeepGym
+from deepgym.exceptions import DeepGymError, SandboxError, VerifierError
 from deepgym.judge import JudgeJob
-from deepgym.models import Environment
-from deepgym.sandbox import run_judge_in_sandbox
+from deepgym.models import Action, Environment, MultiTurnEnvironment
+from deepgym.sandbox import build_run_result, run_judge_in_sandbox
 from deepgym.sandboxes import ExecResult, SandboxTimeoutError, open_sandbox
 from deepgym.sandboxes.apple import AppleContainer
 from deepgym.sandboxes.cli import DEFAULT_IMAGE
@@ -52,6 +54,49 @@ class FakeSandbox:
 
     def delete(self) -> None:
         self.deleted = True
+
+
+class FakeDaytona:
+    """Stands in for the Daytona client. Its sandboxes run commands as a sudoer, like
+    Daytona's default snapshot, and answer from a script of (substring, result) pairs."""
+
+    def __init__(self, answers: list[tuple[str, str]]) -> None:
+        self.answers = answers
+        self.boxes: list[types.SimpleNamespace] = []
+
+    def create(self, params: object, timeout: float = 60) -> types.SimpleNamespace:
+        events: list[str] = []
+        uploads: dict[str, bytes] = {}
+
+        def exec_(command: str, **kwargs: object) -> types.SimpleNamespace:
+            events.append(command)
+            output = next((out for needle, out in self.answers if needle in command), '')
+            return types.SimpleNamespace(exit_code=0, result=output)
+
+        mouse = types.SimpleNamespace(click=lambda *a, **k: events.append('click'))
+        box = types.SimpleNamespace(
+            id='fake-daytona',
+            params=params,
+            events=events,
+            uploads=uploads,
+            process=types.SimpleNamespace(exec=exec_),
+            fs=types.SimpleNamespace(
+                upload_file=lambda data, path: uploads.update({path: data}),
+                create_folder=lambda path, mode: None,
+            ),
+            computer_use=types.SimpleNamespace(
+                start=lambda **kwargs: events.append('computer_use.start'),
+                mouse=mouse,
+                screenshot=types.SimpleNamespace(
+                    take_compressed=lambda *a, **k: types.SimpleNamespace(screenshot='png')
+                ),
+            ),
+        )
+        self.boxes.append(box)
+        return box
+
+    def delete(self, sandbox: object, timeout: float = 60, wait: bool = False) -> None:
+        sandbox.events.append('deleted')
 
 
 # ---------------------------------------------------------------------------
@@ -273,7 +318,8 @@ def test_judge_trusts_a_provider_that_blocks_the_network() -> None:
     assert run_judge_in_sandbox(box, _JOB).verifier_result.score == 1.0
 
 
-_USERS = ('useradd', '997 997 996 996')
+# agent uid/gid, verifier uid/gid, and 0: no sudo, so no deepgym_solution for verifiers.
+_USERS = ('useradd', '997 997 996 996 0')
 
 
 def test_session_runs_as_agent_and_joins_netns_only_when_needed() -> None:
@@ -332,3 +378,73 @@ def test_async_daytona_judge_fails_closed_when_it_cannot_go_offline() -> None:
     client = AsyncDeepGym(mode='local')
     with pytest.raises(SandboxError, match='network'):
         asyncio.run(client._run_judge(sandbox, _JOB))
+
+
+def test_judge_killed_after_printing_a_pass_is_an_error() -> None:
+    box = FakeSandbox(network_blocked=True, answers=[('useradd', '0 999 987 /usr/bin/python3 0')])
+    answer = box.exec
+
+    def exec_(command: str, **kwargs: object) -> ExecResult:
+        if 'DEEPGYM_DEADLINE' in command:
+            return ExecResult(137, '{"score": 1.0, "passed": true}')
+        return answer(command, **kwargs)
+
+    box.exec = exec_  # type: ignore[method-assign]
+    executed = run_judge_in_sandbox(box, _JOB)
+    with pytest.raises(VerifierError, match='137'):
+        build_run_result(executed.verifier_result, 1.0, box.id, exit_code=executed.exit_code)
+
+
+# ---------------------------------------------------------------------------
+# Daytona sessions: the same users and network namespace as any other provider
+# ---------------------------------------------------------------------------
+
+# Daytona's default snapshot runs commands as a sudoer; this is its private upload staging dir.
+_STAGE = ('mktemp -d', '/tmp/tmp.stage')
+_DAYTONA_USERS = ('useradd', '997 997 996 996 1')
+
+
+def _daytona_client(monkeypatch: pytest.MonkeyPatch) -> tuple[DeepGym, FakeDaytona]:
+    pytest.importorskip('daytona')
+    client = FakeDaytona([_STAGE, _DAYTONA_USERS])
+    monkeypatch.setattr(DeepGym, '_init_daytona', staticmethod(lambda *args: client))
+    return DeepGym(mode='daytona'), client
+
+
+def test_daytona_session_runs_agent_and_verifier_as_separate_users(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    dg, client = _daytona_client(monkeypatch)
+    final = 'print(\'{"score": 0.0, "passed": false}\')  # SECRET'
+    with dg.session(MultiTurnEnvironment(task='t', final_verifier_code=final)) as session:
+        session.start()
+        session.step(Action(action_type='bash', content='echo step-marker'))
+        with contextlib.suppress(VerifierError):
+            session.score()
+    box = client.boxes[0]
+    step = next(c for c in box.events if 'step-marker' in c)
+    assert step.startswith('sudo -n -E sh -c')
+    assert 'nsenter --net=/opt/deepgym-netns -- setpriv --reuid=997' in step
+    assert not any('SECRET' in c for c in box.events), 'verifier code must not be in a command'
+    score = next(c for c in box.events if '/opt/deepgym-verifier/' in c and 'python3' in c)
+    assert '--reuid=996' in score
+    staged = [path for path, data in box.uploads.items() if b'SECRET' in data]
+    assert staged and all(path.startswith('/tmp/tmp.stage/') for path in staged)
+    assert box.events[-1] == 'deleted'
+
+
+def test_daytona_desktop_runs_as_the_agent_and_is_locked_down(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    dg, client = _daytona_client(monkeypatch)
+    with dg.session(ComputerUseEnvironment(task='t')) as session:
+        session.start()
+    events = client.boxes[0].events
+    started = events.index('computer_use.start')
+    before = ' '.join(events[:started])
+    assert '/usr/local/bin/xfce4-session' in before, 'the desktop must not run as the sudoer'
+    prepare = next(c for c in events[:started] if '/usr/local/bin/xfce4-session' in c)
+    assert prepare.startswith('sudo -n -E sh -c')
+    assert '--reuid=997' in prepare and '/opt/deepgym-netns' in prepare
+    for blocked in ('thunar-uca', 'Thunar/uca.xml', 'gio-launch-desktop', 'xfce4-terminal', 'idle'):
+        assert blocked in prepare, f'{blocked} must be locked down before the desktop starts'

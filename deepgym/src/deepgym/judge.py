@@ -46,14 +46,14 @@ RUNTIME_SOURCE = Path(__file__).with_name('solution_runtime.py').read_text(encod
 DEADLINE_GRACE_S = 5
 
 _SANDBOX_ROOT = '/opt/deepgym'
-_SOLVER_USER = 'dgsolver'
+SOLVER_USER = 'dgsolver'
 
 # Run once per sandbox (Daytona or Apple container), as its default user (root or a sudoer).
 SANDBOX_SETUP = f"""
 set -e
 if [ "$(id -u)" = 0 ]; then SUDO=; else SUDO="sudo -n"; fi
-id {_SOLVER_USER} >/dev/null 2>&1 || \\
-  $SUDO useradd --system --no-create-home --shell /usr/sbin/nologin {_SOLVER_USER}
+id {SOLVER_USER} >/dev/null 2>&1 || \\
+  $SUDO useradd --system --no-create-home --shell /usr/sbin/nologin {SOLVER_USER}
 $SUDO mkdir -p {_SANDBOX_ROOT}/judge {_SANDBOX_ROOT}/runtime {_SANDBOX_ROOT}/solution \\
   {_SANDBOX_ROOT}/tmp
 $SUDO chown -R "$(id -u):$(id -g)" {_SANDBOX_ROOT}
@@ -65,7 +65,7 @@ chmod 711 {_SANDBOX_ROOT}/tmp
 # 1 if the solution can get its own (offline) network namespace here.
 netns=0
 command -v setpriv >/dev/null && $SUDO unshare --net true 2>/dev/null && netns=1
-echo "$(id -u) $(id -u {_SOLVER_USER}) $(id -g {_SOLVER_USER}) $(command -v python3) $netns"
+echo "$(id -u) $(id -u {SOLVER_USER}) $(id -g {SOLVER_USER}) $(command -v python3) $netns"
 """
 
 
@@ -253,7 +253,7 @@ def sandbox_isolation(setup_output: str, *, require_offline: bool = False) -> tu
     elif offline:
         prefix = ['sudo', '-n', *offline, *drop]
     else:
-        prefix = ['sudo', '-n', '-u', _SOLVER_USER, '--']
+        prefix = ['sudo', '-n', '-u', SOLVER_USER, '--']
     return {'kind': 'user', 'prefix': prefix}, python
 
 

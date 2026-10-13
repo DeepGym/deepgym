@@ -187,6 +187,14 @@ def test_env_loads_as_computer_use(name: str) -> None:
     assert 'def report(' in env.final_verifier_code
 
 
+@pytest.mark.parametrize('name', ENV_NAMES)
+def test_setup_needs_no_root(name: str) -> None:
+    """Setup runs as the unprivileged agent; the desktop is locked down before it runs."""
+    env = load_environment(name)
+    scripts = [env.setup_script, *(t for rel, t in env.files.items() if rel.endswith('.sh'))]
+    assert not any('sudo' in script for script in scripts)
+
+
 def test_computer_use_suite_is_separate() -> None:
     assert sorted(env.name for env in load_suite('computer-use')) == sorted(ENV_NAMES)
     assert not any(isinstance(env, ComputerUseEnvironment) for env in load_suite('all'))

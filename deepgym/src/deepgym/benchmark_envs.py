@@ -260,6 +260,7 @@ class PatchVerifier:
             """
             import json
             import os
+            import re
             import shutil
             import subprocess
             import sys
@@ -303,7 +304,7 @@ class PatchVerifier:
             }
             _HARNESS_DIRS = {
                 'node_modules', 'site-packages', 'dist-packages', 'vendor', '.pytest_cache',
-                '.tox', '.nox', '_pytest', 'pytest', '.venv', 'venv', 'virtualenv',
+                '.tox', '.nox', '_pytest', 'pytest', '.venv', 'venv', 'virtualenv', '.cargo',
             }
             _INFRA_FILES = {
                 'conftest.py', 'pytest.py', 'pytest.ini', '.pytest.ini', 'pytest.toml',
@@ -414,7 +415,7 @@ class PatchVerifier:
                     raise ValueError('no TOML parser in this runtime')
                 if name == 'cargo.toml':
                     keys = ('lib', 'bin', 'test', 'bench', 'features', 'dependencies',
-                            'dev-dependencies', 'build-dependencies')
+                            'dev-dependencies', 'build-dependencies', 'workspace')
                     if any(before.get(key) != after.get(key) for key in keys):
                         return True
                     # Package-level auto-discovery toggles which hidden targets cargo test runs.
@@ -451,18 +452,24 @@ class PatchVerifier:
                 return path.read_bytes() if path.is_file() else None
 
 
+            _MODE_RE = re.compile(r'^(old mode|new mode|new file mode|deleted file mode)\\s+([0-7]+)\\s*$')
+
+
             def _mode_change_paths(patch_text: str) -> list[str]:
                 # The files whose mode changes or that become symlinks. A real code fix edits
                 # content; a mode flip or a symlink (which can aim a protected path at attacker
-                # content) is refused outright.
+                # content) is refused outright. The numeric mode is parsed so non-canonical git
+                # spellings (0120000, trailing space) cannot slip a symlink past an exact match.
                 flagged, current = [], '(file)'
                 for line in patch_text.splitlines():
                     if line.startswith('diff --git '):
                         current = line[len('diff --git ') :]
-                    elif line.startswith(('old mode ', 'new mode ')) or line in (
-                        'new file mode 120000',
-                        'deleted file mode 120000',
-                    ):
+                        continue
+                    match = _MODE_RE.match(line)
+                    if match is None:
+                        continue
+                    kind, mode = match.group(1), int(match.group(2), 8)
+                    if kind in ('old mode', 'new mode') or (mode & 0o170000) == 0o120000:
                         flagged.append(current)
                 return list(dict.fromkeys(flagged))
 

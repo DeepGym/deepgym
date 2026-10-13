@@ -117,6 +117,9 @@ _SETUP_CFG = '[metadata]\nname = calc\n\n[tool:pytest]\npython_files = test_*.py
 _SETUP_CFG_CASE = _SETUP_CFG.replace('python_files', 'PYTHON_FILES')
 # A %(...)s value raises during interpolation; the comparison must fail closed, not crash.
 _SETUP_CFG_INTERP = _SETUP_CFG + 'addopts = -p %(missing)s\n'
+# Repointing workspace selection skips the failing package without touching a target table.
+_CARGO_WS = '[workspace]\nmembers = ["core", "decoy"]\ndefault-members = ["core"]\n'
+_CARGO_WS_EDIT = _CARGO_WS.replace('["core"]', '["decoy"]')
 
 
 @pytest.mark.parametrize(
@@ -190,6 +193,12 @@ _SETUP_CFG_INTERP = _SETUP_CFG + 'addopts = -p %(missing)s\n'
             True,
             id='setup-cfg-interpolation-fails-closed',
         ),
+        pytest.param(
+            {'Cargo.toml': _CARGO_WS},
+            {'Cargo.toml': _CARGO_WS_EDIT},
+            True,
+            id='cargo-workspace-members',
+        ),
     ],
 )
 def test_config_edits_outside_the_test_section_are_allowed(
@@ -214,6 +223,7 @@ def test_config_edits_outside_the_test_section_are_allowed(
         ('Makefile', True),
         ('pytest.toml', True),
         ('package-lock.json', True),
+        ('.cargo/config.toml', True),
         ('scripts/latest.sh', False),
     ],
 )
@@ -254,8 +264,15 @@ def test_crafted_and_symlinked_paths_never_forge(tmp_path: Path, sandbox_dg: Dee
         '--- /dev/null\n+++ b/shim.py\n@@ -0,0 +1 @@\n+payload\n'
         '\\ No newline at end of file\n'
     )
+    # 0120000 and a trailing space are non-canonical symlink spellings git still accepts.
+    symlink_noncanonical = (
+        'diff --git a/shim2.py b/shim2.py\nnew file mode 0120000 \n'
+        '--- /dev/null\n+++ b/shim2.py\n@@ -0,0 +1 @@\n+payload\n'
+        '\\ No newline at end of file\n'
+    )
     crafted = {
         'symlink': symlink_hunk,
+        'symlink_noncanonical': symlink_noncanonical,
         'dot_slash': new_files_diff({'./conftest.py': 'import os\nos._exit(0)\n'}),
         'double_slash': new_files_diff({'pkg//conftest.py': 'import os\nos._exit(0)\n'}),
         'quoted': new_files_diff({'tëst_dir/conftest.py': 'import os\nos._exit(0)\n'}),
@@ -278,3 +295,20 @@ def test_symlink_refusal_names_the_mode_reason(tmp_path: Path, sandbox_dg: DeepG
 
     assert result.error_type == 'test_infra_tampering'
     assert result.cases and any('symlink' in (case.error or '') for case in result.cases)
+
+
+def test_qa_marks_unappliable_tampering_attack_inconclusive(
+    tmp_path: Path, sandbox_dg: DeepGym, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # A repo that already ships conftest.py makes the conftest attack fail to apply; that
+    # says nothing about the guard, so QA must report it inconclusive, never resisted.
+    from deepgym import adversarial
+
+    one_attack = {'conftest': {'conftest.py': 'x\n'}}
+    monkeypatch.setattr(adversarial, 'PATCH_TAMPERING_ATTACKS', one_attack)
+    env = _env(tmp_path, {'conftest.py': 'import pytest\n'})
+
+    report = adversarial.AdversarialTester(sandbox_dg).test(env, ['patch_tampering'])
+
+    assert report.results[0].inconclusive
+    assert not report.is_robust

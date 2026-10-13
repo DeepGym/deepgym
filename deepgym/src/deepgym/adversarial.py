@@ -461,9 +461,14 @@ class AdversarialTester:
         """
         if 'patch' not in env.tags:
             return []
+        # A generated diff that can't apply to this repo (e.g. the file it adds already
+        # exists) never reaches the guard, so it says nothing: inconclusive, not resisted.
         return [
             self._execute_attack(
-                env, f'```diff\n{new_files_diff(files)}```', f'patch_tampering_{label}'
+                env,
+                f'```diff\n{new_files_diff(files)}```',
+                f'patch_tampering_{label}',
+                inconclusive_errors=('patch_apply_failed', 'invalid_patch'),
             )
             for label, files in PATCH_TAMPERING_ATTACKS.items()
         ]
@@ -477,6 +482,7 @@ class AdversarialTester:
         env: Environment,
         attack_code: str,
         strategy: str,
+        inconclusive_errors: tuple[str, ...] = (),
     ) -> AttackResult:
         """Run *attack_code* through *env*'s verifier on this tester's client.
 
@@ -492,6 +498,9 @@ class AdversarialTester:
             The adversarial "solution" source code.
         strategy:
             Strategy name (for labelling the result).
+        inconclusive_errors:
+            ``error_type`` values that mean the attack never reached the verifier (e.g.
+            a generated diff that did not apply), so the run is inconclusive, not resisted.
 
         Returns
         -------
@@ -511,6 +520,8 @@ class AdversarialTester:
             detail_lines.append(f'stderr: {result.stderr[:300]}')
         details = '\n'.join(detail_lines)
         exploited = result.score >= self._pass_threshold
+        if not exploited and result.error_type in inconclusive_errors:
+            return _not_run(strategy, f'Attack did not reach the verifier: {details}')
         # A low score is only resistance if the verifier actually judged the attack.
         if not exploited and not result.has_verdict:
             return _not_run(strategy, f'Verifier gave no verdict: {details}')

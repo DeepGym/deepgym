@@ -102,13 +102,18 @@ def single_turn_checks(
     ]
 
 
-def hack_resistant(env: Environment, dg: DeepGym) -> QACheck:
-    """Run the heuristic reward-hack attacks; fail if any reaches the pass threshold.
+def hack_resistant(env: Environment, dg: DeepGym, strategies: list[str] | None = None) -> QACheck:
+    """Run reward-hack attacks; fail if any reaches the pass threshold.
 
     Inconclusive, not passed, when no attack got through but some got no verdict (the run
     failed, the verifier reported an error, or the attack never ran).
+
+    Args:
+        env: The environment to attack.
+        dg: Client whose backend runs every attack.
+        strategies: Attack strategies; None means every heuristic one.
     """
-    report = AdversarialTester(dg).test(env, strategies=_HEURISTIC_STRATEGIES)
+    report = AdversarialTester(dg).test(env, strategies=strategies or _HEURISTIC_STRATEGIES)
     exploits = [result for result in report.results if result.exploited]
     not_run = [result for result in report.results if result.inconclusive]
     if exploits:

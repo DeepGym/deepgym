@@ -290,9 +290,101 @@ class PatchVerifier:
                 )
 
 
-            def _hidden_paths(repo_dir: Path, patch_file: Path, timeout: int) -> list[str] | None:
-                # Every path the hidden test patch reads or writes, as git's own parser sees
-                # it: --numstat names each post-image path, -R --numstat each pre-image one.
+            # Test infrastructure a model's diff must not touch outside the hidden test
+            # patch's own paths (those are put back anyway): the tests, their helpers,
+            # data and snapshots, everything a test runner loads by name or from its
+            # config, and the installed test harness and dependencies.
+            _TEST_DIRS = {
+                'test', 'tests', 'testing', '__tests__', 'testdata', 'spec', 'specs',
+                '__snapshots__', '__mocks__',
+            }
+            _HARNESS_DIRS = {
+                'node_modules', 'site-packages', 'dist-packages', 'vendor', '.pytest_cache',
+                '.tox', '.nox',
+            }
+            _INFRA_FILES = {
+                'conftest.py', 'pytest.ini', '.pytest.ini', 'tox.ini', 'noxfile.py', 'tests.py',
+                'sitecustomize.py', 'usercustomize.py', '.rspec', 'rakefile', 'phpunit.xml',
+                'phpunit.xml.dist', 'phpunit.dist.xml', 'pom.xml', 'build.gradle',
+                'build.gradle.kts', 'settings.gradle', 'settings.gradle.kts', 'build.rs',
+            }
+            _JS_TOOLS = {'jest', 'vitest', 'vite', 'karma', 'babel', 'ava', 'playwright', 'cypress'}
+            _JS_EXTS = {'js', 'jsx', 'ts', 'tsx', 'mjs', 'cjs', 'mts', 'cts'}
+            # Files that are test configuration only in part: these keys or sections.
+            _PACKAGE_KEYS = ('scripts', 'jest', 'mocha', 'ava', 'babel', 'nyc', 'c8', 'vitest', 'tap')
+            _CONFIG_FILES = {'pyproject.toml', 'setup.cfg', 'package.json', 'cargo.toml'}
+
+
+            def _infra_reason(repo_dir: Path, rel: str) -> str | None:
+                # Why *rel* is test infrastructure judging by its path alone, or None.
+                parts = rel.lower().split('/')
+                name, dirs = parts[-1], parts[:-1]
+                if any(part in _TEST_DIRS for part in dirs):
+                    return 'in a test directory'
+                if any(
+                    part in _HARNESS_DIRS or part.endswith(('.egg-info', '.dist-info', '.egg'))
+                    for part in parts
+                ):
+                    return 'test harness or installed dependency'
+                if any((repo_dir / Path(*rel.split('/')[:depth]) / 'pyvenv.cfg').is_file() for depth in range(len(dirs) + 1)):
+                    return 'inside a virtualenv'
+                segments = name.split('.')
+                if (
+                    name in _INFRA_FILES
+                    or name.endswith(('_test.py', '_test.go', '_spec.rb', '.pth'))
+                    or (name.startswith('test_') and name.endswith('.py'))
+                    or (name.endswith('.sh') and 'test' in name)
+                    or (len(segments) > 2 and segments[-2] in ('test', 'spec') and segments[-1] in _JS_EXTS)
+                    or (len(segments) > 2 and segments[0] in _JS_TOOLS and segments[1] in ('config', 'conf', 'setup', 'workspace', 'preset'))
+                    or segments[0] == 'setuptests'
+                    or name.startswith(('.babelrc', '.mocharc', '.nycrc', '.c8rc'))
+                ):
+                    return 'test file or test configuration'
+                return None
+
+
+            def _pytest_section(text: str) -> list[str]:
+                # The lines of pyproject.toml's [tool.pytest...] or setup.cfg's [tool:pytest].
+                lines, inside = [], False
+                for line in text.splitlines():
+                    header = line.strip().lower().replace(' ', '')
+                    if header.startswith('['):
+                        inside = header.startswith(('[tool.pytest', '[tool:pytest'))
+                    if inside:
+                        lines.append(line)
+                return lines
+
+
+            def _config_tampered(name: str, old: bytes | None, new: bytes | None) -> bool:
+                # Whether a diff turning *old* into *new* changes the test part of a config file.
+                old_text = (old or b'').decode('utf-8', 'replace')
+                new_text = (new or b'').decode('utf-8', 'replace')
+                changed = set(old_text.splitlines()) ^ set(new_text.splitlines())
+                if name == 'package.json':
+                    try:
+                        before, after = json.loads(old_text or '{}'), json.loads(new_text or '{}')
+                    except ValueError:
+                        return True
+                    if not isinstance(before, dict) or not isinstance(after, dict):
+                        return True
+                    return any(before.get(key) != after.get(key) for key in _PACKAGE_KEYS)
+                if name == 'cargo.toml':
+                    return any(word in line.lower() for line in changed for word in ('test', 'harness', 'bench'))
+                return _pytest_section(old_text) != _pytest_section(new_text) or any(
+                    'pytest' in line.lower() for line in changed
+                )
+
+
+            def _read_config(path: Path) -> bytes | None:
+                # A config file's bytes; a symlink reads as a value no real file has.
+                if path.is_symlink():
+                    return b'\\0symlink'
+                return path.read_bytes() if path.is_file() else None
+
+
+            def _patch_paths(repo_dir: Path, patch_file: Path, timeout: int) -> list[str] | None:
+                # Every path a patch reads or writes, as git's own parser sees it:
+                # --numstat names each post-image path, -R --numstat each pre-image one.
                 paths = []
                 for reverse in ([], ['-R']):
                     proc = subprocess.run(
@@ -465,7 +557,7 @@ class PatchVerifier:
                     # goes last, so no spelling of a path in the diff can change the tests.
                     test_patch_file = temp_dir / 'test_patch.diff'
                     test_patch_file.write_text(test_patch, encoding='utf-8')
-                    hidden = _hidden_paths(repo_dir, test_patch_file, timeout) if test_patch else []
+                    hidden = _patch_paths(repo_dir, test_patch_file, timeout) if test_patch else []
                     if hidden is None:
                         return _emit(
                             {
@@ -515,6 +607,35 @@ class PatchVerifier:
                             1,
                         )
 
+                    # Only the hidden test patch's own paths are put back below, so a diff
+                    # that touches any other test infrastructure is refused outright: a new
+                    # conftest.py, plugin, TestMain or runner config could make the tests
+                    # report a pass without running them.
+                    model_paths = _patch_paths(repo_dir, patch_path, timeout)
+                    if model_paths is None:
+                        return _emit(
+                            {
+                                'schema_version': '1.0',
+                                'score': 0.0,
+                                'passed': False,
+                                'details': 'git cannot list the paths the patch touches.',
+                                'reward_components': {'apply': 0.0, 'tests': 0.0},
+                                'metrics': {'pass_fraction': 0.0, 'tests_run': 0},
+                                'truncated': False,
+                                'error_type': 'invalid_patch',
+                                'cases': [],
+                            },
+                            1,
+                        )
+                    hidden_set = set(hidden)
+                    exposed = [rel for rel in model_paths if rel not in hidden_set]
+                    tampered = {rel: _infra_reason(repo_dir, rel) for rel in exposed}
+                    configs = {
+                        rel: _read_config(repo_dir / rel)
+                        for rel in exposed
+                        if rel.lower().split('/')[-1] in _CONFIG_FILES
+                    }
+
                     apply_patch = subprocess.run(
                         ['git', '-C', str(repo_dir), 'apply', str(patch_path)],
                         capture_output=True,
@@ -533,6 +654,39 @@ class PatchVerifier:
                                 'truncated': False,
                                 'error_type': 'patch_apply_failed',
                                 'cases': [],
+                            },
+                            1,
+                        )
+
+                    for rel, old in configs.items():
+                        name = rel.lower().split('/')[-1]
+                        if _config_tampered(name, old, _read_config(repo_dir / rel)):
+                            tampered[rel] = tampered[rel] or 'changes test configuration'
+                    tampered = {rel: reason for rel, reason in sorted(tampered.items()) if reason}
+                    if tampered:
+                        return _emit(
+                            {
+                                'schema_version': '1.0',
+                                'score': 0.0,
+                                'passed': False,
+                                'details': 'Patch changes test infrastructure, so it was not tested: '
+                                + _tail(', '.join(tampered)),
+                                'reward_components': {'apply': 0.0, 'tests': 0.0},
+                                'metrics': {'pass_fraction': 0.0, 'tests_run': 0},
+                                'truncated': False,
+                                'error_type': 'test_infra_tampering',
+                                'cases': [
+                                    {
+                                        'id': rel,
+                                        'passed': False,
+                                        'score': 0.0,
+                                        'input_summary': 'patched path',
+                                        'actual_summary': reason,
+                                        'error': f'{rel}: {reason}',
+                                        'execution_time_ms': 0.0,
+                                    }
+                                    for rel, reason in tampered.items()
+                                ],
                             },
                             1,
                         )
@@ -633,7 +787,10 @@ class SWEBenchProEnvironment(Environment):
     """SWE-bench Pro benchmark adapter."""
 
     name: str | None = 'swebench_pro'
-    task: str = 'Repair the repository by returning a unified diff patch.'
+    task: str = (
+        'Repair the repository by returning a unified diff patch. Change only the code: '
+        'a patch that touches tests or test configuration scores 0.'
+    )
     verifier_code: str = 'return 0.0'
     domain: str = 'software-engineering'
     tags: list[str] = Field(default_factory=lambda: ['benchmark', 'swebench-pro', 'patch'])
@@ -788,7 +945,9 @@ class RepoPatchEnvironment(Environment):
     ``repo_dir``, such as the MiMo-V2.6-RL code subset. The model returns a unified
     diff; the SWE-bench Pro patch runner applies it, puts every file the hidden
     ``test_patch`` touches back to its prior state, applies the test patch, runs
-    ``test_command`` and scores 1.0 if it exits 0, else 0.0.
+    ``test_command`` and scores 1.0 if it exits 0, else 0.0. A diff that touches any
+    other test infrastructure (tests and their helpers or data, conftest.py, runner
+    config, installed dependencies) scores 0.0 with ``error_type='test_infra_tampering'``.
 
     The runner and the tests run as root in the sandbox booted from ``image``:
     these test scripts expect root's toolchains and caches (``/root/go``,

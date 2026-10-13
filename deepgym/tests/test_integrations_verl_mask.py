@@ -15,7 +15,7 @@ import pytest
 from deepgym import load_environment
 from deepgym.exceptions import DeepGymError
 from deepgym.integrations import verl as verl_reward
-from deepgym.models import Environment
+from deepgym.models import MODEL_FAULT_ERRORS, Environment
 
 
 class _Tokenizer:
@@ -117,7 +117,7 @@ def test_failed_scoring_masks_the_sample_under_the_legacy_trainer(verl: types.Mo
     assert output.response_mask == [0] * len('anything')
 
 
-@pytest.mark.parametrize('error_type', ['invalid_patch', 'patch_apply_failed'])
+@pytest.mark.parametrize('error_type', sorted(MODEL_FAULT_ERRORS))
 def test_broken_patch_is_trained_on_as_zero(
     verl: types.ModuleType, monkeypatch: pytest.MonkeyPatch, error_type: str
 ) -> None:

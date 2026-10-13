@@ -19,9 +19,9 @@ logger = logging.getLogger(__name__)
 # Float noise this far outside [0, 1] is clamped; anything further is a verifier bug.
 SCORE_TOLERANCE = 1e-6
 
-MODEL_FAULT_ERRORS = frozenset({'invalid_patch', 'patch_apply_failed'})
-"""error_type values that are the model's own fault (a patch that is malformed or doesn't
-apply): a real 0 to learn from, not a missing verdict."""
+MODEL_FAULT_ERRORS = frozenset({'invalid_patch', 'patch_apply_failed', 'test_infra_tampering'})
+"""error_type values that are the model's own fault (a patch that is malformed, doesn't
+apply, or touches test infrastructure): a real 0 to learn from, not a missing verdict."""
 
 
 def is_verdict(exit_code: int | None, error_type: str | None) -> bool:

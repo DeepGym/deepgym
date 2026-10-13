@@ -25,12 +25,13 @@ def run_qa(
     """Quality-gate one registered environment.
 
     Multi-turn and computer-use envs (they need an agent) and benchmark-backed
-    envs such as swebench_pro or mimo_code (they score through their own runner)
-    get a single 'skipped' check with status 'skip', so the report is neither a
-    pass nor a failure. Harbor tasks with a solution/solve.sh are checked with it as
-    the reference; their hack_resistant check is 'skip', because its attacks are Python
-    solutions and prove nothing about a bash runner. An environment that fails to load
-    gets a failed 'load' check.
+    envs such as swebench_pro (they score through their own runner) get a single
+    'skipped' check with status 'skip', so the report is neither a pass nor a failure.
+    Self-contained patch tasks such as mimo_code have no reference patch, so they only
+    get the patch-tampering attacks. Harbor tasks with a solution/solve.sh are checked
+    with it as the reference; their hack_resistant check is 'skip', because its attacks
+    are Python solutions and prove nothing about a bash runner. An environment that
+    fails to load gets a failed 'load' check.
 
     Args:
         name: Registered environment name, e.g. 'coin_change'.
@@ -59,6 +60,11 @@ def run_qa(
     if hasattr(env, 'prepare_batch_requests') or (
         hasattr(env, 'run_with_deepgym') and reference is None
     ):
+        # A self-contained patch task (e.g. mimo_code) has no reference patch to check,
+        # but its runner must still refuse diffs that add test infrastructure.
+        if 'patch' in env.tags and not hasattr(env, 'prepare_batch_requests'):
+            check = hack_resistant(env, dg, ['patch_tampering'])
+            return QAReport(environment=name, checks=[check])
         return _skipped(name, 'benchmark-backed env scores through its own runner')
 
     checks = single_turn_checks(env, reference, dg, reruns)

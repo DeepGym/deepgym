@@ -129,8 +129,9 @@ def compute_score(
         produced (sandbox or verifier failure, timeout, invalid score; see
         ``RunResult.has_verdict``). The score is then 0.0;
         :mod:`deepgym.integrations.verl_mask` keeps such samples out of training.
-        A patch that is malformed or doesn't apply is the model's fault, so it scores
-        0.0 with ``error`` 0.0 and is trained on.
+        A patch that is malformed, doesn't apply or touches test infrastructure is the
+        model's fault (``MODEL_FAULT_ERRORS``), so it scores 0.0 with ``error`` 0.0 and
+        is trained on.
 
     Raises:
         DeepGymError: If the named environment doesn't exist.

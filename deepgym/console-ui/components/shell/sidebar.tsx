@@ -6,6 +6,7 @@ import { usePathname } from 'next/navigation';
 import { Kbd } from '@/components/base/kbd/kbd';
 import { isActive, NAV } from '@/lib/nav';
 import { cx } from '@/utils/cx';
+import { BrandMark } from './brand-mark';
 
 /** Floating left navigation panel (md and up), in BoardUI's sidebar recipe. */
 export function Sidebar() {
@@ -15,9 +16,14 @@ export function Sidebar() {
       aria-label="Console navigation"
       className="flex h-full w-full flex-col rounded-3xl border border-border-button-default bg-background-secondary-default p-3 shadow-sidebar"
     >
-      <div className="px-1.5 pt-1 pb-5 leading-tight">
-        <p className="font-wordmark text-2xl font-bold tracking-tight text-text-primary">DeepGym</p>
-        <p className="text-mono-label text-text-tertiary">Console</p>
+      <div className="flex items-center gap-2.5 px-1.5 pt-1 pb-5">
+        <span className="flex size-8 items-center justify-center rounded-2lg bg-linear-to-b from-accent-500 to-accent-600 shadow-nav-selected">
+          <BrandMark className="size-4.5 text-text-white" />
+        </span>
+        <div className="leading-tight">
+          <p className="font-display text-body-medium text-text-primary">DeepGym</p>
+          <p className="text-mono-label text-text-tertiary">Console</p>
+        </div>
       </div>
       <p className="text-mono-label px-2 pb-1.5 text-text-tertiary">Workspace</p>
       <nav className="flex flex-col gap-0.5">

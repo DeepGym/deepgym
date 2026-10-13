@@ -48,9 +48,7 @@ def _diff(repo: Path, files: dict[str, str | None]) -> str:
     return diff
 
 
-def _env(
-    tmp_path: Path, extra: dict[str, str] | None = None, flags: str = ''
-) -> RepoPatchEnvironment:
+def _env(tmp_path: Path, extra: dict[str, str] | None = None) -> RepoPatchEnvironment:
     """A repo whose hidden test patch adds a check only a real fix of add() passes."""
     repo = tmp_path / 'repo'
     files = {'calc.py': _CALC, 'tests/test_calc.py': _BASE_TEST, **(extra or {})}
@@ -60,7 +58,7 @@ def _env(
     _git(repo, 'init', '-q')
     _git(repo, 'add', '-A')
     _git(repo, 'commit', '-qm', 'base')
-    pytest_cmd = f'PYTHONPATH=. "{sys.executable}" -m pytest -q {flags} tests/test_calc.py'
+    pytest_cmd = f'PYTHONPATH=. "{sys.executable}" -m pytest -q tests/test_calc.py'
     return RepoPatchEnvironment(
         task='Fix add().',
         repo_dir=str(repo),
@@ -625,87 +623,10 @@ def test_validation_faults_have_no_verdict(
     assert not is_verdict(exit_code, result.error_type)
 
 
-def test_command_flags_are_classified(tmp_path: Path) -> None:
-    # (named, unsure, unparsed): what a pytest run names is test config, what an unrecognized
-    # program names may be, and an unparsable command leaves nothing certain.
-    repo = tmp_path.resolve()
-    flags = _runner()['_command_flags']
-    command = (
-        f'cd {repo}/sub && pytest -c ci.ini --config-file={repo}/top.ini -c /dev/null '
-        '-p no:cacheprovider -p pkg.plug tests'
-    )
-    named = {'sub/ci.ini', 'top.ini', 'sub/pkg/plug.py', 'sub/pkg/plug/__init__.py'}
-    assert flags([command], repo, repo) == (named, set(), False)
-    # pytest however it is started, inside a sh -c string or an if block too.
-    started = [
-        'PYTHONPATH=. python3 -B -m pytest -c a.ini',
-        'py.test -p plug',
-        'bash -lc "cd sub && pytest -c b.ini"',
-        'if true; then pytest -c c.ini; fi',
-    ]
-    named = {'a.ini', 'plug.py', 'plug/__init__.py', 'sub/b.ini', 'c.ini'}
-    assert flags(started, repo, repo) == (named, set(), False)
-    # A program known not to load test config: its -c or -p names nothing.
-    plain = ['gcc -c src/calc.c -o calc.o && ./check', 'cargo test -p calc', 'mkdir -p build']
-    assert flags(plain, repo, repo) == (set(), set(), False)
-    # Any other program might run the tests with what its flags name.
-    assert flags(['uv run pytest -c ci.ini'], repo, repo) == (set(), {'ci.ini'}, False)
-    assert flags(["pytest -c 'unbalanced"], repo, repo) == (set(), set(), True)
-    assert flags(['pytest -c $CFG'], repo, repo) == (set(), set(), True)
-
-
-def test_another_programs_flags_name_no_test_config(tmp_path: Path, sandbox_dg: DeepGym) -> None:
-    # A compile step's -c (gcc -c src/calc.c; here wc -c calc.py) names the very file a real
-    # fix edits, so only a pytest run's flags count.
-    env = _env(tmp_path)
-    command = env.test_command.replace(' && ', ' && wc -c calc.py && ', 1)
-    env = env.model_copy(update={'test_command': command})
-
-    result = sandbox_dg.run(env, _diff(Path(env.repo_dir), _FIX))
-
-    assert result.error_type is None
-    assert result.score == 1.0
-
-
-@pytest.mark.parametrize(
-    ('prefix', 'suffix', 'edit', 'error_type'),
-    [
-        # env (like uv run or timeout) might run pytest with the config its -c names: a patch
-        # that edits it is neither clearly tampering nor clearly safe.
-        pytest.param(
-            'env ',
-            ' -c ci.ini',
-            {'ci.ini': '[pytest]\n# edited\n'},
-            'validation_uncertain',
-            id='unrecognized-program',
-        ),
-        pytest.param('env ', ' -c ci.ini', {}, None, id='unrecognized-program-file-untouched'),
-        pytest.param('', ' -k "unbalanced', {}, 'validation_uncertain', id='unparsable-command'),
-    ],
-)
-def test_unclassifiable_test_command_has_no_verdict(
-    tmp_path: Path,
-    sandbox_dg: DeepGym,
-    prefix: str,
-    suffix: str,
-    edit: dict[str, str],
-    error_type: str | None,
-) -> None:
-    env = _env(tmp_path, {'ci.ini': '[pytest]\n'})
-    run_tests = f'"{sys.executable}" -m pytest -q tests/test_calc.py'
-    command = f'cd "{env.repo_dir}" && {prefix}PYTHONPATH=. {run_tests}{suffix}'
-    env = env.model_copy(update={'test_command': command})
-
-    result = sandbox_dg.run(env, _diff(Path(env.repo_dir), {**_FIX, **edit}))
-
-    assert result.error_type == error_type
-    assert result.has_verdict == (error_type is None)
-    assert result.score == (1.0 if error_type is None else 0.0)
-
-
 def test_unlisted_workspace_package_key_has_no_verdict(tmp_path: Path, sandbox_dg: DeepGym) -> None:
     # Only known metadata in [workspace.package] is a plain release bump; edition (or any key
-    # off that list) could change how members build, so it gets no verdict either way.
+    # off that list) could change how members build, so the edit is uncertain and the pass it
+    # gets here is masked.
     env = _env(tmp_path, {'Cargo.toml': _CARGO_WS_PACKAGE})
     edit = {'Cargo.toml': _CARGO_WS_PACKAGE.replace('2021', '2024'), **_FIX}
 
@@ -715,24 +636,70 @@ def test_unlisted_workspace_package_key_has_no_verdict(tmp_path: Path, sandbox_d
     assert not result.has_verdict
 
 
+# (error_type, score, has_verdict) of a run graded on its tests, masked, or failed with a verdict.
+_OUTCOMES = {
+    'graded': (None, 1.0, True),
+    'masked': ('validation_uncertain', 0.0, False),
+    'failed': (None, 0.0, True),
+}
+_EDITED_INI = '[pytest]\n# edited\n'
+
+
 @pytest.mark.parametrize(
-    ('edit', 'refused'),
+    ('command', 'edit', 'outcome'),
     [
-        pytest.param({'ci.ini': '[pytest]\naddopts = -k nothing\n'}, True, id='config-file'),
-        pytest.param({'localplugin.py': 'VALUE = 2\n'}, True, id='plugin-module'),
-        pytest.param({}, False, id='fix-only'),
+        # A file the test command mentions may be what it loads. The tests still run: a failure
+        # is the normal, trained 0, and only a pass, which the edit may have caused, is masked.
+        pytest.param('{pytest} -c ci.ini', {'ci.ini': _EDITED_INI}, 'masked', id='tests-pass'),
+        pytest.param(
+            '{pytest} -c ci.ini',
+            {'ci.ini': '[pytest]\naddopts = -k nothing\n'},
+            'failed',
+            id='tests-fail',
+        ),
+        # A compile step (gcc -c src/calc.c; here wc -c calc.py) mentions the fixed file itself.
+        pytest.param('wc -c calc.py && {pytest}', {}, 'masked', id='compile-step-fix'),
+        pytest.param(
+            'wc -c calc.py && {pytest}',
+            {'calc.py': _CALC.replace('-', '*')},
+            'failed',
+            id='compile-step-wrong-fix',
+        ),
+        # -p names a plugin by its module; ci.ini stays mentioned however the shell splits the
+        # lines or changes directory (sub/ci.ini by its basename).
+        pytest.param(
+            '{pytest} -p localplugin', {'localplugin.py': 'V = 2\n'}, 'masked', id='module'
+        ),
+        pytest.param(
+            'mkdir -p build\n{pytest} -c ci.ini', {'ci.ini': _EDITED_INI}, 'masked', id='multiline'
+        ),
+        pytest.param(
+            '(cd sub && true); {pytest} -c ci.ini',
+            {'ci.ini': _EDITED_INI},
+            'masked',
+            id='subshell-cd',
+        ),
+        pytest.param(
+            '(cd sub && true); {pytest} -c ci.ini',
+            {'sub/ci.ini': _EDITED_INI},
+            'masked',
+            id='subshell-cd-sub',
+        ),
+        # calc.py inside tests/test_calc.py is no mention: a plain fix is graded.
+        pytest.param('{pytest} -c ci.ini -p localplugin', {}, 'graded', id='fix-only'),
     ],
 )
-def test_files_the_test_command_names_are_test_config(
-    tmp_path: Path, sandbox_dg: DeepGym, edit: dict[str, str], refused: bool
+def test_files_the_test_command_mentions_are_uncertain(
+    tmp_path: Path, sandbox_dg: DeepGym, command: str, edit: dict[str, str], outcome: str
 ) -> None:
-    files = {'ci.ini': '[pytest]\n', 'localplugin.py': 'VALUE = 1\n'}
-    env = _env(tmp_path, files, flags='-c ci.ini -p localplugin')
+    files = {'ci.ini': '[pytest]\n', 'sub/ci.ini': '[pytest]\n', 'localplugin.py': 'V = 1\n'}
+    env = _env(tmp_path, files)
+    run_tests = f'PYTHONPATH=. "{sys.executable}" -m pytest -q tests/test_calc.py'
+    env = env.model_copy(update={'test_command': command.format(pytest=run_tests)})
 
     result = sandbox_dg.run(env, _diff(Path(env.repo_dir), {**_FIX, **edit}))
 
-    assert result.error_type == ('test_infra_tampering' if refused else None)
-    assert result.score == (0.0 if refused else 1.0)
+    assert (result.error_type, result.score, result.has_verdict) == _OUTCOMES[outcome]
 
 
 def test_production_package_named_test_is_refused_known_false_positive(

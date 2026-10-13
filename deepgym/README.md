@@ -376,12 +376,15 @@ so a slow verification doesn't hold up the others.
 
 OpenRLHF can't skip a sample: it trains on whatever `rewards` holds, and a failed
 request would stop its training step, so the endpoint never fails one. A failure the
-model caused is judged and scores 0. A run the sandbox provider or the network failed is
-run again after a short pause, and no request waits on scoring past 150 s (OpenRLHF gives
-up at 180 s). If a run still fails that way or is still going then, or a query doesn't
-contain its prompt, the sample gets the router's `infra_failure_score` (any other run
-without a verdict, such as a verifier failure or a timeout, may follow from the model's
-output, so it scores 0 either way):
+model caused is judged and scores 0, and so does any run without a verdict that the
+model's output may have caused (a verifier failure, a timeout); those are never run
+again. A run the sandbox provider or the network failed
+(`deepgym.exceptions.is_infrastructure_failure`) is graded once more after a short pause.
+Every run, first or second, takes one of the router's `max_parallel` slots (32 by
+default), and no request waits past 150 s (OpenRLHF gives up at 180 s). If the second
+grading fails too or doesn't finish in time, the first one doesn't finish in time, or a
+query doesn't contain its prompt, the sample gets the router's `infra_failure_score`,
+never a score from a run that didn't finish:
 
 - `'zero'` (the default): 0.0, logged as a warning with its error type. OpenRLHF trains
   on it as a failed answer; that is the limit of its API.

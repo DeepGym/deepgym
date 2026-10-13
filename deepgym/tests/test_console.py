@@ -185,7 +185,10 @@ class TestRunStats:
 
         current = stats['current']
         assert [current[key] for key in ('runs', 'finished', 'passed', 'errors')] == [3, 3, 1, 1]
-        assert current['mean_score'] == pytest.approx((1.0 + 0.4) / 2)  # the timeout: no score
+        # The timeout has no verdict: 0 in the mean, left out of the judged mean.
+        assert current['mean_score'] == pytest.approx((1.0 + 0.4 + 0.0) / 3)
+        assert current['judged_mean_score'] == pytest.approx((1.0 + 0.4) / 2)
+        assert (current['judged_count'], current['no_verdict_count']) == (2, 1)
         assert current['mean_duration_ms'] == pytest.approx(150.0)
         assert (stats['previous']['runs'], stats['previous']['passed']) == (1, 1)
         assert stats['hours'] == 24
@@ -214,10 +217,14 @@ class TestRunStats:
     def test_empty_window(self, tmp_path: Path) -> None:
         stats = make_client(tmp_path).get('/api/runs/stats?hours=24').json()
         assert stats['current'] == {'runs': 0, 'finished': 0, 'passed': 0, 'errors': 0,
-                                    'mean_score': None, 'mean_duration_ms': None}  # fmt: skip
+                                    'mean_score': None, 'mean_duration_ms': None,
+                                    'judged_count': 0, 'no_verdict_count': 0,
+                                    'judged_mean_score': None}  # fmt: skip
         assert stats['score_bins'] == [0] * 10
 
-    def test_completed_run_without_a_verdict_has_no_score(self, tmp_path: Path) -> None:
+    def test_run_without_a_verdict_counts_zero_and_never_raises_the_mean(
+        self, tmp_path: Path
+    ) -> None:
         store = RunStore(tmp_path / 'console.db')
         specs = [RunSpec(environment='fizzbuzz', solution='pass', reference=True)] * 3
         judged, crashed, silent = store.create_group(specs, 'local', 'local')
@@ -231,8 +238,13 @@ class TestRunStats:
         store.complete(silent.id, result.model_copy(update=unjudged), 1.0)
 
         stats = store.stats({}, hours=None)
+        current = stats.current
 
-        assert (stats.current.mean_score, stats.current.errors) == (1.0, 2)
+        assert current.mean_score == pytest.approx(1 / 3)  # not 1.0: the two count as 0
+        assert (current.judged_mean_score, current.judged_count, current.no_verdict_count) == (
+            1.0, 1, 2,
+        )  # fmt: skip
+        assert current.errors == 2
         assert {count.error_type for count in stats.error_types} == {'boom', 'verifier_error'}
         assert (store.get(crashed.id).score, store.get(crashed.id).passed) == (None, None)
 

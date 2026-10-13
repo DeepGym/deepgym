@@ -23,6 +23,7 @@ from deepgym.models import (
     Observation,
     RunResult,
     Trajectory,
+    VerdictTotals,
 )
 from deepgym.sandbox import LocalExecutor, build_run_result, error_result, run_judge_in_sandbox
 from deepgym.sandboxes import PROVIDERS, Provider, Sandbox, check_provider, open_sandbox
@@ -271,12 +272,10 @@ class DeepGym:
             max_parallel: Maximum number of concurrent sandbox executions.
 
         Returns:
-            Aggregated BatchResult.
+            Aggregated BatchResult (see :func:`build_batch_result`).
         """
         if not outputs:
-            return BatchResult(
-                results=[], total=0, passed=0, failed=0, avg_score=0.0, execution_time_ms=0.0
-            )
+            return build_batch_result([], 0.0)
 
         start = time.perf_counter()
         results: list[RunResult | None] = [None] * len(outputs)
@@ -299,21 +298,7 @@ class DeepGym:
         # Every slot must be filled — assert rather than silently drop.
         assert all(r is not None for r in results), 'Not all batch slots were filled'
         final_results: list[RunResult] = results  # type: ignore[assignment]
-
-        elapsed_ms = (time.perf_counter() - start) * 1000
-        passed = sum(1 for r in final_results if r.passed)
-        avg_score = (
-            sum(r.score for r in final_results) / len(final_results) if final_results else 0.0
-        )
-
-        return BatchResult(
-            results=final_results,
-            total=len(final_results),
-            passed=passed,
-            failed=len(final_results) - passed,
-            avg_score=avg_score,
-            execution_time_ms=elapsed_ms,
-        )
+        return build_batch_result(final_results, (time.perf_counter() - start) * 1000)
 
     # ------------------------------------------------------------------
     # Evaluation suite
@@ -371,10 +356,12 @@ def build_eval_result(
             None if the model gave no output for it, a plain 0.
 
     Returns:
-        EvalResult whose ``results`` and ``env_names`` follow *names*.
+        EvalResult whose ``results`` and ``env_names`` follow *names*. Its pass rate and
+        mean score count an environment without a verdict as a failed 0; the ``judged_*``
+        fields leave it out.
     """
     results = [_suite_entry(name, outcome) for name, outcome in zip(names, outcomes, strict=True)]
-    passed = sum(1 for r in results if r.passed)
+    passed, score, judged = _verdict_totals(results)
     total = len(results)
     return EvalResult(
         suite=suite,
@@ -383,8 +370,49 @@ def build_eval_result(
         results=results,
         total=total,
         passed=passed,
-        avg_score=sum(r.score for r in results) / max(total, 1),
+        avg_score=score / max(total, 1),
         env_names=list(names),
+        **judged.model_dump(),
+    )
+
+
+def build_batch_result(results: Sequence[RunResult], execution_time_ms: float) -> BatchResult:
+    """Aggregate a batch's results.
+
+    Args:
+        results: One result per output, in output order.
+        execution_time_ms: Wall-clock time of the whole batch.
+
+    Returns:
+        BatchResult whose pass count and mean score count a run without a verdict as a
+        failed 0; the ``judged_*`` fields leave it out.
+    """
+    passed, score, judged = _verdict_totals(results)
+    return BatchResult(
+        results=list(results),
+        total=len(results),
+        passed=passed,
+        failed=len(results) - passed,
+        avg_score=score / max(len(results), 1),
+        execution_time_ms=execution_time_ms,
+        **judged.model_dump(),
+    )
+
+
+def _verdict_totals(results: Sequence[RunResult]) -> tuple[int, float, VerdictTotals]:
+    """Return (passes, score sum, judged-only totals); a run without a verdict adds 0 to both."""
+    judged = [r for r in results if r.has_verdict]
+    passed = sum(1 for r in judged if r.passed)
+    score = sum(r.score for r in judged)
+    return (
+        passed,
+        score,
+        VerdictTotals(
+            no_verdict_count=len(results) - len(judged),
+            judged_count=len(judged),
+            judged_pass_rate=passed / max(len(judged), 1),
+            judged_mean_score=score / max(len(judged), 1),
+        ),
     )
 
 

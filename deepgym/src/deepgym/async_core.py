@@ -18,7 +18,7 @@ from deepgym.benchmark_envs import (
     build_run_requests,
     route_single_run,
 )
-from deepgym.core import build_eval_result
+from deepgym.core import build_batch_result, build_eval_result
 from deepgym.exceptions import DeepGymError, SandboxError, TimeoutError
 from deepgym.judge import DEADLINE_GRACE_S, SANDBOX_SETUP, JudgeJob, sandbox_judge, sandbox_uploads
 from deepgym.models import (
@@ -196,7 +196,7 @@ class AsyncDeepGym:
                 like :meth:`DeepGym.run_batch`.
 
         Returns:
-            Aggregated BatchResult.
+            Aggregated BatchResult (see :func:`~deepgym.core.build_batch_result`).
 
         Raises:
             ValueError: If *max_parallel* is below 1 (no run could ever start).
@@ -204,9 +204,7 @@ class AsyncDeepGym:
         if max_parallel < 1:
             raise ValueError(f'max_parallel must be at least 1, got {max_parallel}')
         if not outputs:
-            return BatchResult(
-                results=[], total=0, passed=0, failed=0, avg_score=0.0, execution_time_ms=0.0
-            )
+            return build_batch_result([], 0.0)
 
         start = time.perf_counter()
         semaphore = asyncio.Semaphore(max_parallel)
@@ -225,18 +223,7 @@ class AsyncDeepGym:
                 logger.warning('Async run %d failed: %s', i, item)
                 item = error_result(item)
             results.append(item)
-
-        elapsed_ms = (time.perf_counter() - start) * 1000.0
-        passed = sum(1 for r in results if r.passed)
-
-        return BatchResult(
-            results=results,
-            total=len(results),
-            passed=passed,
-            failed=len(results) - passed,
-            avg_score=sum(r.score for r in results) / max(len(results), 1),
-            execution_time_ms=elapsed_ms,
-        )
+        return build_batch_result(results, (time.perf_counter() - start) * 1000.0)
 
     async def eval(
         self,

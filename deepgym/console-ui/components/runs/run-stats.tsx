@@ -4,7 +4,15 @@ import type { ReactNode } from 'react';
 import { Bar, BarChart, ResponsiveContainer, Tooltip, XAxis } from 'recharts';
 import { Stat } from '@/components/ui/stat';
 import { formatPercent, formatScore } from '@/lib/format';
-import { type Better, type DeltaUnit, delta, passRate, type Range } from '@/lib/stats';
+import {
+  type Better,
+  type DeltaUnit,
+  delta,
+  judgedPassRate,
+  noVerdictShare,
+  passRate,
+  type Range,
+} from '@/lib/stats';
 import type { RunStats, RunTotals } from '@/lib/types';
 
 interface Kpi {
@@ -34,7 +42,7 @@ const KPIS: Kpi[] = [
     format: formatPercent,
     unit: 'rate',
     better: 'higher',
-    hint: (t) => `${t.passed} passed`,
+    hint: (t) => (t.no_verdict_count ? `judged ${formatPercent(judgedPassRate(t))}` : `${t.passed} passed`),
   },
   {
     label: 'Avg score',
@@ -42,7 +50,15 @@ const KPIS: Kpi[] = [
     format: formatScore,
     unit: 'score',
     better: 'higher',
-    hint: () => 'finished runs',
+    hint: (t) => (t.no_verdict_count ? `judged ${formatScore(t.judged_mean_score)}` : 'finished runs'),
+  },
+  {
+    label: 'No verdict',
+    value: (t) => t.no_verdict_count,
+    format: count,
+    unit: 'count',
+    better: 'lower',
+    hint: (t) => `${formatPercent(noVerdictShare(t))} of finished, counted as 0`,
   },
   {
     label: 'Errors',
@@ -62,7 +78,7 @@ interface KpiTilesProps {
   children?: ReactNode;
 }
 
-/** Runs, pass rate, avg score and errors, each with its change vs the previous window. */
+/** Runs, pass rate, avg score, runs with no verdict and errors, each with its change vs the previous window. */
 export function KpiTiles({ stats, range, children }: KpiTilesProps) {
   return (
     <div className="grid grid-cols-2 gap-3 md:grid-cols-[repeat(auto-fit,minmax(10rem,1fr))]">

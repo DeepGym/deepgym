@@ -6,7 +6,8 @@ from pathlib import Path
 import pytest
 
 from deepgym.async_core import AsyncDeepGym
-from deepgym.core import DeepGym
+from deepgym.core import DeepGym, build_eval_result
+from deepgym.exceptions import SandboxError, VerifierError
 from deepgym.models import BatchResult, Environment, EvalResult, RunResult
 
 ENVS_DIR = Path(__file__).resolve().parent.parent / 'src' / 'deepgym' / 'envs'
@@ -122,6 +123,64 @@ class TestEval:
 
     def test_named_env_without_a_verifier_file_runs(self, outputs: dict[str, str]) -> None:
         assert _eval('sync', outputs).results[2].score == 1.0
+
+    @pytest.mark.parametrize('client', ['sync', 'async'])
+    def test_totals_count_no_verdict_as_zero_and_judged_apart(
+        self, outputs: dict[str, str], client: str
+    ) -> None:
+        result = _eval(client, outputs)
+        # The sandbox failure has no verdict; the unanswered env is a judged 0.
+        assert (result.total, result.passed, result.no_verdict_count) == (3, 1, 1)
+        assert result.pass_rate == result.avg_score == pytest.approx(1 / 3)
+        assert result.judged_count == 2
+        assert (result.judged_pass_rate, result.judged_mean_score) == (0.5, 0.5)
+
+
+def test_runs_without_a_verdict_never_raise_the_headline() -> None:
+    judged = [_judged_result(1.0), _judged_result(0.0)]
+    baseline = build_eval_result('suite', 'm', ['a', 'b'], judged)
+
+    with_unscored = build_eval_result(
+        'suite', 'm', ['a', 'b', 'c', 'd'], [*judged, SandboxError('down'), VerifierError('bug')]
+    )
+
+    assert with_unscored.pass_rate < baseline.pass_rate == 0.5
+    assert with_unscored.avg_score < baseline.avg_score == 0.5
+    assert (with_unscored.judged_pass_rate, with_unscored.no_verdict_count) == (0.5, 2)
+
+
+def _judged_result(score: float) -> RunResult:
+    """A judged result with *score*, passed when it is 1.0."""
+    return RunResult(
+        score=score, passed=score == 1.0, output='', stderr='', exit_code=int(score != 1.0),
+        execution_time_ms=1.0, sandbox_id='local',
+    )  # fmt: skip
+
+
+# Scores 1.0 for "ok", 0.0 otherwise, and crashes (no verdict) on "CRASH".
+_FLAKY_VERIFIER = Environment(
+    task='t',
+    verifier_code=(
+        'content = open(solution_path).read()\n'
+        'if "CRASH" in content:\n'
+        '    raise RuntimeError("verifier bug")\n'
+        'return 1.0 if "ok" in content else 0.0\n'
+    ),
+)
+
+
+@pytest.mark.parametrize('client', ['sync', 'async'])
+def test_batch_totals_count_no_verdict_as_zero_and_judged_apart(client: str) -> None:
+    outputs = ['ok = 1\n', 'nope = 1\n', 'CRASH = 1\n']
+    batch = (
+        DeepGym(mode='local').run_batch(_FLAKY_VERIFIER, outputs)
+        if client == 'sync'
+        else asyncio.run(AsyncDeepGym(mode='local').run_batch(_FLAKY_VERIFIER, outputs))
+    )
+    assert (batch.total, batch.passed, batch.failed) == (3, 1, 2)
+    assert batch.avg_score == pytest.approx(1 / 3)
+    assert (batch.no_verdict_count, batch.judged_count) == (1, 2)
+    assert (batch.judged_pass_rate, batch.judged_mean_score) == (0.5, 0.5)
 
 
 class TestAsyncParallelism:

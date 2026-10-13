@@ -655,14 +655,6 @@ def _verdict(result) -> str:
     return 'PASS' if result.passed else 'FAIL'
 
 
-def _judged_totals(results) -> tuple[int, int, int, str]:
-    """Return (passed, failed, errors, mean score); errors had no verdict, so count in neither."""
-    judged = [r for r in results if r.has_verdict]
-    passed = sum(r.passed for r in judged)
-    mean = f'{sum(r.score for r in judged) / len(judged):.4f}' if judged else '-'
-    return passed, len(judged) - passed, len(results) - len(judged), mean
-
-
 def _cause(result) -> str:
     """First line of why a run without a verdict failed."""
     return result.output.strip().partition('\n')[0]
@@ -680,15 +672,24 @@ def _print_run_result(result, elapsed: float) -> None:
         print(f'\n  Stderr:\n{_indent(result.stderr)}')
 
 
+def _judged(totals, value: str) -> str:
+    """*value*, a judged-only figure, or '-' when no run got a verdict."""
+    return value if totals.judged_count else '-'
+
+
+def _no_verdict_share(totals) -> str:
+    """How many of the runs got no verdict, e.g. '12.00% no verdict'."""
+    return f'{totals.no_verdict_count / max(totals.total, 1):.2%} no verdict'
+
+
 def _print_batch_result(batch, solution_files, elapsed: float) -> None:
-    passed, failed, errors, mean = _judged_totals(batch.results)
+    judged_avg = _judged(batch, f'{batch.judged_mean_score:.4f}')
     print(f'\n{"=" * 50}')
     print('  Batch Results')
     print(f'  Total:   {batch.total}')
-    print(f'  Passed:  {passed}')
-    print(f'  Failed:  {failed}')
-    print(f'  Errors:  {errors}')
-    print(f'  Avg:     {mean}')
+    print(f'  Passed:  {batch.passed}')
+    print(f'  Failed:  {batch.failed}')
+    print(f'  Avg:     {batch.avg_score:.4f}  (judged {judged_avg}, {_no_verdict_share(batch)})')
     print(f'  Time:    {elapsed:.2f}s')
     print(f'{"=" * 50}')
 
@@ -699,16 +700,16 @@ def _print_batch_result(batch, solution_files, elapsed: float) -> None:
 
 
 def _print_eval_result(result, elapsed: float) -> None:
-    passed, failed, errors, mean = _judged_totals(result.results)
-    pass_rate = f'{passed / (passed + failed):.2%}' if passed + failed else '-'
+    judged_rate = _judged(result, f'{result.judged_pass_rate:.2%}')
+    judged_avg = _judged(result, f'{result.judged_mean_score:.4f}')
+    no_verdict = _no_verdict_share(result)
     print(f'\n{"=" * 50}')
     print(f'  Eval Suite:  {result.suite}')
     print(f'  Model:       {result.model_name}')
-    print(f'  Pass Rate:   {pass_rate}')
+    print(f'  Pass Rate:   {result.pass_rate:.2%}  (judged {judged_rate}, {no_verdict})')
     print(f'  Total:       {result.total}')
-    print(f'  Passed:      {passed}')
-    print(f'  Errors:      {errors}')
-    print(f'  Avg Score:   {mean}')
+    print(f'  Passed:      {result.passed}')
+    print(f'  Avg Score:   {result.avg_score:.4f}  (judged {judged_avg})')
     print(f'  Time:        {elapsed:.2f}s')
     print(f'{"=" * 50}')
     for name, run in zip(result.env_names or [], result.results):

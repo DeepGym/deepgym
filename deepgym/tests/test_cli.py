@@ -17,10 +17,10 @@ from deepgym.cli import (
     _read_file_or_string,
     main,
 )
-from deepgym.core import build_eval_result
+from deepgym.core import build_batch_result, build_eval_result
 from deepgym.exceptions import SandboxError
 from deepgym.integrations.zai import ZaiChatClient
-from deepgym.models import BatchResult, RunResult
+from deepgym.models import RunResult
 from deepgym.qa import QACheck, QAReport
 from deepgym.sandbox import error_result
 
@@ -439,29 +439,35 @@ _FAILED = _OK.model_copy(update={'score': 0.5, 'passed': False, 'exit_code': 1})
 
 
 class TestResultOutput:
-    """Runs without a verdict print as errors with their cause, outside the model metrics."""
+    """Runs without a verdict print as errors with their cause; totals count them as 0
+    and show the judged figures and the share without a verdict beside them."""
 
     def test_run_without_a_verdict_is_an_error(self, capsys: pytest.CaptureFixture) -> None:
         _print_run_result(error_result(SandboxError('sandbox unreachable')), 1.0)
         assert 'Result:  ERROR (sandbox_error)' in capsys.readouterr().out
 
-    def test_batch_counts_errors_apart(self, capsys: pytest.CaptureFixture) -> None:
+    def test_batch_shows_judged_and_no_verdict_beside_the_totals(
+        self, capsys: pytest.CaptureFixture
+    ) -> None:
         outage = error_result(SandboxError('sandbox unreachable'))
-        batch = BatchResult(results=[_OK, _FAILED, outage], total=3, passed=1, failed=2,
-                            avg_score=0.5, execution_time_ms=1.0)  # fmt: skip
+        batch = build_batch_result([_OK, _FAILED, outage], 1.0)
 
         _print_batch_result(batch, [Path('a.py'), Path('b.py'), Path('c.py')], 1.0)
 
         out = capsys.readouterr().out
-        assert 'Failed:  1' in out and 'Errors:  1' in out and 'Avg:     0.7500' in out
+        assert 'Failed:  2' in out
+        assert 'Avg:     0.5000  (judged 0.7500, 33.33% no verdict)' in out
         assert '[ERROR (sandbox_error)] c.py' in out and 'sandbox unreachable' in out
 
-    def test_eval_lists_errored_environments(self, capsys: pytest.CaptureFixture) -> None:
+    def test_eval_shows_judged_and_no_verdict_beside_the_totals(
+        self, capsys: pytest.CaptureFixture
+    ) -> None:
         outcomes = [_OK, _FAILED, SandboxError('sandbox down')]
         result = build_eval_result('suite', 'model', ['a', 'b', 'c'], outcomes)
 
         _print_eval_result(result, 1.0)
 
         out = capsys.readouterr().out
-        assert 'Pass Rate:   50.00%' in out and 'Errors:      1' in out
+        assert 'Pass Rate:   33.33%  (judged 50.00%, 33.33% no verdict)' in out
+        assert 'Avg Score:   0.5000  (judged 0.7500)' in out
         assert '[ERROR (sandbox_error)] c: sandbox down' in out

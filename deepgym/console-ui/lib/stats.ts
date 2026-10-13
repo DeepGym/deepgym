@@ -12,9 +12,17 @@ export const DEFAULT_RANGE: Range = '7d';
 export const parseRange = (value: string | null): Range =>
   value !== null && Object.hasOwn(RANGES, value) ? (value as Range) : DEFAULT_RANGE;
 
-/** Share of finished runs that passed, or null before any finished. */
+/** Share of finished runs that passed, a run without a verdict counting as failed; null before any finished. */
 export const passRate = (totals: RunTotals): number | null =>
   totals.finished ? totals.passed / totals.finished : null;
+
+/** Share of the judged runs that passed, or null before any was judged. */
+export const judgedPassRate = (totals: RunTotals): number | null =>
+  totals.judged_count ? totals.passed / totals.judged_count : null;
+
+/** Share of finished runs that got no verdict, or null before any finished. */
+export const noVerdictShare = (totals: RunTotals): number | null =>
+  totals.finished ? totals.no_verdict_count / totals.finished : null;
 
 export interface Delta {
   /** Signed change, e.g. "+12%", "-5 pts", "+0.04", or "no change". */

@@ -29,14 +29,18 @@ _SUMMARY_COLUMNS = (
 # Columns list() and stats() may filter on; keys are code-defined, values are bound parameters.
 _FILTER_COLUMNS = frozenset({'status', 'environment', 'provider', 'group_id'})
 _FINISHED = "status IN ('completed', 'failed')"
-# Select list of RunTotals; SUM over no rows is NULL, hence the COALESCEs.
+# Select list of RunTotals; SUM over no rows is NULL, hence the COALESCEs. A finished run
+# without a score got no verdict: it counts 0 in mean_score and is left out of the judged_*.
 _TOTALS = (
     'COUNT(*) AS runs, '
     f'COALESCE(SUM({_FINISHED}), 0) AS finished, '
     'COALESCE(SUM(passed = 1), 0) AS passed, '
     'COALESCE(SUM(error_type IS NOT NULL), 0) AS errors, '
-    f'AVG(CASE WHEN {_FINISHED} THEN score END) AS mean_score, '
-    'AVG(duration_ms) AS mean_duration_ms'
+    f'AVG(CASE WHEN {_FINISHED} THEN COALESCE(score, 0) END) AS mean_score, '
+    'AVG(duration_ms) AS mean_duration_ms, '
+    f'COALESCE(SUM({_FINISHED} AND score IS NOT NULL), 0) AS judged_count, '
+    f'COALESCE(SUM({_FINISHED} AND score IS NULL), 0) AS no_verdict_count, '
+    f'AVG(CASE WHEN {_FINISHED} THEN score END) AS judged_mean_score'
 )
 
 
@@ -96,7 +100,8 @@ class RunStore:
         """Record the verifier result of a run that finished.
 
         A result without a verdict (``RunResult.has_verdict`` False) keeps no score or
-        pass, so score metrics leave it out; its error type counts it as an error.
+        pass: the mean score counts it as 0, the judged totals leave it out, and its error
+        type counts it as an error.
         """
         judged = result.has_verdict
         with connect(self._path) as conn:

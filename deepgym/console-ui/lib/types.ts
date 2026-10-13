@@ -149,8 +149,15 @@ export interface RunTotals {
   passed: number;
   /** Runs with an error_type. */
   errors: number;
+  /** Mean score of the finished runs, a run without a verdict counting 0. */
   mean_score: number | null;
   mean_duration_ms: number | null;
+  /** Finished runs with a verdict. */
+  judged_count: number;
+  /** Finished runs without a verdict: they raised, were interrupted, or nothing judged them. */
+  no_verdict_count: number;
+  /** Mean score of the judged runs only. */
+  judged_mean_score: number | null;
 }
 
 export interface EnvironmentStats extends RunTotals {

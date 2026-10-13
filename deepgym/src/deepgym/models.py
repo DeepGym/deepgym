@@ -494,19 +494,39 @@ class MultiTurnEnvironment(BaseModel):
         return self
 
 
-class BatchResult(BaseModel):
+class VerdictTotals(BaseModel):
+    """Totals over only the runs that got a verdict (``RunResult.has_verdict``).
+
+    They sit next to the headline totals, which count a run without a verdict as a failed
+    0, so a run that breaks its verifier or sandbox can never raise the headline.
+    """
+
+    no_verdict_count: int = 0
+    """Runs whose verifier or sandbox failed instead of judging them."""
+    judged_count: int = 0
+    """Runs with a verdict."""
+    judged_pass_rate: float = 0.0
+    """Fraction of the judged runs that passed; 0.0 if none was judged."""
+    judged_mean_score: float = 0.0
+    """Mean score of the judged runs; 0.0 if none was judged."""
+
+
+class BatchResult(VerdictTotals):
     """Aggregate results from running multiple solutions against one environment."""
 
     results: list[RunResult]
     total: int
     passed: int
+    """Runs judged as passed."""
     failed: int
+    """Every other run: judged as failed, or without a verdict."""
     avg_score: float
+    """Mean score over every run, a run without a verdict counting 0."""
     execution_time_ms: float
     """Total wall-clock time for the entire batch."""
 
 
-class EvalResult(BaseModel):
+class EvalResult(VerdictTotals):
     """Results from evaluating a model against an entire suite."""
 
     suite: str
@@ -516,12 +536,14 @@ class EvalResult(BaseModel):
     """Identifier for the model being evaluated."""
 
     pass_rate: float
-    """Fraction of tasks passed (0.0 - 1.0)."""
+    """Fraction of all tasks passed (0.0 - 1.0); a task without a verdict counts as failed."""
 
     results: list[RunResult]
     total: int
     passed: int
+    """Tasks judged as passed."""
     avg_score: float
+    """Mean score over every task, a task without a verdict counting 0."""
 
     env_names: list[str] | None = None
     """Environment of each entry in ``results``, in the same (suite) order."""

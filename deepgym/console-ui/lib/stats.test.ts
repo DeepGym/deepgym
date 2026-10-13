@@ -1,14 +1,26 @@
 import { expect, test } from 'bun:test';
-import { delta, etaNote, medianDuration, parseRange, passRate, worstFirst } from './stats';
+import {
+  delta,
+  etaNote,
+  judgedPassRate,
+  medianDuration,
+  noVerdictShare,
+  parseRange,
+  passRate,
+  worstFirst,
+} from './stats';
 import type { RunSummary, RunTotals } from './types';
 
-const totals = (runs: number, finished: number, passed: number): RunTotals => ({
+const totals = (runs: number, finished: number, passed: number, noVerdict = 0): RunTotals => ({
   runs,
   finished,
   passed,
-  errors: 0,
+  errors: noVerdict,
   mean_score: null,
   mean_duration_ms: null,
+  judged_count: finished - noVerdict,
+  no_verdict_count: noVerdict,
+  judged_mean_score: null,
 });
 
 test('deltas are coloured by improvement, not by sign', () => {
@@ -38,6 +50,15 @@ test('range from the URL falls back to 7d', () => {
 test('pass rate counts finished runs only', () => {
   expect(passRate(totals(5, 4, 3))).toBe(0.75);
   expect(passRate(totals(2, 0, 0))).toBeNull();
+});
+
+test('runs without a verdict lower the pass rate and only the judged rate leaves them out', () => {
+  // Two more runs that broke their verifier: the headline drops from 75% to 60%, never rises.
+  expect(passRate(totals(8, 8, 6))).toBe(0.75);
+  expect(passRate(totals(10, 10, 6, 2))).toBe(0.6);
+  expect(judgedPassRate(totals(10, 10, 6, 2))).toBe(0.75);
+  expect(noVerdictShare(totals(10, 10, 6, 2))).toBe(0.2);
+  expect(judgedPassRate(totals(2, 2, 0, 2))).toBeNull();
 });
 
 test('worst pass rate first, unfinished last, ties by most runs', () => {

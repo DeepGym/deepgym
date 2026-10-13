@@ -109,9 +109,19 @@ class RunTotals(BaseModel):
     """Runs with an error_type: they raised, were interrupted, or the verifier reported one."""
 
     mean_score: float | None = None
-    """Mean score of the finished runs that got a verdict; the rest count in errors."""
+    """Mean score of the finished runs, a run without a verdict counting 0."""
 
     mean_duration_ms: float | None = None
+
+    judged_count: int = 0
+    """Finished runs with a verdict (a score)."""
+
+    no_verdict_count: int = 0
+    """Finished runs without a verdict: they raised, were interrupted, or the verifier or
+    sandbox failed instead of judging them."""
+
+    judged_mean_score: float | None = None
+    """Mean score of the judged runs only."""
 
 
 class EnvironmentStats(RunTotals):

@@ -20,6 +20,7 @@ function HealthCard({ env }: { env: EnvironmentStats }) {
   const cells = [
     { label: 'Runs', value: String(env.runs) },
     { label: 'Pass', value: formatPercent(rate) },
+    { label: 'No verdict', value: String(env.no_verdict_count), alert: env.no_verdict_count > 0 },
     { label: 'Avg time', value: formatDuration(env.mean_duration_ms) },
     { label: 'Errors', value: String(env.errors), alert: env.errors > 0 },
   ];
@@ -32,7 +33,7 @@ function HealthCard({ env }: { env: EnvironmentStats }) {
       )}
     >
       <span className="truncate font-mono text-body-2-medium text-text-primary">{env.environment}</span>
-      <dl className="grid grid-cols-4 gap-2">
+      <dl className="grid grid-cols-5 gap-2">
         {cells.map((cell) => (
           <div key={cell.label} className="flex min-w-0 flex-col gap-0.5">
             <dt className="text-mono-label truncate text-text-tertiary">{cell.label}</dt>

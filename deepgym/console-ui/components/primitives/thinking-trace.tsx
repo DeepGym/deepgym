@@ -4,6 +4,7 @@
 
 import { RiArrowDownSLine, RiCheckLine, RiSparkling2Fill } from '@remixicon/react';
 import { useEffect, useRef, useState } from 'react';
+import { Collapse } from '@/components/ui/collapse';
 import { cx } from '@/utils/cx';
 
 export interface TraceRow {
@@ -55,59 +56,54 @@ export function ThinkingTrace({ label, rows, selected, onSelect }: ThinkingTrace
           )}
         />
       </button>
-      <div
-        className="grid transition-[grid-template-rows,opacity] duration-300"
-        style={{ gridTemplateRows: open ? '1fr' : '0fr', opacity: open ? 1 : 0 }}
-      >
-        <div className="overflow-hidden">
-          <div ref={list} className="scrollbar-thin relative ms-[7px] mt-1 max-h-80 overflow-y-auto ps-4">
-            <span aria-hidden className="absolute inset-y-1 start-[3px] w-px bg-separator-border" />
-            <div className="flex flex-col gap-0.5 py-1">
-              {rows.map((row, index) => {
-                const active = index === selected;
-                return (
-                  <button
-                    key={row.key}
-                    type="button"
-                    data-index={index}
-                    aria-current={active ? 'step' : undefined}
-                    onClick={() => onSelect(index)}
+      <Collapse open={open}>
+        <div ref={list} className="scrollbar-thin relative ms-[7px] mt-1 max-h-80 overflow-y-auto ps-4">
+          <span aria-hidden className="absolute inset-y-1 start-[3px] w-px bg-separator-border" />
+          <div className="flex flex-col gap-0.5 py-1">
+            {rows.map((row, index) => {
+              const active = index === selected;
+              return (
+                <button
+                  key={row.key}
+                  type="button"
+                  data-index={index}
+                  aria-current={active ? 'step' : undefined}
+                  onClick={() => onSelect(index)}
+                  className={cx(
+                    'flex min-h-7 w-full cursor-pointer items-center gap-2 rounded-md px-1.5 py-0.5 text-start outline-none transition-colors focus-visible:ring-2 focus-visible:ring-border-focus-ring',
+                    active ? 'bg-background-tertiary-default' : 'hover:bg-background-secondary-hover',
+                  )}
+                >
+                  {index < selected ? (
+                    <RiCheckLine aria-hidden className="size-3.5 shrink-0 text-text-tertiary" />
+                  ) : (
+                    <span
+                      aria-hidden
+                      className={cx(
+                        'mx-[3px] size-2 shrink-0 rounded-full',
+                        active ? 'bg-accent-400' : 'border border-separator-border',
+                      )}
+                    />
+                  )}
+                  <span
                     className={cx(
-                      'flex min-h-7 w-full cursor-pointer items-center gap-2 rounded-md px-1.5 py-0.5 text-start outline-none transition-colors focus-visible:ring-2 focus-visible:ring-border-focus-ring',
-                      active ? 'bg-background-tertiary-default' : 'hover:bg-background-secondary-hover',
+                      'min-w-0 flex-1 truncate font-mono text-caption-1-medium',
+                      active ? 'text-text-primary' : 'text-text-secondary',
                     )}
                   >
-                    {index < selected ? (
-                      <RiCheckLine aria-hidden className="size-3.5 shrink-0 text-text-tertiary" />
-                    ) : (
-                      <span
-                        aria-hidden
-                        className={cx(
-                          'mx-[3px] size-2 shrink-0 rounded-full',
-                          active ? 'bg-accent-400' : 'border border-separator-border',
-                        )}
-                      />
-                    )}
-                    <span
-                      className={cx(
-                        'min-w-0 flex-1 truncate font-mono text-caption-1-medium',
-                        active ? 'text-text-primary' : 'text-text-secondary',
-                      )}
-                    >
-                      {row.primary}
+                    {row.primary}
+                  </span>
+                  {row.secondary && (
+                    <span className="shrink-0 font-mono text-caption-2-medium text-text-tertiary tabular-nums">
+                      {row.secondary}
                     </span>
-                    {row.secondary && (
-                      <span className="shrink-0 font-mono text-caption-2-medium text-text-tertiary tabular-nums">
-                        {row.secondary}
-                      </span>
-                    )}
-                  </button>
-                );
-              })}
-            </div>
+                  )}
+                </button>
+              );
+            })}
           </div>
         </div>
-      </div>
+      </Collapse>
     </div>
   );
 }

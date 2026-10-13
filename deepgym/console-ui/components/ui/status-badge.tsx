@@ -1,5 +1,7 @@
 import { Chip, type ChipProps } from '@/components/base/badges/chip';
+import { formatScore } from '@/lib/format';
 import type { EnvKind, RunStatus } from '@/lib/types';
+import { scoreTone, type Tone } from '@/lib/verdict';
 import { cx } from '@/utils/cx';
 
 type ChipColor = NonNullable<ChipProps['color']>;
@@ -28,6 +30,17 @@ export function PassBadge({ passed }: { passed: boolean | null }) {
   return (
     <Chip variant="caption" color={passed ? 'lime' : 'rose'}>
       {passed ? 'pass' : 'fail'}
+    </Chip>
+  );
+}
+
+const TONE_COLOR: Record<Tone, ChipColor> = { good: 'lime', warn: 'yellow', bad: 'rose' };
+
+/** A score in [0, 1] as a pill coloured by its band (green from 0.8, amber from 0.5, red below). */
+export function ScoreChip({ score }: { score: number }) {
+  return (
+    <Chip variant="caption" color={TONE_COLOR[scoreTone(score)]} className="font-mono tabular-nums">
+      {formatScore(score)}
     </Chip>
   );
 }

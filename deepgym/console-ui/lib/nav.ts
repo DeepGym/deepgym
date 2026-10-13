@@ -1,6 +1,7 @@
 import {
   type RemixiconComponentType,
   RiBox3Line,
+  RiDashboardLine,
   RiFilmLine,
   RiPlayCircleLine,
   RiShieldCheckLine,
@@ -17,7 +18,8 @@ export interface NavItem {
 
 /** The console's pages, shared by the sidebar, the command palette and the shortcuts. */
 export const NAV: NavItem[] = [
-  { href: '/', label: 'Environments', icon: RiStackLine, chord: 'g e' },
+  { href: '/', label: 'Overview', icon: RiDashboardLine, chord: 'g o' },
+  { href: '/environments/', label: 'Environments', icon: RiStackLine, chord: 'g e' },
   { href: '/runs/', label: 'Runs', icon: RiPlayCircleLine, chord: 'g r' },
   { href: '/episodes/', label: 'Episodes', icon: RiFilmLine, chord: 'g p' },
   { href: '/sandboxes/', label: 'Sandboxes', icon: RiBox3Line, chord: 'g s' },

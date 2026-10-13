@@ -1,10 +1,10 @@
 import { Suspense } from 'react';
-import { EnvironmentsPage } from '@/components/environments/environments-page';
+import { OverviewPage } from '@/components/overview/overview-page';
 
 export default function Page() {
   return (
     <Suspense>
-      <EnvironmentsPage />
+      <OverviewPage />
     </Suspense>
   );
 }

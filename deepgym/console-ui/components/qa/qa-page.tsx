@@ -10,8 +10,9 @@ import { useApi } from '@/lib/api';
 import { timeAgo } from '@/lib/format';
 import type { QAReport } from '@/lib/types';
 import { useQueryParam } from '@/lib/use-query-param';
+import { qaStatus } from '@/lib/verdict';
 import { QADrawer } from './qa-drawer';
-import { QAStatusBadge, qaStatus } from './qa-status';
+import { QAStatusBadge } from './qa-status';
 
 type QARow = QAReport & { id: string };
 

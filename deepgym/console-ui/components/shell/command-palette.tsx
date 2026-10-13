@@ -104,7 +104,7 @@ export function CommandPalette({
               icon={RiStackLine}
               label={env.name}
               hint={env.id}
-              onSelect={() => go(`/?env=${encodeURIComponent(env.id)}`)}
+              onSelect={() => go(`/environments/?env=${encodeURIComponent(env.id)}`)}
             />
           ))}
         </Command.Group>

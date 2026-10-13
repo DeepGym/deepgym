@@ -1,6 +1,51 @@
 import { expect, test } from 'bun:test';
-import type { CaseResult } from './types';
-import { caseReason, failuresFirst, scoreTone, verdictLine } from './verdict';
+import type { CaseResult, QAReport, RunSummary } from './types';
+import { caseReason, failuresFirst, recentActivity, scoreTone, verdictLine } from './verdict';
+
+const run = (id: string, created_at: string, extra: Partial<RunSummary> = {}): RunSummary => ({
+  id,
+  group_id: 'g',
+  environment: `env-${id}`,
+  mode: 'local',
+  provider: 'local',
+  reference: true,
+  status: 'completed',
+  score: 1,
+  passed: true,
+  error_type: null,
+  duration_ms: 10,
+  created_at,
+  finished_at: created_at,
+  ...extra,
+});
+
+const report = (environment: string, created_at: string, checks: QAReport['checks']): QAReport => ({
+  environment,
+  passed: checks.every((check) => check.passed),
+  checks,
+  created_at,
+});
+
+test('activity merges runs and QA verdicts newest first, without skipped QA', () => {
+  const items = recentActivity(
+    [
+      run('a', '2026-10-13T10:00:00+00:00'),
+      run('b', '2026-10-13T12:00:00.5+00:00', { status: 'failed', passed: false, error_type: 'timeout' }),
+      run('c', '2026-10-13T12:30:00+00:00', { status: 'running', score: null, passed: null }),
+    ],
+    [
+      report('qa-env', '2026-10-13T11:00:00Z', [{ name: 'empty_fails', passed: false, details: '1.00' }]),
+      report('skip-env', '2026-10-13T13:00:00Z', [{ name: 'skipped', passed: true, details: 'no ref' }]),
+    ],
+    3,
+  );
+  expect(items.map((item) => [item.key, item.status, item.subline])).toEqual([
+    ['run-c', 'running', 'Run in progress'],
+    ['run-b', 'failed', 'Run error: timeout'],
+    ['qa-qa-env', 'failed', 'QA: 0 of 1 checks passed'],
+  ]);
+  expect(items[2].href).toBe('/qa/?env=qa-env');
+});
 
 test('failures first, then in-flight, then passed, keeping order within each status', () => {
   const rows = [

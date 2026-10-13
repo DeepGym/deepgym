@@ -1,6 +1,7 @@
-/** Pure helpers behind the console's verdict views: score colour bands, case reasons and headlines. */
+/** Pure helpers behind the console's verdict views: statuses, colour bands, headlines and the activity feed. */
 
-import type { CaseResult, RunStatus, RunSummary } from './types';
+import { formatScore } from './format';
+import type { CaseResult, QAReport, RunStatus, RunSummary } from './types';
 
 export type Tone = 'good' | 'warn' | 'bad';
 
@@ -47,4 +48,54 @@ export function caseReason(item: CaseResult): string {
   if (item.error) return item.error;
   if (item.passed || !item.expected_summary) return item.actual_summary;
   return `expected ${item.expected_summary}, got ${item.actual_summary || 'nothing'}`;
+}
+
+/** pass, fail or skip (environments `deepgym qa` can't check carry one "skipped" check). */
+export function qaStatus(report: QAReport): 'pass' | 'fail' | 'skip' {
+  if (report.checks.some((check) => check.name === 'skipped')) return 'skip';
+  return report.passed ? 'pass' : 'fail';
+}
+
+export interface ActivityItem {
+  key: string;
+  /** When the run started or the QA report was written (ISO). */
+  at: string;
+  label: string;
+  subline: string;
+  status: TaskStatus;
+  href: string;
+}
+
+function runSubline(run: RunSummary): string {
+  if (run.status === 'queued') return 'Run queued';
+  if (run.status === 'running') return 'Run in progress';
+  return run.error_type ? `Run error: ${run.error_type}` : `Run scored ${formatScore(run.score)}`;
+}
+
+/** The latest runs and QA verdicts, newest first; QA reports of environments it can't check are left out. */
+export function recentActivity(runs: RunSummary[], reports: QAReport[], limit: number): ActivityItem[] {
+  const items: ActivityItem[] = [
+    ...runs.map((run) => ({
+      key: `run-${run.id}`,
+      at: run.created_at,
+      label: run.environment,
+      subline: runSubline(run),
+      status: runTaskStatus(run),
+      href: `/runs/detail/?id=${run.id}`,
+    })),
+    ...reports
+      .filter((report) => qaStatus(report) !== 'skip')
+      .map(
+        (report): ActivityItem => ({
+          key: `qa-${report.environment}`,
+          at: report.created_at,
+          label: report.environment,
+          subline: `QA: ${report.checks.filter((check) => check.passed).length} of ${report.checks.length} checks passed`,
+          status: report.passed ? 'done' : 'failed',
+          href: `/qa/?env=${encodeURIComponent(report.environment)}`,
+        }),
+      ),
+  ];
+  // Runs and QA reports format their timestamps differently, so compare instants, not strings.
+  return items.toSorted((a, b) => Date.parse(b.at) - Date.parse(a.at)).slice(0, limit);
 }

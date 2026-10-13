@@ -95,7 +95,7 @@ export function RunDetailPage() {
               size="small"
               variant="secondary"
               leadingIcon={RiStackLine}
-              onClick={() => router.push(`/?env=${encodeURIComponent(run.environment)}`)}
+              onClick={() => router.push(`/environments/?env=${encodeURIComponent(run.environment)}`)}
             >
               Environment
             </Button>

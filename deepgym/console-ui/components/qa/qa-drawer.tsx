@@ -6,8 +6,7 @@ import { Drawer } from '@/components/ui/overlay';
 import { VerdictBanner } from '@/components/ui/verdict-banner';
 import { timeAgo } from '@/lib/format';
 import type { QAReport } from '@/lib/types';
-import { failuresFirst, verdictLine } from '@/lib/verdict';
-import { qaStatus } from './qa-status';
+import { failuresFirst, qaStatus, verdictLine } from '@/lib/verdict';
 
 /** One environment's QA checks: the verdict on top, failed checks first, each with its details inline. */
 export function QADrawer({ report, onClose }: { report: QAReport | null; onClose: () => void }) {

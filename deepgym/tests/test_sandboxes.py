@@ -448,3 +448,5 @@ def test_daytona_desktop_runs_as_the_agent_and_is_locked_down(
     assert '--reuid=997' in prepare and '/opt/deepgym-netns' in prepare
     for blocked in ('thunar-uca', 'Thunar/uca.xml', 'gio-launch-desktop', 'xfce4-terminal', 'idle'):
         assert blocked in prepare, f'{blocked} must be locked down before the desktop starts'
+    for x11vnc_option in ('novncconnect', 'noremote', 'nocmds', 'safer'):
+        assert x11vnc_option in prepare

@@ -69,3 +69,26 @@ def test_a_shell_out_of_the_desktop_is_the_unprivileged_agent(dg: DeepGym) -> No
         result = session.score()
     assert not [name for name, out in escaped.items() if 'ESCAPED' in out], escaped
     assert result.score == 0.0, 'the spy must not forge the untouched desktop to a pass'
+
+
+# Root-side stand-in for any loopback service outside the agent's network namespace.
+_LISTENER = (
+    '(setsid python3 -c "import socket; s = socket.socket(); '
+    "s.bind(('127.0.0.1', 5999)); s.listen(); s.accept(); "
+    "open('/root/vnc_hit', 'w').write('hit')\" >/dev/null 2>&1 &); sleep 1"
+)
+
+
+def test_x11vnc_ignores_connect_requests_from_x_clients(dg: DeepGym) -> None:
+    """x11vnc runs as the sudoer outside the agent's network namespace, and any X client
+    can set root-window properties, so it must not act on VNC_CONNECT."""
+    env = load_environment('file_manager')
+    env = env.model_copy(update={'allowed_actions': env.allowed_actions | {'bash'}})
+    request = 'xprop -root -f VNC_CONNECT 8s -set VNC_CONNECT 127.0.0.1:5999; sleep 5'
+    with dg.session(env) as session:
+        session.start()
+        root = session._backend._sandbox  # root exec, outside the agent's namespace
+        root.exec(_LISTENER, timeout=30)
+        session.step(Action(action_type='bash', content=request))
+        hit = root.exec('test -e /root/vnc_hit && echo CONNECTED || echo none', timeout=30)
+    assert 'none' in hit.output

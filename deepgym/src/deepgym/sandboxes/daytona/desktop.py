@@ -41,8 +41,10 @@ _LAUNCHERS = (
 _LOCKDOWN = """set -e
 printf %s {wrapper} > /usr/local/bin/xfce4-session
 chmod 755 /usr/local/bin/xfce4-session
-# x11vnc runs as the sudoer and by default obeys remote-control commands from any X client.
-printf 'noremote\\nnocmds\\n' > "$HOME/.x11vncrc"
+# x11vnc runs as the sudoer outside the agent's network namespace and by default acts on
+# root-window properties any X client can set: VNC_CONNECT (connect out) and X11VNC_REMOTE
+# (remote control). Turn both off, and with -safer its -gui and -connect file channels too.
+printf 'novncconnect\\nnoremote\\nnocmds\\nsafer\\n' > "$HOME/.x11vncrc"
 mkdir -p /etc/chromium/policies/managed
 printf %s {policy} > /etc/chromium/policies/managed/deepgym.json
 # Thunar's custom actions, "Open Terminal Here" included, all come from this plugin.

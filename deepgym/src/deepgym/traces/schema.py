@@ -499,6 +499,15 @@ def _cut_short(copy: Trace, furthest: Trace) -> bool:
     A traced episode takes no action once scored, so a graded copy has every step, and it
     never clears an error, so one the copy records stays (or a later one replaces it).
     """
+    if copy.schema_version == '1.0' and copy.result is not None and not copy.prior_results:
+        # Schema 1.0 kept only the last grade in memory, so a console copy can lack the
+        # earlier grades its event log has: take those from the furthest copy.
+        history = _grades(furthest)
+        if copy.result not in history:
+            return False
+        finished = copy.finished_at is not None
+        position = len(history) - 1 if finished else history.index(copy.result)
+        copy = copy.model_copy(update={'prior_results': history[:position]})
     if copy.finished_at is not None:
         return copy == furthest
     grades = _grades(copy)

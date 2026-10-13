@@ -234,6 +234,19 @@ class TestSchema:
             with pytest.raises(ValueError, match='trace0001'):
                 merge_copies(copies)
 
+    def test_merge_copies_fills_a_1_0_console_copy_from_its_event_log(self) -> None:
+        # Schema 1.0 logged every grade but kept only the last in memory, so in the console.
+        graded = graded_trace().model_copy(update={'schema_version': '1.0'})
+        failed = graded.result.model_copy(update={'score': 0.0, 'passed': False})
+        logged = graded.model_copy(update={'prior_results': (failed,)})
+        snapshot = graded.model_copy(update={'result': failed, 'finished_at': None})
+        other = graded.result.model_copy(update={'score': 0.5})
+
+        assert merge_copies([graded, logged]) == [logged]
+        assert merge_copies([snapshot, logged]) == [logged]
+        with pytest.raises(ValueError, match='trace0001'):
+            merge_copies([graded.model_copy(update={'result': other}), logged])
+
     def test_only_schema_1_1_continues_a_turn_without_messages(self) -> None:
         trace = graded_trace()
         bare = trace.steps[1].model_copy(update={'messages': ()})

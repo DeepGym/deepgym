@@ -381,8 +381,9 @@ model's output may have caused (a verifier failure, a timeout); those are never 
 again. A run the sandbox provider or the network failed
 (`deepgym.exceptions.is_infrastructure_failure`) is graded once more after a short pause.
 Every run, first or second, takes one of the router's `max_parallel` slots (32 by
-default), and no request waits past 150 s (OpenRLHF gives up at 180 s). If the second
-grading fails too or doesn't finish in time, the first one doesn't finish in time, or a
+default), and no request waits past 150 s (OpenRLHF gives up at 180 s); a first run
+still going then scores 0, since the model's code may be what slows it. If the second
+grading fails too or doesn't finish in time, the first one never got a slot in time, or a
 query doesn't contain its prompt, the sample gets the router's `infra_failure_score`,
 never a score from a run that didn't finish:
 

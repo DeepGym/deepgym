@@ -28,7 +28,13 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator
 from deepgym import __version__
 from deepgym.exceptions import DeepGymError
 from deepgym.judge import local_runs_root
-from deepgym.qa.report import DIFFICULTY_CHECK, MUTANTS_CHECK, QACheck, QAReport
+from deepgym.qa.report import (
+    DIFFICULTY_CHECK,
+    MUTANTS_CHECK,
+    QACheck,
+    QAReport,
+    write_atomically,
+)
 from deepgym.verifier_lint import ADVISORY_NOTE
 
 APPROVAL_FILE = 'approval.json'
@@ -206,8 +212,7 @@ def approve(
         lint=LintRecord(warnings=list(lint)),
     )
     try:
-        with path.open('x', encoding='utf-8') as handle:
-            handle.write(approval.model_dump_json(indent=2) + '\n')
+        write_atomically(path, approval.model_dump_json(indent=2) + '\n', exclusive=True)
     except FileExistsError as exc:
         raise DeepGymError(
             f'{path} already exists and approvals are never overwritten; '

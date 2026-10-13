@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import contextlib
 import os
+import tempfile
 from collections.abc import Iterable, Sequence
 from datetime import datetime, timezone
 from pathlib import Path
@@ -31,6 +33,8 @@ _COLUMNS = {
     'deterministic': 'det',
     'empty_fails': 'empty',
     'stub_fails': 'stub',
+    'busy_fails': 'busy',
+    'random_fails': 'rand',
     'hack_resistant': 'hack',
     MUTANTS_CHECK: 'mut',
     DIFFICULTY_CHECK: 'diff',
@@ -88,9 +92,47 @@ class QAReport(BaseModel):
 
     @computed_field
     @property
+    def ran(self) -> list[str]:
+        """Checks that ran: each passed, failed or couldn't decide."""
+        return [check.name for check in self.checks if check.status != 'skip']
+
+    @computed_field
+    @property
     def not_run(self) -> list[str]:
         """Checks that were skipped: they count neither way, so a pass never rests on them."""
         return [check.name for check in self.checks if check.status == 'skip']
+
+
+def write_atomically(path: Path, text: str, *, exclusive: bool = False) -> None:
+    """Write *text* to *path* so readers see the old file or the whole new one, never half.
+
+    The text goes to a temporary file in the same directory, flushed to disk, then
+    takes *path*'s place in one step. With *exclusive*, an existing *path* is never
+    replaced.
+
+    Raises:
+        FileExistsError: If *exclusive* and *path* already exists.
+    """
+    with tempfile.NamedTemporaryFile(
+        'w', dir=path.parent, prefix=f'.{path.name}.', delete=False, encoding='utf-8'
+    ) as handle:
+        temporary = Path(handle.name)
+        try:
+            handle.write(text)
+            handle.flush()
+            os.fsync(handle.fileno())
+        except BaseException:
+            handle.close()
+            temporary.unlink()
+            raise
+    try:
+        if exclusive:
+            os.link(temporary, path)  # fails if path exists, and is atomic when it doesn't
+        else:
+            os.replace(temporary, path)
+    finally:
+        with contextlib.suppress(FileNotFoundError):
+            temporary.unlink()
 
 
 def report_dir() -> Path:
@@ -101,7 +143,9 @@ def report_dir() -> Path:
 def write_report(report: QAReport) -> Path:
     """Write *report* to ``<report_dir()>/<env>.json``.
 
-    Slashes in the environment name become underscores in the file name.
+    Slashes in the environment name become underscores in the file name. The write is
+    atomic (see :func:`write_atomically`): a crash or a concurrent writer never leaves a
+    truncated report.
 
     Returns:
         Path of the written file.
@@ -109,7 +153,7 @@ def write_report(report: QAReport) -> Path:
     directory = report_dir()
     directory.mkdir(parents=True, exist_ok=True)
     path = directory / f'{report.environment.replace("/", "_")}.json'
-    path.write_text(report.model_dump_json(indent=2) + '\n', encoding='utf-8')
+    write_atomically(path, report.model_dump_json(indent=2) + '\n')
     return path
 
 

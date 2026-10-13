@@ -75,6 +75,10 @@ RESERVED_JUDGE_FILES = frozenset({'verifier.py', 'deepgym_solution.py', 'test_ca
 REFERENCE_FILES = ('reference_solution.py', 'reference_solution.diff')
 """Where an env folder keeps the model output that must score 1.0 (a diff for repo patches)."""
 
+REFERENCE_ACTIONS = 'reference_actions.json'
+"""Where a multi-turn env folder keeps the scripted episode that must score 1.0: a JSON list
+of actions, or for a computer-use env one such list per variant, in variants.json order."""
+
 
 class Environment(BaseModel):
     """Define a task environment for RL evaluation.
@@ -526,6 +530,10 @@ class MultiTurnEnvironment(BaseModel):
 
     type: Literal['multi-turn'] = 'multi-turn'
     """Environment type discriminator."""
+
+    reference_actions: list[Action] | None = Field(default=None, exclude=True)
+    """A scripted episode that should score 1.0 (the folder's reference_actions.json), for
+    QA. Never serialized, so it reaches neither the agent nor a stored env."""
 
     @model_validator(mode='after')
     def check_desktop_actions(self) -> MultiTurnEnvironment:

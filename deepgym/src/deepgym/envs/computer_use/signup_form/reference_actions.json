@@ -1,0 +1,90 @@
+[
+  [
+    {"action_type": "click", "x": 512, "y": 177},
+    {"action_type": "type", "content": "Ada Lovelace"},
+    {"action_type": "click", "x": 512, "y": 254},
+    {"action_type": "type", "content": "ada@example.com"},
+    {"action_type": "key", "content": "Tab"},
+    {"action_type": "type", "content": "Team"},
+    {"action_type": "click", "x": 305, "y": 380},
+    {"action_type": "click", "x": 512, "y": 441},
+    {"action_type": "done"}
+  ],
+  [
+    {"action_type": "click", "x": 512, "y": 177},
+    {"action_type": "type", "content": "Alan Turing"},
+    {"action_type": "click", "x": 512, "y": 254},
+    {"action_type": "type", "content": "alan@example.org"},
+    {"action_type": "key", "content": "Tab"},
+    {"action_type": "type", "content": "Pro"},
+    {"action_type": "click", "x": 305, "y": 380},
+    {"action_type": "click", "x": 512, "y": 441},
+    {"action_type": "done"}
+  ],
+  [
+    {"action_type": "click", "x": 512, "y": 177},
+    {"action_type": "type", "content": "Grace Hopper"},
+    {"action_type": "click", "x": 512, "y": 254},
+    {"action_type": "type", "content": "grace.hopper@navy.example"},
+    {"action_type": "key", "content": "Tab"},
+    {"action_type": "type", "content": "Free"},
+    {"action_type": "click", "x": 305, "y": 380},
+    {"action_type": "click", "x": 512, "y": 441},
+    {"action_type": "done"}
+  ],
+  [
+    {"action_type": "click", "x": 512, "y": 177},
+    {"action_type": "type", "content": "Katherine Johnson"},
+    {"action_type": "click", "x": 512, "y": 254},
+    {"action_type": "type", "content": "kjohnson@nasa.example"},
+    {"action_type": "key", "content": "Tab"},
+    {"action_type": "type", "content": "Team"},
+    {"action_type": "click", "x": 305, "y": 380},
+    {"action_type": "click", "x": 512, "y": 441},
+    {"action_type": "done"}
+  ],
+  [
+    {"action_type": "click", "x": 512, "y": 177},
+    {"action_type": "type", "content": "Linus Torvalds"},
+    {"action_type": "click", "x": 512, "y": 254},
+    {"action_type": "type", "content": "linus@kernel.example"},
+    {"action_type": "key", "content": "Tab"},
+    {"action_type": "type", "content": "Pro"},
+    {"action_type": "click", "x": 305, "y": 380},
+    {"action_type": "click", "x": 512, "y": 441},
+    {"action_type": "done"}
+  ],
+  [
+    {"action_type": "click", "x": 512, "y": 177},
+    {"action_type": "type", "content": "Margaret Hamilton"},
+    {"action_type": "click", "x": 512, "y": 254},
+    {"action_type": "type", "content": "mhamilton@mit.example"},
+    {"action_type": "key", "content": "Tab"},
+    {"action_type": "type", "content": "Team"},
+    {"action_type": "click", "x": 305, "y": 380},
+    {"action_type": "click", "x": 512, "y": 441},
+    {"action_type": "done"}
+  ],
+  [
+    {"action_type": "click", "x": 512, "y": 177},
+    {"action_type": "type", "content": "Edsger Dijkstra"},
+    {"action_type": "click", "x": 512, "y": 254},
+    {"action_type": "type", "content": "ewd@utexas.example"},
+    {"action_type": "key", "content": "Tab"},
+    {"action_type": "type", "content": "Free"},
+    {"action_type": "click", "x": 305, "y": 380},
+    {"action_type": "click", "x": 512, "y": 441},
+    {"action_type": "done"}
+  ],
+  [
+    {"action_type": "click", "x": 512, "y": 177},
+    {"action_type": "type", "content": "Barbara Liskov"},
+    {"action_type": "click", "x": 512, "y": 254},
+    {"action_type": "type", "content": "liskov@csail.example"},
+    {"action_type": "key", "content": "Tab"},
+    {"action_type": "type", "content": "Pro"},
+    {"action_type": "click", "x": 305, "y": 380},
+    {"action_type": "click", "x": 512, "y": 441},
+    {"action_type": "done"}
+  ]
+]

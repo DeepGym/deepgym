@@ -11,7 +11,13 @@ from pathlib import Path
 from string import Template
 
 from deepgym.computer_use import ComputerUseEnvironment
-from deepgym.models import REFERENCE_FILES, Environment, MultiTurnEnvironment
+from deepgym.models import (
+    REFERENCE_ACTIONS,
+    REFERENCE_FILES,
+    Action,
+    Environment,
+    MultiTurnEnvironment,
+)
 from deepgym.verifier_template import split_future_imports
 
 logger = logging.getLogger(__name__)
@@ -266,7 +272,7 @@ def _benchmark_entries(registry: list[dict], benchmark_name: str) -> list[dict]:
 
 
 _COMPUTER_USE_SPEC_FILES = frozenset(
-    {'task.md', 'verifier.py', 'metadata.json', 'setup.sh', 'variants.json'}
+    {'task.md', 'verifier.py', 'metadata.json', 'setup.sh', 'variants.json', REFERENCE_ACTIONS}
 )
 
 
@@ -291,6 +297,31 @@ def _read_text_files(root: Path, prefix: str = '') -> dict[str, str]:
             raise ValueError(f'{rel.as_posix()} links outside {root.name}; copy the file in')
         files[f'{prefix}{rel.as_posix()}'] = path.read_text(encoding='utf-8')
     return files
+
+
+def _read_reference_actions(env_dir: Path, variant: int = 0) -> list[Action] | None:
+    """Return the scripted reference episode in *env_dir*, or None if it has none.
+
+    A computer-use env keeps one per variant: a list of episodes in variants.json order.
+
+    Raises:
+        ValueError: If the file isn't a list of actions (or of episodes), or has no
+            episode for *variant*.
+    """
+    path = env_dir / REFERENCE_ACTIONS
+    if not path.is_file():
+        return None
+    try:
+        data = json.loads(path.read_text(encoding='utf-8'))
+        if isinstance(data, list) and data and all(isinstance(item, list) for item in data):
+            if not 0 <= variant < len(data):
+                raise ValueError(f'no episode for variant {variant}')
+            data = data[variant]
+        if not isinstance(data, list):
+            raise ValueError('expected a JSON list of actions')
+        return [Action.model_validate(item) for item in data]
+    except ValueError as exc:
+        raise ValueError(f'{REFERENCE_ACTIONS}: {exc}') from exc
 
 
 def _load_computer_use_env(env_dir: Path, metadata: dict, variant: int) -> ComputerUseEnvironment:
@@ -327,6 +358,7 @@ def _load_computer_use_env(env_dir: Path, metadata: dict, variant: int) -> Compu
         + (env_dir / 'verifier.py').read_text(encoding='utf-8'),
         setup_script=setup_path.read_text(encoding='utf-8') if setup_path.exists() else '',
         files=files,
+        reference_actions=_read_reference_actions(env_dir, variant),
         **{
             key: metadata[key]
             for key in ('difficulty', 'domain', 'tags', 'max_steps', 'timeout_per_step', 'image')
@@ -341,7 +373,7 @@ _MULTI_TURN_SPEC_FILES = frozenset(
         'verifier.py',
         'metadata.json',
         'setup.sh',
-        'reference_actions.json',
+        REFERENCE_ACTIONS,
         'approval.json',
         *REFERENCE_FILES,
     }
@@ -372,6 +404,7 @@ def _load_multi_turn_env(env_dir: Path, settings: dict) -> MultiTurnEnvironment:
         setup_script=setup_path.read_text(encoding='utf-8') if setup_path.exists() else '',
         final_verifier_code=''.join(future for future, _ in parts)
         + '\n\n'.join(rest for _, rest in parts),
+        reference_actions=_read_reference_actions(env_dir),
         **{
             key: settings[key]
             for key in ('difficulty', 'domain', 'tags', 'max_steps', 'timeout_per_step', 'image')

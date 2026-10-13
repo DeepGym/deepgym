@@ -9,8 +9,13 @@ expected answers or hand back an object that equals anything. Every case is
 reported with a reason. A crash in this file exits 2 (verifier error, no reward)
 instead of a silent 0.
 
-To adapt it: point ENTRY and FUNCTION at what the agent must build, rewrite
-expected() and edit variants.py.
+Only fixes earn reward. The starting runs.py already gets many cases right, so
+paying for those would pay an agent that does nothing. The cases it gets wrong
+(fail-to-pass) are scored; the ones it gets right (pass-to-pass) must keep passing,
+and breaking any of them zeroes the score.
+
+To adapt it: point ENTRY and FUNCTION at what the agent must fix, rewrite expected()
+and starting() (what the shipped code returns) and edit variants.py.
 """
 
 import json
@@ -46,10 +51,24 @@ def expected(values):
     return best
 
 
+def starting(values):
+    """What the shipped runs.py returns, bugs and all: where it already matches
+    expected(), a case only guards against regressions."""
+    best = current = 1
+    for previous, value in zip(values, values[1:]):
+        if value >= previous:
+            current += 1
+            best = max(best, current)
+        else:
+            current = 1
+    return best
+
+
 def run_case(index, values, function):
     """Call the agent's code on one input and report the outcome with a reason."""
     want = expected(values)
-    case = {'id': f'case_{index}', 'input_summary': repr(values)[:200]}
+    kind = 'pass_to_pass' if starting(values) == want else 'fail_to_pass'
+    case = {'id': f'{kind}_{index}', 'input_summary': repr(values)[:200]}
     case['expected_summary'] = repr(want)[:200]
     try:
         got = function(values)
@@ -63,12 +82,15 @@ def run_case(index, values, function):
 
 
 def result(cases, problem=None):
-    """Full marks only when every case passes; partial credit otherwise."""
-    passed = sum(case['passed'] for case in cases)
+    """The share of fail-to-pass cases fixed, or 0 if any pass-to-pass case broke."""
+    fixes = [case for case in cases if case['id'].startswith('fail_to_pass')]
+    broken = [case for case in cases if not case['passed'] and case not in fixes]
+    fixed = sum(case['passed'] for case in fixes)
+    score = 0.0 if broken or not fixes else fixed / len(fixes)
     return {
-        'score': passed / len(cases) if cases else 0.0,
-        'passed': bool(cases) and passed == len(cases),
-        'details': problem or f'{passed}/{len(cases)} cases passed',
+        'score': score,
+        'passed': bool(fixes) and not broken and fixed == len(fixes),
+        'details': problem or f'{fixed}/{len(fixes)} failing cases fixed, {len(broken)} broken',
         'cases': cases,
         'seed': SEED,
     }

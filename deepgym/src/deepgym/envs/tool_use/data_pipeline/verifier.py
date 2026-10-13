@@ -56,15 +56,15 @@ def verify(solution_path, test_cases_path=None):
 
     checks = {}
 
-    # Check script ran without error.
-    checks['no_error'] = proc.returncode == 0
-
     # Check output.csv exists.
     try:
         output_text = read_output(output_path, work_dir)
         checks['output_exists'] = True
     except (OSError, ValueError):  # missing, a symlink, or not UTF-8 text
         checks['output_exists'] = False
+
+    # A clean exit counts only with output to show for it: an empty script also exits 0.
+    checks['no_error'] = proc.returncode == 0 and checks['output_exists']
 
     try:
         rows = list(csv.DictReader(io.StringIO(output_text))) if checks['output_exists'] else []

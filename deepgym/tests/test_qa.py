@@ -96,6 +96,18 @@ def test_reference_runs_without_a_verdict_prove_nothing(local_dg: DeepGym) -> No
     assert checks['deterministic'].status == 'inconclusive'
 
 
+@pytest.mark.parametrize('reward', [0.25, 0.01])
+def test_negative_controls_that_earn_any_reward_fail(reward: float, local_dg: DeepGym) -> None:
+    body = f"return 1.0 if 'a + b' in open(solution_path).read() else {reward}\n"
+
+    checks = _by_name(single_turn_checks(_env(body), _ADD_REFERENCE, local_dg, reruns=1))
+
+    assert checks['reference_passes'].passed
+    for name in ('empty_fails', 'stub_fails'):
+        assert checks[name].status == 'fail'
+        assert checks[name].details.endswith('earned reward without doing the task')
+
+
 def test_one_reference_run_says_nothing_about_determinism(local_dg: DeepGym) -> None:
     checks = _by_name(single_turn_checks(_env(_ADD_VERIFIER), _ADD_REFERENCE, local_dg, reruns=0))
 
@@ -220,7 +232,15 @@ def test_write_report_uses_the_console_format(
 
     assert path == tmp_path / 'cyber_toy.json'
     data = json.loads(path.read_text(encoding='utf-8'))
-    assert set(data) == {'environment', 'status', 'passed', 'not_run', 'checks', 'created_at'}
+    assert set(data) == {
+        'environment',
+        'status',
+        'passed',
+        'ran',
+        'not_run',
+        'checks',
+        'created_at',
+    }
     assert data['environment'] == 'cyber/toy'
     assert (data['status'], data['passed']) == ('fail', False)
     assert data['checks'] == [
@@ -293,21 +313,22 @@ def _client(answers: list[str], seen: list[dict]) -> ZaiChatClient:
 
 
 @pytest.mark.parametrize(
-    ('answers', 'passed', 'details'),
+    ('answers', 'details'),
     [
-        ([_RIGHT, _WRONG], True, 'pass@1=0.50 pass@4=1.00 (2/4 solved by m)'),
-        ([_RIGHT], False, 'too_easy: pass@1=1.00 pass@4=1.00 (4/4 solved by m)'),
-        ([_WRONG], False, 'too_hard: pass@1=0.00 pass@4=0.00 (0/4 solved by m)'),
+        ([_RIGHT, _WRONG], 'pass@1=0.50 pass@4=1.00, mean reward 0.50, spread 0.50'),
+        ([_RIGHT], 'too_easy, no_variance: pass@1=1.00 pass@4=1.00, mean reward 1.00, spread 0.00'),
+        ([_WRONG], 'too_hard, no_variance: pass@1=0.00 pass@4=0.00, mean reward 0.00, spread 0.00'),
     ],
 )
-def test_difficulty_check(
-    answers: list[str], passed: bool, details: str, local_dg: DeepGym
+def test_difficulty_is_reported_never_gated(
+    answers: list[str], details: str, local_dg: DeepGym
 ) -> None:
     seen: list[dict] = []
 
     check = difficulty_check(_env(_ADD_VERIFIER), local_dg, _client(answers, seen), samples=4)
 
-    assert (check.passed, check.details) == (passed, details)
+    assert check.passed  # too easy or too hard is information, not a failed environment
+    assert check.details.startswith(details)
     assert len(seen) == 4
     assert seen[0]['messages'] == [{'role': 'user', 'content': _ADD_TASK}]
     assert seen[0]['temperature'] == 1.0
@@ -329,6 +350,58 @@ def test_difficulty_is_inconclusive_when_a_sample_gets_no_verdict(local_dg: Deep
     assert check.details == '1/2 samples got no verdict (the verifier errored)'
 
 
+def test_partial_rewards_are_variance_not_too_hard(local_dg: DeepGym) -> None:
+    body = "return 0.2 if 'low' in open(solution_path).read() else 0.8\n"
+    answers = ['```python\nlow = 1\n```', '```python\nhigh = 1\n```']
+
+    check = difficulty_check(_env(body), local_dg, _client(answers, []), samples=2)
+
+    assert check.details.startswith('pass@1=0.00 pass@2=0.00, mean reward 0.50, spread 0.30')
+
+
+def _flaky_client(statuses: list[int], seen: list[int]) -> ZaiChatClient:
+    """A client whose endpoint answers with *statuses* in turn, then a solved answer."""
+    replies = iter(statuses)
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        status = next(replies, 200)
+        seen.append(status)
+        if status != 200:
+            return httpx.Response(status, headers={'retry-after': '0'}, json={})
+        return httpx.Response(200, json={'choices': [{'message': {'content': _RIGHT}}]})
+
+    transport = httpx.MockTransport(handler)
+    return ZaiChatClient('key', base_url='https://llm.test/v1', model='m', transport=transport)
+
+
+def test_a_rate_limited_sample_is_retried(
+    local_dg: DeepGym, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr('deepgym.qa.difficulty.time.sleep', lambda _: None)
+    seen: list[int] = []
+
+    check = difficulty_check(_env(_ADD_VERIFIER), local_dg, _flaky_client([429, 503], seen), 2)
+
+    assert check.status == 'pass'
+    assert seen[:2] == [429, 503] and seen.count(200) == 2
+
+
+def test_an_endpoint_that_stays_rate_limited_makes_difficulty_inconclusive(
+    local_dg: DeepGym, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr('deepgym.qa.difficulty.time.sleep', lambda _: None)
+
+    check = difficulty_check(_env(_ADD_VERIFIER), local_dg, _flaky_client([429] * 99, []), 2)
+
+    assert check.status == 'inconclusive'  # never a model failure, never an aborted run
+    assert '2/2 samples never came back from the model endpoint after 5 retries' in check.details
+
+
+def test_an_endpoint_that_refuses_the_request_stops_the_run(local_dg: DeepGym) -> None:
+    with pytest.raises(DeepGymError, match='refused the request'):
+        difficulty_check(_env(_ADD_VERIFIER), local_dg, _flaky_client([401] * 9, []), 2)
+
+
 def test_client_from_env(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.delenv('OPENAI_API_KEY', raising=False)
     with pytest.raises(DeepGymError, match='OPENAI_API_KEY'):
@@ -341,3 +414,24 @@ def test_client_from_env(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv('OPENAI_BASE_URL', 'http://localhost:8000/v1/')
     client = client_from_env('m')
     assert (client.base_url, client.model) == ('http://localhost:8000/v1', 'm')
+
+
+def test_reports_are_written_whole_or_not_at_all(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from deepgym.qa import report as report_module
+
+    target = tmp_path / 'r.json'
+    report_module.write_atomically(target, 'old\n')
+
+    def crash(*args: object) -> None:
+        raise OSError('disk gone')
+
+    monkeypatch.setattr(report_module.os, 'replace', crash)
+    with pytest.raises(OSError, match='disk gone'):
+        report_module.write_atomically(target, 'new\n')
+
+    assert target.read_text() == 'old\n'  # the previous evidence survives a failed write
+    assert [path.name for path in tmp_path.iterdir()] == ['r.json']  # no stray temp file
+    with pytest.raises(FileExistsError):
+        report_module.write_atomically(target, 'new\n', exclusive=True)

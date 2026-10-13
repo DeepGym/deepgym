@@ -1,0 +1,77 @@
+"""Scripted agents for multi-turn QA: they act, but never work on the task.
+
+A verifier must give them nothing. One that pays for being busy, or for random
+clicks and commands, rewards a policy for activity instead of the outcome.
+Their shell actions are harmless (``ls``, ``print``, notes files), because a local
+session runs them on the host.
+"""
+
+from __future__ import annotations
+
+import random
+
+from deepgym.models import Action, ActionType, MultiTurnEnvironment
+
+_SCREEN = (1024, 768)
+"""Daytona's default desktop, in screenshot pixels."""
+
+_SEED = 0
+"""Fixed, so the random agent replays the same episode every time."""
+
+_COMMANDS = ('ls', 'pwd', 'echo working', 'true')
+_CODE = ('print("working")', 'total = sum(range(10))')
+_TEXT = ('hello', 'test', '42')
+_KEYS = ('Return', 'Tab', 'Escape', 'ctrl+a')
+_DIRECTIONS = ('up', 'down', 'left', 'right')
+
+
+def do_everything(env: MultiTurnEnvironment) -> list[Action]:
+    """Every allowed action type in turn, with fixed arguments, for the whole step budget."""
+    kinds = _kinds(env)
+    return [_action(kinds[step % len(kinds)], step, None) for step in range(env.max_steps)]
+
+
+def random_agent(env: MultiTurnEnvironment) -> list[Action]:
+    """Seeded random actions of the allowed types, for the whole step budget."""
+    rng = random.Random(_SEED)
+    kinds = _kinds(env)
+    return [_action(rng.choice(kinds), step, rng) for step in range(env.max_steps)]
+
+
+def _kinds(env: MultiTurnEnvironment) -> list[ActionType]:
+    """The action types the env allows, except 'done', in a fixed order."""
+    return sorted(env.allowed_actions - {'done'}) or ['done']
+
+
+def _action(kind: ActionType, step: int, rng: random.Random | None) -> Action:
+    """One harmless action of *kind*: fixed arguments without *rng*, random ones with it."""
+
+    def pick(options: tuple[str, ...]) -> str:
+        return rng.choice(options) if rng else options[step % len(options)]
+
+    def point() -> tuple[int, int]:
+        if rng is None:
+            return 10 + step, 10 + step
+        return rng.randrange(_SCREEN[0]), rng.randrange(_SCREEN[1])
+
+    x, y = point()
+    match kind:
+        case 'bash':
+            return Action(action_type=kind, content=pick(_COMMANDS))
+        case 'code':
+            return Action(action_type=kind, content=pick(_CODE))
+        case 'write_file':
+            return Action(action_type=kind, path=f'notes_{step}.txt', content='notes\n')
+        case 'type':
+            return Action(action_type=kind, content=pick(_TEXT))
+        case 'key':
+            return Action(action_type=kind, content=pick(_KEYS))
+        case 'scroll':
+            return Action(action_type=kind, content=pick(_DIRECTIONS), x=x, y=y)
+        case 'drag':
+            to_x, to_y = point()
+            return Action(action_type=kind, x=x, y=y, to_x=to_x, to_y=to_y)
+        case 'click' | 'double_click' | 'right_click' | 'move':
+            return Action(action_type=kind, x=x, y=y)
+        case _:  # screenshot, wait, done
+            return Action(action_type=kind)

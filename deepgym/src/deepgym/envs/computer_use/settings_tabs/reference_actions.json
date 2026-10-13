@@ -1,0 +1,90 @@
+[
+  [
+    {"action_type": "click", "x": 512, "y": 210},
+    {"action_type": "key", "content": "ctrl+a"},
+    {"action_type": "type", "content": "Grace Hopper"},
+    {"action_type": "click", "x": 376, "y": 121},
+    {"action_type": "click", "x": 784, "y": 191},
+    {"action_type": "click", "x": 497, "y": 121},
+    {"action_type": "click", "x": 239, "y": 250},
+    {"action_type": "click", "x": 290, "y": 446},
+    {"action_type": "done"}
+  ],
+  [
+    {"action_type": "click", "x": 512, "y": 210},
+    {"action_type": "key", "content": "ctrl+a"},
+    {"action_type": "type", "content": "Ada Lovelace"},
+    {"action_type": "click", "x": 376, "y": 121},
+    {"action_type": "click", "x": 784, "y": 295},
+    {"action_type": "click", "x": 497, "y": 121},
+    {"action_type": "click", "x": 239, "y": 290},
+    {"action_type": "click", "x": 290, "y": 446},
+    {"action_type": "done"}
+  ],
+  [
+    {"action_type": "click", "x": 512, "y": 210},
+    {"action_type": "key", "content": "ctrl+a"},
+    {"action_type": "type", "content": "Alan Turing"},
+    {"action_type": "click", "x": 376, "y": 121},
+    {"action_type": "click", "x": 784, "y": 243},
+    {"action_type": "click", "x": 497, "y": 121},
+    {"action_type": "click", "x": 239, "y": 250},
+    {"action_type": "click", "x": 290, "y": 446},
+    {"action_type": "done"}
+  ],
+  [
+    {"action_type": "click", "x": 512, "y": 210},
+    {"action_type": "key", "content": "ctrl+a"},
+    {"action_type": "type", "content": "Hedy Lamarr"},
+    {"action_type": "click", "x": 376, "y": 121},
+    {"action_type": "click", "x": 784, "y": 191},
+    {"action_type": "click", "x": 497, "y": 121},
+    {"action_type": "click", "x": 239, "y": 290},
+    {"action_type": "click", "x": 290, "y": 446},
+    {"action_type": "done"}
+  ],
+  [
+    {"action_type": "click", "x": 512, "y": 210},
+    {"action_type": "key", "content": "ctrl+a"},
+    {"action_type": "type", "content": "Claude Shannon"},
+    {"action_type": "click", "x": 376, "y": 121},
+    {"action_type": "click", "x": 784, "y": 295},
+    {"action_type": "click", "x": 497, "y": 121},
+    {"action_type": "click", "x": 239, "y": 250},
+    {"action_type": "click", "x": 290, "y": 446},
+    {"action_type": "done"}
+  ],
+  [
+    {"action_type": "click", "x": 512, "y": 210},
+    {"action_type": "key", "content": "ctrl+a"},
+    {"action_type": "type", "content": "Radia Perlman"},
+    {"action_type": "click", "x": 376, "y": 121},
+    {"action_type": "click", "x": 784, "y": 243},
+    {"action_type": "click", "x": 497, "y": 121},
+    {"action_type": "click", "x": 239, "y": 290},
+    {"action_type": "click", "x": 290, "y": 446},
+    {"action_type": "done"}
+  ],
+  [
+    {"action_type": "click", "x": 512, "y": 210},
+    {"action_type": "key", "content": "ctrl+a"},
+    {"action_type": "type", "content": "Donald Knuth"},
+    {"action_type": "click", "x": 376, "y": 121},
+    {"action_type": "click", "x": 784, "y": 191},
+    {"action_type": "click", "x": 497, "y": 121},
+    {"action_type": "click", "x": 239, "y": 250},
+    {"action_type": "click", "x": 290, "y": 446},
+    {"action_type": "done"}
+  ],
+  [
+    {"action_type": "click", "x": 512, "y": 210},
+    {"action_type": "key", "content": "ctrl+a"},
+    {"action_type": "type", "content": "Frances Allen"},
+    {"action_type": "click", "x": 376, "y": 121},
+    {"action_type": "click", "x": 784, "y": 295},
+    {"action_type": "click", "x": 497, "y": 121},
+    {"action_type": "click", "x": 239, "y": 290},
+    {"action_type": "click", "x": 290, "y": 446},
+    {"action_type": "done"}
+  ]
+]

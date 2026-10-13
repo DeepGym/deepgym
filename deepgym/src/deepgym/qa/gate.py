@@ -2,15 +2,22 @@
 
 from __future__ import annotations
 
-import json
 from pathlib import Path
 from typing import TYPE_CHECKING
 
 from pydantic import BaseModel, ConfigDict, Field
 
 from deepgym.integrations.zai import ZaiChatClient
-from deepgym.models import Action, MultiTurnEnvironment
-from deepgym.qa.checks import episode_results, hack_resistant, run_verdicts, single_turn_checks
+from deepgym.models import REFERENCE_ACTIONS, MultiTurnEnvironment
+from deepgym.qa.agents import do_everything, random_agent
+from deepgym.qa.checks import (
+    earns_nothing,
+    episode,
+    episode_results,
+    hack_resistant,
+    run_verdicts,
+    single_turn_checks,
+)
 from deepgym.qa.difficulty import difficulty_check
 from deepgym.qa.mutants import mutation_check
 from deepgym.qa.report import DIFFICULTY_CHECK, MUTANTS_CHECK, SKIPPED, QACheck, QAReport
@@ -18,9 +25,6 @@ from deepgym.registry import load_environment, load_environment_dir
 
 if TYPE_CHECKING:
     from deepgym.core import DeepGym
-
-REFERENCE_ACTIONS = 'reference_actions.json'
-"""A multi-turn env's scripted reference episode: a JSON list of actions."""
 
 
 class QAOptions(BaseModel):
@@ -38,27 +42,17 @@ class QAOptions(BaseModel):
     """Add the mutation check (see :mod:`deepgym.qa.mutants`)."""
 
 
-def read_reference_actions(path: Path) -> list[Action]:
-    """Parse a reference_actions.json file into actions.
-
-    Raises:
-        ValueError: If it isn't a JSON list of valid actions.
-    """
-    data = json.loads(path.read_text(encoding='utf-8'))
-    if not isinstance(data, list):
-        raise ValueError('expected a JSON list of actions')
-    return [Action.model_validate(item) for item in data]
-
-
 def run_qa(target: str | Path, dg: DeepGym, options: QAOptions | None = None) -> QAReport:
     """Quality-gate one registered environment, or the environment folder *target*.
 
-    Computer-use envs (they need a desktop agent), multi-turn envs without a
-    reference_actions.json, and benchmark-backed envs such as swebench_pro (they
-    score through their own runner) get a single 'skipped' check with status 'skip',
-    so the report is neither a pass nor a failure. Self-contained patch tasks such as
-    mimo_code have no reference patch, so they only get the patch-tampering attacks.
-    A multi-turn folder with reference actions replays them. Harbor tasks with a solution/solve.sh
+    Multi-turn and computer-use envs with a reference_actions.json replay it and
+    run scripted agents (one that quits at once, one that does everything, one that
+    acts at random), each of which must earn nothing. Without one, or for a
+    computer-use env off Daytona (it needs a desktop), and for benchmark-backed envs
+    such as swebench_pro (they score through their own runner), the report has a
+    single 'skipped' check with status 'skip': neither a pass nor a failure.
+    Self-contained patch tasks such as mimo_code have no reference patch, so they
+    only get the patch-tampering attacks. Harbor tasks with a solution/solve.sh
     are checked with it as the reference; their hack_resistant and mutants_killed
     checks are 'skip', because both run Python solutions and prove nothing about a
     bash runner. A Python env whose verifier rejects every attack as a malformed
@@ -86,10 +80,11 @@ def run_qa(target: str | Path, dg: DeepGym, options: QAOptions | None = None) ->
         check = QACheck(name='load', status='fail', details=str(exc))
         return QAReport(environment=label, checks=[check])
     if isinstance(env, MultiTurnEnvironment):
-        actions = target / REFERENCE_ACTIONS if isinstance(target, Path) else None
-        if env.desktop or actions is None or not actions.is_file():
-            return _skipped(label, 'multi-turn/computer-use env needs an agent')
-        return QAReport(environment=label, checks=_multi_turn_checks(env, actions, dg, options))
+        if env.reference_actions is None:
+            return _skipped(label, f'multi-turn env without {REFERENCE_ACTIONS} needs an agent')
+        if env.desktop and dg.backend != 'daytona':
+            return _skipped(label, 'computer-use env needs a desktop: run with --mode daytona')
+        return QAReport(environment=label, checks=_multi_turn_checks(env, dg, options))
     # The tests core.run_batch and core.run use to route a run to a benchmark runner. One
     # with a reference solution of its own (a Harbor task's solve.sh) is still checkable.
     reference = env.reference_solution
@@ -121,16 +116,17 @@ def run_qa(target: str | Path, dg: DeepGym, options: QAOptions | None = None) ->
     return QAReport(environment=label, checks=checks)
 
 
-def _multi_turn_checks(
-    env: MultiTurnEnvironment, actions_path: Path, dg: DeepGym, options: QAOptions
-) -> list[QACheck]:
-    """Replay the reference episode and an agent that quits at once."""
-    try:
-        actions = read_reference_actions(actions_path)
-    except ValueError as exc:
-        details = f'{REFERENCE_ACTIONS}: {exc}'
-        return [QACheck(name='reference_passes', status='fail', details=details)]
+def _multi_turn_checks(env: MultiTurnEnvironment, dg: DeepGym, options: QAOptions) -> list[QACheck]:
+    """Replay the reference episode, then scripted agents that must earn nothing.
+
+    empty_fails is an agent that quits at once, busy_fails one that uses every
+    allowed action in turn and random_fails one that acts at random (seeded), each for
+    the whole step budget without working on the task.
+    """
+    actions = env.reference_actions or []
     checks = run_verdicts(episode_results(env, actions, dg, options.reruns), 1 + options.reruns)
+    checks.append(earns_nothing('busy_fails', episode(env, do_everything(env), dg)))
+    checks.append(earns_nothing('random_fails', episode(env, random_agent(env), dg)))
     # Named as skipped, so the report's not_run says what this evidence leaves out.
     skipped = {
         'stub_fails': 'a multi-turn reference is a list of actions; there is no stub',
@@ -146,6 +142,6 @@ def _multi_turn_checks(
 
 def _skipped(name: str, reason: str) -> QAReport:
     """Return a skipped report whose only check says why *name* wasn't checked."""
-    details = f'{reason}; the gate checks single-turn envs and multi-turn folders'
+    details = f'{reason}; the gate checks single-turn envs and replayable multi-turn ones'
     check = QACheck(name=SKIPPED, status='skip', details=details)
     return QAReport(environment=name, checks=[check])

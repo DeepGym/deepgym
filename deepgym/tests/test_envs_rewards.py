@@ -220,3 +220,12 @@ def test_non_object_json_answer_is_scored_not_a_crash(
 
     assert result.has_verdict is True
     assert result.passed is False
+
+
+@pytest.mark.parametrize('env_name', ['data_pipeline', 'cyber/web_path_traversal_toy'])
+def test_an_empty_answer_earns_nothing(dg: DeepGym, env_name: str) -> None:
+    # Both used to pay for an empty answer: a clean exit, or a safe GET by default.
+    result = dg.run(load_environment(env_name), '')
+
+    assert result.has_verdict
+    assert result.score == 0.0

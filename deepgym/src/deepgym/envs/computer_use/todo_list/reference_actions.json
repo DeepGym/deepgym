@@ -1,0 +1,82 @@
+[
+  [
+    {"action_type": "click", "x": 279, "y": 243},
+    {"action_type": "click", "x": 743, "y": 185},
+    {"action_type": "click", "x": 463, "y": 119},
+    {"action_type": "type", "content": "Book flights"},
+    {"action_type": "key", "content": "Return"},
+    {"action_type": "type", "content": "Pay rent"},
+    {"action_type": "key", "content": "Return"},
+    {"action_type": "done"}
+  ],
+  [
+    {"action_type": "click", "x": 279, "y": 185},
+    {"action_type": "click", "x": 743, "y": 301},
+    {"action_type": "click", "x": 463, "y": 119},
+    {"action_type": "type", "content": "Renew passport"},
+    {"action_type": "key", "content": "Return"},
+    {"action_type": "type", "content": "Water plants"},
+    {"action_type": "key", "content": "Return"},
+    {"action_type": "done"}
+  ],
+  [
+    {"action_type": "click", "x": 279, "y": 301},
+    {"action_type": "click", "x": 743, "y": 243},
+    {"action_type": "click", "x": 463, "y": 119},
+    {"action_type": "type", "content": "Fix bike"},
+    {"action_type": "key", "content": "Return"},
+    {"action_type": "type", "content": "Email Sam"},
+    {"action_type": "key", "content": "Return"},
+    {"action_type": "done"}
+  ],
+  [
+    {"action_type": "click", "x": 279, "y": 243},
+    {"action_type": "click", "x": 743, "y": 301},
+    {"action_type": "click", "x": 463, "y": 119},
+    {"action_type": "type", "content": "Dentist at 3pm"},
+    {"action_type": "key", "content": "Return"},
+    {"action_type": "type", "content": "Order printer ink"},
+    {"action_type": "key", "content": "Return"},
+    {"action_type": "done"}
+  ],
+  [
+    {"action_type": "click", "x": 279, "y": 185},
+    {"action_type": "click", "x": 743, "y": 243},
+    {"action_type": "click", "x": 463, "y": 119},
+    {"action_type": "type", "content": "Gym"},
+    {"action_type": "key", "content": "Return"},
+    {"action_type": "type", "content": "Read chapter 4"},
+    {"action_type": "key", "content": "Return"},
+    {"action_type": "done"}
+  ],
+  [
+    {"action_type": "click", "x": 279, "y": 301},
+    {"action_type": "click", "x": 743, "y": 185},
+    {"action_type": "click", "x": 463, "y": 119},
+    {"action_type": "type", "content": "Cancel trial"},
+    {"action_type": "key", "content": "Return"},
+    {"action_type": "type", "content": "Back up laptop"},
+    {"action_type": "key", "content": "Return"},
+    {"action_type": "done"}
+  ],
+  [
+    {"action_type": "click", "x": 279, "y": 243},
+    {"action_type": "click", "x": 743, "y": 185},
+    {"action_type": "click", "x": 463, "y": 119},
+    {"action_type": "type", "content": "Buy stamps"},
+    {"action_type": "key", "content": "Return"},
+    {"action_type": "type", "content": "Clean garage"},
+    {"action_type": "key", "content": "Return"},
+    {"action_type": "done"}
+  ],
+  [
+    {"action_type": "click", "x": 279, "y": 185},
+    {"action_type": "click", "x": 743, "y": 301},
+    {"action_type": "click", "x": 463, "y": 119},
+    {"action_type": "type", "content": "Submit expenses"},
+    {"action_type": "key", "content": "Return"},
+    {"action_type": "type", "content": "Call plumber"},
+    {"action_type": "key", "content": "Return"},
+    {"action_type": "done"}
+  ]
+]

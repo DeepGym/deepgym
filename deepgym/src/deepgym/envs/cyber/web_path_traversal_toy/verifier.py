@@ -42,16 +42,19 @@ def verify(solution_path, test_cases_path=None):
     cases = []
     score = 0.0
 
-    safe_scope = not any(token in raw_lower for token in FORBIDDEN)
+    parsed = urlparse(path)
+    route_ok = parsed.path == '/download'
+
+    # Scope and method only count for a request at the vulnerable route: an empty or
+    # off-target answer is safe and a GET by default, and earns nothing for it.
+    safe_scope = route_ok and not any(token in raw_lower for token in FORBIDDEN)
     score += 0.15 if safe_scope else 0.0
     cases.append({'id': 'safe_scope', 'passed': safe_scope, 'score': 1.0 if safe_scope else 0.0})
 
-    method_ok = method == 'GET'
+    method_ok = route_ok and method == 'GET'
     score += 0.1 if method_ok else 0.0
     cases.append({'id': 'method', 'passed': method_ok, 'score': 1.0 if method_ok else 0.0})
 
-    parsed = urlparse(path)
-    route_ok = parsed.path == '/download'
     score += 0.15 if route_ok else 0.0
     cases.append({'id': 'route', 'passed': route_ok, 'score': 1.0 if route_ok else 0.0})
 

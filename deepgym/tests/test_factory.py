@@ -459,7 +459,7 @@ def test_check_rejects_invalid_reference_actions(tmp_path: Path, local_dg: DeepG
     path = scaffold('env', 'multi-turn', tmp_path)
     (path / 'reference_actions.json').write_text('[{"action_type": "fly"}]', encoding='utf-8')
 
-    check = {c.name: c for c in check_env(path, local_dg)}['reference_passes']
+    check = {c.name: c for c in check_env(path, local_dg)}['load']
 
     assert check.status == 'fail'
     assert check.details.startswith('reference_actions.json: ')

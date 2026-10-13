@@ -6,7 +6,7 @@ import pytest
 
 from deepgym import Action, DeepGym, load_environment
 from deepgym.exceptions import SandboxError
-from tests.computer_use_trajectories import DONE, REFERENCE, variants
+from tests.computer_use_trajectories import DONE, NAMES, reference, variants
 from tests.test_sandboxes_live import _SPY
 
 pytestmark = pytest.mark.skipif(
@@ -14,7 +14,7 @@ pytestmark = pytest.mark.skipif(
 )
 
 # First and last variant of each env; the full sweep is too slow for a test run.
-CASES = [(name, v) for name in sorted(REFERENCE) for v in (0, len(variants(name)) - 1)]
+CASES = [(name, v) for name in NAMES for v in (0, len(variants(name)) - 1)]
 
 
 @pytest.fixture(scope='module')
@@ -24,7 +24,7 @@ def dg() -> DeepGym:
 
 @pytest.mark.parametrize(('name', 'variant'), CASES)
 def test_reference_trajectory_passes(dg: DeepGym, name: str, variant: int) -> None:
-    actions = iter(REFERENCE[name](variants(name)[variant]))
+    actions = iter(reference(name, variant))
     env = load_environment(name, variant=variant)
     trajectory, result = dg.run_episode(env, lambda obs: next(actions))
     assert result.passed, result.output

@@ -21,14 +21,19 @@ from typing import TYPE_CHECKING
 from pydantic import ValidationError
 
 from deepgym.factory.approval import approval_check
-from deepgym.models import REFERENCE_FILES, EnvMetadata, MultiTurnEnvironment, RunResult
+from deepgym.models import (
+    REFERENCE_ACTIONS,
+    REFERENCE_FILES,
+    EnvMetadata,
+    MultiTurnEnvironment,
+    RunResult,
+)
 from deepgym.qa.checks import (
     episode_results,
     run_verdicts,
     single_turn_results,
     single_turn_verdicts,
 )
-from deepgym.qa.gate import REFERENCE_ACTIONS, read_reference_actions
 from deepgym.qa.report import QACheck
 from deepgym.registry import load_environment_dir
 from deepgym.verifier_lint import lint_verifier
@@ -177,12 +182,7 @@ def _run_checks(env_dir: Path, dg: DeepGym) -> list[QACheck]:
         except SyntaxError as exc:
             details = f'verifier.py with its support files prepended: line {exc.lineno}: {exc.msg}'
             return [QACheck(name='load', status='fail', details=details)]
-        try:
-            actions = read_reference_actions(env_dir / REFERENCE_ACTIONS)
-        except ValueError as exc:
-            details = f'{REFERENCE_ACTIONS}: {exc}'
-            return [QACheck(name='reference_passes', status='fail', details=details)]
-        results = episode_results(env, actions, dg, _RERUNS)
+        results = episode_results(env, env.reference_actions or [], dg, _RERUNS)
         return [*run_verdicts(results, runs), protocol_check(results)]
     results = single_turn_results(env, env.reference_solution or '', dg, _RERUNS)
     return [*single_turn_verdicts(results, _RERUNS), protocol_check(results)]

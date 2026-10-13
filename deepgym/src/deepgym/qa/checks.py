@@ -10,7 +10,7 @@ import ast
 from collections.abc import Sequence
 from typing import TYPE_CHECKING
 
-from deepgym.adversarial import DEFAULT_STRATEGIES, AdversarialTester
+from deepgym.adversarial import DEFAULT_STRATEGIES, PASS_THRESHOLD, AdversarialTester
 from deepgym.exceptions import DeepGymError, error_type_for
 from deepgym.models import (
     MODEL_FAULT_ERRORS,
@@ -60,16 +60,21 @@ def _summary(result: RunResult) -> str:
     return f'score {result.score:.2f}' + (f' ({first_line})' if first_line else '')
 
 
-def _scores_below_full(name: str, result: RunResult) -> QACheck:
-    """Pass if *result* scored below full marks, but only on a real verdict.
+def earns_nothing(name: str, result: RunResult) -> QACheck:
+    """Pass if *result*, a run that does nothing toward the task, earned no reward.
 
-    A verifier that crashed or printed no protocol output also scores 0. That is not
-    the expected failure: it says nothing about the solution, so it is inconclusive.
+    Any reward above float noise fails: a verifier that pays for an empty answer, a
+    stub or an idle agent teaches a policy to do nothing. Only a real verdict counts:
+    a verifier that crashed or printed no protocol output also scores 0, which says
+    nothing about the run, so that is inconclusive.
     """
     if not result.has_verdict:
         details = f'the verifier errored instead of judging the solution: {_summary(result)}'
         return QACheck(name=name, status='inconclusive', details=details)
-    return QACheck(name=name, status=verdict(not solved(result)), details=_summary(result))
+    if result.score > SCORE_TOLERANCE:
+        details = f'{_summary(result)}: earned reward without doing the task'
+        return QACheck(name=name, status='fail', details=details)
+    return QACheck(name=name, status='pass', details=_summary(result))
 
 
 def _same_scores(results: Sequence[RunResult]) -> QACheck:
@@ -104,8 +109,8 @@ def run_verdicts(results: Sequence[RunResult], runs: int) -> list[QACheck]:
     return [
         reference,
         _same_scores(results[:runs]),
-        _scores_below_full('empty_fails', results[runs]),
-        *(_scores_below_full('stub_fails', stub) for stub in results[runs + 1 :]),
+        earns_nothing('empty_fails', results[runs]),
+        *(earns_nothing('stub_fails', stub) for stub in results[runs + 1 :]),
     ]
 
 
@@ -148,11 +153,11 @@ def single_turn_checks(
         missing = QACheck(
             name='reference_passes', status='fail', details='no reference_solution.py found'
         )
-        return [missing, _scores_below_full('empty_fails', empty)]
+        return [missing, earns_nothing('empty_fails', empty)]
     return single_turn_verdicts(single_turn_results(env, reference, dg, reruns), reruns)
 
 
-def _episode(env: MultiTurnEnvironment, actions: Sequence[Action], dg: DeepGym) -> RunResult:
+def episode(env: MultiTurnEnvironment, actions: Sequence[Action], dg: DeepGym) -> RunResult:
     """Replay *actions* (then 'done') as one episode; a run that errors has no verdict."""
     replay = iter(actions)
     try:
@@ -178,11 +183,11 @@ def episode_results(
     Episodes run one after another on *dg*'s backend. Local sessions are not isolated
     (they run in a host temp directory), so the reference actions run as the author.
     """
-    return [*(_episode(env, actions, dg) for _ in range(1 + reruns)), _episode(env, [], dg)]
+    return [*(episode(env, actions, dg) for _ in range(1 + reruns)), episode(env, [], dg)]
 
 
 def hack_resistant(env: Environment, dg: DeepGym, strategies: list[str] | None = None) -> QACheck:
-    """Run reward-hack attacks; fail if any reaches the pass threshold.
+    """Run reward-hack attacks; fail if any reaches the exploit threshold (0.50).
 
     Inconclusive, not passed, when no attack got through but some got no verdict (the run
     failed, the verifier reported an error, or the attack never ran). Skipped, not passed,
@@ -215,5 +220,7 @@ def hack_resistant(env: Environment, dg: DeepGym, strategies: list[str] | None =
         details = f'{len(not_run)} of {report.attacks_run} attacks got no verdict: {reasons}'
         return QACheck(name='hack_resistant', status='inconclusive', details=details)
     top = max(result.score for result in report.results)
-    details = f'{report.attacks_run} attacks, max score {top:.2f}'
+    details = (
+        f'{report.attacks_run} attacks, max score {top:.2f} (an exploit is {PASS_THRESHOLD:.2f})'
+    )
     return QACheck(name='hack_resistant', status='pass', details=details)

@@ -5,7 +5,10 @@ import os
 import pytest
 
 from deepgym import Action, DeepGym, load_environment
+from deepgym.exceptions import SandboxError
+from deepgym.judge import JudgeJob
 from deepgym.models import Environment, MultiTurnEnvironment
+from deepgym.sandbox import run_judge_in_sandbox
 from deepgym.session import _IDS_ARE_EXCLUSIVE
 from tests.test_isolation import LOOPBACK_PROBE, LOOPBACK_PROBE_VERIFIER, WRONG, _env
 from tests.test_session import ALWAYS_EQUAL, FIXED, debug_fix_score
@@ -171,6 +174,19 @@ def test_session_users_hold_ids_no_other_account_has(dg: DeepGym) -> None:
         shared = 'useradd -o -M -u "$(id -u dgagent)" dgshared'
         assert backend.exec_trusted(shared, 30).exit_code == 0
         assert backend.exec_trusted(_IDS_ARE_EXCLUSIVE, 30).exit_code != 0
+
+
+def test_judge_refuses_a_solver_account_that_is_root(dg: DeepGym) -> None:
+    """An image whose dgsolver already exists as a root alias gets no judge, not a root solver."""
+    env = Environment(task='t', verifier_code='def verify(solution_path):\n    return 1.0\n')
+    sandbox = dg.open_sandbox(env)
+    try:
+        alias = sandbox.exec('useradd -o -u 0 -g 0 -M -s /bin/sh dgsolver', timeout=30)
+        assert alias.exit_code == 0, alias.output
+        with pytest.raises(SandboxError, match='dgsolver is root or shares an id'):
+            run_judge_in_sandbox(sandbox, JudgeJob.for_environment(env, ''))
+    finally:
+        sandbox.delete()
 
 
 def test_judge_temp_files_are_private(dg: DeepGym) -> None:

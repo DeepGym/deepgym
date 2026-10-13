@@ -19,7 +19,7 @@ from e2b import (
 )
 from e2b import Sandbox as E2BClient
 
-from deepgym.exceptions import SandboxError
+from deepgym.exceptions import SandboxDiedError, SandboxError
 from deepgym.sandboxes.protocol import (
     TIMEOUT_EXIT_CODES,
     ExecResult,
@@ -68,6 +68,8 @@ class E2BSandbox:
 
         Raises:
             SandboxTimeoutError: If the command outruns *timeout* seconds.
+            SandboxDiedError: If the sandbox stopped running during the command.
+            SandboxError: If E2B can't reach the sandbox.
         """
         if timeout:
             command = f'/usr/bin/timeout --kill-after=2 {timeout} /bin/sh -c {shlex.quote(command)}'
@@ -83,8 +85,10 @@ class E2BSandbox:
         except CommandExitException as exc:
             # E2B raises on any non-zero exit; that's an ordinary result here.
             result = exc
-        except (SandboxNotRunningException, SandboxUnreachableException) as exc:
-            # Both subclass TimeoutException, but mean the sandbox is gone.
+        # Both subclass TimeoutException, but mean the sandbox stopped or can't be reached.
+        except SandboxNotRunningException as exc:
+            raise SandboxDiedError(f'E2B sandbox {self.id} stopped running: {exc}') from exc
+        except SandboxUnreachableException as exc:
             raise SandboxError(f'E2B sandbox {self.id} is not reachable: {exc}') from exc
         except TimeoutException as exc:
             raise SandboxTimeoutError(f'command exceeded {timeout}s') from exc

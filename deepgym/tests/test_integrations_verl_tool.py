@@ -300,7 +300,7 @@ def test_a_provider_outage_during_an_action_is_not_a_zero(
 def test_an_action_the_policy_broke_is_scored(
     verl: types.ModuleType, monkeypatch: pytest.MonkeyPatch, masked: list[bool]
 ) -> None:
-    """A failure that follows from the policy's own action is shown to it, then judged.
+    """A failure that follows from the policy's own action is shown to it and scores 0.
 
     Masking it would let a policy escape its 0 by breaking its sandbox.
     """
@@ -309,7 +309,7 @@ def test_an_action_the_policy_broke_is_scored(
     _, output, responses = _rollout(verl, WRITE_AND_FINISH)
 
     assert responses[1] == "Error executing tool 'computer': Sandbox local-session is not running"
-    assert responses[2] == '(no output)'  # 'done' still runs
+    assert responses[2] == 'The episode is over.'  # the failed step ended it
     assert output.reward_score == 0.0
     assert output.extra_fields['reward_extra_info']['error'] == 0.0
     assert output.response_mask == [1, 1, 1]

@@ -35,10 +35,11 @@ from deepgym.sandbox import (
     build_run_result,
     error_result,
     parse_wrapped_output,
+    policy_sandbox_failure,
     wrap_stderr,
 )
 from deepgym.sandboxes import PROVIDERS, Provider
-from deepgym.sandboxes.daytona import create_params, is_timeout
+from deepgym.sandboxes.daytona import create_params, has_stopped, is_timeout
 
 if TYPE_CHECKING:
     from daytona import AsyncDaytona, Sandbox
@@ -418,8 +419,20 @@ class AsyncDeepGym:
         except Exception as exc:
             if is_timeout(exc):
                 raise TimeoutError(f'Verifier exceeded {job.timeout}s') from exc
+            if await self._stopped(sandbox, exc):
+                return policy_sandbox_failure(exc)
             raise SandboxError(f'Verifier execution failed: {exc}') from exc
         return parse_wrapped_output(response.result, marker, response.exit_code)
+
+    @staticmethod
+    async def _stopped(sandbox: Sandbox, exc: Exception) -> bool:
+        """Whether a call that failed with *exc* means the sandbox stopped (see
+        :func:`~deepgym.sandboxes.daytona.has_stopped`); False if Daytona can't say."""
+        try:
+            await sandbox.refresh_data()
+        except Exception:
+            return False
+        return has_stopped(exc, sandbox)
 
     async def _cleanup_sandbox(self, sandbox: Sandbox) -> None:
         """Safely destroy a sandbox, swallowing errors."""

@@ -13,6 +13,7 @@ from collections.abc import Mapping
 
 import modal
 
+from deepgym.exceptions import SandboxDiedError
 from deepgym.sandboxes.protocol import (
     TRUSTED_PATH,
     ExecResult,
@@ -68,17 +69,34 @@ class ModalSandbox:
 
         Raises:
             SandboxTimeoutError: If the command outruns *timeout* seconds.
+            SandboxDiedError: If Modal terminated the sandbox during the command.
         """
         start = time.monotonic()
-        process = self._sandbox.exec(
-            '/bin/sh', '-c', command, workdir=cwd, env=dict(env) if env else None, timeout=timeout
-        )
-        output = process.stdout.read() + process.stderr.read()
-        exit_code = process.wait()
+        try:
+            process = self._sandbox.exec(
+                '/bin/sh', '-c', command, workdir=cwd, env=dict(env) if env else None,
+                timeout=timeout,
+            )  # fmt: skip
+            output = process.stdout.read() + process.stderr.read()
+            exit_code = process.wait()
+        except modal.exception.Error as exc:
+            # Modal words a stopped sandbox several ways (terminated, not found); poll() tells.
+            if isinstance(exc, modal.exception.SandboxTerminatedError) or self._stopped():
+                raise SandboxDiedError(f'Modal sandbox {self.id} was terminated: {exc}') from exc
+            raise
+        if exit_code != 0 and self._stopped():
+            raise SandboxDiedError(f'Modal sandbox {self.id} was terminated: {output[-500:]}')
         # Modal kills an exec at its timeout and reports only a failed exit.
         if timeout and exit_code != 0 and time.monotonic() - start >= timeout:
             raise SandboxTimeoutError(f'command exceeded {timeout}s')
         return ExecResult(exit_code, output)
+
+    def _stopped(self) -> bool:
+        """Whether the sandbox itself has finished; False if Modal can't say."""
+        try:
+            return self._sandbox.poll() is not None
+        except modal.exception.Error:
+            return False
 
     def upload(self, content: bytes, path: str) -> None:
         """Write *content* to *path*, creating parent directories."""

@@ -5,7 +5,8 @@ files as text in memory (a patch can only change files listed in REPO_FILES), an
 load_files() imports the patched code in an isolated process, where every call
 crosses the boundary as plain data. Every case is reported with a reason. A diff
 that doesn't apply scores 0 as the model's fault; a bug in this file ends the run as
-a verifier error (no reward) instead of a silent 0.
+a verifier error (no reward) until the patched code starts, and scores 0 after, so a
+solution can't escape its score by breaking the judge.
 
 To adapt it: put your repo's files in repo/ (flat: support files are placed next to
 this file by name), list them in metadata.json support_files and REPO_FILES, show

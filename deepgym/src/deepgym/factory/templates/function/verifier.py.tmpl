@@ -4,7 +4,8 @@ The judge never imports or runs the solution itself. load_solution() starts it i
 isolated process, and every call crosses that boundary as plain data, so the
 solution can't read the expected answers or hand back an object that equals
 anything. Every case is reported with a reason. A bug in this file ends the run as a
-verifier error (no reward) instead of a silent 0.
+verifier error (no reward) until the solution starts; after that a crash scores 0, so
+a solution can't escape its score by breaking the judge.
 
 To adapt it: rename ENTRY, rewrite expected() for your task, and edit variants.py.
 """

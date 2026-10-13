@@ -21,7 +21,7 @@ from uuid import uuid4
 
 from pydantic import BaseModel, ConfigDict
 
-from deepgym.exceptions import SandboxError
+from deepgym.exceptions import SandboxDiedError, SandboxError
 from deepgym.sandboxes.protocol import (
     TIMEOUT_EXIT_CODES,
     TRUSTED_PATH,
@@ -133,6 +133,7 @@ class CliContainer:
 
         Raises:
             SandboxTimeoutError: If the command outruns *timeout* seconds.
+            SandboxDiedError: If the container stopped during the command.
         """
         argv = ['exec']
         if cwd:
@@ -152,7 +153,17 @@ class CliContainer:
             if time.monotonic() - start >= timeout:
                 raise SandboxTimeoutError(f'command exceeded {timeout}s')
         output = done.stdout.decode('utf-8', 'replace') + done.stderr.decode('utf-8', 'replace')
+        # A failed exec may mean the container itself is gone; only the listing can tell.
+        if done.returncode != 0 and self._gone():
+            raise SandboxDiedError(f'Container {self.id} stopped: {output[-500:]}')
         return ExecResult(done.returncode, output)
+
+    def _gone(self) -> bool:
+        """Whether the container no longer runs; False if the CLI can't list containers."""
+        try:
+            return all(box.id != self.id for box in self.running())
+        except SandboxError:
+            return False
 
     def booted_image(self) -> SandboxImage:
         """Return the image the container runs and its digest, as the CLI reports them.

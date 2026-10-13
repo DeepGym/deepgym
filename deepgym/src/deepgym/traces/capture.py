@@ -21,7 +21,7 @@ from pathlib import Path
 from typing import TextIO, TypeVar
 from uuid import uuid4
 
-from deepgym.exceptions import DeepGymError, SandboxError, VerifierError
+from deepgym.exceptions import DeepGymError, SandboxError
 from deepgym.models import Action, MultiTurnEnvironment, Observation, RunResult, is_verdict
 from deepgym.session import Session, StepResult
 from deepgym.traces.schema import (
@@ -85,6 +85,7 @@ class TracedSession:
         self._error: str | None = None
         self._finished_at: datetime | None = None
         self._file: TextIO | None = None
+        self._session_closed = False
         self._lock = threading.Lock()
 
     @property
@@ -163,16 +164,14 @@ class TracedSession:
             start = time.perf_counter()
             try:
                 result = self._session.step(action)
-            except Exception as exc:
+            except BaseException as exc:
+                # The session records a failed step, with no step reward, whenever its action
+                # may have taken effect (anything but a rejected action), and ends the episode.
                 applied = len(trajectory.steps) > applied_before
-                # The session records a step once its step verifier scored it, or failed
-                # (VerifierError); a later failure, such as a screenshot, keeps the score.
-                verified = applied and scored and not isinstance(exc, VerifierError)
                 observation = trajectory.final_observation if applied else None
                 self._add_step(
                     TraceStep(
                         **record,
-                        **(self._step_score(trajectory.step_rewards[-1]) if verified else {}),
                         applied=applied,
                         observation=observation and observation.model_copy(deep=True),
                         error=_describe(exc),
@@ -210,18 +209,21 @@ class TracedSession:
             return result
 
     def close(self) -> None:
-        """Finish the trace file, if there is one, then close the session. Safe to call twice."""
+        """Finish the trace file, if there is one, then close the session. Safe to call twice;
+        after a failed sandbox delete, the next call tries the delete again."""
         with self._lock:
-            if self._finished_at is not None:
-                return
-            self._finished_at = datetime.now(timezone.utc)
             try:
-                if self._file is not None:
-                    with self._file:
-                        finished = self._finished_at.isoformat()
-                        self._write({'event': 'end', 'error': self._error, 'finished_at': finished})
+                if self._finished_at is None:
+                    self._finished_at = datetime.now(timezone.utc)
+                    if self._file is not None:
+                        with self._file:
+                            finished = self._finished_at.isoformat()
+                            event = {'event': 'end', 'error': self._error, 'finished_at': finished}
+                            self._write(event)
             finally:
-                self._session.close()
+                if not self._session_closed:
+                    self._session.close()
+                    self._session_closed = True
 
     def __enter__(self) -> TracedSession:
         return self

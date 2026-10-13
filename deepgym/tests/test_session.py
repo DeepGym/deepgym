@@ -1,6 +1,7 @@
 """Tests for deepgym.session -- live multi-turn episodes on the local backend."""
 
 import asyncio
+import errno
 import os
 import threading
 import time
@@ -10,8 +11,9 @@ import pytest
 from pydantic import ValidationError
 
 from deepgym import AsyncDeepGym, ComputerUseEnvironment, DeepGym
-from deepgym.exceptions import DeepGymError, SandboxError, VerifierError
+from deepgym.exceptions import ActionError, DeepGymError, SandboxError, VerifierError
 from deepgym.models import Action, MultiTurnEnvironment, Observation, Trajectory
+from deepgym.sandboxes import SandboxDiedError
 from deepgym.session import Session, _signals_done, run_episode
 
 PASS_VERIFIER = (
@@ -280,6 +282,137 @@ class TestLocalEpisodes:
         assert session.done and session.trajectory.step_rewards == []
         assert (result.has_verdict, result.error_type) == (False, 'verifier_error')
 
+    def test_step_verifier_outage_ends_the_episode_unjudged(
+        self, dg: DeepGym, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        env = MultiTurnEnvironment(
+            task='t',
+            max_steps=1,
+            step_verifier_code='print(1.0)',
+            final_verifier_code=PASS_VERIFIER,
+        )
+        first = Action(action_type='bash', content='echo one')
+        with dg.session(env) as session:
+            session.start()
+
+            def outage(*args: object, **kwargs: object) -> None:
+                raise SandboxError('provider unreachable') from ConnectionError('reset')
+
+            monkeypatch.setattr(session._backend, 'verify', outage)
+            with pytest.raises(SandboxError, match='unreachable'):
+                session.step(first)
+            # A retry would apply a second action past the budget and score it.
+            with pytest.raises(DeepGymError, match='not running'):
+                session.step(Action(action_type='bash', content='echo two'))
+            result = session.score()
+
+        trajectory = session.trajectory
+        assert session.done and [action for _, action in trajectory.steps] == [first]
+        assert (trajectory.step_rewards, trajectory.total_reward) == ([], 0.0)
+        assert trajectory.final_observation.content.strip() == 'one'
+        assert (result.has_verdict, result.error_type) == (False, 'sandbox_error')
+
+    def test_a_write_the_agents_own_files_block_is_rejected_and_the_episode_goes_on(
+        self, dg: DeepGym
+    ) -> None:
+        with dg.session(MultiTurnEnvironment(task='t', max_steps=3)) as session:
+            session.start()
+            session.step(Action(action_type='bash', content='mkdir taken'))
+            with pytest.raises(ActionError, match='Failed to write taken'):
+                session.step(Action(action_type='write_file', path='taken', content='x'))
+            session.step(Action(action_type='bash', content='echo still running'))
+        assert [action.action_type for _, action in session.trajectory.steps] == ['bash', 'bash']
+
+    @pytest.mark.parametrize(
+        'blocker',
+        ['mkdir _step_output.txt', 'ln -s missing_dir/output _step_output.txt'],
+        ids=['folder', 'dangling_link'],
+    )
+    def test_blocking_the_step_output_ends_the_episode_with_a_judged_zero(
+        self, dg: DeepGym, blocker: str
+    ) -> None:
+        env = MultiTurnEnvironment(
+            task='t',
+            max_steps=3,
+            step_verifier_code='print(1.0)',
+            final_verifier_code=PASS_VERIFIER,
+        )
+        block = Action(action_type='bash', content=blocker)
+        with dg.session(env) as session:
+            session.start()
+            with pytest.raises(ActionError):
+                session.step(block)
+            result = session.score()
+        assert session.done and [action for _, action in session.trajectory.steps] == [block]
+        assert session.trajectory.step_rewards == []
+        assert (result.score, result.has_verdict) == (0.0, True)
+        assert result.error_type == 'policy_sandbox_failure'
+
+    @pytest.mark.parametrize('when', ['step', 'final_verifier'])
+    def test_a_sandbox_that_dies_once_the_agent_acted_is_a_judged_zero(
+        self, dg: DeepGym, monkeypatch: pytest.MonkeyPatch, when: str
+    ) -> None:
+        env = MultiTurnEnvironment(task='t', max_steps=3, final_verifier_code=PASS_VERIFIER)
+
+        def dies(*args: object, **kwargs: object) -> None:
+            raise SandboxDiedError('the sandbox ran out of memory')
+
+        with dg.session(env) as session:
+            session.start()
+            if when == 'step':
+                monkeypatch.setattr(session._backend, 'exec', dies)
+                with pytest.raises(SandboxDiedError):
+                    session.step(Action(action_type='bash', content='echo hog'))
+            else:
+                session.step(Action(action_type='done'))
+                monkeypatch.setattr(session._backend, 'verify', dies)
+            result = session.score()
+
+        assert session.done and len(session.trajectory.steps) == 1
+        assert (result.score, result.has_verdict) == (0.0, True)
+        assert result.error_type == 'policy_sandbox_failure'
+
+    def test_run_episode_returns_the_result_a_failed_step_fixed(self, dg: DeepGym) -> None:
+        env = MultiTurnEnvironment(
+            task='t',
+            max_steps=3,
+            step_verifier_code='print(1.0)',
+            final_verifier_code=PASS_VERIFIER,
+        )
+        actions = iter([Action(action_type='bash', content='mkdir _step_output.txt')])
+
+        trajectory, result = dg.run_episode(env, lambda obs: next(actions))
+
+        assert len(trajectory.steps) == 1  # the agent blocked the harness: its own 0
+        assert (result.has_verdict, result.error_type) == (True, 'policy_sandbox_failure')
+
+    def test_a_step_output_write_that_fails_is_the_agents_zero(
+        self, dg: DeepGym, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        env = MultiTurnEnvironment(
+            task='t',
+            max_steps=3,
+            step_verifier_code='print(1.0)',
+            final_verifier_code=PASS_VERIFIER,
+        )
+        real_open = os.open
+
+        def disk_error(path: object, *args: object, **kwargs: object) -> int:
+            if str(path).endswith('_step_output.txt'):
+                raise OSError(errno.EIO, 'Input/output error')
+            return real_open(path, *args, **kwargs)
+
+        with dg.session(env) as session:
+            session.start()
+            monkeypatch.setattr(os, 'open', disk_error)
+            with pytest.raises(SandboxError, match='Input/output error'):
+                session.step(Action(action_type='bash', content='echo harmless'))
+            monkeypatch.undo()
+            result = session.score()
+        # A failed write with no provider failure behind it follows from the agent's actions.
+        assert session.done and len(session.trajectory.steps) == 1
+        assert (result.has_verdict, result.error_type) == (True, 'policy_sandbox_failure')
+
     def test_step_verifier_model_fault_is_a_reward(self, dg: DeepGym) -> None:
         model_fault = 'print(\'{"score": 0.0, "passed": false, "error_type": "invalid_patch"}\')\n'
         env = MultiTurnEnvironment(task='t', max_steps=1, step_verifier_code=model_fault)
@@ -331,11 +464,27 @@ class TestLocalEpisodes:
                 session.step(Action(content='print(1)'))
         assert session.trajectory.total_reward == 0.0
 
-    def test_final_score_printed_before_a_crash_is_an_error(self, dg: DeepGym) -> None:
+    def test_final_score_printed_before_a_crash_is_not_kept(self, dg: DeepGym) -> None:
         crashes = PASS_VERIFIER + 'import sys\nsys.stdout.flush()\nraise RuntimeError("bug")\n'
         env = MultiTurnEnvironment(task='t', max_steps=1, final_verifier_code=crashes)
-        with pytest.raises(VerifierError):
-            dg.run_episode(env, _scripted(Action(action_type='done')))
+        _, result = dg.run_episode(env, _scripted(Action(action_type='done')))
+        assert (result.score, result.has_verdict) == (0.0, False)
+        assert result.error_type == 'runtime_error'
+
+    def test_final_verifier_crash_after_loading_the_agents_code_is_a_judged_zero(
+        self, dg: DeepGym
+    ) -> None:
+        crashes = (
+            'from deepgym_solution import load_solution\n'
+            'load_solution("agent.py")\n' + PASS_VERIFIER + 'raise RuntimeError("bug")\n'
+        )
+        env = MultiTurnEnvironment(task='t', max_steps=2, final_verifier_code=crashes)
+        agent = _scripted(
+            Action(action_type='write_file', path='agent.py', content='x = 1\n'),
+            Action(action_type='done'),
+        )
+        _, result = dg.run_episode(env, agent)
+        assert (result.score, result.passed, result.has_verdict) == (0.0, False, True)
 
     def test_protocol_fail_exit_keeps_partial_credit(self, dg: DeepGym) -> None:
         failed = 'import sys\nprint(\'{"score": 0.4, "passed": false}\')\nsys.exit(1)\n'

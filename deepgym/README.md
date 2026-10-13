@@ -278,12 +278,13 @@ final verifier, and deletes the sandbox. Screenshots come back as images. Only f
 that aren't the policy's doing get no verdict and are kept out of training the same way
 (`error` 1.0): a sandbox that fails to start, a provider or network failure during an
 action or the final verifier (`deepgym.exceptions.is_infrastructure_failure`), and a
-step or final verifier that fails. Everything that follows from the policy's own actions
-is scored. An invalid or disallowed action comes back to the model as text, any other
-failed action as an error while the rollout goes on, and if the final verifier can't run
-in a sandbox the policy killed or hung, the rollout scores 0 with `error_type`
-`policy_sandbox_failure`. One where the model never calls the tool scores 0. This loop
-also warns when more than 5% of a batch is kept out.
+step or final verifier that fails before it runs the agent's code. Everything that
+follows from the policy's own actions is scored. An invalid or disallowed action comes
+back to the model as text. Any other failed action (a failed write, a sandbox the policy
+killed) comes back as an error and ends the episode with a 0, `error_type`
+`policy_sandbox_failure`, as does a final verifier that can't run in a sandbox the
+policy killed or hung. One where the model never calls the tool scores 0. This loop also
+warns when more than 5% of a batch is kept out.
 
 ```yaml
 # agent_loop_config_path
@@ -704,8 +705,9 @@ and the local backend works for those without Daytona. Session verifiers that
 grade the agent's code load it with `load_solution` too, so it runs isolated from
 the verifier: locally in the same sandbox as single runs, and in sandbox images
 with sudo (Daytona's default has it) as a third user. A score only counts if the
-verifier exits cleanly; printing one and then crashing or being killed is a
-verifier error.
+verifier exits cleanly. A verifier that crashes has no verdict until it has started
+the agent's code, and scores 0 after that, since the crash came from handling it;
+one that is killed has no verdict.
 
 ### Sessions over HTTP
 
@@ -935,10 +937,21 @@ Never import or run the solution yourself. Use the helpers in `deepgym_solution`
 
 When the machine can't start the solution at all (out of processes, say), these
 raise `LaunchError`. Let it propagate: the run ends as a verifier error with no
-verdict, instead of scoring the solution 0.
+verdict, instead of scoring the solution 0. It isn't an `Exception`, so an
+`except Exception` doesn't catch it. Once solution code has run, the same failure
+is the solution's (it may have used up the disk or processes) and scores 0.
 
 Each call is bounded by `case_timeout` (default 10s) and by the run's `timeout`,
-so a slow case fails on its own and the run still returns partial credit.
+so a slow case fails on its own and the run still returns partial credit. Whatever the
+solution starts is killed when the verifier ends, however it ends.
+
+Whatever the solution does once it runs (raise, exit, hang, return garbage) is its own
+failure: if the verifier doesn't handle it, the run scores 0, not a verifier error, so
+a solution can't dodge its score by breaking the verifier. Each such failure reaches the
+verifier as a `deepgym_solution.SolutionError`, still of the builtin type the solution
+raised, and a hang past the time limit scores 0 with `error_type='solution_timeout'`.
+Load test data before the solution, since a verifier that fails after starting it
+scores 0 too.
 
 ### Isolation
 

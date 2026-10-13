@@ -12,7 +12,8 @@ or detected by parsing the source (never by text search):
 
 Normalized output: one JSON object on stdout; exit 0 passed, 1 failed, 2 verifier error.
 A return value that isn't a float, bool or dict, or a dict whose ``passed`` or
-``truncated`` isn't a real bool, is a verifier error.
+``truncated`` isn't a real bool, is a verifier error. In every shape, an uncaught
+exception overrides whatever was printed before it (see :func:`guard_crashes`).
 """
 
 from __future__ import annotations
@@ -37,15 +38,18 @@ _REPORT = textwrap.dedent('''\
 
 
     def _dg_report(run):
-        """Run the verifier, normalize its result to the protocol, print it, and exit."""
+        """Run the verifier, normalize its result to the protocol, print it, and exit.
+
+        A crash inside *run* is left to the crash guard, which knows whether the solution ran.
+        """
         solution_path = _dg_sys.argv[1] if len(_dg_sys.argv) > 1 else "solution.py"
         test_cases_path = _dg_sys.argv[2] if len(_dg_sys.argv) > 2 else None
+        if test_cases_path is None:
+            result = run(solution_path)
+        else:
+            result = run(solution_path, test_cases_path)
         exit_code = 0
         try:
-            if test_cases_path is None:
-                result = run(solution_path)
-            else:
-                result = run(solution_path, test_cases_path)
             # bool before int/float: bool is a subclass of int.
             if isinstance(result, bool):
                 output = {"score": 1.0 if result else 0.0, "passed": result, "details": None}
@@ -80,11 +84,13 @@ _REPORT = textwrap.dedent('''\
                 raise _DgInvalidScore(f"invalid score {output['score']!r}; must be in [0, 1]")
             output["score"] = max(0.0, min(1.0, output["score"]))
             output.setdefault("truncated", False)
-            print(_dg_json.dumps(output))
+            # A line of its own, even after a partial line the verifier left unterminated.
+            print("\\n" + _dg_json.dumps(output))
             exit_code = 0 if output["passed"] else 1
         except Exception as e:
             print(
-                _dg_json.dumps(
+                "\\n"
+                + _dg_json.dumps(
                     {
                         "schema_version": "1.0",
                         "score": 0.0,
@@ -98,10 +104,6 @@ _REPORT = textwrap.dedent('''\
                         "truncated": False,
                         "error_type": "invalid_score"
                         if isinstance(e, _DgInvalidScore)
-                        else "import_error"
-                        if isinstance(e, ImportError)
-                        else "timeout"
-                        if isinstance(e, TimeoutError)
                         else "runtime_error",
                     }
                 )
@@ -141,6 +143,58 @@ _VERIFY_FUNCTION_TEMPLATE = """\
 if __name__ == "__main__":
     _dg_report(verify)
 """
+
+# Python exits 1 on an uncaught exception, which is also the protocol's "failed" code, so a
+# verifier that printed a score and then crashed would keep that score. This hook never
+# trusts what was printed. Once a solution process has started, the crash came from handling
+# the solution, so it is the solution's failure: a judged 0 (exit 1; error_type
+# solution_timeout when the solution ran out of time), or a solution could dodge its score
+# by breaking the verifier. Before that, it is the verifier's own failure, or the machine's
+# (a LaunchError: sandbox_error): no verdict (exit 2). Either way the hook prints the last
+# protocol line. SystemExit raised from an
+# excepthook still runs atexit handlers; a deliberate sys.exit() never reaches it.
+_CRASH_GUARD = '''\
+import json as _dg_json
+import os as _dg_os
+import sys as _dg_sys
+import traceback as _dg_traceback
+
+
+def _dg_crashed(kind, value, tb):
+    """Report an uncaught exception: a judged 0 once the solution ran, else a verifier error."""
+    trace = "".join(_dg_traceback.format_exception(kind, value, tb))
+    runtime = _dg_sys.modules.get("deepgym_solution")
+    if runtime is not None and runtime.consulted():
+        details = f"The verifier crashed handling the solution: {kind.__name__}: {value}"
+        report, code = {"details": details}, 1
+        if isinstance(value, runtime.SolutionTimeoutError):
+            report["error_type"] = "solution_timeout"  # a model fault: still a verdict
+    else:
+        error_type = (
+            "import_error" if issubclass(kind, ImportError)
+            else "timeout" if issubclass(kind, TimeoutError)
+            else "sandbox_error" if runtime is not None and issubclass(kind, runtime.LaunchError)
+            else "runtime_error"
+        )
+        report = {"details": f"Verifier error: {kind.__name__}: {value}\\n{trace}"}
+        report, code = {**report, "error_type": error_type}, 2
+    output = {"schema_version": "1.0", "score": 0.0, "passed": False, "truncated": False}
+    try:
+        # On a line of its own, even after a partial line the verifier left unterminated.
+        print("\\n" + _dg_json.dumps({**output, **report}), flush=True)
+    except (OSError, ValueError):
+        _dg_os._exit(2)  # no verdict line can get out, so nothing printed before counts
+    try:
+        _dg_sys.stderr.write(trace)
+        _dg_sys.stderr.flush()
+    except (AttributeError, OSError, ValueError):
+        # A stderr the solution broke (a full disk) must not change the verdict or exit code.
+        _dg_sys.stderr = None
+    raise SystemExit(code)
+
+
+_dg_sys.excepthook = _dg_crashed
+'''
 
 
 def is_main_guard(node: ast.stmt) -> bool:
@@ -204,18 +258,35 @@ def wrap_verifier(user_code: str) -> str:
         return 1.0 if "def sort" in content else 0.0
     """
     future, body = split_future_imports(user_code)
-    return _BODY_TEMPLATE.format(
-        future=future,
-        body=textwrap.indent(body.rstrip() or 'pass', '    '),
-        report=_REPORT,
+    return guard_crashes(
+        _BODY_TEMPLATE.format(
+            future=future,
+            body=textwrap.indent(body.rstrip() or 'pass', '    '),
+            report=_REPORT,
+        )
     )
 
 
+def guard_crashes(source: str, prelude: str = '') -> str:
+    """Return *source* with :data:`_CRASH_GUARD` installed before any of it runs.
+
+    The guard goes right after *source*'s ``from __future__`` imports, which must stay
+    first, and *prelude* (more setup code) right after the guard. The script keeps running
+    as ``__main__`` with its own ``__file__``, so pickling, multiprocessing and paths
+    relative to the script behave as before.
+    """
+    future, rest = split_future_imports(source)
+    return f'{future}{_CRASH_GUARD}{prelude}{rest}'
+
+
 def prepare_verifier(source: str, mode: VerifierMode = 'auto') -> str:
-    """Return a runnable verifier script for *source* in the given (or detected) mode."""
+    """Return a runnable verifier script for *source* in the given (or detected) mode.
+
+    Every shape gets :func:`guard_crashes`, so a crash never keeps a printed score.
+    """
     resolved = detect_verifier_mode(source) if mode == 'auto' else mode
-    if resolved == 'script':
-        return source
+    if resolved == 'body':
+        return wrap_verifier(source)
     if resolved == 'verify_function':
-        return _VERIFY_FUNCTION_TEMPLATE.format(source=source.rstrip(), report=_REPORT)
-    return wrap_verifier(source)
+        source = _VERIFY_FUNCTION_TEMPLATE.format(source=source.rstrip(), report=_REPORT)
+    return guard_crashes(source)

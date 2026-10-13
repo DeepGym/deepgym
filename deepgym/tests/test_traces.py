@@ -102,7 +102,23 @@ class _FailingScreenshots(LocalBackend):
         return base64.b64encode(b'png').decode()
 
 
-def _desktop_trace(env: MultiTurnEnvironment, *, screenshots: int, path: Path) -> TracedSession:
+class _InterruptedScreenshots(_FailingScreenshots):
+    """A 'desktop' interrupted (Ctrl-C) where _FailingScreenshots would fail."""
+
+    def screenshot(self) -> str:
+        try:
+            return super().screenshot()
+        except SandboxError:
+            raise KeyboardInterrupt from None
+
+
+def _desktop_trace(
+    env: MultiTurnEnvironment,
+    *,
+    screenshots: int,
+    path: Path,
+    backend: type[_FailingScreenshots] = _FailingScreenshots,
+) -> TracedSession:
     """Trace *env* as a desktop episode whose screenshots fail after *screenshots*."""
     env = env.model_copy(update={'desktop': True})
     provenance = Provenance(
@@ -112,7 +128,7 @@ def _desktop_trace(env: MultiTurnEnvironment, *, screenshots: int, path: Path) -
         deepgym_version='test',
         started_at=datetime.now(timezone.utc),
     )
-    return TracedSession(Session(env, _FailingScreenshots(screenshots)), env, provenance, path)
+    return TracedSession(Session(env, backend(screenshots)), env, provenance, path)
 
 
 class TestSchema:
@@ -494,6 +510,31 @@ class TestCapture:
         assert result.passed
         assert 'Could not delete sandbox local-session' in caplog.text
 
+    def test_a_failed_delete_is_retried_by_the_next_close(
+        self, dg: DeepGym, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        tr = dg.trace(WRITE_ENV, AGENT)
+        backend = tr._session._backend
+        real_close = backend.close
+        deletes: list[str] = []
+
+        def flaky_close() -> None:
+            deletes.append('attempt')
+            if len(deletes) == 1:
+                raise SandboxError('Could not delete sandbox local-session')
+            real_close()
+
+        monkeypatch.setattr(backend, 'close', flaky_close)
+        tr.start()
+        with pytest.raises(SandboxError, match='Could not delete'):
+            tr.close()
+        tr.close()
+        tr.close()
+
+        assert len(deletes) == 2
+        events = [json.loads(line)['event'] for line in tr.path.read_text().splitlines()]
+        assert events.count('end') == 1 and load_trace(tr.path).finished_at is not None
+
     def test_rejected_action_is_recorded(self, dg: DeepGym) -> None:
         env = WRITE_ENV.model_copy(update={'allowed_actions': frozenset({'bash', 'done'})})
 
@@ -701,18 +742,43 @@ class TestCapture:
         assert not trace.has_verdict and trace.result.error_type == 'verifier_error'
         assert json.loads((tmp_path / 'rl.jsonl').read_text())['step_rewards'] == [None]
 
-    def test_failure_after_scoring_a_step_keeps_the_score(self, tmp_path: Path) -> None:
+    def test_failed_screenshot_ends_the_episode_without_a_replay(self, tmp_path: Path) -> None:
         tr = _desktop_trace(WRITE_ENV, screenshots=1, path=tmp_path / 't.jsonl')
+        action = Action(action_type='bash', content='echo hello > out.txt')
 
         with tr:
-            tr.start()
+            first = tr.start()
             with pytest.raises(SandboxError, match='screenshot failed'):
-                tr.step(Action(action_type='bash', content='echo hello > out.txt'))
+                tr.step(action)
+            # A retry would apply the action again and score it twice.
+            with pytest.raises(DeepGymError, match='not running'):
+                tr.step(action)
+            result = tr.score()
+
+        trajectory = tr._session.trajectory
+        assert trajectory.steps == [(first, action)]
+        assert (trajectory.step_rewards, trajectory.final_observation) == ([], None)
+        # No provider failure behind it, so it follows from the agent's actions: a 0.
+        assert (result.has_verdict, result.error_type) == (True, 'policy_sandbox_failure')
+        trace = load_trace(tr.path)
+        (step,) = trace.steps
+        assert step.applied and step.observation is None
+        assert (step.reward, step.step_verifier) == (None, None)
+        assert step.error == 'SandboxError: screenshot failed'
+        assert trace.to_trajectory() == trajectory  # replay keeps the action it can't show
+
+    def test_an_interrupted_step_stays_in_the_trace(self, tmp_path: Path) -> None:
+        tr = _desktop_trace(
+            WRITE_ENV, screenshots=1, path=tmp_path / 't.jsonl', backend=_InterruptedScreenshots
+        )
+
+        with pytest.raises(KeyboardInterrupt), tr:
+            tr.start()
+            tr.step(Action(action_type='bash', content='echo hello > out.txt'))
 
         (step,) = load_trace(tr.path).steps
-        assert step.applied and step.observation is None
-        assert (step.reward, step.step_verifier['details']) == (0.5, 'step 1')
-        assert step.error == 'SandboxError: screenshot failed'
+        assert step.applied and step.error == 'KeyboardInterrupt: '
+        assert len(tr._session.trajectory.steps) == 1
 
     def test_replay_keeps_an_action_whose_screenshot_failed(self, tmp_path: Path) -> None:
         tr = _desktop_trace(WRITE_ENV, screenshots=1, path=tmp_path / 't.jsonl')
@@ -724,37 +790,23 @@ class TestCapture:
         trajectory = load_trace(tr.path).to_trajectory()
 
         assert trajectory == tr._session.trajectory
-        assert (len(trajectory.steps), trajectory.step_rewards) == (1, [0.5])
+        assert (len(trajectory.steps), trajectory.step_rewards) == (1, [])  # never graded
 
     def test_failed_step_verifier_never_reuses_an_earlier_verdict(self, tmp_path: Path) -> None:
         verifier = 'import os\nprint(0.5 if os.environ["STEP_NUMBER"] == "1" else "garbage")\n'
         env = WRITE_ENV.model_copy(update={'step_verifier_code': verifier})
-        tr = _desktop_trace(env, screenshots=2, path=tmp_path / 't.jsonl')
+        tr = _desktop_trace(env, screenshots=3, path=tmp_path / 't.jsonl')
 
         with tr:
             tr.start()
             tr.step(Action(action_type='bash', content='echo one'))
-            # The step verifier fails, then the screenshot taken after it fails too; the
-            # verifier's failure is what ends the episode, so it is what propagates.
             with pytest.raises(VerifierError):
                 tr.step(Action(action_type='bash', content='echo two'))
 
         first, second = load_trace(tr.path).steps
         assert first.reward == 0.5
         assert (second.reward, second.step_verifier) == (None, None)
-
-    def test_first_step_verifier_failure_then_failed_screenshot(self, tmp_path: Path) -> None:
-        env = WRITE_ENV.model_copy(update={'step_verifier_code': 'print("garbage")'})
-        tr = _desktop_trace(env, screenshots=1, path=tmp_path / 't.jsonl')
-
-        with tr:
-            tr.start()
-            with pytest.raises(VerifierError) as raised:
-                tr.step(Action(action_type='bash', content='echo one'))
-
-        (step,) = load_trace(tr.path).steps
-        assert step.applied and (step.reward, step.step_verifier) == (None, None)
-        assert isinstance(raised.value.__cause__, SandboxError)
+        assert second.observation.screenshot is not None and second.observation.done
 
     def test_replay_gives_a_failed_step_no_reward(self, dg: DeepGym) -> None:
         verifier = 'import os\nprint(0.5 if os.environ["STEP_NUMBER"] == "1" else "garbage")\n'

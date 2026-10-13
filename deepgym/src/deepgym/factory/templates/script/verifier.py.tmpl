@@ -4,7 +4,8 @@ The judge never imports or runs the solution itself. run_solution() starts the s
 in an isolated process with an empty environment, no network and a scratch directory
 as the only place it may write; the judge only sees its exit code and output. Every
 case is reported with a reason. A bug in this file ends the run as a verifier error
-(no reward) instead of a silent 0.
+(no reward) until the solution starts; after that a crash scores 0, so a solution
+can't escape its score by breaking the judge.
 
 To adapt it: rewrite expected() and to_stdin() for your task, and edit variants.py.
 """

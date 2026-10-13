@@ -4,6 +4,7 @@ from deepgym.sandboxes.daytona.sandbox import (
     cleanup_sandbox,
     create_params,
     create_sandbox,
+    has_stopped,
     is_timeout,
     snapshot_digest,
 )
@@ -14,6 +15,7 @@ __all__ = [
     'cleanup_sandbox',
     'create_params',
     'create_sandbox',
+    'has_stopped',
     'is_timeout',
     'snapshot_digest',
 ]

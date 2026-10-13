@@ -170,12 +170,13 @@ def test_a_strong_verifier_kills_every_mutant(tmp_path: Path, local_dg: DeepGym)
 @needs_sandbox
 @pytest.mark.usefixtures('mutants_run_here')
 def test_mutants_the_verifier_errors_on_are_inconclusive(local_dg: DeepGym) -> None:
+    # It crashes before running a mutant; a crash after running one would score it 0.
     verifier = (
-        'from deepgym_solution import load_solution\n\n'
+        'from deepgym_solution import load_solution, solution_source\n\n'
         'def verify(solution_path, test_cases_path=None):\n'
-        '    if load_solution(solution_path).f(1) != 2:\n'
+        "    if 'x + 1' not in solution_source(solution_path):\n"
         "        raise ValueError('a verifier that crashes instead of scoring')\n"
-        '    return 1.0\n'
+        '    return float(load_solution(solution_path).f(1) == 2)\n'
     )
     env = Environment(task='t', verifier_code=verifier)
 

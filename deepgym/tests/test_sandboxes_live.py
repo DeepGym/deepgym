@@ -16,17 +16,29 @@ from pathlib import Path
 import pytest
 
 from deepgym import AsyncDeepGym, ComputerUseEnvironment, DeepGym, load_environment
-from deepgym.exceptions import DeepGymError, SandboxError
+from deepgym.exceptions import ActionError, DeepGymError
 from deepgym.models import Action, MultiTurnEnvironment
 from deepgym.sandboxes.apple import AppleContainer
 from deepgym.sandboxes.docker import DockerContainer
 from deepgym.traces import AgentMeta
-from tests.test_isolation import _env
+
+# Every failure-attribution path, rerun on each provider via this module's `mode`.
+from tests.test_failure_attribution import (  # noqa: F401
+    test_an_uncaught_solution_timeout_is_a_judged_zero,
+    test_final_verifiers_attribute_failures_alike,
+    test_single_runs_attribute_failures_alike,
+    test_step_verifiers_attribute_failures_alike,
+)
+from tests.test_isolation import (  # noqa: F401
+    _env,
+    test_every_solution_failure_reaches_the_verifier_as_a_solution_error,
+)
 
 # Every live isolation test, rerun here on each provider via this module's `dg`.
 from tests.test_isolation_live import (  # noqa: F401
     test_api_request_scores_what_the_solution_fetches,
     test_hacks_fail,
+    test_judge_refuses_a_solver_account_that_is_root,
     test_judge_temp_files_are_private,
     test_reference_passes_and_wrong_fails,
     test_script_env_and_support_files,
@@ -61,11 +73,16 @@ _LIST_CONTAINERS = {
 
 
 @pytest.fixture(scope='module', params=_PROVIDERS)
-def dg(request: pytest.FixtureRequest) -> DeepGym:
-    yield DeepGym(mode=request.param)
+def mode(request: pytest.FixtureRequest) -> str:
+    yield request.param
     if command := _LIST_CONTAINERS.get(request.param):
         names = subprocess.run(command, capture_output=True, text=True, check=False).stdout
         assert not [name for name in names.split() if name.startswith('deepgym-')]
+
+
+@pytest.fixture(scope='module')
+def dg(mode: str) -> DeepGym:
+    return DeepGym(mode=mode)
 
 
 def test_solution_has_no_network(dg: DeepGym) -> None:
@@ -200,7 +217,7 @@ def test_session_write_file_cannot_follow_symlinks_out(dg: DeepGym) -> None:
     with dg.session(MultiTurnEnvironment(task='t', max_steps=5)) as session:
         session.start()
         session.step(Action(action_type='bash', content='ln -s /usr/bin ub'))
-        with contextlib.suppress(SandboxError):
+        with contextlib.suppress(ActionError):
             session.step(Action(action_type='write_file', path='ub/timeout', content=_TROJAN))
         after = session.step(Action(action_type='bash', content=_PWNED)).observation.content
     assert 'clean' in after

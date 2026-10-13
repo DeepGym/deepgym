@@ -1,14 +1,20 @@
 """Tests for deepgym.sandbox.LocalExecutor."""
 
+import asyncio
+import contextlib
+import os
+import signal
+import subprocess
+import time
 from pathlib import Path
 
 import pytest
 
 from deepgym import DeepGym
-from deepgym.exceptions import SandboxError, TimeoutError, VerifierError
+from deepgym.exceptions import DeepGymError, SandboxError, TimeoutError, VerifierError
 from deepgym.judge import JudgeJob
 from deepgym.models import Environment, VerifierResult
-from deepgym.sandbox import ExecutionResult, LocalExecutor
+from deepgym.sandbox import AsyncLocalExecutor, ExecutionResult, LocalExecutor
 
 ENVS_DIR = Path(__file__).resolve().parent.parent / 'src' / 'deepgym' / 'envs'
 
@@ -157,6 +163,136 @@ class TestLocalExecutorRun:
                     env_vars={'; rm -rf /': 'bad'},
                 )
             )
+
+
+async def test_cancelled_async_run_kills_and_reaps_the_verifier(tmp_path: Path) -> None:
+    pid_file = tmp_path / 'pids'
+    # The verifier starts a child that holds its output pipes, as a helper process might.
+    verifier = (
+        'import os, subprocess, time\n'
+        'child = subprocess.Popen(["sleep", "60"])\n'
+        'path = os.environ["PID_FILE"]\n'
+        'open(path + ".tmp", "w").write(f"{os.getpid()} {child.pid}")\n'
+        'os.replace(path + ".tmp", path)\n'
+        'time.sleep(60)\n'
+    )
+    job = JudgeJob(verifier=verifier, solution='', timeout=60, env_vars={'PID_FILE': str(pid_file)})
+    run = asyncio.ensure_future(AsyncLocalExecutor().run(job))
+    while not pid_file.exists():
+        await asyncio.sleep(0.05)
+    pids = [int(pid) for pid in pid_file.read_text().split()]
+    try:
+        run.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await asyncio.wait_for(run, timeout=3)
+        await asyncio.sleep(0.2)  # the child is reparented to init, which reaps it
+        for pid in pids:  # killed and reaped: not even a zombie is left
+            with pytest.raises(ProcessLookupError):
+                os.kill(pid, 0)
+    finally:
+        for pid in pids:
+            with contextlib.suppress(ProcessLookupError):
+                os.kill(pid, signal.SIGKILL)
+
+
+def test_a_timed_out_run_kills_and_reaps_the_verifier_and_its_children(tmp_path: Path) -> None:
+    pid_file = tmp_path / 'pids'
+    verifier = (
+        'import os, subprocess, time\n'
+        'child = subprocess.Popen(["sleep", "60"])\n'
+        'path = os.environ["PID_FILE"]\n'
+        'open(path + ".tmp", "w").write(f"{os.getpid()} {child.pid}")\n'
+        'os.replace(path + ".tmp", path)\n'
+        'time.sleep(60)\n'
+    )
+    job = JudgeJob(verifier=verifier, solution='', timeout=1, env_vars={'PID_FILE': str(pid_file)})
+    with pytest.raises(TimeoutError):
+        LocalExecutor().run(job)
+    pids = [int(pid) for pid in pid_file.read_text().split()]
+    try:
+        time.sleep(0.2)  # the child is reparented to init, which reaps it
+        for pid in pids:  # killed and reaped: not even a zombie is left
+            with pytest.raises(ProcessLookupError):
+                os.kill(pid, 0)
+    finally:
+        for pid in pids:
+            with contextlib.suppress(ProcessLookupError):
+                os.kill(pid, signal.SIGKILL)
+
+
+# A C loop holds the interpreter lock, so no thread in that process (a watchdog, say) runs.
+_HOG = 'import itertools; sum(itertools.repeat(1))'
+# As a module (load_solution) f() hogs; as a script (run_solution) it starts a busy child
+# that is told the script's path, so it can be found, and then hogs too.
+_HOGGING_SOLUTION = (
+    'import itertools, subprocess, sys\n\n'
+    'def f():\n'
+    '    sum(itertools.repeat(1))\n\n'
+    'if __name__ == "__main__":\n'
+    f'    subprocess.Popen([sys.executable, "-c", {_HOG!r}, sys.argv[0]])\n'
+    '    sum(itertools.repeat(1))\n'
+)
+_ENDS_WHILE_SOLUTION_RUNS = """\
+import os, sys, threading, time
+from deepgym_solution import load_solution, run_solution
+
+def start():
+    if os.environ["CALL"] == "load_solution":
+        load_solution(sys.argv[1]).f()
+    else:
+        run_solution(sys.argv[1], allow_subprocess=True, timeout=60)
+
+threading.Thread(target=start, daemon=True).start()
+time.sleep(1)  # the solution and its child are running
+with open(os.environ["MARK"], "w") as mark:
+    mark.write(sys.argv[1])
+if os.environ["ENDING"] == "crash":
+    raise RuntimeError("the verifier crashes while the solution runs")
+if os.environ["ENDING"] in ("timeout", "cancel"):
+    time.sleep(60)
+print('{"score": 1.0, "passed": true}')
+"""
+
+
+def _processes_running(solution_path: str) -> list[str]:
+    """The processes whose command line names *solution_path*: its server, script, child."""
+    listing = subprocess.run(['ps', '-axo', 'pid=,command='], capture_output=True, text=True)
+    return [line for line in listing.stdout.splitlines() if solution_path in line]
+
+
+@pytest.mark.parametrize('call', ['load_solution', 'run_solution'])
+@pytest.mark.parametrize('ending', ['normal', 'crash', 'timeout', 'cancel'])
+async def test_no_solution_process_outlives_its_run(tmp_path: Path, call: str, ending: str) -> None:
+    """However a run ends, nothing the solution started keeps running: not a server or
+    script hogging the interpreter lock, nor a busy child it started."""
+    mark = tmp_path / 'solution_path'
+    env_vars = {'CALL': call, 'ENDING': ending, 'MARK': str(mark)}
+    job = JudgeJob(
+        verifier=_ENDS_WHILE_SOLUTION_RUNS,
+        solution=_HOGGING_SOLUTION,
+        timeout=2,
+        env_vars=env_vars,
+    )
+    if ending == 'cancel':
+        run = asyncio.ensure_future(AsyncLocalExecutor().run(job))
+        while not mark.exists():
+            await asyncio.sleep(0.05)
+        run.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await run
+    else:
+        with contextlib.suppress(DeepGymError):  # a crash or timeout has no verdict
+            await asyncio.to_thread(LocalExecutor().run, job)
+    solution_path = mark.read_text()
+    try:
+        deadline = time.monotonic() + 5
+        while _processes_running(solution_path) and time.monotonic() < deadline:
+            await asyncio.sleep(0.1)
+        assert _processes_running(solution_path) == []
+    finally:  # never leave a busy process behind, even when the test fails
+        for line in _processes_running(solution_path):
+            with contextlib.suppress(ProcessLookupError):
+                os.kill(int(line.split()[0]), signal.SIGKILL)
 
 
 class TestExampleEnvironments:

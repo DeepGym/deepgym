@@ -78,6 +78,7 @@ class Sandbox(Protocol):
 
         Raises:
             SandboxTimeoutError: If the command outruns *timeout* seconds.
+            SandboxDiedError: If the sandbox itself stopped during the command.
         """
         ...
 

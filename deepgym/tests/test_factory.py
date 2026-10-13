@@ -393,8 +393,9 @@ def test_check_marks_a_verifier_error_on_the_empty_solution_inconclusive(
 ) -> None:
     path = scaffold('env', 'function', tmp_path)
     (path / 'verifier.py').write_text(
-        'from deepgym_solution import load_solution\n\n'
+        'from deepgym_solution import load_solution, solution_source\n\n'
         'def verify(solution_path, test_cases_path=None):\n'
+        '    solution_source(solution_path).splitlines()[0]  # a bug when the file is empty\n'
         '    got = load_solution(solution_path).longest_run([1, 2, 3])\n'
         "    case = {'id': 'c0', 'passed': got == 3, 'actual_summary': repr(got)}\n"
         "    return {'score': float(got == 3), 'passed': got == 3, 'cases': [case]}\n",
@@ -403,7 +404,7 @@ def test_check_marks_a_verifier_error_on_the_empty_solution_inconclusive(
 
     statuses = _statuses(check_env(path, local_dg))
 
-    # The empty solution has no longest_run, so the verifier itself raises: no verdict.
+    # The verifier raises on the empty solution before running it: no verdict.
     assert statuses['empty_fails'] == 'inconclusive'
     assert statuses['stub_fails'] == 'pass'
     assert _cli('check', str(path)) == 2

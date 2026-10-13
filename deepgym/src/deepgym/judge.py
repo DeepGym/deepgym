@@ -49,12 +49,39 @@ SANDBOX_ROOT = '/opt/deepgym'
 """Where judge, runtime and solution files go in a sandbox (see :data:`SANDBOX_SETUP`)."""
 SOLVER_USER = 'dgsolver'
 
+
+def ids_are_exclusive(*users: str) -> str:
+    """Return a shell check that each of *users* that exists holds ids no other account has.
+
+    A user's uid and gid must be nonzero, that account's alone, and its only group, so
+    dropping to them grants that account's rights and nobody else's. Ruling out root isn't
+    enough: a uid or primary gid shared with any other account, or a supplementary group
+    the image put the user in (a stray ``shadow:x:42:dgsolver`` line), would carry that
+    account's or group's rights too. The passwd gid check catches an account whose primary
+    gid has no group entry. The check prints the first user that fails and exits 1.
+    """
+    return (
+        f'for u in {shlex.join(users)}; do '
+        'id "$u" >/dev/null 2>&1 || continue; '
+        'uid=$(id -u "$u"); gid=$(id -g "$u"); '
+        '[ "$uid" != 0 ] && [ "$gid" != 0 ] && '
+        '[ "$(getent passwd | cut -d: -f3 | grep -Fcx "$uid")" = 1 ] && '
+        '[ "$(getent passwd | cut -d: -f4 | grep -Fcx "$gid")" = 1 ] && '
+        '[ "$(getent group | cut -d: -f3 | grep -Fcx "$gid")" = 1 ] && '
+        '[ "$(id -Gn "$u")" = "$u" ] '
+        '|| { echo "$u is root or shares an id or a group with another account"; exit 1; }; '
+        'done'
+    )
+
+
 # Run once per sandbox (Daytona or Apple container), as its default user (root or a sudoer).
+# A solver account the image already has is used only if its ids are its own.
 SANDBOX_SETUP = f"""
 set -e
 if [ "$(id -u)" = 0 ]; then SUDO=; else SUDO="sudo -n"; fi
 id {SOLVER_USER} >/dev/null 2>&1 || \\
   $SUDO useradd --system --no-create-home --shell /usr/sbin/nologin {SOLVER_USER}
+{ids_are_exclusive(SOLVER_USER)}
 $SUDO mkdir -p {SANDBOX_ROOT}/judge {SANDBOX_ROOT}/runtime {SANDBOX_ROOT}/solution \\
   {SANDBOX_ROOT}/tmp
 $SUDO chown -R "$(id -u):$(id -g)" {SANDBOX_ROOT}
@@ -278,9 +305,14 @@ def sandbox_isolation(setup_output: str, *, require_offline: bool = False) -> tu
     no host). ``own_network`` in the spec says it got one.
 
     Raises:
-        SandboxError: If *require_offline* is set but the sandbox can't make that namespace.
+        SandboxError: If the solver's uid or gid is root or unreadable, or if
+            *require_offline* is set but the sandbox can't make that namespace.
     """
     judge_uid, uid, gid, python, netns = setup_output.split()[-5:]
+    # SANDBOX_SETUP proved the ids exclusive; this guards the parse before it reaches setpriv.
+    # Only sandbox_judge_by_name passes the solver's name instead.
+    if not all(v == SOLVER_USER or (v.isdecimal() and int(v) > 0) for v in (uid, gid)):
+        raise SandboxError(f'Refusing to run the solution as root or an unknown id: {uid}:{gid}')
     if require_offline and netns != '1':
         raise SandboxError(
             'Cannot cut the solution off the network here; the image needs util-linux '

@@ -12,7 +12,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Literal
 
-from deepgym.exceptions import DeepGymError
+from deepgym.exceptions import DeepGymError, SandboxDiedError
 from deepgym.sandboxes.protocol import (
     TRUSTED_PATH,
     ExecResult,
@@ -29,6 +29,7 @@ __all__ = [
     'ExecResult',
     'Provider',
     'Sandbox',
+    'SandboxDiedError',
     'SandboxImage',
     'SandboxTimeoutError',
     'TRUSTED_PATH',

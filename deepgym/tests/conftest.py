@@ -10,6 +10,7 @@ from pathlib import Path
 
 import pytest
 
+from deepgym import solution_runtime
 from deepgym.core import DeepGym
 from deepgym.models import Environment
 from deepgym.sandboxes import ExecResult
@@ -28,6 +29,15 @@ STRING_DIR = ENVS_DIR / 'string_manipulation'
 # ---------------------------------------------------------------------------
 # Fixtures
 # ---------------------------------------------------------------------------
+
+
+@pytest.fixture(autouse=True)
+def fresh_solution_runtime(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Start each test as a fresh verifier: no solution code run yet, no preflight done,
+    no watcher started."""
+    monkeypatch.setattr(solution_runtime, '_consulted', False)
+    monkeypatch.setattr(solution_runtime, '_preflight_passed', False)
+    monkeypatch.setattr(solution_runtime, '_watcher', None)
 
 
 @pytest.fixture()

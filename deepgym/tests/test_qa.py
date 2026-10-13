@@ -135,9 +135,10 @@ def test_single_turn_checks_fail_without_a_reference(local_dg: DeepGym) -> None:
 
 
 def test_a_verifier_error_on_empty_or_stub_is_inconclusive_not_a_pass(local_dg: DeepGym) -> None:
-    # sol.add raises AttributeError in the judge for the empty solution: no verdict on it.
+    # The verifier raises on the empty solution before running it: no verdict on it.
     strict = (
-        'from deepgym_solution import load_solution\n'
+        'from deepgym_solution import load_solution, solution_source\n'
+        'solution_source(solution_path).splitlines()[0]  # a bug when the file is empty\n'
         'sol = load_solution(solution_path)\n'
         'return 1.0 if sol.add(2, 3) == 5 else 0.0\n'
     )

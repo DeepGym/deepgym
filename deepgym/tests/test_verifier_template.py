@@ -8,6 +8,9 @@ from pathlib import Path
 
 import pytest
 
+from deepgym import AsyncDeepGym, DeepGym
+from deepgym.integrations.reward import AsyncRewardFunction, RewardFunction
+from deepgym.models import Environment
 from deepgym.verifier_template import wrap_verifier
 
 
@@ -173,3 +176,149 @@ class TestScoreValidation:
     def test_float_noise_is_clamped(self) -> None:
         output, _ = _run_wrapped('return 1.0000000001\n', '# e\n')
         assert output['score'] == 1.0
+
+
+def _crash_after(score: float, mode: str) -> str:
+    """A verifier that prints *score* as a failed run, then crashes outside any handler."""
+    report = f'print(json.dumps({{"score": {score}, "passed": False}}), flush=True)'
+    if mode == 'script':
+        return f'import json\nif __name__ == "__main__":\n    {report}\n    raise ValueError\n'
+    return (
+        f'import json\n{report}\nraise RuntimeError("bug")\n\n'
+        'def verify(solution_path, test_cases_path=None):\n    return 1.0\n'
+    )
+
+
+# Use the solution's answer with no handling of their own, so whatever the solution does
+# wrong reaches the crash guard.
+_CALLS_SOLUTION = (
+    'from deepgym_solution import load_solution\n\n'
+    'def verify(solution_path, test_cases_path=None):\n'
+    '    return 1.0 if load_solution(solution_path).double(2) + 0 == 4 else 0.0\n'
+)
+_PARSES_OUTPUT = (
+    'import json\n'
+    'from deepgym_solution import run_solution\n\n'
+    'def verify(solution_path, test_cases_path=None):\n'
+    '    return 1.0 if json.loads(run_solution(solution_path).stdout) == 4 else 0.0\n'
+)
+
+
+class TestCrashGuard:
+    """A crash never keeps a printed score (Python exits 1 on a crash, the protocol's "failed"
+    code). Before the solution runs it is the verifier's failure, with no verdict; once the
+    solution has run it is the solution's, a judged 0, so breaking the verifier never pays."""
+
+    @pytest.mark.parametrize('mode', ['script', 'verify_function'])
+    @pytest.mark.parametrize('score', [0.75, 0.0])
+    async def test_a_crash_before_the_solution_runs_is_no_reward(
+        self, mode: str, score: float
+    ) -> None:
+        env = Environment(task='t', verifier_code=_crash_after(score, mode), verifier_mode=mode)
+
+        rewards = RewardFunction(env, DeepGym(mode='local'))(['x'])
+        async_rewards = await AsyncRewardFunction(env, AsyncDeepGym(mode='local'))(['x'])
+
+        assert rewards == async_rewards == [None]
+
+    def test_a_broken_stderr_never_keeps_a_printed_score(self) -> None:
+        verifier = (
+            'import json, sys\n\n'
+            'class Full:\n'
+            '    def write(self, text):\n'
+            '        raise OSError(28, "No space left on device")\n'
+            '    flush = write\n\n'
+            'if __name__ == "__main__":\n'
+            '    print(json.dumps({"score": 0.75, "passed": False}), flush=True)\n'
+            '    sys.stderr = Full()  # a full disk under a file-backed stderr\n'
+            '    raise ValueError\n'
+        )
+        env = Environment(task='t', verifier_code=verifier)
+
+        result = DeepGym(mode='local').run(env, 'x = 1')
+
+        assert (result.exit_code, result.has_verdict) == (2, False)
+
+    async def test_a_crash_after_the_solution_runs_is_a_judged_zero(self) -> None:
+        verifier = (
+            'import json, sys\n'
+            'from deepgym_solution import load_solution\n\n'
+            'if __name__ == "__main__":\n'
+            '    load_solution(sys.argv[1])\n'
+            '    print(json.dumps({"score": 0.75, "passed": False}), flush=True)\n'
+            '    raise ValueError\n'
+        )
+        env = Environment(task='t', verifier_code=verifier)
+
+        rewards = RewardFunction(env, DeepGym(mode='local'))(['x = 1'])
+        async_rewards = await AsyncRewardFunction(env, AsyncDeepGym(mode='local'))(['x = 1'])
+
+        assert rewards == async_rewards == [0.0]
+
+    @pytest.mark.parametrize(
+        ('verifier', 'solution'),
+        [
+            (_CALLS_SOLUTION, 'def double(n):\n    raise ValueError("no")\n'),
+            (_CALLS_SOLUTION, 'def double(n):\n    raise ImportError("not the verifier\'s")\n'),
+            (_CALLS_SOLUTION, 'def double(n):\n    raise TimeoutError("not the verifier\'s")\n'),
+            (_CALLS_SOLUTION, 'import os\n\ndef double(n):\n    os._exit(3)\n'),
+            (_CALLS_SOLUTION, 'def double(n):\n    while True:\n        pass\n'),
+            (_CALLS_SOLUTION, 'def double(n):\n    return "four"\n'),
+            (_CALLS_SOLUTION, 'def double(n) return 4\n'),
+            (_PARSES_OUTPUT, 'print("four")\n'),
+            (_PARSES_OUTPUT, 'import sys\nsys.exit(3)\n'),
+        ],
+        ids=[
+            'raises',
+            'raises_import_error',
+            'raises_timeout',
+            'exits',
+            'hangs',
+            'returns_garbage',
+            'syntax_error',
+            'prints_garbage',
+            'exits_nonzero',
+        ],
+    )
+    def test_whatever_the_solution_does_wrong_is_a_judged_zero(
+        self, verifier: str, solution: str
+    ) -> None:
+        env = Environment(task='t', verifier_code=verifier, case_timeout=1)
+
+        result = DeepGym(mode='local').run(env, solution)
+
+        assert (result.score, result.passed, result.has_verdict) == (0.0, False, True)
+
+    @pytest.mark.parametrize(
+        ('verifier', 'solution'),
+        [(_CALLS_SOLUTION, 'def double(n):\n    return 2 * n\n'), (_PARSES_OUTPUT, 'print(4)\n')],
+    )
+    def test_a_working_solution_still_passes(self, verifier: str, solution: str) -> None:
+        env = Environment(task='t', verifier_code=verifier)
+        assert DeepGym(mode='local').run(env, solution).score == 1.0
+
+    def test_a_verifier_setup_failure_has_no_verdict(self) -> None:
+        verifier = (
+            'from deepgym_solution import load_solution\n\n'
+            'def verify(solution_path, test_cases_path=None):\n'
+            '    cases = open("missing_cases.json").read()\n'
+            '    return 1.0 if load_solution(solution_path).double(2) == 4 else 0.0\n'
+        )
+        env = Environment(task='t', verifier_code=verifier)
+
+        result = DeepGym(mode='local').run(env, 'def double(n):\n    return 2 * n\n')
+
+        assert (result.has_verdict, result.error_type) == (False, 'runtime_error')
+
+    def test_a_deliberate_failed_exit_keeps_partial_credit(self) -> None:
+        verifier = (
+            'from __future__ import annotations\n'
+            'import json, sys\n'
+            'if __name__ == "__main__":\n'
+            '    print(json.dumps({"score": 0.4, "passed": False}))\n'
+            '    sys.exit(1)\n'
+        )
+
+        result = DeepGym(mode='local').run(Environment(task='t', verifier_code=verifier), 'x')
+
+        assert (result.score, result.passed, result.has_verdict) == (0.4, False, True)

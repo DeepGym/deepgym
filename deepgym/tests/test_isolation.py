@@ -4,6 +4,7 @@ Runs locally. File-isolation checks need sandbox-exec (macOS) or bwrap (Linux)
 and are skipped where neither works.
 """
 
+import errno
 import json
 import os
 import shutil
@@ -20,6 +21,7 @@ from deepgym import DeepGym, load_environment
 from deepgym.exceptions import SandboxError
 from deepgym.judge import local_isolation_kind, sandbox_isolation
 from deepgym.models import Environment
+from deepgym.verifier_template import guard_crashes
 
 needs_sandbox = pytest.mark.skipif(
     local_isolation_kind() == 'none', reason='no sandbox-exec or bwrap on this machine'
@@ -98,6 +100,62 @@ def test_a_restart_with_the_run_out_of_time_keeps_the_partial_score() -> None:
     assert result.output == '1/3'
 
 
+def test_a_cleanup_the_solution_broke_is_its_failure(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A script that used up the processes can make the cleanup after it fail: that is
+    still the solution's failure, never a verifier error with no verdict."""
+    from deepgym import solution_runtime
+
+    script = tmp_path / 'solution.py'
+    script.write_text('print("ran")\n', encoding='utf-8')
+
+    def no_processes_left(proc: subprocess.Popen) -> None:
+        proc.kill()
+        raise OSError(errno.EAGAIN, 'Resource temporarily unavailable')
+
+    monkeypatch.setattr(solution_runtime, '_kill', no_processes_left)
+
+    with pytest.raises(solution_runtime.SolutionError, match='temporarily unavailable'):
+        solution_runtime.run_solution(str(script))
+    assert solution_runtime.consulted()
+
+
+def test_a_script_runs_only_once_the_watcher_knows_it(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A judge that dies before handing a script to its watcher must not leave it running:
+    the script is held until then, so nothing ran and it is no verdict."""
+    from deepgym import solution_runtime
+
+    script = tmp_path / 'solution.py'
+    script.write_text('open("ran", "w").close()\n', encoding='utf-8')
+
+    def slow_then_gone(group: int) -> None:
+        time.sleep(1)  # time enough for an unheld script to run
+        raise OSError('the watcher is gone')
+
+    monkeypatch.setattr(solution_runtime, '_watch_group', slow_then_gone)
+
+    with pytest.raises(solution_runtime.LaunchError, match='the watcher is gone'):
+        solution_runtime.run_solution(str(script), cwd=str(tmp_path))
+    assert not (tmp_path / 'ran').exists()
+
+
+def test_a_run_the_solution_used_up_stays_a_timeout(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from deepgym import solution_runtime
+
+    script = tmp_path / 'solution.py'
+    script.write_text('while True:\n    pass\n', encoding='utf-8')
+    monkeypatch.setenv('DEEPGYM_DEADLINE', str(time.time() + 1))
+
+    for _ in range(2):  # the second launch finds the run's time already used up
+        with pytest.raises(solution_runtime.SolutionTimeoutError):
+            solution_runtime.run_solution(str(script), timeout=5)
+
+
 def test_run_solution_tells_a_launch_failure_from_the_script_failing(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -109,7 +167,10 @@ def test_run_solution_tells_a_launch_failure_from_the_script_failing(
     # The script's own exit code, however launcher-like, is its result to score.
     assert solution_runtime.run_solution(str(script)).returncode == 127
     monkeypatch.setenv('DEEPGYM_PYTHON', '/nonexistent/python')  # env starts, Python never does
-    with pytest.raises(solution_runtime.LaunchError):
+    with pytest.raises(solution_runtime.SolutionError):  # after the solution ran: maybe its doing
+        solution_runtime.run_solution(str(script))
+    monkeypatch.setattr(solution_runtime, '_consulted', False)
+    with pytest.raises(solution_runtime.LaunchError):  # before any of it ran: the machine's
         solution_runtime.run_solution(str(script))
 
 
@@ -134,7 +195,8 @@ def test_no_start_signal_goes_through_sudo(monkeypatch: pytest.MonkeyPatch) -> N
     spec = {'kind': 'user', 'prefix': ['/usr/bin/sudo', '-n', '-u', 'solver', '--']}
     monkeypatch.setenv('DEEPGYM_ISOLATION', json.dumps(spec))
 
-    with solution_runtime._start_signal() as (prefix, fds, started):
+    with solution_runtime._start_signal() as (prefix, fds, started, release):
+        release()
         assert (prefix, fds, started()) == ([], (), True)  # sudo would close the pipe
 
 
@@ -160,7 +222,7 @@ def test_a_reader_that_cannot_start_is_a_launch_failure(
 
     with pytest.raises(solution_runtime.LaunchError, match="can't start new thread"):
         solution_runtime.load_solution(str(solution))
-    assert started[0].poll() is not None  # the server it started is gone
+    assert started[-1].poll() is not None  # the server it started is gone
 
 
 def test_local_sandboxes_hide_host_bus_sockets(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -906,6 +968,127 @@ def test_overlapping_loopback_setups_in_a_shared_workdir_stay_judge_owned(monkey
         shutil.rmtree(base)
 
 
+def test_every_solution_failure_reaches_the_verifier_as_a_solution_error(dg: DeepGym) -> None:
+    """Raising (even a type the verifier could take for its own), a missing function, dying
+    and hanging all arrive as SolutionError, still catchable by their builtin type."""
+    env = _env(
+        """
+import subprocess
+from deepgym_solution import SolutionError, run_solution
+seen = []
+for name, kind in [('raises', ValueError), ('raises_timeout', TimeoutError),
+                   ('raises_os_error', OSError), ('missing', AttributeError),
+                   ('exits', SolutionError), ('hangs', TimeoutError)]:
+    try:
+        getattr(sol, name)()
+    except kind as exc:
+        seen.append(isinstance(exc, SolutionError))
+try:
+    run_solution(solution_path, timeout=1)
+except subprocess.TimeoutExpired as exc:
+    seen.append(isinstance(exc, SolutionError))
+ok = seen == [True] * 7
+return {'score': float(ok), 'passed': ok, 'details': str(seen)}
+""",
+        case_timeout=1,
+    )
+    solution = (
+        'import os\n'
+        'def raises():\n    raise ValueError("bug")\n'
+        'def raises_timeout():\n    raise TimeoutError("mine")\n'
+        'def raises_os_error():\n    raise OSError("mine")\n'
+        'def exits():\n    os._exit(3)\n'
+        'def hangs():\n    while True:\n        pass\n'
+        'if __name__ == "__main__":\n    while True:\n        pass\n'
+    )
+    result = dg.run(env, solution)
+    assert result.passed, result.output
+
+
+# Stand-in isolation launchers. Each refuses `kill`, so the runtime's cleanup (kill -9 -1 as
+# the solver) never runs as the test's own user.
+_LAUNCHERS = {
+    'exits_at_once': '#!/bin/sh\nexit 1\n',
+    # Passes the preflight's empty program, never starts the solution runtime.
+    'only_starts_its_check': (
+        '#!/bin/sh\ncase "$*" in *kill*) exit 1;; *"-c pass"*) exec "$@";; esac\nexit 1\n'
+    ),
+}
+
+
+@pytest.mark.parametrize(
+    ('launcher', 'call'),
+    [
+        ('missing', 'run_solution'),
+        ('exits_at_once', 'run_solution'),
+        ('only_starts_its_check', 'load_solution'),
+    ],
+)
+def test_a_solution_that_cannot_start_ends_the_run_without_a_verdict(
+    tmp_path: Path, launcher: str, call: str
+) -> None:
+    from deepgym.judge import RUNTIME_SOURCE
+
+    (tmp_path / 'deepgym_solution.py').write_text(RUNTIME_SOURCE)
+    (tmp_path / 'solution.py').write_text('x = 1\n')
+    if launcher in _LAUNCHERS:
+        (tmp_path / launcher).write_text(_LAUNCHERS[launcher])
+        (tmp_path / launcher).chmod(0o755)
+    # A verifier's `except Exception` can't turn the sandbox's fault into a score.
+    verifier = guard_crashes(
+        f'from deepgym_solution import {call}\n'
+        'try:\n'
+        f'    {call}("solution.py")\n'
+        'except Exception:\n'
+        '    pass\n'
+        'print(\'{"score": 1.0, "passed": true}\')\n'
+    )
+    isolation = {'kind': 'user', 'prefix': [str(tmp_path / launcher)]}
+
+    run = subprocess.run(
+        [sys.executable, '-c', verifier],
+        cwd=tmp_path,
+        env={**os.environ, 'DEEPGYM_ISOLATION': json.dumps(isolation)},
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+
+    assert run.returncode == 2
+    assert json.loads(run.stdout.splitlines()[-1])['error_type'] == 'sandbox_error'
+
+
+@pytest.mark.parametrize('solution_ran', [False, True], ids=['before', 'after_the_solution_ran'])
+def test_a_full_disk_while_preparing_a_run(tmp_path: Path, solution_ran: bool) -> None:
+    """Before any solution code runs, a full disk is the sandbox's (a LaunchError: no
+    verdict); once the solution has run, it may have filled it: a SolutionError."""
+    from deepgym.judge import RUNTIME_SOURCE
+
+    (tmp_path / 'deepgym_solution.py').write_text(RUNTIME_SOURCE)
+    (tmp_path / 'solution.py').write_text('x = 1\n')
+    verifier = guard_crashes(
+        'import errno, deepgym_solution as runtime\n'
+        + ('runtime.load_solution("solution.py")\n' if solution_ran else '')
+        + 'def full(*args, **kwargs):\n'
+        '    raise OSError(errno.ENOSPC, "No space left on device")\n'
+        'runtime._scratch_dir = full\n'
+        'try:\n'
+        '    runtime.run_solution("solution.py")\n'
+        'except runtime.SolutionError as exc:\n'
+        '    print("solution fault:", exc)\n'
+    )
+
+    run = subprocess.run(
+        [sys.executable, '-c', verifier], cwd=tmp_path, capture_output=True, text=True, timeout=60
+    )
+
+    if solution_ran:
+        assert run.returncode == 0 and 'solution fault: could not start' in run.stdout
+    else:
+        assert run.returncode == 2, run.stdout + run.stderr
+        assert json.loads(run.stdout.splitlines()[-1])['error_type'] == 'sandbox_error'
+
+
 def test_root_loopback_bootstrap_ignores_modules_planted_in_cwd_or_env(tmp_path) -> None:
     from deepgym.judge import _LOOPBACK_UP_THEN_EXEC
 
@@ -957,3 +1140,87 @@ def test_sandbox_isolation_goes_offline_or_fails_closed() -> None:
     assert sandbox_isolation('0 999 987 /usr/bin/python3 0')[0]['prefix'][0] == 'setpriv'
     with pytest.raises(SandboxError, match='network'):
         sandbox_isolation('0 999 987 /usr/bin/python3 0', require_offline=True)
+
+
+@pytest.mark.parametrize('ids', ['0 0', '999 0', '0 987', '-1 987', 'x 987'])
+def test_sandbox_isolation_never_runs_the_solution_as_root(ids: str) -> None:
+    with pytest.raises(SandboxError, match='root or an unknown id'):
+        sandbox_isolation(f'0 {ids} /usr/bin/python3 1')
+
+
+# Stand-ins for the account tools the judge setup uses, over FAKE_PASSWD and FAKE_GROUP.
+_FAKE_ID = """
+import os, sys
+users = {u[0]: u for u in (line.split(':') for line in open(os.environ['FAKE_PASSWD']))}
+groups = [line.strip().split(':') for line in open(os.environ['FAKE_GROUP'])]
+args = sys.argv[1:]
+flag = args.pop(0) if args and args[0].startswith('-') else ''
+if not args:
+    sys.exit(print(0))  # the setup runs as root
+if args[0] not in users:
+    sys.exit(1)
+_, _, uid, gid, *_ = users[args[0]]
+names = [g[0] for g in groups if g[2] == gid] + [g[0] for g in groups if args[0] in g[3].split(',')]
+print({'-u': uid, '-g': gid, '-Gn': ' '.join(names)}.get(flag, f'uid={uid}'))
+"""
+_FAKE_GETENT = """
+import os, sys
+print(open(os.environ['FAKE_' + sys.argv[1].upper()]).read(), end='')
+"""
+_FAKE_USERADD = """
+import os, sys
+open(os.environ['FAKE_PASSWD'], 'a').write(f'{sys.argv[-1]}:x:998:998::/:/sbin/nologin\\n')
+open(os.environ['FAKE_GROUP'], 'a').write(f'{sys.argv[-1]}:x:998:\\n')
+"""
+_ROOT = 'root:x:0:0::/root:/bin/sh\n'
+
+
+@pytest.mark.parametrize(
+    ('passwd', 'group', 'ok'),
+    [
+        (_ROOT, 'root:x:0:\n', True),
+        (_ROOT + 'dgsolver:x:0:0::/:/bin/sh\n', 'root:x:0:\n', False),
+        ('dgsolver:x:0:0::/:/bin/sh\n', 'root:x:0:\n', False),
+        (
+            _ROOT + 'svc:x:999:999::/:/bin/sh\ndgsolver:x:999:998::/:/bin/sh\n',
+            'root:x:0:\nsvc:x:999:\ndgsolver:x:998:\n',
+            False,
+        ),
+        (
+            _ROOT + 'dgsolver:x:998:998::/:/bin/sh\n',
+            'root:x:0:\ndgsolver:x:998:\nshadow:x:42:dgsolver\n',
+            False,
+        ),
+    ],
+    ids=['fresh', 'root_alias', 'only_uid_0', 'shared_uid', 'extra_group'],
+)
+def test_judge_setup_runs_the_solution_only_as_an_account_of_its_own(
+    tmp_path: Path, passwd: str, group: str, ok: bool
+) -> None:
+    from deepgym.judge import SANDBOX_SETUP
+
+    bin_dir = tmp_path / 'bin'
+    bin_dir.mkdir()
+    tools = {'id': _FAKE_ID, 'getent': _FAKE_GETENT, 'useradd': _FAKE_USERADD}
+    tools |= dict.fromkeys(('mkdir', 'chown', 'chmod'), '')
+    for name, source in tools.items():
+        (bin_dir / name).write_text(f'#!{sys.executable}\n{source}')
+        (bin_dir / name).chmod(0o755)
+    (tmp_path / 'passwd').write_text(passwd)
+    (tmp_path / 'group').write_text(group)
+    env = {
+        'PATH': f'{bin_dir}:/usr/bin:/bin',
+        'FAKE_PASSWD': str(tmp_path / 'passwd'),
+        'FAKE_GROUP': str(tmp_path / 'group'),
+    }
+
+    setup = subprocess.run(
+        ['bash', '-c', SANDBOX_SETUP], env=env, capture_output=True, text=True, timeout=60
+    )
+
+    if ok:
+        assert setup.returncode == 0, setup.stdout + setup.stderr
+        assert '--reuid=998' in sandbox_isolation(setup.stdout)[0]['prefix']
+    else:
+        assert setup.returncode != 0
+        assert 'dgsolver is root or shares an id or a group' in setup.stdout

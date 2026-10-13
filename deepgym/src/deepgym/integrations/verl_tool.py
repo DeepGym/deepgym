@@ -17,14 +17,16 @@ training (see :func:`~deepgym.integrations.verl_mask.exclude_unscored`) and logs
 ``error`` 1.0 in ``reward_extra_info``. Only failures that aren't the policy's doing are
 kept out (see :func:`~deepgym.exceptions.is_infrastructure_failure`): a sandbox that
 fails to start, a provider or network failure during an action or the final verifier,
-and a step or final verifier that fails, as the session reports.
+and a step or final verifier that fails before it runs the agent's code, as the session
+reports.
 
 Everything that follows from the policy's own actions is scored. An invalid or
-disallowed action comes back to the model as text, and any other failure of an action
-(a failed write, a sandbox the policy killed) comes back as tool-error text while the
-rollout goes on to its final verifier. If that verifier can't run because of what the
-policy did (the sandbox died or hung), the rollout scores 0 with ``error_type``
-``policy_sandbox_failure``. A rollout where the model never called the tool scores 0.0.
+disallowed action comes back to the model as text. Any other failure of an action (a
+failed write, a sandbox the policy killed) comes back as tool-error text and ends the
+episode (see :meth:`deepgym.session.Session.step`) with a 0, ``error_type``
+``policy_sandbox_failure``, as does a final verifier that can't run because of what the
+policy did (the sandbox died or hung). A rollout where the model never called the tool
+scores 0.0.
 The share of rollouts kept out is watched (:class:`~deepgym.integrations.reward.MaskedRate`).
 
 Agent loop config (``actor_rollout_ref.rollout.agent.agent_loop_config_path``)::
@@ -177,8 +179,8 @@ class DeepGymSessionTool(BaseTool):
                 verl shows it to the model as tool-error text. A failed start, or a provider
                 or network failure (see :func:`~deepgym.exceptions.is_infrastructure_failure`),
                 marks the episode failed: it gets no verdict and takes no more actions. Any
-                other failure follows from the policy's actions, so the episode goes on and
-                is scored.
+                other failure follows from the policy's actions: the session ends the
+                episode there, and it scores 0.
         """
         episode = self._episode_of[instance_id]
         async with self._locks.setdefault(episode, asyncio.Lock()):

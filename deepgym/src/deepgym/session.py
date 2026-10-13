@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import base64
 import contextlib
+import errno
 import json
 import logging
 import os
@@ -31,15 +32,19 @@ from uuid import uuid4
 from deepgym.exceptions import (
     ActionError,
     DeepGymError,
+    SandboxDiedError,
     SandboxError,
     TimeoutError,
     VerifierError,
+    is_infrastructure_failure,
 )
 from deepgym.judge import (
+    DEADLINE_GRACE_S,
     RUNTIME_FILE,
     RUNTIME_SOURCE,
     SANDBOX_ROOT,
     SOLVER_USER,
+    ids_are_exclusive,
     local_isolation,
 )
 from deepgym.models import (
@@ -61,6 +66,7 @@ from deepgym.sandbox import (
     wrap_stderr,
 )
 from deepgym.sandboxes import TRUSTED_PATH, ExecResult, Sandbox, SandboxImage
+from deepgym.verifier_template import guard_crashes
 
 if TYPE_CHECKING:
     from deepgym.sandboxes.daytona import DaytonaDesktop
@@ -105,6 +111,24 @@ _MAX_ARCHIVE_BYTES = 256 << 20
 _AGENT_KEEP = ('LANG', 'LC_ALL', 'LC_CTYPE', 'TERM', 'TZ')
 _DISPLAY = ':0'
 _STEP_OUTPUT = '_step_output.txt'
+# errno names for a write the agent's own files block (a folder where the file goes, a file
+# where a folder goes, a link or mode it set, a name too long), raised before any byte is
+# written. Any other write failure is the sandbox's. Names, as the numbers vary by platform.
+_BLOCKED_ERRNOS = ('EACCES', 'EEXIST', 'EISDIR', 'ELOOP', 'ENAMETOOLONG', 'ENOTDIR', 'EPERM')
+# Run as the session user to write stdin to argv[1]: exits 3 if the agent's files block it,
+# including a link it planted at the path, whatever the error following that link.
+_WRITE_AS_AGENT = f"""
+import errno, os, sys
+try:
+    os.makedirs(os.path.dirname(sys.argv[1]), exist_ok=True)
+    fd = os.open(sys.argv[1], os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o666)
+except OSError as exc:
+    print(exc, file=sys.stderr)
+    blocked = exc.errno in {{getattr(errno, n) for n in {_BLOCKED_ERRNOS}}}
+    sys.exit(3 if blocked or os.path.islink(sys.argv[1]) else 1)
+with os.fdopen(fd, 'wb') as out:
+    out.write(sys.stdin.buffer.read())
+"""
 
 
 class StepResult(NamedTuple):
@@ -134,15 +158,19 @@ class SessionBackend(Protocol):
         ...
 
     def write_file(self, path: str, content: bytes) -> None:
-        """Write a file relative to the work directory."""
+        """Write a file relative to the work directory.
+
+        ActionError means the agent's own files are in the way, not that the sandbox failed.
+        """
         ...
 
     def verify(self, code: str, timeout: int, env: dict[str, str] | None = None) -> VerifierOutput:
         """Run verifier *code* in the work directory, out of the agent's reach where possible.
 
         Where the backend can isolate code from the verifier, it sets ``DEEPGYM_RUNTIME``
-        and the other variables ``deepgym_solution`` needs. Its stdout and stderr come back
-        apart, so only stdout can carry a verdict.
+        and the other variables ``deepgym_solution`` needs, with *timeout* as the deadline
+        for the code it loads; the verifier gets ``DEADLINE_GRACE_S`` more to report. Its
+        stdout and stderr come back apart, so only stdout can carry a verdict.
         """
         ...
 
@@ -216,10 +244,25 @@ class LocalBackend:
         return VerifierOutput(proc.returncode, stdout, stderr)
 
     def write_file(self, path: str, content: bytes) -> None:
-        """Write *content* to *path* inside the temp directory."""
+        """Write *content* to *path* inside the temp directory.
+
+        Raises:
+            ActionError: If the agent's own files are in the way (see ``_BLOCKED_ERRNOS``).
+            SandboxError: If the write fails any other way.
+        """
         target = self._dir / path
-        target.parent.mkdir(parents=True, exist_ok=True)
-        target.write_bytes(content)
+        try:
+            target.parent.mkdir(parents=True, exist_ok=True)
+            fd = os.open(target, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o666)
+        except OSError as exc:
+            if errno.errorcode.get(exc.errno) in _BLOCKED_ERRNOS or target.is_symlink():
+                raise ActionError(f'Failed to write {path}: {exc}') from exc
+            raise SandboxError(f'Failed to write {path}: {exc}') from exc
+        try:
+            with os.fdopen(fd, 'wb') as file:
+                file.write(content)
+        except OSError as exc:
+            raise SandboxError(f'Failed to write {path}: {exc}') from exc
 
     def verify(self, code: str, timeout: int, env: dict[str, str] | None = None) -> VerifierOutput:
         """Run verifier *code* inline; it shares the agent's user here.
@@ -230,8 +273,10 @@ class LocalBackend:
             'DEEPGYM_ISOLATION': json.dumps(local_isolation([str(self._runtime.parent)])),
             'DEEPGYM_RUNTIME': str(self._runtime),
             'DEEPGYM_PYTHON': sys.executable,
+            'DEEPGYM_DEADLINE': str(time.time() + timeout),
         }
-        return self._run(_inline_python(self.python, code), timeout, {**runtime, **(env or {})})
+        command = _inline_python(self.python, code)
+        return self._run(command, timeout + DEADLINE_GRACE_S, {**runtime, **(env or {})})
 
     def start_desktop(self) -> None:
         """Refuse: the local backend has no display."""
@@ -280,22 +325,8 @@ _SUDOERS_RULE = (
     '--bounding-set=-all --no-new-privs -- *\\n'
 )
 
-# Each session user's uid and gid must be that account's alone and its only group, so dropping
-# to them grants that fresh account's rights and nobody else's. Ruling out root isn't enough:
-# a uid or primary gid shared with any other account, or a supplementary group the image put
-# the user in (a stray ``shadow:x:42:dgsolver`` line), would carry that account's or group's
-# rights too. The passwd gid check catches an account whose primary gid has no group entry.
-_IDS_ARE_EXCLUSIVE = (
-    f'for u in {_AGENT_USER} {_VERIFIER_USER} {SOLVER_USER}; do '
-    'id "$u" >/dev/null 2>&1 || continue; '
-    'uid=$(id -u "$u"); gid=$(id -g "$u"); '
-    '[ "$(getent passwd | cut -d: -f3 | grep -Fcx "$uid")" = 1 ] && '
-    '[ "$(getent passwd | cut -d: -f4 | grep -Fcx "$gid")" = 1 ] && '
-    '[ "$(getent group | cut -d: -f3 | grep -Fcx "$gid")" = 1 ] && '
-    '[ "$(id -Gn "$u")" = "$u" ] '
-    '|| { echo "$u shares an id or a group with another account"; exit 1; }; '
-    'done'
-)
+# Dropping to a session user must grant that fresh account's rights and nobody else's.
+_IDS_ARE_EXCLUSIVE = ids_are_exclusive(_AGENT_USER, _VERIFIER_USER, SOLVER_USER)
 
 # Make a root-owned directory the agent can neither redirect nor rewrite. Refuses a symlink
 # or a path that resolves elsewhere (a link anywhere above it), creates it, then forces root
@@ -600,20 +631,22 @@ class SandboxBackend:
         done as the session user, so the agent's symlinks can't redirect a root write.
 
         Raises:
-            SandboxError: If the write fails.
+            ActionError: If the agent's own files are in the way (see ``_BLOCKED_ERRNOS``).
+            SandboxError: If the write fails any other way.
         """
         staged = f'{_STAGING_DIR}/{uuid4().hex}'
         self._sandbox.upload(content, staged)
-        write = 'mkdir -p "$(dirname "$1")" && cat > "$1"'
         target = shlex.quote(f'{self._workdir}/{path}')
+        write = f'{self.python} -I -c {shlex.quote(_WRITE_AS_AGENT)} {target}'
         done = self._sandbox.exec(
             trusted(
-                f'{self._as_agent} sh -c {shlex.quote(write)} write {target} < {staged}; '
-                f'status=$?; rm -f {staged}; exit $status'
+                f'{self._as_agent} {write} < {staged}; status=$?; rm -f {staged}; exit $status'
             ),
             env=self._clear,
             timeout=60,
         )
+        if done.exit_code == 3:
+            raise ActionError(f'Failed to write {path}: {done.output[-500:]}')
         if done.exit_code != 0:
             raise SandboxError(f'Failed to write {path}: {done.output[-500:]}')
 
@@ -634,14 +667,16 @@ class SandboxBackend:
         command, marker = wrap_stderr(
             f'{self._offline}{self._as_verifier} {self.python} -I {script}'
         )
+        # The deadline is set by the sandbox's own clock, as the judge's is.
+        deadline = f'export DEEPGYM_DEADLINE=$(( $(date +%s) + {timeout} ))'
         done = self._sandbox.exec(
             trusted(
-                f'{command}; status=$?; rm -f {script}; exit $status',
+                f'{deadline}; {command}; status=$?; rm -f {script}; exit $status',
                 {'HOME': _VERIFIER_DIR, **self._verifier_base, **self._runtime_env, **(env or {})},
             ),
             cwd=self._workdir,
             env=self._clear,
-            timeout=timeout,
+            timeout=timeout + DEADLINE_GRACE_S,
         )
         return VerifierOutput(done.exit_code, *split_wrapped_output(done.output, marker))
 
@@ -800,7 +835,8 @@ class Session:
         self._step = 0
         self._done = False
         self._step_verdict: dict[str, object] | None = None
-        self._step_error: VerifierError | None = None
+        # The episode's result, once a failed step fixed it (see step()).
+        self._failed_result: RunResult | None = None
         # One sandbox, one actor at a time: concurrent step/score/close calls queue up.
         self._lock = threading.Lock()
 
@@ -818,7 +854,7 @@ class Session:
     def step_verdict(self) -> dict[str, object] | None:
         """The step verifier output of the last step (score, passed, details, ...).
 
-        None before any step verifier ran, or if the last one failed.
+        None before any step verifier ran, or if the last step got no verdict from it.
 
         ``exit_code`` is the verifier's exit code, in place of any key it printed by that name.
         """
@@ -864,11 +900,22 @@ class Session:
     def step(self, action: Action) -> StepResult:
         """Apply one action and return the new observation, step reward, and done flag.
 
+        The new observation (with its screenshot) is taken before the step verifier runs,
+        and the step is recorded only once both are in. A step that fails any other way
+        than a rejected action ends the episode: the action may have changed the sandbox, so
+        it stays on the record, with no step reward and no retry. :meth:`score` then reports
+        no verdict for a network or provider failure or a failed step verifier; anything
+        else follows from the agent's actions (its sandbox died, its files blocked the
+        step's output file): a judged 0 (``policy_sandbox_failure``).
+
         Raises:
             DeepGymError: If the session is not running.
-            ActionError: If the action is not allowed here or the desktop rejects it.
-            VerifierError: If the step verifier fails or gives no verdict. The episode is
-                then over: the step gets no reward and :meth:`score` reports no verdict.
+            ActionError: If the action is not allowed here, the desktop rejects it, or the
+                agent's own files are in the way of a write (the episode goes on, unless
+                they blocked the step's output file).
+            VerifierError: If the step verifier fails or gives no verdict.
+            SandboxError: If the sandbox fails to apply the action, take the screenshot or
+                run the step verifier.
         """
         with self._lock:
             if self._obs is None or self._done:
@@ -880,39 +927,46 @@ class Session:
                 )
 
             self._step += 1
-            output, exit_code = self._apply(action)
+            self._step_verdict = None
             try:
-                reward = self._step_reward(output) if self._env.step_verifier_code else 0.0
-            except VerifierError as exc:
-                self._step_error = exc
-                try:
-                    self._record(action, output, exit_code, reward=None, done=True)
-                except Exception as late:
-                    # The verifier's failure decides the episode, not the screenshot after it.
-                    raise exc from late
+                output, exit_code = self._apply(action)
+            except ActionError:
+                raise
+            except BaseException as exc:
+                self._end(action, None, exc)
                 raise
             done = (
                 action.action_type == 'done'
                 or _signals_done(output)
                 or self._step >= self._env.max_steps
             )
-            observation = self._record(action, output, exit_code, reward=reward, done=done)
+            observation: Observation | None = None
+            try:
+                observation = self._observe(output, done=done, exit_code=exit_code)
+                reward = self._step_reward(output) if self._env.step_verifier_code else 0.0
+            except BaseException as exc:
+                # Here an ActionError means the agent's own files blocked the step's output.
+                self._end(action, observation, exc)
+                raise
+            self._record(action, observation, reward=reward, done=done)
             return StepResult(observation, reward, done)
 
     def score(self) -> RunResult:
         """Run the final verifier against the current state.
 
-        An episode whose step verifier failed has no verdict: the final verifier doesn't
-        run, and the result carries that failure as its ``error_type``.
+        An episode that a failed step ended (see :meth:`step`) keeps the result that step
+        fixed, with the failure as its ``error_type``; the final verifier doesn't run. A
+        sandbox that dies under the final verifier is the agent's doing once it has acted
+        (a judged 0); before any action, it has no verdict.
 
         Raises:
             VerifierError: If the verifier output is not valid protocol JSON, or the
-                verifier crashed or was killed after printing it.
+                verifier was killed after printing it.
             TimeoutError: If the verifier exceeds the per-step timeout.
         """
         with self._lock:
-            if self._step_error is not None:
-                return error_result(self._step_error, self.sandbox_id)
+            if self._failed_result is not None:
+                return self._failed_result
             if not self._env.final_verifier_code:
                 return RunResult(
                     score=0.0,
@@ -925,9 +979,14 @@ class Session:
                     error_type='no_verifier',
                 )
             start = time.perf_counter()
-            exit_code, stdout, stderr = self._backend.verify(
-                _guarded(self._env.final_verifier_code), self._env.timeout_per_step
-            )
+            try:
+                exit_code, stdout, stderr = self._backend.verify(
+                    _guarded(self._env.final_verifier_code), self._env.timeout_per_step
+                )
+            except SandboxDiedError as exc:
+                if not self._trajectory.steps:
+                    return error_result(exc, self.sandbox_id)
+                return _failure_result(exc, self.sandbox_id)
             stderr = stderr.strip()
             result = parse_verifier_output(stdout, f'exit_code={exit_code} stderr: {stderr!r}')
             elapsed_ms = (time.perf_counter() - start) * 1000
@@ -985,28 +1044,40 @@ class Session:
             f'{self._backend.python} {filename}', timeout or self._env.timeout_per_step
         )
 
+    def _end(self, action: Action, observation: Observation | None, exc: BaseException) -> None:
+        """End the episode after *action*'s step failed with *exc* (see :func:`_failure_result`).
+
+        The action may have changed the sandbox, so it is recorded, with no step reward.
+        *observation* is the one taken after the action, if any.
+        """
+        self._failed_result = _failure_result(exc, self.sandbox_id)
+        if observation is not None:
+            observation = observation.model_copy(update={'done': True})
+        self._record(action, observation, reward=None, done=True)
+
     def _record(
         self,
         action: Action,
-        output: str,
-        exit_code: int | None,
+        observation: Observation | None,
         *,
         reward: float | None,
         done: bool,
-    ) -> Observation:
-        """Append the step to the trajectory and return the new current observation.
+    ) -> None:
+        """Append the step to the trajectory; *observation* becomes the current one.
 
-        A step without a verdict (*reward* None) adds no step reward, never a 0.
+        A step without a verdict (*reward* None) adds no step reward, never a 0. A failed
+        step may have no *observation*; then the episode's final observation is None, not
+        the one from before the action.
         """
         self._trajectory.steps.append((self._obs, action))
         if reward is not None:
             self._trajectory.step_rewards.append(reward)
             self._trajectory.total_reward += reward
         self._done = done
-        self._obs = self._observe(output, done=done, exit_code=exit_code)
+        if observation is not None:
+            self._obs = observation
         if done:
-            self._trajectory.final_observation = self._obs
-        return self._obs
+            self._trajectory.final_observation = observation
 
     def _observe(self, output: str, *, done: bool, exit_code: int | None = None) -> Observation:
         return Observation(
@@ -1029,7 +1100,6 @@ class Session:
                 reports its own failure (exit 2, or an ``error_type`` that isn't the
                 model's fault; see :func:`~deepgym.models.is_verdict`).
         """
-        self._step_verdict = None
         self._backend.write_file(_STEP_OUTPUT, output.encode('utf-8'))
         try:
             exit_code, stdout, _ = self._backend.verify(
@@ -1070,13 +1140,34 @@ def run_episode(
         agent: Callable mapping an observation to the next action.
 
     Returns:
-        Tuple of (trajectory, final_result).
+        Tuple of (trajectory, final_result). A step that failed after its action may have
+        run ends the episode, and the result is the one it fixed (see :meth:`Session.step`).
     """
     with session:
         obs = session.start()
         while not session.done:
-            obs = session.step(agent(obs)).observation
+            try:
+                obs = session.step(agent(obs)).observation
+            except Exception:
+                if not session.done:  # the agent failed, or its action was rejected
+                    raise
         return session.trajectory, session.score()
+
+
+def _failure_result(exc: BaseException, sandbox_id: str) -> RunResult:
+    """Return the result of an episode that *exc* ended once the agent had acted.
+
+    A network or provider failure (see :func:`~deepgym.exceptions.is_infrastructure_failure`),
+    a step verifier that failed, or an interrupt has no verdict. Anything else follows from
+    the agent's actions (its sandbox died or hung, a write failed, its files blocked a
+    harness write): a judged 0 (``policy_sandbox_failure``), or breaking the sandbox would
+    dodge the score.
+    """
+    result = error_result(exc, sandbox_id)
+    unjudged = isinstance(exc, VerifierError) or not isinstance(exc, Exception)
+    if unjudged or is_infrastructure_failure(exc):
+        return result
+    return result.model_copy(update={'error_type': 'policy_sandbox_failure'})
 
 
 def _kill_group(group: int) -> None:
@@ -1093,29 +1184,20 @@ def _checked(what: str, result: ExecResult) -> str:
     return result.output
 
 
-# Runs every session verifier. Python exits 1 on an uncaught exception, the protocol's
-# "failed" code, so a crash becomes 2 (verifier error) and never counts as a scored
-# failure. It also puts deepgym_solution on the path where the backend ships it.
-_VERIFIER_GUARD = """\
-import os
-import sys
-import traceback
+# Puts deepgym_solution on a session verifier's path where the backend ships it.
+_RUNTIME_ON_PATH = """\
+import os as _dg_os
+import sys as _dg_sys
 
-if 'DEEPGYM_RUNTIME' in os.environ:
-    sys.path.insert(0, os.path.dirname(os.environ['DEEPGYM_RUNTIME']))
-try:
-    exec(compile({code!r}, '<verifier>', 'exec'), {{'__name__': '__main__'}})
-except SystemExit:
-    raise
-except BaseException:
-    traceback.print_exc()
-    raise SystemExit(2)
+if 'DEEPGYM_RUNTIME' in _dg_os.environ:
+    _dg_sys.path.insert(0, _dg_os.path.dirname(_dg_os.environ['DEEPGYM_RUNTIME']))
 """
 
 
 def _guarded(code: str) -> str:
-    """Wrap verifier *code* in :data:`_VERIFIER_GUARD`."""
-    return _VERIFIER_GUARD.format(code=code)
+    """Return session verifier *code* with deepgym_solution on its path, exiting 2 on a crash
+    (see :func:`~deepgym.verifier_template.guard_crashes`) so it never counts as a failed run."""
+    return guard_crashes(code, _RUNTIME_ON_PATH)
 
 
 def _inline_python(python: str, code: str) -> str:

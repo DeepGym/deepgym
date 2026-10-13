@@ -7,7 +7,8 @@ from. load_solution() runs the agent's runs.py in an isolated process, and every
 call crosses that boundary as plain data, so the agent's code can't read the
 expected answers or hand back an object that equals anything. Every case is
 reported with a reason. A crash in this file exits 2 (verifier error, no reward)
-instead of a silent 0.
+until the agent's code starts; after that it scores 0, so the agent can't escape its
+score by breaking the judge.
 
 Only fixes earn reward. The starting runs.py already gets many cases right, so
 paying for those would pay an agent that does nothing. The cases it gets wrong

@@ -244,12 +244,12 @@ class TraceStep(BaseModel):
     """What the action produced; None if it failed before producing anything."""
 
     applied: bool = True
-    """Whether the session recorded the action as taken; False if it was rejected, or
-    failed before the session recorded it."""
+    """Whether the session recorded the action as taken (it may have changed the sandbox,
+    even if the step then failed); False if it was rejected."""
 
     reward: float | None = Field(default=None, ge=0.0, le=1.0)
-    """Step verifier score; None without a step verifier, or when it failed or reported
-    its own failure (see :func:`deepgym.models.is_verdict`)."""
+    """Step verifier score; None without a step verifier, when the step failed, or when
+    the step verifier reported its own failure (see :func:`deepgym.models.is_verdict`)."""
 
     step_verifier: dict[str, JsonValue] | None = None
     """The step verifier's parsed output (score, passed, details, ...)."""
@@ -350,10 +350,10 @@ class Trace(BaseModel):
         the episode never ended, so a replay shows it; a session sets it only at the end.
 
         Rewards match a session's own trajectory: each step counts 0 when the environment
-        has no step verifier, and a step whose step verifier failed has no step reward at
-        all, so nothing is appended for it (it ended the episode without a verdict).
-        Rewards stay on their own steps: older traces could go on past such a step, and
-        their later rewards are left out rather than shifted onto earlier actions.
+        has no step verifier, and a step that failed, or whose step verifier failed, has no
+        step reward at all, so nothing is appended for it (it ended the episode without a
+        verdict). Rewards stay on their own steps: older traces could go on past such a
+        step, and their later rewards are left out rather than shifted onto earlier actions.
         """
         applied = [step for step in self.steps if step.applied]
         if self.initial_observation is None or not applied:
@@ -364,14 +364,13 @@ class Trace(BaseModel):
             pairs.append((shown, step.action))
             if step.observation is not None:
                 shown = step.observation
-        if self.provenance.env.step_verifier_sha256 is None:
-            rewards = [0.0] * len(applied)
-        else:
-            rewards = []
-            for step in applied:
-                if step.reward is None:
-                    break
-                rewards.append(step.reward)
+        verified = self.provenance.env.step_verifier_sha256 is not None
+        rewards: list[float] = []
+        for step in applied:
+            reward = step.reward if verified else None if step.error else 0.0
+            if reward is None:
+                break
+            rewards.append(reward)
         return Trajectory(
             steps=pairs,
             final_observation=applied[-1].observation,

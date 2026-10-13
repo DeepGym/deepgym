@@ -26,9 +26,29 @@ that claims to equal everything can't fake a pass.
 Each call is bounded by DEEPGYM_CASE_TIMEOUT and by the run's overall
 DEEPGYM_DEADLINE, so a slow case fails on its own instead of sinking the run.
 
+Every outcome of a solution call gets exactly one classification:
+
+* Solution fault, a judged 0: the solution raises, exits (any code, or early), is
+  signalled or killed, times out, runs out of memory, returns invalid or unparseable
+  output, breaks the protocol or closes its pipe, or exhausts a resource (disk, inodes,
+  processes, file descriptors), even when that makes the verifier's own later reads or
+  writes fail. Each reaches the verifier as a :class:`SolutionError`; uncaught, the
+  crash guard scores it 0 (``error_type`` solution_timeout for a timeout).
+* Infra, no verdict: the preflight before any solution code runs fails (too little free
+  disk or inodes, an isolation launcher that can't start code), or the runtime can't
+  launch or hand-shake before then. That raises :class:`LaunchError`, which a verifier
+  lets propagate (it isn't an ``Exception``); the crash guard then ends the run with no
+  verdict. Provider and transport failures, and the verifier's own setup failing before
+  it starts the solution, are no verdict outside this file.
+* Anything else, once solution code has run (see :func:`consulted`): solution fault.
+
+So a solution can't dodge its score by breaking the verifier. Load test data before
+the solution: a verifier that fails after starting it scores 0.
+
 Stdlib only: this file is copied next to the verifier as ``deepgym_solution.py``
 and also runs as the solution-side server (``python -I deepgym_solution.py --serve``),
-loopback forwarder (``--forward``) and judge confiner (``--confine``).
+loopback forwarder (``--forward``), judge confiner (``--confine``) and solution watcher
+(``--watch``), which kills what a judge started if the judge dies first.
 """
 
 from __future__ import annotations
@@ -37,6 +57,7 @@ import atexit
 import base64
 import builtins
 import contextlib
+import functools
 import importlib.util
 import json
 import math
@@ -69,14 +90,37 @@ _CONFINE_GRACE_S = 3
 
 
 class SolutionError(Exception):
-    """Raise when the solution raised a non-builtin exception or broke the protocol."""
+    """Raise when the solution failed: it raised, exited, hung, died or broke the protocol.
+
+    Every failure that comes from the solution process is one, so a verifier can tell it
+    from its own failures and the sandbox's. A builtin exception the solution raised keeps
+    its type too (``except ValueError`` still works), as does a timeout (``TimeoutError``,
+    or ``subprocess.TimeoutExpired`` from :func:`run_solution`).
+    """
 
 
-class LaunchError(RuntimeError):
-    """Raise when the judge can't start the solution's process (out of processes, say).
+class SolutionTimeoutError(SolutionError):
+    """Raise when the solution runs past its time limit: a judged 0, never a verifier error.
 
-    The machine failed, not the solution: a verifier lets this propagate, so the run
-    ends as a verifier error with no verdict instead of scoring the solution 0.
+    Also a ``TimeoutError``, or ``subprocess.TimeoutExpired`` from :func:`run_solution`.
+    """
+
+
+@functools.cache
+def _marked(kind: type[Exception], base: type[SolutionError] = SolutionError) -> type[Exception]:
+    """Return *kind* as a *base* too (see :class:`SolutionError`)."""
+    return type(kind.__name__, (kind, base), {'__module__': kind.__module__})
+
+
+class LaunchError(BaseException):
+    """Raise when the judge can't start the solution's process (out of processes, say)
+    before any solution code has run.
+
+    The machine failed, not the solution: a verifier lets this propagate, so the run ends
+    as a verifier error with no verdict instead of scoring the solution 0. It isn't an
+    ``Exception``, so a verifier's ``except Exception`` can't turn it into a score. Once
+    solution code has run, the same failure is a :class:`SolutionError` (see the module
+    docstring).
     """
 
 
@@ -312,11 +356,13 @@ _NO_FORK = (
     'os.execvp(sys.argv[1], sys.argv[1:])'
 )
 
-# Run as a prefix: say on fd argv[1] that the solution's Python is up, close it so the
-# script never holds it, then exec the rest.
+# Run as a prefix: wait for the judge's go on fd argv[1] (none if the judge died first: run
+# nothing), say on fd argv[2] that the solution's Python is up, close both so the script
+# never holds them, then exec the rest.
 _STARTED = (
-    'import os, sys; fd = int(sys.argv[1]); os.write(fd, b"1"); os.close(fd); '
-    'os.execvp(sys.argv[2], sys.argv[2:])'
+    'import os, sys; go, fd = int(sys.argv[1]), int(sys.argv[2]); '
+    'os.read(go, 1) or os._exit(1); os.close(go); os.write(fd, b"1"); os.close(fd); '
+    'os.execvp(sys.argv[3], sys.argv[3:])'
 )
 
 # Run in a child: bind the inherited socket (argv[1]) at argv[2] with umask 0.
@@ -380,19 +426,25 @@ def _scratch_dir() -> str:
 
 
 @contextlib.contextmanager
-def _start_signal() -> Iterator[tuple[list[str], tuple[int, ...], Callable[[], bool]]]:
-    """Yield a command prefix that writes to a pipe once the solution's Python is up,
-    the descriptors to pass on, and a check of whether it did.
+def _start_signal() -> Iterator[
+    tuple[list[str], tuple[int, ...], Callable[[], bool], Callable[[], None]]
+]:
+    """Yield a command prefix that holds the solution until released and then writes to a
+    pipe once its Python is up, the descriptors to pass on, a check of whether it started,
+    and the release.
 
-    The script never holds the pipe, so it can't fake a launch failure. setpriv and
-    unshare pass the pipe on; sudo (a sandbox judge that isn't root) closes it, so
-    there nothing is checked.
+    The hold means a judge that dies before handing the solution to its watcher (see
+    :func:`_watch_group`) starts nothing: the prefix sees the go pipe close and exits.
+    The script never holds the pipes, so it can't fake a launch failure. setpriv and
+    unshare pass them on; sudo (a sandbox judge that isn't root) closes them, so there
+    nothing is held or checked.
     """
     spec = _isolation()
     if any(os.path.basename(arg) == 'sudo' for arg in spec.get('prefix', [])):
-        yield [], (), lambda: True
+        yield [], (), lambda: True, lambda: None
         return
     read_end, write_end = os.pipe()
+    go_read, go_write = os.pipe()
     os.set_blocking(read_end, False)
 
     def started() -> bool:
@@ -401,42 +453,151 @@ def _start_signal() -> Iterator[tuple[list[str], tuple[int, ...], Callable[[], b
         except BlockingIOError:
             return False
 
+    def release() -> None:
+        os.write(go_write, b'1')
+
+    prefix = [_python(), '-I', '-S', '-c', _STARTED, str(go_read), str(write_end)]
     try:
-        yield [_python(), '-I', '-S', '-c', _STARTED, str(write_end)], (write_end,), started
+        yield prefix, (go_read, write_end), started, release
     finally:
-        os.close(read_end)
-        os.close(write_end)
+        for fd in (read_end, write_end, go_read, go_write):
+            os.close(fd)
+
+
+_consulted = False
+_preflight_passed = False
+# The preflight's floor: less free space than this before the solution runs is the sandbox's.
+_MIN_FREE_BYTES = 16 << 20
+_MIN_FREE_INODES = 256
+
+
+def consulted() -> bool:
+    """Whether solution code has started in this verifier; from then on a verifier crash
+    is the solution's failure (see deepgym.verifier_template.guard_crashes)."""
+    return _consulted
+
+
+def _launch_failure(reason: str) -> BaseException:
+    """Return the error for the judge failing to start the solution, as the module says.
+
+    Before any solution code has run, the machine failed: :class:`LaunchError`. After, the
+    solution may be why (a full disk, processes it used up): :class:`SolutionError`.
+    """
+    if _consulted:
+        return SolutionError(f'could not start the solution again: {reason}')
+    return LaunchError(f'could not start the solution: {reason}')
 
 
 @contextlib.contextmanager
 def _launching() -> Iterator[None]:
-    """Turn the judge's own errors while starting the solution into :class:`LaunchError`.
+    """Turn the judge's own errors while starting the solution into :func:`_launch_failure`.
 
-    That is OS errors and RuntimeError (a thread that can't start); no solution code
-    runs inside.
+    That is OS and subprocess errors and RuntimeError (a thread that can't start); no
+    solution code runs inside.
     """
     try:
         yield
-    except (OSError, RuntimeError) as exc:
-        raise LaunchError(f'could not start the solution: {exc}') from exc
+    except (OSError, RuntimeError, subprocess.SubprocessError) as exc:
+        raise _launch_failure(str(exc)) from exc
+
+
+def _preflight() -> None:
+    """Check, once and before any solution code runs, that the sandbox can host it.
+
+    There must be free disk and inodes where runs write, and the isolation launcher (sudo,
+    setpriv, bwrap, sandbox-exec) must start an empty program from a fresh directory:
+    starting the launcher doesn't prove it can start code. Run inside :func:`_launching`,
+    so a failure is the sandbox's; exhaustion after this is the solution's.
+
+    Raises:
+        OSError: If space is short or the launcher can't start code.
+        subprocess.TimeoutExpired: If the launcher doesn't finish in time.
+    """
+    global _preflight_passed
+    if _preflight_passed:
+        return
+    workdir = _scratch_dir()
+    disk = os.statvfs(workdir)
+    free_bytes = disk.f_bavail * disk.f_frsize
+    # A file system that reports no inode counts at all (f_files 0) has no inode limit.
+    if free_bytes < _MIN_FREE_BYTES or (disk.f_files and disk.f_favail < _MIN_FREE_INODES):
+        raise OSError(f'only {free_bytes} bytes and {disk.f_favail} inodes free')
+    probe = subprocess.run(
+        _launch_argv([_python(), '-I', '-S', '-c', 'pass'], workdir),
+        cwd=workdir,
+        capture_output=True,
+        timeout=min(_LOAD_TIMEOUT_S, _remaining()),
+        start_new_session=True,
+    )
+    if probe.returncode != 0:
+        error = probe.stderr.decode('utf-8', 'replace')[-500:]
+        raise OSError(f'the isolation launcher exited {probe.returncode}: {error}')
+    _preflight_passed = True
+
+
+def _kill_group(group: int) -> None:
+    """Kill every process in process group *group*: an isolated solution and its children."""
+    _sweep_solver_user()
+    with contextlib.suppress(ProcessLookupError, PermissionError):
+        os.killpg(group, signal.SIGKILL)
+
+
+def _sweep_solver_user() -> None:
+    """With a sandbox user, kill every process it runs, not just one group: children that
+    call setsid() would otherwise outlive the call and could tamper with files the judge
+    reads next. A concurrent load_solution server restarts on its next call."""
+    spec = _isolation()
+    if spec['kind'] == 'user':
+        kill_all = [*spec['prefix'], 'bash', '-c', 'kill -9 -1']
+        subprocess.run(kill_all, capture_output=True, check=False)
 
 
 def _kill(proc: subprocess.Popen) -> None:
-    """Kill an isolated process and everything in its process group."""
-    spec = _isolation()
-    if spec['kind'] == 'user':
-        # Kill every process of the solution user, not just this group: children
-        # that call setsid() would otherwise outlive the call and could tamper with
-        # files the judge reads next. A concurrent load_solution server restarts on
-        # its next call.
-        kill_all = [*spec['prefix'], 'bash', '-c', 'kill -9 -1']
-        subprocess.run(kill_all, capture_output=True, check=False)
-    with contextlib.suppress(ProcessLookupError, PermissionError):
-        os.killpg(proc.pid, signal.SIGKILL)
+    """Kill an isolated process and everything in its process group, and reap it."""
+    _kill_group(proc.pid)
     with contextlib.suppress(Exception):
         proc.kill()
     with contextlib.suppress(Exception):
         proc.wait(timeout=5)
+
+
+_watcher: subprocess.Popen | None = None
+
+
+def _start_watcher() -> None:
+    """Start this judge's watcher (see :func:`_watch`) once, before its first solution."""
+    global _watcher
+    if _watcher is None:
+        _watcher = subprocess.Popen(
+            [sys.executable, '-I', '-B', _runtime(), '--watch'],
+            stdin=subprocess.PIPE,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            start_new_session=True,
+        )
+        atexit.register(_stop_watcher)
+
+
+def _stop_watcher() -> None:
+    """At the judge's own exit, let the watcher finish first, so its sweep of a sandbox
+    user never lands on the next grade's solution."""
+    if _watcher is None:
+        return
+    with contextlib.suppress(OSError):
+        _watcher.stdin.close()
+    with contextlib.suppress(subprocess.TimeoutExpired):
+        _watcher.wait(timeout=10)
+
+
+def _watch_group(group: int) -> None:
+    """Have the watcher kill process group *group* (a solution just started) if this judge
+    ends without doing so itself: killed by its host, say.
+
+    Raises:
+        OSError: If the watcher can't be told (it died, say).
+    """
+    _watcher.stdin.write(f'{group}\n'.encode())
+    _watcher.stdin.flush()
 
 
 def _remaining() -> float:
@@ -473,25 +634,28 @@ def run_solution(
     unreachable.
 
     Raises:
-        subprocess.TimeoutExpired: If it runs past *timeout* (default: the case timeout).
-        LaunchError: If the process can't be started, or never got Python going.
+        subprocess.TimeoutExpired: If it runs past *timeout* (default: the case timeout);
+            a :class:`SolutionError` too.
+        LaunchError: If the process can't be started, or never got Python going, before
+            any solution code has run; after that, a :class:`SolutionError`.
     """
+    global _consulted
     path = os.path.abspath(solution_path)
-    with _launching():
-        workdir = os.path.abspath(cwd or _scratch_dir())
     command = [_python(), '-B', path, *args]
     limit = _call_timeout() if timeout is None else min(timeout, _remaining())
-    # Output goes to files, not pipes: a forked child holding a pipe open would
-    # keep us waiting (and alive to tamper) after the script itself exits.
-    with (
-        tempfile.TemporaryFile() as out,
-        tempfile.TemporaryFile() as err,
-        _loopback(loopback_port) as forwarder,
-        _start_signal() as (prefix, signal_fds, started),
-    ):
-        launch = [*prefix, *forwarder, *command]
-        argv = _launch_argv(launch, workdir, env, allow_subprocess, loopback_port)
+    with contextlib.ExitStack() as stack:
         with _launching():
+            _preflight()
+            _start_watcher()
+            workdir = os.path.abspath(cwd or _scratch_dir())
+            # Output goes to files, not pipes: a forked child holding a pipe open would
+            # keep us waiting (and alive to tamper) after the script itself exits.
+            out = stack.enter_context(tempfile.TemporaryFile())
+            err = stack.enter_context(tempfile.TemporaryFile())
+            forwarder = stack.enter_context(_loopback(loopback_port))
+            prefix, signal_fds, started, release = stack.enter_context(_start_signal())
+            launch = [*prefix, *forwarder, *command]
+            argv = _launch_argv(launch, workdir, env, allow_subprocess, loopback_port)
             proc = subprocess.Popen(
                 argv,
                 stdin=subprocess.PIPE if input is not None else subprocess.DEVNULL,
@@ -501,12 +665,28 @@ def run_solution(
                 start_new_session=True,
                 pass_fds=signal_fds,
             )
+            try:
+                _watch_group(proc.pid)
+                release()
+            except BaseException:
+                _kill(proc)  # held until released, so no solution code ran
+                raise
+        timed_out = False
         try:
             proc.communicate(None if input is None else input.encode(), timeout=limit)
+        except subprocess.TimeoutExpired:
+            timed_out = True
         finally:
-            _kill(proc)
-        if not started():
-            raise LaunchError('the solution process did not start')
+            # Read before the cleanup, which a solution that used up the processes can break.
+            ran = started()
+            _consulted = _consulted or ran
+            with _launching():
+                _kill(proc)
+        # Solution code used up the time, this launch's or earlier calls' (it may never start).
+        if timed_out and _consulted:
+            raise _marked(subprocess.TimeoutExpired, SolutionTimeoutError)(argv, limit)
+        if not ran:  # a launcher that never got Python going ran no solution code
+            raise _launch_failure('the solution process did not start')
         out.seek(0)
         err.seek(0)
         stdout = out.read(_MAX_MESSAGE).decode('utf-8', 'replace')
@@ -715,7 +895,10 @@ class _Runner:
         atexit.register(self.close)
 
     def _start(self) -> None:
+        global _consulted
         with _launching():
+            _preflight()
+            _start_watcher()
             workdir = _scratch_dir()
             path = self._path
             if self._files is not None:
@@ -738,6 +921,7 @@ class _Runner:
                 start_new_session=True,
             )
             try:
+                _watch_group(self._proc.pid)
                 # Requests are written without blocking, so a server that stops reading
                 # can't hold a call past its deadline (see _write).
                 os.set_blocking(self._proc.stdin.fileno(), False)
@@ -749,16 +933,18 @@ class _Runner:
                 self._dead()
                 raise
         # The server reports in before it touches the solution, so a failure before that
-        # (a launcher that never got Python going) is the machine's, not the solution's.
+        # (a launcher that never got Python going) is the machine's until solution code
+        # has run (see _launch_failure).
         try:
             ready = self._replies.get(timeout=min(_LOAD_TIMEOUT_S, _remaining()))
         except queue.Empty:
             ready = None
         if ready != _READY:
             self._dead()
-            if _remaining() <= 0:  # earlier calls used up the run: the solution's doing
-                raise TimeoutError('the run is out of time')
-            raise LaunchError('the solution process did not start')
+            if _consulted and _remaining() <= 0:  # earlier calls used up the run
+                raise _marked(TimeoutError, SolutionTimeoutError)('the run is out of time')
+            raise _launch_failure('the solution process did not start')
+        _consulted = True
         self.exports = self._send({'op': 'load'}, min(_LOAD_TIMEOUT_S, _remaining()))
 
     @staticmethod
@@ -775,7 +961,7 @@ class _Runner:
 
     def _send(self, message: dict, timeout: float) -> Any:
         if timeout <= 0:
-            raise TimeoutError('the run is out of time')
+            raise _marked(TimeoutError, SolutionTimeoutError)('the run is out of time')
         # The deadline covers sending the request too, not just waiting for the reply.
         deadline = time.monotonic() + timeout
         self._next_id += 1
@@ -787,13 +973,16 @@ class _Runner:
             raise SolutionError('the solution process exited') from exc
         if not sent:
             self._dead()
-            raise TimeoutError(f'solution call exceeded {timeout:.1f}s')
+            raise _marked(TimeoutError, SolutionTimeoutError)(
+                f'solution call exceeded {timeout:.1f}s'
+            )
         while True:
             try:
                 raw = self._replies.get(timeout=max(0.0, deadline - time.monotonic()))
             except queue.Empty:
                 self._dead()
-                raise TimeoutError(f'solution call exceeded {timeout:.1f}s') from None
+                exceeded = f'solution call exceeded {timeout:.1f}s'
+                raise _marked(TimeoutError, SolutionTimeoutError)(exceeded) from None
             if raw is None:
                 self._dead()
                 raise SolutionError('the solution process exited during the call')
@@ -838,12 +1027,13 @@ class _Runner:
             self._proc = None
 
 
-def _remote_exception(name: str, message: str) -> BaseException:
-    """Rebuild builtin exception types by name; anything else becomes SolutionError."""
+def _remote_exception(name: str, message: str) -> SolutionError:
+    """Rebuild a builtin exception type by name, as a SolutionError too; anything else (or
+    a type that can't be rebuilt from a message) becomes a plain SolutionError."""
     kind = getattr(builtins, name, None)
     if isinstance(kind, type) and issubclass(kind, Exception):
         with contextlib.suppress(Exception):
-            return kind(message)
+            return _marked(kind)(message)
     return SolutionError(f'{name}: {message}')
 
 
@@ -893,9 +1083,11 @@ class _RemoteModule:
         self._runner = runner
 
     def __getattr__(self, name: str) -> Any:
-        kind = self._runner.exports.get(name)
-        if kind is None or name.startswith('_'):
+        if name.startswith('_'):
             raise AttributeError(f'solution has no attribute {name!r}')
+        kind = self._runner.exports.get(name)
+        if kind is None:
+            raise _marked(AttributeError)(f'solution has no attribute {name!r}')
         target = {'name': name}
         if kind == 'callable':
             return _RemoteCallable(self._runner, target, name)
@@ -922,8 +1114,8 @@ def load_solution(solution_path: str) -> _RemoteModule:
     """Import the solution in the isolated domain and return a proxy for it.
 
     Raises:
-        Exception: The solution's own import error (SyntaxError, ImportError, ...).
-        TimeoutError: If importing takes too long.
+        SolutionError: The solution's own import error, also of the type it raised
+            (SyntaxError, ImportError, ...), or a TimeoutError if importing takes too long.
     """
     return _RemoteModule(_Runner(solution_path))
 
@@ -1054,6 +1246,49 @@ def _forward(port: int, judge_socket: str, command: list[str]) -> int:
     return subprocess.call(command)
 
 
+def _watch() -> None:
+    """Kill each process group the judge names on stdin once the judge is gone.
+
+    The judge holds the other end of stdin, so it closes however the judge ends: its own
+    exit, a crash, or a host that killed it, which runs none of the judge's cleanup. The
+    watcher runs in its own session, so a host that kills the judge's process group
+    leaves it to finish, and in its own process, so a solution that hogs the interpreter
+    (a long C call holds the lock every thread needs) can't stop it. Each second it drops
+    groups that are gone; killing an unrelated group would take the system reusing one's
+    id within that second.
+    """
+    groups: set[int] = set()
+    seen = False
+    pending = b''
+    with selectors.DefaultSelector() as selector:
+        selector.register(0, selectors.EVENT_READ)
+        while True:
+            if selector.select(1.0):
+                data = os.read(0, 4096)
+                if not data:
+                    break
+                *lines, pending = (pending + data).split(b'\n')
+                groups.update(int(line) for line in lines if line)
+                seen = seen or bool(groups)
+            groups = {group for group in groups if _group_exists(group)}
+    if seen:  # a child that left its group (setsid) is still the sandbox user's
+        _sweep_solver_user()
+    for group in groups:
+        with contextlib.suppress(ProcessLookupError, PermissionError):
+            os.killpg(group, signal.SIGKILL)
+
+
+def _group_exists(group: int) -> bool:
+    """Whether process group *group* still has a process (perhaps a sandbox user's)."""
+    try:
+        os.killpg(group, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    return True
+
+
 def _confine(workdir: str, command: list[str]) -> int:
     """Run *command* (a whole judge) in this process's DEEPGYM_ISOLATION sandbox.
 
@@ -1107,10 +1342,12 @@ elif __name__ == '__main__' and sys.argv[1:2] == ['--forward']:
     sys.exit(_forward(int(sys.argv[2]), sys.argv[3], sys.argv[4:]))
 elif __name__ == '__main__' and sys.argv[1:2] == ['--confine']:
     sys.exit(_confine(sys.argv[2], sys.argv[3:]))
+elif __name__ == '__main__' and sys.argv[1:2] == ['--watch']:
+    _watch()
 elif __name__ == '__main__':
     usage = (
         '--serve <solution.py> | --forward <port> <socket> <command...> '
-        '| --confine <dir> <command...>'
+        '| --confine <dir> <command...> | --watch'
     )
     print(f'usage: {shlex.quote(sys.argv[0])} {usage}', file=sys.stderr)
     sys.exit(2)

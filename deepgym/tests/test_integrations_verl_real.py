@@ -12,11 +12,11 @@ import sys
 import types
 from pathlib import Path
 
-import numpy as np
 import pytest
 
 pytest.importorskip('verl')
 
+import numpy as np  # noqa: E402
 import torch  # noqa: E402
 from hydra.utils import get_class  # noqa: E402
 from omegaconf import OmegaConf  # noqa: E402

@@ -1,20 +1,25 @@
-"""Tests for deepgym.integrations.lm_eval — lm-evaluation-harness task adapter."""
+"""Tests for deepgym.integrations.lm_eval against the real lm-evaluation-harness.
+
+The tasks run through ``lm_eval.simple_evaluate`` with a scripted model, so lm-eval
+builds the requests (including the ``metadata`` keyword it passes to
+``construct_requests``), calls ``process_results`` and aggregates the metrics itself.
+"""
 
 from __future__ import annotations
 
+import math
 from pathlib import Path
-from unittest.mock import MagicMock, patch
+from types import ModuleType
+from unittest.mock import patch
 
 import pytest
 
-from deepgym.integrations.lm_eval import make_lm_eval_task, register_deepgym_tasks
+from deepgym.core import DeepGym
+from deepgym.integrations.lm_eval import make_lm_eval_task
 from deepgym.models import Environment
 
-ENVS_DIR = Path(__file__).resolve().parent.parent / 'src' / 'deepgym' / 'envs'
-REVERSE_DIR = ENVS_DIR / 'reverse_string'
-
+REVERSE_DIR = Path(__file__).resolve().parent.parent / 'src' / 'deepgym' / 'envs' / 'reverse_string'
 GOOD_SOLUTION = 'def reverse_string(s: str) -> str:\n    return s[::-1]\n'
-BAD_SOLUTION = 'pass\n'
 
 
 @pytest.fixture()
@@ -26,250 +31,92 @@ def env() -> Environment:
     )
 
 
-def _make_mock_lm_eval() -> MagicMock:
-    """Build a minimal mock of the lm_eval module tree."""
-    mock_task_base = MagicMock()
-    mock_task_base.__name__ = 'Task'
-
-    # Task base class: allow subclassing
-    class FakeTask:
-        VERSION = 0
-        DATASET_PATH = None
-        DATASET_NAME = None
-
-    mock_lm_eval = MagicMock()
-    mock_lm_eval.api.task.Task = FakeTask
-    mock_lm_eval.api.metrics.mean = sum  # simple stand-in
-
-    return mock_lm_eval
+@pytest.fixture()
+def lm_eval() -> ModuleType:
+    """The installed lm_eval package; the test is skipped without it."""
+    return pytest.importorskip('lm_eval')
 
 
-class TestMakeLmEvalTask:
-    """Verify make_lm_eval_task returns a usable Task subclass."""
-
-    def test_raises_import_error_when_lm_eval_missing(self, env: Environment) -> None:
-        with patch('builtins.__import__', side_effect=ImportError('no lm_eval')):
-            with pytest.raises(ImportError, match='lm-evaluation-harness'):
-                make_lm_eval_task(env, task_name='reverse_string')
-
-    def test_returns_class(self, env: Environment) -> None:
-        mock_lm_eval = _make_mock_lm_eval()
-        with patch.dict(
-            'sys.modules',
-            {
-                'lm_eval': mock_lm_eval,
-                'lm_eval.api': mock_lm_eval.api,
-                'lm_eval.api.task': mock_lm_eval.api.task,
-                'lm_eval.api.metrics': mock_lm_eval.api.metrics,
-                'lm_eval.api.instance': MagicMock(),
-            },
-        ):
-            task_cls = make_lm_eval_task(env, task_name='reverse_string')
-        assert isinstance(task_cls, type)
-
-    def test_task_name_embedded_in_class_name(self, env: Environment) -> None:
-        mock_lm_eval = _make_mock_lm_eval()
-        with patch.dict(
-            'sys.modules',
-            {
-                'lm_eval': mock_lm_eval,
-                'lm_eval.api': mock_lm_eval.api,
-                'lm_eval.api.task': mock_lm_eval.api.task,
-                'lm_eval.api.metrics': mock_lm_eval.api.metrics,
-                'lm_eval.api.instance': MagicMock(),
-            },
-        ):
-            task_cls = make_lm_eval_task(env, task_name='reverse_string')
-        assert 'reverse_string' in task_cls.__name__
-
-    def test_task_methods_present(self, env: Environment) -> None:
-        mock_lm_eval = _make_mock_lm_eval()
-        with patch.dict(
-            'sys.modules',
-            {
-                'lm_eval': mock_lm_eval,
-                'lm_eval.api': mock_lm_eval.api,
-                'lm_eval.api.task': mock_lm_eval.api.task,
-                'lm_eval.api.metrics': mock_lm_eval.api.metrics,
-                'lm_eval.api.instance': MagicMock(),
-            },
-        ):
-            task_cls = make_lm_eval_task(env, task_name='reverse_string')
-
-        instance = task_cls.__new__(task_cls)
-        assert hasattr(instance, 'has_test_docs')
-        assert hasattr(instance, 'doc_to_text')
-        assert hasattr(instance, 'process_results')
-        assert hasattr(instance, 'aggregation')
-        assert hasattr(instance, 'higher_is_better')
-
-    def test_has_test_docs_returns_true(self, env: Environment) -> None:
-        mock_lm_eval = _make_mock_lm_eval()
-        with patch.dict(
-            'sys.modules',
-            {
-                'lm_eval': mock_lm_eval,
-                'lm_eval.api': mock_lm_eval.api,
-                'lm_eval.api.task': mock_lm_eval.api.task,
-                'lm_eval.api.metrics': mock_lm_eval.api.metrics,
-                'lm_eval.api.instance': MagicMock(),
-            },
-        ):
-            task_cls = make_lm_eval_task(env, task_name='reverse_string')
-
-        instance = task_cls.__new__(task_cls)
-        assert instance.has_test_docs() is True
-        assert instance.has_training_docs() is False
-        assert instance.has_validation_docs() is False
-
-    def test_test_docs_returns_single_doc(self, env: Environment) -> None:
-        mock_lm_eval = _make_mock_lm_eval()
-        with patch.dict(
-            'sys.modules',
-            {
-                'lm_eval': mock_lm_eval,
-                'lm_eval.api': mock_lm_eval.api,
-                'lm_eval.api.task': mock_lm_eval.api.task,
-                'lm_eval.api.metrics': mock_lm_eval.api.metrics,
-                'lm_eval.api.instance': MagicMock(),
-            },
-        ):
-            task_cls = make_lm_eval_task(env, task_name='reverse_string')
-
-        instance = task_cls.__new__(task_cls)
-        docs = instance.test_docs()
-        assert len(docs) == 1
-        assert docs[0]['env_name'] == 'reverse_string'
-        assert env.task in docs[0]['task']
-
-    def test_doc_to_text_returns_task_prompt(self, env: Environment) -> None:
-        mock_lm_eval = _make_mock_lm_eval()
-        with patch.dict(
-            'sys.modules',
-            {
-                'lm_eval': mock_lm_eval,
-                'lm_eval.api': mock_lm_eval.api,
-                'lm_eval.api.task': mock_lm_eval.api.task,
-                'lm_eval.api.metrics': mock_lm_eval.api.metrics,
-                'lm_eval.api.instance': MagicMock(),
-            },
-        ):
-            task_cls = make_lm_eval_task(env, task_name='reverse_string')
-
-        instance = task_cls.__new__(task_cls)
-        doc = {'task': env.task, 'env_name': 'reverse_string'}
-        assert instance.doc_to_text(doc) == env.task
-
-    def test_process_results_good_solution_scores_high(self, env: Environment) -> None:
-        mock_lm_eval = _make_mock_lm_eval()
-        with patch.dict(
-            'sys.modules',
-            {
-                'lm_eval': mock_lm_eval,
-                'lm_eval.api': mock_lm_eval.api,
-                'lm_eval.api.task': mock_lm_eval.api.task,
-                'lm_eval.api.metrics': mock_lm_eval.api.metrics,
-                'lm_eval.api.instance': MagicMock(),
-            },
-        ):
-            task_cls = make_lm_eval_task(env, task_name='reverse_string')
-
-        instance = task_cls.__new__(task_cls)
-        doc = {'task': env.task, 'env_name': 'reverse_string'}
-        metrics = instance.process_results(doc, [GOOD_SOLUTION])
-        assert metrics['deepgym_score'] >= 0.9
-        assert metrics['deepgym_pass'] == 1
-
-    def test_process_results_bad_solution_scores_zero(self, env: Environment) -> None:
-        mock_lm_eval = _make_mock_lm_eval()
-        with patch.dict(
-            'sys.modules',
-            {
-                'lm_eval': mock_lm_eval,
-                'lm_eval.api': mock_lm_eval.api,
-                'lm_eval.api.task': mock_lm_eval.api.task,
-                'lm_eval.api.metrics': mock_lm_eval.api.metrics,
-                'lm_eval.api.instance': MagicMock(),
-            },
-        ):
-            task_cls = make_lm_eval_task(env, task_name='reverse_string')
-
-        instance = task_cls.__new__(task_cls)
-        doc = {'task': env.task, 'env_name': 'reverse_string'}
-        metrics = instance.process_results(doc, [BAD_SOLUTION])
-        assert metrics['deepgym_score'] == 0.0
-        assert metrics['deepgym_pass'] == 0
-
-    def test_process_results_empty_results_returns_zero(self, env: Environment) -> None:
-        mock_lm_eval = _make_mock_lm_eval()
-        with patch.dict(
-            'sys.modules',
-            {
-                'lm_eval': mock_lm_eval,
-                'lm_eval.api': mock_lm_eval.api,
-                'lm_eval.api.task': mock_lm_eval.api.task,
-                'lm_eval.api.metrics': mock_lm_eval.api.metrics,
-                'lm_eval.api.instance': MagicMock(),
-            },
-        ):
-            task_cls = make_lm_eval_task(env, task_name='reverse_string')
-
-        instance = task_cls.__new__(task_cls)
-        doc = {'task': env.task, 'env_name': 'reverse_string'}
-        metrics = instance.process_results(doc, [])
-        assert metrics['deepgym_score'] == 0.0
-
-    def test_aggregation_keys_match_higher_is_better(self, env: Environment) -> None:
-        mock_lm_eval = _make_mock_lm_eval()
-        with patch.dict(
-            'sys.modules',
-            {
-                'lm_eval': mock_lm_eval,
-                'lm_eval.api': mock_lm_eval.api,
-                'lm_eval.api.task': mock_lm_eval.api.task,
-                'lm_eval.api.metrics': mock_lm_eval.api.metrics,
-                'lm_eval.api.instance': MagicMock(),
-            },
-        ):
-            task_cls = make_lm_eval_task(env, task_name='reverse_string')
-
-        instance = task_cls.__new__(task_cls)
-        assert set(instance.aggregation().keys()) == set(instance.higher_is_better().keys())
-        assert all(instance.higher_is_better().values())
+def test_raises_import_error_when_lm_eval_missing(env: Environment) -> None:
+    with patch('builtins.__import__', side_effect=ImportError('no lm_eval')):
+        with pytest.raises(ImportError, match='lm-evaluation-harness'):
+            make_lm_eval_task(env, task_name='reverse_string')
 
 
-class TestRegisterDeepGymTasks:
-    """Verify register_deepgym_tasks calls register_task for each environment."""
+def _evaluate(lm_eval: ModuleType, reply: str, *tasks: object) -> tuple[dict, list]:
+    """Run *tasks* through lm_eval.simple_evaluate with a model that always says *reply*."""
+    from lm_eval.api.model import LM
+    from lm_eval.tasks import TaskManager
 
-    def test_raises_import_error_when_lm_eval_missing(self) -> None:
-        with patch('builtins.__import__', side_effect=ImportError('no lm_eval')):
-            with pytest.raises(ImportError, match='lm-evaluation-harness'):
-                register_deepgym_tasks()
+    class Scripted(LM):
+        def __init__(self) -> None:
+            super().__init__()
+            self.requests: list = []
 
-    def test_registers_specified_envs(self, env: Environment) -> None:
-        mock_lm_eval = _make_mock_lm_eval()
-        registered: list[str] = []
+        def generate_until(self, requests: list, disable_tqdm: bool = False) -> list[str]:
+            self.requests.extend(requests)
+            return [reply] * len(requests)
 
-        def fake_register_task(name: str):
-            registered.append(name)
-            return lambda cls: cls
+        def loglikelihood(self, requests: list, disable_tqdm: bool = False) -> list:
+            raise NotImplementedError
 
-        mock_lm_eval.api.registry = MagicMock()
-        mock_lm_eval.api.registry.register_task = fake_register_task
+        def loglikelihood_rolling(self, requests: list, disable_tqdm: bool = False) -> list:
+            raise NotImplementedError
 
-        with patch.dict(
-            'sys.modules',
-            {
-                'lm_eval': mock_lm_eval,
-                'lm_eval.api': mock_lm_eval.api,
-                'lm_eval.api.task': mock_lm_eval.api.task,
-                'lm_eval.api.metrics': mock_lm_eval.api.metrics,
-                'lm_eval.api.registry': mock_lm_eval.api.registry,
-                'lm_eval.api.instance': MagicMock(),
-            },
-        ):
-            result = register_deepgym_tasks(env_names=['reverse_string', 'two_sum'])
+    model = Scripted()
+    # Our tasks are objects; skip indexing lm-eval's thousands of built-in task configs.
+    task_manager = TaskManager(include_defaults=False)
+    out = lm_eval.simple_evaluate(
+        model=model, tasks=list(tasks), task_manager=task_manager, bootstrap_iters=0
+    )
+    return out['results'], model.requests
 
-        assert 'deepgym_reverse_string' in result
-        assert 'deepgym_two_sum' in result
-        assert len(result) == 2
+
+def test_fenced_answer_is_scored_by_the_verifier(
+    lm_eval: ModuleType, env: Environment, local_dg: DeepGym
+) -> None:
+    """The task builds, lm-eval queries the model, and the fenced code inside is what runs."""
+    results, requests = _evaluate(
+        lm_eval,
+        f'Sure:\n```python\n{GOOD_SOLUTION}```',
+        make_lm_eval_task(env, 'reverse_string', local_dg),
+    )
+
+    metrics = results['deepgym_reverse_string']
+    assert metrics['deepgym_score,none'] == 1.0
+    assert metrics['deepgym_pass,none'] == 1.0
+    assert metrics['deepgym_verdict,none'] == 1.0
+    prompt, generation_kwargs = requests[0].args
+    assert prompt == env.task
+    # No stop strings: code has blank lines, so only EOS or max_gen_toks may end it.
+    assert generation_kwargs['until'] == []
+
+
+def test_a_verifier_failure_is_not_a_wrong_answer(
+    lm_eval: ModuleType, env: Environment, local_dg: DeepGym
+) -> None:
+    broken = Environment(task='t', verifier_code='raise SystemExit(3)\n', verifier_mode='script')
+
+    results, _ = _evaluate(
+        lm_eval,
+        GOOD_SOLUTION,
+        make_lm_eval_task(env, 'reverse_string', local_dg),
+        make_lm_eval_task(broken, 'broken', local_dg),
+    )
+
+    assert results['deepgym_reverse_string']['deepgym_score,none'] == 1.0
+    failed = results['deepgym_broken']
+    assert math.isnan(failed['deepgym_score,none'])
+    assert math.isnan(failed['deepgym_pass,none'])
+    assert failed['deepgym_verdict,none'] == 0.0
+
+
+def test_a_wrong_answer_scores_zero_with_a_verdict(
+    lm_eval: ModuleType, env: Environment, local_dg: DeepGym
+) -> None:
+    results, _ = _evaluate(lm_eval, 'pass\n', make_lm_eval_task(env, 'reverse_string', local_dg))
+
+    metrics = results['deepgym_reverse_string']
+    assert metrics['deepgym_score,none'] == 0.0
+    assert metrics['deepgym_pass,none'] == 0.0
+    assert metrics['deepgym_verdict,none'] == 1.0

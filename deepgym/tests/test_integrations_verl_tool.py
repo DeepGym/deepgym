@@ -1,31 +1,41 @@
 """DeepGym verl integration against a stand-in for verl (verl itself is not installed here).
 
 The stand-in ToolAgentLoop does what verl's does: create -> execute -> release around
-every single tool call. State must still carry across calls within one rollout.
+every single tool call, and an exception from the tool comes back to the model as
+tool-error text while the rollout goes on (ToolAgentLoop._call_tool at verl 76e837e).
+State must still carry across calls within one rollout. Sessions are real (local).
 """
 
 import asyncio
 import importlib
+import logging
 import sys
 import types
 from typing import Any
 
 import pytest
 
-from deepgym.exceptions import DeepGymError
+from deepgym.exceptions import DeepGymError, SandboxError
 from deepgym.models import MultiTurnEnvironment
+from deepgym.session import Session
 
+WRITES_HELLO = (
+    'import json, pathlib\n'
+    'p = pathlib.Path("out.txt")\n'
+    'ok = p.exists() and p.read_text().strip() == "hello"\n'
+    'print(json.dumps({"score": float(ok), "passed": ok}))\n'
+)
 ENV = MultiTurnEnvironment(
     task='Write hello to out.txt',
     allowed_actions={'bash', 'done'},
     max_steps=10,
-    final_verifier_code=(
-        'import json, pathlib\n'
-        'p = pathlib.Path("out.txt")\n'
-        'ok = p.exists() and p.read_text().strip() == "hello"\n'
-        'print(json.dumps({"score": float(ok), "passed": ok}))\n'
-    ),
+    final_verifier_code=WRITES_HELLO,
 )
+WRITE_AND_FINISH = [
+    {'action_type': 'screenshot'},
+    {'action_type': 'bash', 'content': 'echo hello > out.txt && echo wrote'},
+    {'action_type': 'done'},
+]
 
 
 class _ToolResponse:
@@ -49,23 +59,31 @@ class _BaseTool:
 class _ToolAgentLoop:
     """Mimic verl's ToolAgentLoop: per-call tool lifecycle, scripted tool calls."""
 
-    def __init__(self, tools: list, calls: list[dict]) -> None:
+    def __init__(self, tools: list, calls: list[dict], use_v1: bool = True) -> None:
         self.tools = {tool.name: tool for tool in tools}
         self.calls = calls
         self.responses: list[str | None] = []
+        self.config = types.SimpleNamespace(trainer={'use_v1': use_v1})
 
     async def run(self, sampling_params: dict, **kwargs: object) -> types.SimpleNamespace:
         tools_kwargs = kwargs.get('tools_kwargs') or {}
         for args in self.calls:
-            tool = self.tools['computer']
+            self.responses.append((await self._call_tool(args, tools_kwargs)).text)
+        return types.SimpleNamespace(reward_score=None, response_mask=[1, 1, 1], extra_fields={})
+
+    async def _call_tool(self, args: dict, tools_kwargs: dict) -> _ToolResponse:
+        """As verl's _call_tool: a tool exception becomes text for the model."""
+        tool, instance_id = self.tools['computer'], None
+        try:
             create_kwargs = tools_kwargs.get('computer', {}).get('create_kwargs', {})
             instance_id, _ = await tool.create(create_kwargs=create_kwargs)
-            try:
-                response, _, _ = await tool.execute(instance_id, args, agent_data=None)
-                self.responses.append(response.text)
-            finally:
+            response, _, _ = await tool.execute(instance_id, args, agent_data=None)
+        except Exception as exc:
+            return _ToolResponse(text=f"Error executing tool 'computer': {exc}")
+        finally:
+            if instance_id:
                 await tool.release(instance_id)
-        return types.SimpleNamespace(reward_score=None)
+        return response
 
 
 @pytest.fixture()
@@ -81,6 +99,7 @@ def verl(monkeypatch: pytest.MonkeyPatch) -> types.ModuleType:
             'register': lambda name: lambda cls: cls,
         },
         'verl.experimental.agent_loop.tool_agent_loop': {'ToolAgentLoop': _ToolAgentLoop},
+        'verl.experimental.agent_loop.single_turn_agent_loop': {'SingleTurnAgentLoop': object},
     }
     for name in ('verl', 'verl.tools', 'verl.experimental', 'verl.experimental.agent_loop'):
         package = types.ModuleType(name)
@@ -91,7 +110,8 @@ def verl(monkeypatch: pytest.MonkeyPatch) -> types.ModuleType:
         for attr, value in attrs.items():
             setattr(module, attr, value)
         monkeypatch.setitem(sys.modules, name, module)
-    monkeypatch.delitem(sys.modules, 'deepgym.integrations.verl_tool', raising=False)
+    for name in ('deepgym.integrations.verl_tool', 'deepgym.integrations.verl_mask'):
+        monkeypatch.delitem(sys.modules, name, raising=False)
     module = importlib.import_module('deepgym.integrations.verl_tool')
     monkeypatch.setattr(module, 'load_environment', lambda name, variant=0: ENV)
     return module
@@ -101,26 +121,23 @@ def _tool(verl: types.ModuleType) -> Any:
     return verl.DeepGymSessionTool({'environment': 'x', 'mode': 'local'}, None)
 
 
-def _rollout(verl: types.ModuleType, calls: list[dict]) -> tuple[Any, Any, list]:
+def _rollout(
+    verl: types.ModuleType, calls: list[dict], use_v1: bool = True
+) -> tuple[Any, Any, list]:
     tool = _tool(verl)
-    loop = verl.DeepGymAgentLoop([tool], calls)
+    loop = verl.DeepGymAgentLoop([tool], calls, use_v1)
     output = asyncio.run(loop.run({}, tools_kwargs={}))
     return tool, output, loop.responses
 
 
 def test_state_carries_across_calls_and_reward_is_set(verl: types.ModuleType) -> None:
-    tool, output, responses = _rollout(
-        verl,
-        [
-            {'action_type': 'screenshot'},
-            {'action_type': 'bash', 'content': 'echo hello > out.txt && echo wrote'},
-            {'action_type': 'done'},
-        ],
-    )
+    tool, output, responses = _rollout(verl, WRITE_AND_FINISH)
 
     assert responses[0] == '(no output)'
     assert responses[1].strip() == 'wrote'
     assert output.reward_score == 1.0
+    assert output.extra_fields['reward_extra_info'] == {'score': 1.0, 'passed': 1.0, 'error': 0.0}
+    assert output.response_mask == [1, 1, 1]
     assert not tool._sessions
 
 
@@ -130,6 +147,118 @@ def test_first_call_starts_episode_without_applying_action(verl: types.ModuleTyp
     )
     assert responses[0].startswith('Episode started')
     assert output.reward_score == 0.0
+    assert output.extra_fields['reward_extra_info']['error'] == 0.0
+
+
+def test_a_rollout_without_tool_calls_scores_zero(verl: types.ModuleType) -> None:
+    """The model never acted, so the task isn't done: a real 0, trained on."""
+    _, output, _ = _rollout(verl, [])
+
+    assert output.reward_score == 0.0
+    assert output.extra_fields['reward_extra_info'] == {'score': 0.0, 'passed': 0.0, 'error': 0.0}
+    assert output.response_mask == [1, 1, 1]
+
+
+@pytest.fixture()
+def failing_start(verl: types.ModuleType, monkeypatch: pytest.MonkeyPatch) -> list[str]:
+    """Make the sandbox's setup fail (a SandboxError from session.start); count the starts."""
+    env = ENV.model_copy(update={'setup_script': 'echo starting >> starts.log; exit 3'})
+    starts: list[str] = []
+
+    def load(name: str, variant: int = 0) -> MultiTurnEnvironment:
+        starts.append(name)
+        return env
+
+    monkeypatch.setattr(verl, 'load_environment', load)
+    return starts
+
+
+def test_a_sandbox_that_fails_to_start_drops_the_rollout_under_v1(
+    verl: types.ModuleType, failing_start: list[str]
+) -> None:
+    """verl swallows the startup error into text; the rollout must not end as a plain 0.0."""
+    tool = _tool(verl)
+    loop = verl.DeepGymAgentLoop([tool], WRITE_AND_FINISH, True)
+
+    with pytest.raises(DeepGymError, match='sandbox_error'):
+        asyncio.run(loop.run({}, tools_kwargs={}))
+
+    assert loop.responses[0].startswith("Error executing tool 'computer'")
+    assert loop.responses[1:] == [verl._FAILED_NOTE] * 2
+    assert failing_start == ['x']
+    assert not tool._failed
+
+
+def test_a_sandbox_that_fails_to_start_is_masked_under_the_legacy_trainer(
+    verl: types.ModuleType, failing_start: list[str]
+) -> None:
+    _, output, _ = _rollout(verl, WRITE_AND_FINISH, use_v1=False)
+
+    assert output.reward_score == 0.0
+    assert output.extra_fields['reward_extra_info']['error'] == 1.0
+    assert output.response_mask == [0, 0, 0]
+    assert failing_start == ['x']
+
+
+@pytest.mark.parametrize(
+    'final_verifier',
+    [
+        # Reports its own failure (exit 2): score() returns a result without a verdict.
+        'import json\n'
+        'print(json.dumps({"score": 0.0, "passed": False, "error_type": "verifier_error"}))\n'
+        'raise SystemExit(2)\n',
+        # Prints nothing usable: score() raises.
+        'print("not json")\n',
+    ],
+)
+def test_a_final_verifier_failure_is_not_a_zero(
+    verl: types.ModuleType, monkeypatch: pytest.MonkeyPatch, final_verifier: str
+) -> None:
+    env = ENV.model_copy(update={'final_verifier_code': final_verifier})
+    monkeypatch.setattr(verl, 'load_environment', lambda name, variant=0: env)
+
+    tool, output, _ = _rollout(verl, WRITE_AND_FINISH, use_v1=False)
+
+    assert output.extra_fields['reward_extra_info']['error'] == 1.0
+    assert output.response_mask == [0, 0, 0]
+    assert not tool._sessions
+    with pytest.raises(DeepGymError, match='No verdict'):
+        _rollout(verl, WRITE_AND_FINISH, use_v1=True)
+
+
+def test_a_step_verifier_failure_is_not_a_zero(
+    verl: types.ModuleType, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """verl shows the step's VerifierError to the model; score() then reports no verdict."""
+    env = ENV.model_copy(update={'step_verifier_code': 'raise SystemExit(3)\n'})
+    monkeypatch.setattr(verl, 'load_environment', lambda name, variant=0: env)
+
+    _, output, responses = _rollout(verl, WRITE_AND_FINISH, use_v1=False)
+
+    assert responses[1].startswith("Error executing tool 'computer'")
+    assert output.extra_fields['reward_extra_info']['error'] == 1.0
+    assert output.response_mask == [0, 0, 0]
+
+
+def test_a_failed_sandbox_delete_keeps_the_score(
+    verl: types.ModuleType, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """A provider that reports a failed delete must not cost the episode its verdict."""
+    real_close = Session.close
+
+    def close(session: Session) -> None:
+        real_close(session)
+        raise SandboxError('delete failed: provider returned 500')
+
+    monkeypatch.setattr(Session, 'close', close)
+
+    with caplog.at_level(logging.WARNING, logger='deepgym.integrations.verl_tool'):
+        tool, output, _ = _rollout(verl, WRITE_AND_FINISH)
+
+    assert output.reward_score == 1.0
+    assert output.extra_fields['reward_extra_info']['error'] == 0.0
+    assert 'Could not delete sandbox' in caplog.text
+    assert not tool._sessions
 
 
 def test_bad_calls_come_back_as_text(verl: types.ModuleType) -> None:
@@ -145,18 +274,20 @@ def test_bad_calls_come_back_as_text(verl: types.ModuleType) -> None:
     assert 'not allowed' in responses[2]
 
 
-def test_failed_rollout_still_deletes_sandbox(verl: types.ModuleType) -> None:
+def test_failed_rollout_still_deletes_sandbox(
+    verl: types.ModuleType, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    original = _ToolAgentLoop.run
+
+    async def crashing(self: Any, sampling_params: dict, **kwargs: object) -> None:
+        await original(self, sampling_params, **kwargs)
+        raise RuntimeError('rollout crashed')
+
+    monkeypatch.setattr(_ToolAgentLoop, 'run', crashing)
     tool = _tool(verl)
-    real_execute = tool.execute
+    loop = verl.DeepGymAgentLoop([tool], [{'action_type': 'screenshot'}])
 
-    async def execute(instance_id: str, parameters: dict, **kwargs: object) -> tuple:
-        if parameters['action_type'] == 'done':
-            raise RuntimeError('rollout crashed')
-        return await real_execute(instance_id, parameters, **kwargs)
-
-    tool.execute = execute
-    loop = verl.DeepGymAgentLoop([tool], [{'action_type': 'screenshot'}, {'action_type': 'done'}])
-    with pytest.raises(RuntimeError):
+    with pytest.raises(RuntimeError, match='rollout crashed'):
         asyncio.run(loop.run({}, tools_kwargs={}))
     assert not tool._sessions
 
@@ -178,3 +309,13 @@ def test_parquet_nulls_fall_back_to_the_tool_default(verl: types.ModuleType) -> 
     create_kwargs = {'episode': 'e', 'environment': None, 'variant': None}
     asyncio.run(tool.create(create_kwargs=create_kwargs))
     assert tool._specs['e'] == ('x', 0)
+
+
+def test_reward_extra_info_keys_match_compute_score(verl: types.ModuleType) -> None:
+    """verl batches reward_extra_info by the first sample's keys, so every loop must agree."""
+    from deepgym.integrations.verl import compute_score
+
+    _, output, _ = _rollout(verl, WRITE_AND_FINISH)
+    row = compute_score('coin_change', 'pass', mode='local')
+
+    assert output.extra_fields['reward_extra_info'].keys() == row.keys()

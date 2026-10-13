@@ -1,12 +1,16 @@
-"""Tests for deepgym.integrations -- TRL, verl, OpenRLHF integration wrappers."""
+"""Tests for deepgym.integrations -- TRL, verl, DAPO, OpenRLHF integration wrappers."""
 
+import asyncio
+import threading
 import time
 from pathlib import Path
 
+import httpx
 import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
+from deepgym.async_core import AsyncDeepGym
 from deepgym.core import DeepGym
 from deepgym.integrations.dapo import (
     generate_dapo_reward_module,
@@ -20,7 +24,7 @@ from deepgym.integrations.openrlhf import (
     OpenRLHFRewardResponse,
     create_openrlhf_router,
 )
-from deepgym.integrations.reward import RewardFunction
+from deepgym.integrations.reward import AsyncRewardFunction, RewardFunction
 from deepgym.integrations.trl import make_trl_async_reward_fn, make_trl_reward_fn
 from deepgym.integrations.verl import (
     compute_score,
@@ -36,6 +40,19 @@ REVERSE_DIR = ENVS_DIR / 'reverse_string'
 
 GOOD_SOLUTION = 'def reverse_string(s: str) -> str:\n    return s[::-1]\n'
 BAD_SOLUTION = '# no function\npass\n'
+FENCED = f'Here you go:\n```python\n{GOOD_SOLUTION}```\n'
+
+MIXED = Environment(
+    task='Say right.',
+    verifier_code=(
+        'source = open(solution_path).read()\n'
+        "if 'boom' in source:\n"
+        "    raise RuntimeError('verifier bug')\n"
+        "return {'score': 1.0 if 'right' in source else 0.0, 'passed': 'right' in source,\n"
+        "        'reward_components': {'style': 0.5}}\n"
+    ),
+)
+"""Judges 'right' 1.0 and 'wrong' 0.0 (a real zero), and crashes on 'boom': no verdict."""
 
 
 @pytest.fixture()
@@ -102,6 +119,17 @@ class TestTRLIntegration:
         async_scores = await make_trl_async_reward_fn(env=env, dg=local_dg)(completions=completions)
 
         assert sync_scores == async_scores == [1.0] * len(completions)
+
+    async def test_no_verdict_is_none_and_a_judged_zero_stays_zero(self, local_dg: DeepGym) -> None:
+        """TRL 1.6+ leaves None out of the group baseline; a 0.0 would read as a failed answer."""
+        completions = ['right', 'wrong', 'boom']
+
+        sync_scores = make_trl_reward_fn(MIXED, local_dg)(completions=completions)
+        async_scores = await make_trl_async_reward_fn(MIXED, local_dg)(completions=completions)
+        styles = make_trl_reward_fn(MIXED, local_dg, component='style')(completions=completions)
+
+        assert sync_scores == async_scores == [1.0, 0.0, None]
+        assert styles == [0.5, 0.5, None]
 
 
 class TestVerlIntegration:
@@ -175,6 +203,21 @@ class TestVerlIntegration:
 
         assert (trl, verl, openrlhf) == ([1.0], 1.0, [1.0])
 
+    def test_fenced_code_scores_the_same_in_every_entry_point(
+        self, env: Environment, local_dg: DeepGym
+    ) -> None:
+        """Raw fenced text is a syntax error; every entry point must run the block inside."""
+        scores = {
+            'trl': make_trl_reward_fn(env=env, dg=local_dg)(completions=[FENCED]),
+            'dapo': make_dapo_reward_fn(env, local_dg)(completions=[FENCED]),
+            'verl': [make_verl_compute_score(env, local_dg)('ds', FENCED)],
+            'verl_batch': make_verl_reward_fn(env, local_dg)({'responses': [FENCED]}),
+            'reward_function': RewardFunction(env, local_dg)([FENCED]),
+            'openrlhf': _openrlhf_score(env, local_dg, [OPENRLHF_PROMPT + FENCED])['rewards'],
+        }
+
+        assert scores == dict.fromkeys(scores, [1.0])
+
     def test_package_compute_score_picks_env_per_row(self) -> None:
         reference = (
             Path(__file__).resolve().parent.parent
@@ -232,6 +275,18 @@ class TestDAPOIntegration:
         scores = fn(completions=['print("hi")\n'])
         assert scores == [0.8]
 
+    async def test_dapo_reward_fns_reward_no_verdict_as_none(self, local_dg: DeepGym) -> None:
+        completions = ['right', 'wrong', 'boom']
+
+        sync_scores = make_dapo_reward_fn(MIXED, local_dg)(completions=completions)
+        async_scores = await make_dapo_async_reward_fn(MIXED, local_dg)(completions=completions)
+        shaped = make_dapo_shaped_reward_fn(MIXED, local_dg, component='style')(
+            completions=completions
+        )
+
+        assert sync_scores == async_scores == [1.0, 0.0, None]
+        assert shaped == [0.5, 0.5, None]
+
     def test_generate_dapo_verl_config_contains_expected_fields(self) -> None:
         config = generate_dapo_verl_config(train_files='data/train.parquet')
         assert 'adv_estimator: grpo' in config
@@ -273,6 +328,17 @@ class TestRewardFunction:
         batch = rf.call_with_details([GOOD_SOLUTION])
         assert batch.total == 1
 
+    async def test_no_verdict_is_none_in_every_method(self, local_dg: DeepGym) -> None:
+        outputs = ['right', 'boom']
+        rf = RewardFunction(MIXED, local_dg)
+        arf = AsyncRewardFunction(MIXED, AsyncDeepGym(mode='local'))
+
+        assert rf(outputs) == await arf(outputs) == [1.0, None]
+        assert rf.shaped_rewards(outputs) == await arf.shaped_rewards(outputs)
+        assert rf.shaped_rewards(outputs) == [{'style': 0.5}, None]
+        assert rf.per_test_rewards(outputs) == await arf.per_test_rewards(outputs)
+        assert rf.per_test_rewards(outputs) == [{'overall': 1.0}, None]
+
 
 OPENRLHF_CONTEXT = '<|im_start|>user\n' + 'Strings are sequences of characters. ' * 12
 OPENRLHF_PROMPT = (
@@ -299,6 +365,26 @@ def _openrlhf_score(env: Environment, dg: DeepGym, queries: list[str]) -> dict:
     response = TestClient(app).post('/reward/score', json=payload)
     assert response.status_code == 200, response.text
     return response.json()
+
+
+class _GatedDeepGym(DeepGym):
+    """Local client that scores the 'slow' output only after another output was scored."""
+
+    def __init__(self) -> None:
+        super().__init__(mode='local')
+        self.slow_started = threading.Event()
+        self.other_scored = threading.Event()
+        self.finished: list[str] = []
+
+    def run_batch(self, env: Environment, outputs: list[str], **kwargs: object) -> object:
+        if outputs == ['slow']:
+            self.slow_started.set()
+            self.other_scored.wait(timeout=10)
+        batch = super().run_batch(env, outputs, **kwargs)
+        self.finished.extend(outputs)
+        if outputs != ['slow']:
+            self.other_scored.set()
+        return batch
 
 
 class TestOpenRLHFIntegration:
@@ -353,6 +439,30 @@ class TestOpenRLHFIntegration:
 
         assert data['rewards'] == [0.0, 1.0, 0.0]
         assert data['error_types'] == [None, None, 'prompt_mismatch']
+
+    async def test_a_slow_verification_does_not_hold_up_other_requests(
+        self, env: Environment
+    ) -> None:
+        """OpenRLHF posts one request per rollout, concurrently, each with a 180 s timeout.
+
+        The 'slow' request's scoring waits until another request has been scored. If
+        scoring ran on the event loop, the second request couldn't even start.
+        """
+        dg = _GatedDeepGym()
+        app = FastAPI()
+        app.include_router(create_openrlhf_router(env, dg))
+        transport = httpx.ASGITransport(app=app)
+
+        async with httpx.AsyncClient(transport=transport, base_url='http://test') as client:
+            slow = asyncio.create_task(
+                client.post('/reward/score', json={'prompts': ['p'], 'outputs': ['slow']})
+            )
+            await asyncio.to_thread(dg.slow_started.wait, 10)
+            fast = await client.post('/reward/score', json={'prompts': ['p'], 'outputs': [FENCED]})
+            await slow
+
+        assert fast.json()['rewards'] == [1.0]
+        assert dg.finished == [extract_code(FENCED), 'slow']
 
     def test_score_endpoint_empty(self, env: Environment, local_dg: DeepGym) -> None:
         router = create_openrlhf_router(env, local_dg)

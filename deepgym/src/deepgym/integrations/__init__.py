@@ -6,7 +6,7 @@ Available integrations:
 - trl: HuggingFace TRL GRPOTrainer reward functions
 - verl: ByteDance verl compute_score and batch reward functions
 - verl_tool: verl multi-turn tool backed by a live DeepGym session
-- verl_mask: verl single-turn agent loop that masks unscored samples out of the loss
+- verl_mask: verl single-turn agent loop that keeps unscored samples out of training
 - openrlhf: OpenRLHF reward server FastAPI router
 - reward: Universal RewardFunction and AsyncRewardFunction
 - hf: HuggingFace Hub push/pull for environments and results

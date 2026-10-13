@@ -131,11 +131,16 @@ class OpenRLHFRewardResponse(BaseModel):
 
 
 def create_openrlhf_router(env: Environment, dg: DeepGym) -> APIRouter:
-    """Create a FastAPI router compatible with OpenRLHF's reward server protocol."""
+    """Create a FastAPI router compatible with OpenRLHF's reward server protocol.
+
+    OpenRLHF sends one request per rollout, concurrently. The handler is synchronous, so
+    FastAPI runs each request in its worker thread pool (40 threads by default) and a
+    slow verification never blocks the event loop the other requests arrive on.
+    """
     router = APIRouter(prefix='/reward')
 
     @router.post('/score')
-    async def score(request: OpenRLHFRewardRequest) -> OpenRLHFRewardResponse:
+    def score(request: OpenRLHFRewardRequest) -> OpenRLHFRewardResponse:
         """Score a batch of model responses and return rewards."""
         responses = request.responses
         found = [response for response in responses if response is not None]

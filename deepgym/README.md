@@ -57,7 +57,7 @@ lm-evaluation-harness, `deepgym[all]` for everything.
 - Seeded verifiers: the same input gets the same score
 - Batch scoring for GRPO (score N completions in parallel)
 - Reward functions for TRL, verl, OpenRLHF and Axolotl, plus a verl multi-turn agent loop
-- lm-evaluation-harness tasks (`lm_eval --tasks deepgym_*`) and Hugging Face Hub sharing
+- lm-evaluation-harness tasks and Hugging Face Hub sharing
 - Gymnasium-style `reset`/`step`/`state` API
 - Runs locally or in sandboxes from Daytona, Modal, E2B, Docker or Apple container
 
@@ -75,7 +75,7 @@ together: verl loads DeepGym's reward function with one config line (see [verl](
 | Reward hacking | Up to your reward function | The solution runs apart from the verifier with no network, so it can't read the tests or forge the score; `deepgym qa` checks that empty, stub and hack solutions fail before you train |
 | Multi-turn agents | Agent loop and tool interface | One live sandbox per episode (shell or desktop), with a verl agent loop and session tool |
 | Computer use | Not built in | Desktop tasks, scored on the state the agent leaves behind |
-| Failed runs | A reward function can't drop a sample | A verl agent loop masks failed runs out of the loss |
+| Failed runs | A reward function can't drop a sample | A verl agent loop keeps failed runs out of training |
 | Managing it | Training logs (wandb, TensorBoard) | `deepgym console`: environments, runs, episode replay, sandboxes, QA reports |
 
 ## For teams and enterprises
@@ -214,6 +214,12 @@ trainer = GRPOTrainer(model=model, reward_funcs=[reward_fn])
 trainer.train()
 ```
 
+It runs the last fenced code block of each completion, plain or conversational. A
+completion whose sandbox or verifier failed gets `None`, not 0.0: TRL 1.6+ leaves it out
+of its group's baseline and gives it no advantage, so an outage neither penalizes it nor
+shifts its siblings' advantages. `component='correctness'` returns one reward component
+instead of the score.
+
 ### verl
 
 verl loads DeepGym's reward function from the package. Each dataset row names
@@ -239,10 +245,14 @@ and `error` (1.0 when the sandbox or verifier failed and the score is a forced 0
 For one fixed environment in your own module, use `make_verl_compute_score(env)`.
 
 A verl reward function or reward manager can't drop a sample, so a failed run
-trains as a 0. To keep those samples out of the policy loss, let DeepGym's
-single-turn agent loop score the rows instead. It zeroes the response mask of any
-sample whose `error` is 1.0, so the sample gets no gradient and adds no tokens to
-the loss, and verl skips its own reward step because the score is already set.
+trains as a 0. To keep those samples out of training, let DeepGym's single-turn agent
+loop score the rows instead; verl skips its own reward step because the score is
+already set. With verl's v1 trainer (`trainer.use_v1`, the default since verl 0.9) a
+sample whose `error` is 1.0 is dropped: verl records its prompt group as failed and
+computes the group's GRPO mean and std from the other samples (the async trainers
+replace the whole group). With the legacy trainer its response mask is zeroed instead,
+so it gets no gradient and adds no tokens to the loss, but its 0 still counts toward
+its group's mean and std.
 
 ```yaml
 # actor_rollout_ref.rollout.agent.agent_loop_config_path
@@ -252,14 +262,16 @@ the loss, and verl skips its own reward step because the score is already set.
 ```
 
 Then set `actor_rollout_ref.rollout.agent.default_agent_loop=deepgym_single_turn`.
-The rows are the same `verl_rows`. A masked sample's 0 still counts toward its
-GRPO group's mean and std, and a policy that learns to trigger failures escapes
-their penalty, so keep watching `error`.
+The rows are the same `verl_rows`. A policy that learns to trigger failures escapes
+their penalty either way, so keep watching `error`.
 
 For multi-turn agent RL, use DeepGym's agent loop and session tool. verl's stock
 `ToolAgentLoop` creates and releases a tool around every call, so the
 `deepgym_agent` loop keeps one sandbox per rollout, sets `reward_score` from the
-final verifier, and deletes the sandbox. Screenshots come back as images.
+final verifier, and deletes the sandbox. Screenshots come back as images. A rollout
+whose sandbox fails to start, or whose step or final verifier fails, gets no verdict and
+is kept out of training the same way (`error` 1.0); one where the model never calls the
+tool scores 0.
 
 ```yaml
 # agent_loop_config_path
@@ -279,7 +291,8 @@ tools:
   `extra_info.tools_kwargs.computer.create_kwargs: {environment: todo_list, variant: 3}`.
 - verl cuts tool output to 256 characters by default; raise
   `actor_rollout_ref.rollout.multi_turn.max_tool_response_length` for shell output.
-- Written against verl v0.9.1 and tested against a stand-in for its loop.
+- Written against verl 0.9.1. CI runs the loop against a stand-in for verl's; it was also
+  run on Daytona sandboxes through verl 0.9.1's own `ToolAgentLoop._call_tool`.
 
 ### DAPO
 
@@ -289,6 +302,10 @@ from deepgym.integrations.dapo import make_dapo_reward_fn
 reward_fn = make_dapo_reward_fn(env)
 scores = reward_fn(completions=['def solve(x): return x'])
 ```
+
+These are the TRL reward functions: the last fenced code block runs, and a completion
+that got no verdict scores `None`, so leave it out of the loss and of its group's
+statistics.
 
 For verl-based DAPO recipes, generate a reward module and a minimal config snippet:
 
@@ -305,6 +322,26 @@ config_yaml = generate_dapo_verl_config(
 )
 ```
 
+### Axolotl
+
+Axolotl trains GRPO with TRL, so `make_axolotl_reward_fn(env)` is the TRL reward
+function. For a config with no code, save `verl_rows` as JSON lines and point
+`trl.reward_funcs` at `deepgym.integrations.axolotl.row_reward_fn`, which scores each
+row with the environment it names:
+
+```python
+import pandas as pd
+from deepgym.integrations.axolotl import generate_axolotl_config
+from deepgym.integrations.verl import verl_rows
+
+rows = pd.DataFrame(verl_rows(['coin_change', 'two_sum']) * 64)
+rows.to_json('data/train.jsonl', orient='records', lines=True)
+config = generate_axolotl_config(base_model='Qwen/Qwen2.5-Coder-7B-Instruct')
+# write config to axolotl.yaml, then: axolotl train axolotl.yaml
+```
+
+`row_reward_fn` scores in Daytona when `DAYTONA_API_KEY` is set, otherwise locally.
+
 ### OpenRLHF
 
 ```python
@@ -317,15 +354,27 @@ app.include_router(create_openrlhf_router(env, dg))
 # Train with: --remote_rm_url http://localhost:8000/reward/score
 ```
 
+OpenRLHF sends one request per rollout, all at once. They run in FastAPI's thread pool,
+so a slow verification doesn't hold up the others.
+
 ### lm-evaluation-harness
 
 ```python
-from deepgym.integrations.lm_eval import register_deepgym_tasks
-register_deepgym_tasks()  # registers deepgym_* tasks
+import lm_eval
+from deepgym import load_environment
+from deepgym.integrations.lm_eval import make_lm_eval_task
 
-# lm_eval --model hf --model_args pretrained=Qwen/Qwen2-0.5B-Instruct \
-#         --tasks deepgym_coin_change,deepgym_two_sum
+tasks = [make_lm_eval_task(load_environment(n), n) for n in ['coin_change', 'two_sum']]
+results = lm_eval.simple_evaluate(
+    model='hf', model_args='pretrained=Qwen/Qwen2.5-0.5B-Instruct', tasks=tasks
+)
 ```
+
+lm-eval (0.4.9+) has no registry for Python tasks, so pass the task objects;
+`lm_eval --tasks` can't name them. The last fenced code block of the generation runs.
+`deepgym_score` and `deepgym_pass` average the environments that got a verdict, and
+`deepgym_verdict` is the fraction that did, so a sandbox or verifier failure doesn't
+count as a wrong answer.
 
 ### Hugging Face Hub
 

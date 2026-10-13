@@ -146,6 +146,8 @@ test_labels = [
 ]
 
 scores = deepgym_reward_fn(completions=test_completions)
+if None in scores:
+    raise SystemExit(f'  FAIL: no verdict (sandbox or verifier failed) for some: {scores}')
 print(f'  {"Solution":<25} {"Score":>8}')
 print(f'  {"-"*25} {"-"*8}')
 for label, score in zip(test_labels, scores):

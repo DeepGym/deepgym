@@ -7,184 +7,100 @@ This module provides:
 - Reward functions for Axolotl's GRPO/RL training loops
 - Config generation helpers for Axolotl YAML files
 
-Since Axolotl wraps TRL's GRPOTrainer internally, the reward function interface
-matches TRL's signature.
+Axolotl trains GRPO with TRL's GRPOTrainer, so its reward functions are TRL's
+(:mod:`deepgym.integrations.trl`): conversational completions are handled, the
+last fenced code block runs, and a completion that got no verdict is rewarded None.
 
-Usage (GRPO reward function):
+Usage (no code): build rows with :func:`deepgym.integrations.verl.verl_rows`, save them
+as JSON lines, and let :func:`row_reward_fn` score each row with the environment it
+names::
+
+    import pandas as pd
+    from deepgym.integrations.axolotl import generate_axolotl_config
+    from deepgym.integrations.verl import verl_rows
+
+    rows = pd.DataFrame(verl_rows(['coin_change', 'two_sum']) * 64)
+    rows.to_json('data/train.jsonl', orient='records', lines=True)
+    config = generate_axolotl_config(base_model='Qwen/Qwen2.5-Coder-7B-Instruct')
+    # axolotl train axolotl_config.yaml
+
+Usage (one environment, your own training script):
     from deepgym.integrations.axolotl import make_axolotl_reward_fn
 
     reward_fn = make_axolotl_reward_fn(env=env)
-
-    # In your Axolotl custom training script:
     trainer = GRPOTrainer(model=model, reward_funcs=[reward_fn])
 
-Usage (config generation):
-    from deepgym.integrations.axolotl import generate_axolotl_config
-
-    config = generate_axolotl_config(
-        base_model='Qwen/Qwen3.5-Coder-7B',
-        env=env,
-        method='grpo',
-    )
-
 Sources:
-    - https://github.com/axolotl-ai-cloud/axolotl
-    - https://axolotlai.substack.com/p/process-reward-models
-    - https://docs.axolotl.ai/
+    - https://github.com/axolotl-ai-cloud/axolotl (src/axolotl/core/trainers/grpo/__init__.py:
+      GRPOStrategy.get_reward_func; src/axolotl/utils/data/rl.py)
+    - https://docs.axolotl.ai/docs/rlhf.html#grpo
 """
 
 from __future__ import annotations
 
-import asyncio
-from collections.abc import Awaitable, Callable
-from typing import Literal
+import functools
+from collections import defaultdict
+from collections.abc import Mapping, Sequence
+from typing import Any, Literal
 
 from deepgym.core import DeepGym
-from deepgym.models import Environment
+from deepgym.integrations.reward import Completion
+from deepgym.integrations.trl import make_trl_async_reward_fn, make_trl_reward_fn
+from deepgym.integrations.verl import row_environment
 
 # ---------------------------------------------------------------------------
 # GRPO / RL reward functions
 # ---------------------------------------------------------------------------
 
-
-def make_axolotl_reward_fn(
-    env: Environment,
-    dg: DeepGym | None = None,
-    max_parallel: int = 32,
-) -> Callable[..., list[float]]:
-    """Create a reward function for Axolotl's GRPO training.
-
-    Axolotl uses TRL's GRPOTrainer internally, so the reward function
-    follows TRL's interface: ``reward_func(completions, **kwargs) -> list[float]``.
-
-    Args:
-        env: DeepGym environment with verifier.
-        dg: Optional DeepGym client (auto-created if None).
-        max_parallel: Maximum concurrent sandbox executions.
-
-    Returns:
-        Callable matching Axolotl/TRL reward_funcs interface.
-    """
-    _dg = dg or DeepGym(mode='auto')
-
-    def reward_fn(completions: list[str], **kwargs: object) -> list[float]:
-        """Score completions via sandboxed execution.
-
-        Args:
-            completions: List of decoded model output strings.
-            **kwargs: Additional args from Axolotl/TRL (prompts, etc.)
-
-        Returns:
-            List of scores between 0.0 and 1.0.
-        """
-        if not completions:
-            return []
-        batch = _dg.run_batch(
-            env,
-            completions,
-            max_parallel=min(len(completions), max_parallel),
-            **kwargs,
-        )
-        return [r.score for r in batch.results]
-
-    return reward_fn
+make_axolotl_reward_fn = make_trl_reward_fn
+make_axolotl_async_reward_fn = make_trl_async_reward_fn
+# One reward function per reward component: pass component='correctness' and so on.
+make_axolotl_shaped_reward_fn = make_trl_reward_fn
 
 
-def make_axolotl_async_reward_fn(
-    env: Environment,
-    dg: DeepGym | None = None,
-    max_parallel: int = 32,
-) -> Callable[..., Awaitable[list[float]]]:
-    """Create an async reward function for Axolotl's GRPO training.
+@functools.cache
+def _client() -> DeepGym:
+    return DeepGym(mode='auto')
 
-    Async reward functions run concurrently when Axolotl provides multiple
-    reward functions, reducing latency for I/O-bound sandbox execution.
+
+def row_reward_fn(
+    completions: Sequence[Completion],
+    data_source: Sequence[str],
+    extra_info: Sequence[Mapping[str, Any] | None] | None = None,
+    **kwargs: object,
+) -> list[float | None]:
+    """Score each completion with the DeepGym environment its dataset row names.
+
+    Point Axolotl's ``trl.reward_funcs`` at ``deepgym.integrations.axolotl.row_reward_fn``
+    and train on :func:`~deepgym.integrations.verl.verl_rows`: TRL passes every dataset
+    column to reward functions, and the environment is ``extra_info['environment']``
+    (with optional ``variant``), else ``data_source``. Scoring uses Daytona when
+    ``DAYTONA_API_KEY`` is set, else the local executor.
 
     Args:
-        env: DeepGym environment with verifier.
-        dg: Optional DeepGym client (auto-created if None).
-        max_parallel: Maximum concurrent sandbox executions.
+        completions: Decoded strings or conversations, one per sample.
+        data_source: Each sample's ``data_source`` column.
+        extra_info: Each sample's ``extra_info`` column.
+        **kwargs: The other dataset columns and TRL arguments (unused).
 
     Returns:
-        Async callable matching Axolotl/TRL reward_funcs interface.
+        One score per completion, in order; None where there was no verdict.
+
+    Raises:
+        DeepGymError: If a row names an environment that doesn't exist.
     """
-    _dg = dg or DeepGym(mode='auto')
-
-    async def reward_fn(completions: list[str], **kwargs: object) -> list[float]:
-        """Score completions asynchronously via sandboxed execution.
-
-        Args:
-            completions: List of decoded model output strings.
-            **kwargs: Additional args from Axolotl/TRL.
-
-        Returns:
-            List of scores between 0.0 and 1.0.
-        """
-        if not completions:
-            return []
-        loop = asyncio.get_running_loop()
-        batch = await loop.run_in_executor(
-            None,
-            lambda: _dg.run_batch(
-                env,
-                completions,
-                max_parallel=min(len(completions), max_parallel),
-                **kwargs,
-            ),
-        )
-        return [r.score for r in batch.results]
-
-    return reward_fn
-
-
-def make_axolotl_shaped_reward_fn(
-    env: Environment,
-    dg: DeepGym | None = None,
-    max_parallel: int = 32,
-    component: str | None = None,
-) -> Callable[..., list[float]]:
-    """Create a reward function that returns a specific reward component.
-
-    When verifiers emit shaped reward components (correctness, efficiency,
-    style), this function extracts a single component for use as a dedicated
-    reward signal. Axolotl supports multiple reward functions -- use one
-    per component for multi-signal GRPO training.
-
-    Args:
-        env: DeepGym environment with verifier.
-        dg: Optional DeepGym client (auto-created if None).
-        max_parallel: Maximum concurrent sandbox executions.
-        component: Reward component key to extract (e.g. 'correctness').
-            If None, returns the aggregate score.
-
-    Returns:
-        Callable matching Axolotl/TRL reward_funcs interface.
-    """
-    _dg = dg or DeepGym(mode='auto')
-
-    def reward_fn(completions: list[str], **kwargs: object) -> list[float]:
-        """Score completions and extract a specific reward component.
-
-        Args:
-            completions: List of decoded model output strings.
-            **kwargs: Additional args from Axolotl/TRL.
-
-        Returns:
-            List of component scores between 0.0 and 1.0.
-        """
-        if not completions:
-            return []
-        batch = _dg.run_batch(
-            env,
-            completions,
-            max_parallel=min(len(completions), max_parallel),
-            **kwargs,
-        )
-        if component is None:
-            return [r.score for r in batch.results]
-        return [(r.reward_components or {}).get(component, r.score) for r in batch.results]
-
-    return reward_fn
+    infos = extra_info or [None] * len(completions)
+    envs = [row_environment(source, info) for source, info in zip(data_source, infos, strict=True)]
+    # row_environment loads each environment once, so identity groups the rows.
+    groups: defaultdict[int, list[int]] = defaultdict(list)
+    for i, env in enumerate(envs):
+        groups[id(env)].append(i)
+    rewards: list[float | None] = [None] * len(completions)
+    for indices in groups.values():
+        score = make_trl_reward_fn(envs[indices[0]], _client())
+        for i, value in zip(indices, score([completions[i] for i in indices]), strict=True):
+            rewards[i] = value
+    return rewards
 
 
 # ---------------------------------------------------------------------------
@@ -197,19 +113,23 @@ _GRPO_CONFIG_TEMPLATE = """\
 #
 # Usage:
 #   pip install axolotl[flash-attn,deepspeed] deepgym
+#   python -c "import pandas as pd; from deepgym.integrations.verl import verl_rows; \\
+#     pd.DataFrame(verl_rows(['coin_change']) * 64).to_json('{dataset_path}', \\
+#     orient='records', lines=True)"
 #   axolotl train {config_filename}
 
 base_model: {base_model}
 
 rl: grpo
+trl:
+  # Scores each completion with the environment its row names (data_source, or
+  # extra_info.environment); Daytona when DAYTONA_API_KEY is set, else local.
+  reward_funcs:
+    - deepgym.integrations.axolotl.row_reward_fn
 
-# DeepGym reward function -- loaded via custom reward module
-# See: https://github.com/DeepGym/deepgym/wiki/Integrations#axolotl
-reward_model: null
-
+# Rows from deepgym.integrations.verl.verl_rows already have a chat `prompt`, so no `type`.
 datasets:
   - path: {dataset_path}
-    type: {dataset_type}
     split: train
 
 val_set_size: 0.02
@@ -296,7 +216,6 @@ def generate_axolotl_config(
     base_model: str,
     method: Literal['grpo', 'prm'] = 'grpo',
     dataset_path: str = 'data/train.jsonl',
-    dataset_type: str = 'completion',
     step_separator: str = '\\n\\n',
     sequence_len: int = 4096,
     micro_batch_size: int = 2,
@@ -307,11 +226,13 @@ def generate_axolotl_config(
 ) -> str:
     """Generate an Axolotl YAML config for DeepGym-powered training.
 
+    The GRPO config scores with :func:`row_reward_fn` and trains on rows from
+    :func:`~deepgym.integrations.verl.verl_rows` saved at *dataset_path*.
+
     Args:
         base_model: HuggingFace model identifier (e.g. 'Qwen/Qwen3.5-Coder-7B').
         method: Training method -- 'grpo' for RL or 'prm' for process reward model.
-        dataset_path: Path to the training dataset.
-        dataset_type: Axolotl dataset type (e.g. 'completion', 'stepwise_supervised').
+        dataset_path: Path to the training dataset (JSON lines, or .parquet).
         step_separator: PRM step separator string (only for method='prm').
         sequence_len: Maximum sequence length.
         micro_batch_size: Per-device batch size.
@@ -326,7 +247,6 @@ def generate_axolotl_config(
     params = {
         'base_model': base_model,
         'dataset_path': dataset_path,
-        'dataset_type': dataset_type,
         'step_separator': step_separator,
         'sequence_len': sequence_len,
         'micro_batch_size': micro_batch_size,

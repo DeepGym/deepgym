@@ -3,99 +3,21 @@
 DAPO is commonly run through ``verl`` recipes rather than a standalone trainer
 API. DeepGym keeps the integration thin: expose reward callbacks and helper
 config/module generators that fit naturally into an external DAPO training run.
+
+The callbacks take completions plus per-sample metadata, as TRL's do, and are TRL's
+(:mod:`deepgym.integrations.trl`): the last fenced code block of each completion runs,
+and a completion that got no verdict (a sandbox or verifier failure) is rewarded None
+rather than 0.0, so your loop can leave it out of the loss and of its group's statistics.
 """
 
 from __future__ import annotations
 
-import asyncio
-from collections.abc import Awaitable, Callable
+from deepgym.integrations.trl import make_trl_async_reward_fn, make_trl_reward_fn
 
-from deepgym.core import DeepGym
-from deepgym.models import Environment
-
-
-def make_dapo_reward_fn(
-    env: Environment,
-    dg: DeepGym | None = None,
-    max_parallel: int = 32,
-) -> Callable[..., list[float]]:
-    """Create a sync reward function for DAPO-style training loops.
-
-    The callable accepts decoded completions plus arbitrary per-sample metadata
-    and returns one scalar reward per completion.
-    """
-    _dg = dg or DeepGym(mode='auto')
-
-    def reward_fn(completions: list[str], **kwargs: object) -> list[float]:
-        if not completions:
-            return []
-        batch = _dg.run_batch(
-            env,
-            completions,
-            max_parallel=min(len(completions), max_parallel),
-            **kwargs,
-        )
-        return [result.score for result in batch.results]
-
-    return reward_fn
-
-
-def make_dapo_async_reward_fn(
-    env: Environment,
-    dg: DeepGym | None = None,
-    max_parallel: int = 32,
-) -> Callable[..., Awaitable[list[float]]]:
-    """Create an async reward function for DAPO-style training loops."""
-    _dg = dg or DeepGym(mode='auto')
-
-    async def reward_fn(completions: list[str], **kwargs: object) -> list[float]:
-        if not completions:
-            return []
-        loop = asyncio.get_running_loop()
-        batch = await loop.run_in_executor(
-            None,
-            lambda: _dg.run_batch(
-                env,
-                completions,
-                max_parallel=min(len(completions), max_parallel),
-                **kwargs,
-            ),
-        )
-        return [result.score for result in batch.results]
-
-    return reward_fn
-
-
-def make_dapo_shaped_reward_fn(
-    env: Environment,
-    dg: DeepGym | None = None,
-    *,
-    component: str | None = None,
-    max_parallel: int = 32,
-) -> Callable[..., list[float]]:
-    """Return a specific shaped reward component for each completion.
-
-    If ``component`` is ``None``, the aggregate DeepGym score is returned.
-    """
-    _dg = dg or DeepGym(mode='auto')
-
-    def reward_fn(completions: list[str], **kwargs: object) -> list[float]:
-        if not completions:
-            return []
-        batch = _dg.run_batch(
-            env,
-            completions,
-            max_parallel=min(len(completions), max_parallel),
-            **kwargs,
-        )
-        if component is None:
-            return [result.score for result in batch.results]
-        return [
-            (result.reward_components or {}).get(component, result.score)
-            for result in batch.results
-        ]
-
-    return reward_fn
+make_dapo_reward_fn = make_trl_reward_fn
+make_dapo_async_reward_fn = make_trl_async_reward_fn
+# One reward function per reward component: pass component='correctness' and so on.
+make_dapo_shaped_reward_fn = make_trl_reward_fn
 
 
 _DAPO_VERL_CONFIG_TEMPLATE = """\

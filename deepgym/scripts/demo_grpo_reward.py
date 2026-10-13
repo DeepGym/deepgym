@@ -109,12 +109,15 @@ pass
     # ------------------------------------------------------------------
     # 5. Compute GRPO-style group advantages
     #    advantage_i = (r_i - mean(G)) / std(G)
+    #    A candidate with no verdict (score None: the sandbox or verifier failed)
+    #    stays out of the group's statistics and gets no advantage, as in TRL.
     # ------------------------------------------------------------------
-    group_mean = sum(scores) / len(scores)
-    variance = sum((s - group_mean) ** 2 for s in scores) / len(scores)
+    scored = [s for s in scores if s is not None]
+    group_mean = sum(scored) / len(scored) if scored else 0.0
+    variance = sum((s - group_mean) ** 2 for s in scored) / len(scored) if scored else 0.0
     group_std = max(variance ** 0.5, 1e-8)  # avoid division by zero
 
-    advantages = [(s - group_mean) / group_std for s in scores]
+    advantages = [0.0 if s is None else (s - group_mean) / group_std for s in scores]
 
     # ------------------------------------------------------------------
     # 6. Print results table
@@ -133,9 +136,8 @@ pass
     print('-' * len(header))
 
     for label, score, adv in zip(labels, scores, advantages):
-        print(
-            f'{label:<25} {score:>6.3f} {group_mean:>6.3f} {group_std:>6.3f} {adv:>+10.3f}'
-        )
+        shown = '  none' if score is None else f'{score:>6.3f}'
+        print(f'{label:<25} {shown} {group_mean:>6.3f} {group_std:>6.3f} {adv:>+10.3f}')
 
     print()
     print('How GRPO uses these advantages:')

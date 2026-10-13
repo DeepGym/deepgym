@@ -54,10 +54,13 @@ class TestInvalidScores:
             (0.0, False, 'invalid_score')
         ] * 2
 
-    def test_reward_fns_return_zero(self, dg: DeepGym, make_env, score: str) -> None:
+    def test_reward_fns_never_hand_out_the_invalid_score(
+        self, dg: DeepGym, make_env, score: str
+    ) -> None:
+        """An invalid score is no verdict: None for TRL-style callbacks, 0.0 for verl's."""
         env = make_env(score)
-        assert make_trl_reward_fn(env, dg)(completions=['']) == [0.0]
-        assert make_dapo_reward_fn(env, dg)(completions=['']) == [0.0]
+        assert make_trl_reward_fn(env, dg)(completions=['']) == [None]
+        assert make_dapo_reward_fn(env, dg)(completions=['']) == [None]
         assert make_verl_compute_score(env, dg)('ds', '', '') == 0.0
 
 

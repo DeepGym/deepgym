@@ -13,7 +13,7 @@ Build the rows with :func:`verl_rows` and save them with
 ``pandas.DataFrame(rows).to_parquet(path)``.
 
 A failed sandbox or verifier scores 0.0 with ``error: 1.0``, and verl trains on it.
-To keep those samples out of the policy loss, use the agent loop in
+To keep those samples out of training, use the agent loop in
 :mod:`deepgym.integrations.verl_mask` instead of the reward function.
 
 For a fixed environment in your own reward module, use
@@ -30,7 +30,7 @@ from __future__ import annotations
 
 import functools
 import re
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from typing import Any, Literal
 
 from deepgym.core import DeepGym
@@ -82,6 +82,19 @@ def _environment(name: str, variant: int) -> Environment:
     return load_environment(name, variant=variant)  # type: ignore[return-value]
 
 
+def row_environment(data_source: str, extra_info: Mapping[str, Any] | None) -> Environment:
+    """Return the environment a dataset row names (see :func:`verl_rows`), loaded once.
+
+    That is ``extra_info['environment']`` (with optional ``extra_info['variant']``),
+    else *data_source*.
+
+    Raises:
+        DeepGymError: If the named environment doesn't exist.
+    """
+    info = extra_info or {}
+    return _environment(info.get('environment') or data_source, int(info.get('variant') or 0))
+
+
 def _score_one(dg: DeepGym, env: Environment, response: str) -> RunResult:
     # run_batch turns verifier and sandbox errors into a zero score instead of crashing training.
     return dg.run_batch(env, [extract_code(response)], max_parallel=1).results[0]
@@ -115,16 +128,14 @@ def compute_score(
         ``passed`` (1.0 or 0.0), and ``error``, which is 1.0 when no verdict was
         produced (sandbox or verifier failure, timeout, invalid score; see
         ``RunResult.has_verdict``). The score is then 0.0;
-        :mod:`deepgym.integrations.verl_mask` masks such samples out of the loss.
+        :mod:`deepgym.integrations.verl_mask` keeps such samples out of training.
         A patch that is malformed or doesn't apply is the model's fault, so it scores
         0.0 with ``error`` 0.0 and is trained on.
 
     Raises:
         DeepGymError: If the named environment doesn't exist.
     """
-    info = extra_info or {}
-    env = _environment(info.get('environment') or data_source, int(info.get('variant') or 0))
-    result = _score_one(_client(mode), env, solution_str)
+    result = _score_one(_client(mode), row_environment(data_source, extra_info), solution_str)
     return {
         'score': result.score,
         'passed': float(result.passed),
@@ -200,7 +211,8 @@ def make_verl_reward_fn(
         dg: Optional DeepGym client (auto-created if None).
 
     Returns:
-        Callable taking a data batch dict and returning list of scores.
+        Callable taking a data batch dict and returning list of scores; like
+        :func:`compute_score`, it runs each response's last fenced code block.
     """
     _dg = dg or DeepGym(mode='auto')
 
@@ -219,7 +231,8 @@ def make_verl_reward_fn(
             return []
         if isinstance(outputs[0], list):
             raise ValueError('Token ID inputs not yet supported. Pass decoded strings.')
-        batch = _dg.run_batch(env, outputs, max_parallel=min(len(outputs), 32))
+        solutions = [extract_code(output) for output in outputs]
+        batch = _dg.run_batch(env, solutions, max_parallel=min(len(outputs), 32))
         return [r.score for r in batch.results]
 
     return reward_fn

@@ -5,6 +5,8 @@ from __future__ import annotations
 import importlib.resources
 import json
 import logging
+import re
+from collections.abc import Mapping, Sequence
 from pathlib import Path
 from string import Template
 
@@ -578,6 +580,38 @@ def load_suite(suite_name: str) -> list[Environment | ComputerUseEnvironment]:
             logger.warning('Environment directory not found: %s (skipped)', entry['path'])
 
     return environments
+
+
+def register_benchmark(name: str, env_dirs: Sequence[Path], metadata: Mapping[str, object]) -> Path:
+    """Make each of *env_dirs* loadable as ``<name>/<folder name>``.
+
+    Each folder is linked, not copied, into ``<cache>/<name>/``, which gets a registry.json
+    listing them with *metadata*. Registering *name* again replaces its links.
+
+    Returns:
+        The registry.json path.
+
+    Raises:
+        ValueError: If *name* isn't a plain folder name, or that folder in the cache holds
+            anything but links and a registry.json (another benchmark, say).
+    """
+    if not re.fullmatch(r'[\w.-]+', name) or name in ('.', '..'):
+        raise ValueError(f'Benchmark name {name!r} must be a plain folder name')
+    root = _get_cache_dir() / name
+    root.mkdir(exist_ok=True)
+    existing = list(root.iterdir())
+    if any(not path.is_symlink() and path.name != 'registry.json' for path in existing):
+        raise ValueError(f'{root} already holds another benchmark; pick another name')
+    for link in existing:
+        if link.is_symlink():
+            link.unlink()
+    entries = []
+    for env_dir in env_dirs:
+        (root / env_dir.name).symlink_to(env_dir.resolve(), target_is_directory=True)
+        entries.append({'id': env_dir.name, 'path': f'{name}/{env_dir.name}', **metadata})
+    registry = root / 'registry.json'
+    registry.write_text(json.dumps({'environments': entries}, indent=2) + '\n', encoding='utf-8')
+    return registry
 
 
 def download_benchmark(name: str) -> Path:

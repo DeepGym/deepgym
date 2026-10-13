@@ -121,6 +121,27 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     qa_p.add_argument('--json', action='store_true', help='Print the reports as JSON')
 
+    # ── harbor ────────────────────────────────────────────────────────
+    harbor_p = sub.add_parser('harbor', help='Import Harbor tasks, or export envs as Harbor tasks')
+    harbor_sub = harbor_p.add_subparsers(dest='harbor_command', required=True)
+    import_p = harbor_sub.add_parser('import', help='List and validate Harbor tasks')
+    import_p.add_argument(
+        'source', help='Task or dataset folder, git URL, or Hugging Face dataset (org/name)'
+    )
+    import_p.add_argument('--limit', type=int, default=None, help='Read at most N tasks')
+    import_p.add_argument(
+        '--register', metavar='NAME', default=None, help='Make valid tasks loadable as NAME/TASK'
+    )
+    harbor_export_p = harbor_sub.add_parser(
+        'export', help='Write environments as Harbor task folders'
+    )
+    harbor_export_p.add_argument(
+        'envs', nargs='+', metavar='ENV', help='Registered environment names'
+    )
+    harbor_export_p.add_argument(
+        '--out', required=True, help='Folder to write the task folders into'
+    )
+
     # ── benchmark-audit ───────────────────────────────────────────────
     bench_p = sub.add_parser(
         'benchmark-audit',
@@ -430,6 +451,54 @@ def _guard_local_model_code(mode: str, allowed: bool) -> None:
         )
 
 
+def _cmd_harbor(args: argparse.Namespace) -> None:
+    if args.harbor_command == 'import':
+        _harbor_import(args)
+    else:
+        _harbor_export(args)
+
+
+def _harbor_import(args: argparse.Namespace) -> None:
+    """Print one line per task folder; register the valid ones if asked; exit 1 if any fail."""
+    from deepgym.harbor import HarborTask, dataset_root, task_dirs
+    from deepgym.registry import register_benchmark
+
+    if args.limit is not None and args.limit < 1:
+        print('Error: --limit must be >= 1', file=sys.stderr)
+        sys.exit(1)
+    dirs = task_dirs(dataset_root(args.source))[: args.limit]
+    if not dirs:
+        print(f'Error: no Harbor tasks (task.toml folders) in {args.source}', file=sys.stderr)
+        sys.exit(1)
+    width = max(len(task_dir.name) for task_dir in dirs)
+    valid: list[Path] = []
+    for task_dir in dirs:
+        try:
+            task = HarborTask.from_dir(task_dir)
+        except ValueError as exc:
+            print(f'  FAIL  {task_dir.name:{width}}  {exc}')
+            continue
+        valid.append(task_dir)
+        image = task.docker_image or ('environment/Dockerfile' if task.dockerfile else 'none')
+        solution = 'yes' if task.solution else 'no'
+        print(f'  ok    {task.name:{width}}  image={image}  solution={solution}')
+    print(f'\n{len(valid)} of {len(dirs)} tasks valid')
+    if args.register and valid:
+        metadata = {'type': 'tool-use', 'domain': 'terminal', 'tags': ['harbor']}
+        registry = register_benchmark(args.register, valid, metadata)
+        print(f'Registered in {registry}: load_environment("{args.register}/{valid[0].name}")')
+    if len(valid) < len(dirs):
+        sys.exit(1)
+
+
+def _harbor_export(args: argparse.Namespace) -> None:
+    from deepgym.harbor import export_environment
+    from deepgym.registry import load_environment
+
+    for name in args.envs:
+        print(export_environment(load_environment(name), Path(args.out)))
+
+
 def _cmd_benchmark_audit(args: argparse.Namespace) -> None:
     from deepgym.benchmark_ops import build_benchmark_audit, load_environments_from_dir
 
@@ -682,6 +751,7 @@ def _parse_split_overrides(values: list[str]) -> dict[str, str]:
 _COMMANDS = {
     'audit': _cmd_audit,
     'benchmark-audit': _cmd_benchmark_audit,
+    'harbor': _cmd_harbor,
     'qa': _cmd_qa,
     'run': _cmd_run,
     'run-batch': _cmd_run_batch,

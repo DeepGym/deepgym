@@ -16,7 +16,7 @@ from pydantic import ValidationError
 from deepgym import ComputerUseEnvironment, DeepGym
 from deepgym.console.episode_store import EpisodeStore, record_episode
 from deepgym.exceptions import ActionError, DeepGymError, SandboxError, VerifierError
-from deepgym.models import Action, MultiTurnEnvironment, Trajectory
+from deepgym.models import Action, MultiTurnEnvironment, RunResult, Trajectory
 from deepgym.session import LocalBackend, Session
 from deepgym.traces import (
     AgentMeta,
@@ -30,7 +30,7 @@ from deepgym.traces import (
     load_trace,
 )
 from deepgym.traces.capture import UNFINISHED
-from deepgym.traces.schema import environment_sha256
+from deepgym.traces.schema import environment_sha256, json_text
 from tests.trace_samples import ENV, crashed_trace, graded_trace, unjudged_trace
 
 SRC = Path(__file__).resolve().parent.parent / 'src'
@@ -147,6 +147,18 @@ class TestSchema:
         with pytest.raises(ValidationError):
             Trace.model_validate({**graded_trace().model_dump(), 'schema_version': '2.0'})
 
+    def test_non_finite_case_timing_survives_a_round_trip(self) -> None:
+        result = RunResult.model_validate_json(
+            graded_trace().result.model_dump_json()[:-1]
+            + ', "cases": [{"passed": true, "execution_time_ms": 1e999}]}'
+        )
+        trace = graded_trace().model_copy(update={'result': result})
+
+        restored = Trace.model_validate_json(json_text(trace))
+
+        assert restored.result.cases[0].execution_time_ms == 0.0
+        assert restored == trace
+
     def test_naive_timestamps_rejected(self) -> None:
         with pytest.raises(ValidationError):
             Trace.model_validate(
@@ -247,7 +259,12 @@ class TestCapture:
         assert trace.provenance.env.seed == 3
         assert trace.provenance.env.verifier_sha256 == EnvFingerprint.of(WRITE_ENV).verifier_sha256
         assert [step.reward for step in trace.steps] == [0.5, 0.5]
-        assert trace.steps[0].step_verifier == {'score': 0.5, 'passed': True, 'details': 'step 1'}
+        assert trace.steps[0].step_verifier == {
+            'score': 0.5,
+            'passed': True,
+            'details': 'step 1',
+            'exit_code': 0,
+        }
         assert trace.steps[0].exit_code == 0
         assert trace.steps[0].messages[-1].token_ids == (5,)
         assert trace.steps[1].observation is not None and trace.steps[1].observation.done
@@ -349,7 +366,8 @@ class TestCapture:
         for path in (tr.path, tmp_path / 'out.jsonl'):
             for line in path.read_text().splitlines():
                 json.loads(line, parse_constant=_reject_constant)
-        assert load_trace(tr.path).steps[0].step_verifier == {'score': 0.5, 'metrics': {'x': None}}
+        verifier = load_trace(tr.path).steps[0].step_verifier
+        assert verifier == {'score': 0.5, 'metrics': {'x': None}, 'exit_code': 0}
 
     def test_killed_process_leaves_an_incomplete_trace(self, traces_dir: Path) -> None:
         code = (
@@ -437,6 +455,23 @@ class TestCapture:
                 )
 
         assert [step.index for step in load_trace(tr.path).steps] == [1, 2, 3, 4]
+
+    def test_step_verifier_error_is_not_a_reward(self, dg: DeepGym, tmp_path: Path) -> None:
+        broken = (
+            'print(\'{"score": 0, "passed": false, "error_type": "sandbox_error"}\')\n'
+            'raise SystemExit(2)\n'
+        )
+        env = WRITE_ENV.model_copy(update={'step_verifier_code': broken})
+
+        with dg.trace(env, AGENT) as tr:
+            tr.start()
+            tr.step(Action(action_type='bash', content='echo hello > out.txt'), _reply('echo'))
+            tr.score()
+        export_traces([load_trace(tr.path)], 'jsonl', tmp_path / 'rl.jsonl', rows='rl')
+
+        step = load_trace(tr.path).steps[0]
+        assert step.reward is None and step.step_verifier['exit_code'] == 2
+        assert json.loads((tmp_path / 'rl.jsonl').read_text())['step_rewards'] == [None]
 
     def test_failure_after_scoring_a_step_keeps_the_score(self, tmp_path: Path) -> None:
         env = WRITE_ENV.model_copy(update={'desktop': True})

@@ -446,7 +446,10 @@ class Session:
 
     @property
     def step_verdict(self) -> dict[str, object] | None:
-        """The last step verifier output that scored (score, passed, details, ...), if any."""
+        """The last step verifier output that scored (score, passed, details, ...), if any.
+
+        ``exit_code`` is the verifier's exit code, in place of any key it printed by that name.
+        """
         return self._step_verdict
 
     @property
@@ -635,7 +638,7 @@ class Session:
             ) from exc
         score = checked_score(value)
         check_exit(exit_code, score, data.get('passed'))
-        self._step_verdict = data
+        self._step_verdict = {**data, 'exit_code': exit_code}
         return score
 
 

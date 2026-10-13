@@ -24,6 +24,15 @@ MODEL_FAULT_ERRORS = frozenset({'invalid_patch', 'patch_apply_failed'})
 apply): a real 0 to learn from, not a missing verdict."""
 
 
+def is_verdict(exit_code: int | None, error_type: str | None) -> bool:
+    """False when a verifier or sandbox failed instead of judging the solution.
+
+    That is any *error_type* other than a model fault (see ``MODEL_FAULT_ERRORS``), or
+    the verifier-error exit code 2.
+    """
+    return exit_code != 2 and (error_type is None or error_type in MODEL_FAULT_ERRORS)
+
+
 def checked_score(value: object) -> float:
     """Return *value* as a reward in [0, 1], clamping only float noise.
 
@@ -173,6 +182,12 @@ class CaseResult(BaseModel):
     execution_time_ms: float = 0.0
     """Execution time for this specific test case in milliseconds."""
 
+    @field_validator('execution_time_ms')
+    @classmethod
+    def zero_non_finite_time(cls, value: float) -> float:
+        """Zero a NaN or infinite timing, which JSON can't carry and would fail to reload."""
+        return value if math.isfinite(value) else 0.0
+
     @model_validator(mode='before')
     @classmethod
     def zero_invalid_score(cls, data: object) -> object:
@@ -290,9 +305,7 @@ class RunResult(BaseModel):
         That is any ``error_type`` other than a model fault (see ``MODEL_FAULT_ERRORS``),
         or the verifier-error exit code 2. The score is then 0.0 but means nothing.
         """
-        if self.exit_code == 2:
-            return False
-        return self.error_type is None or self.error_type in MODEL_FAULT_ERRORS
+        return is_verdict(self.exit_code, self.error_type)
 
 
 class Observation(BaseModel):

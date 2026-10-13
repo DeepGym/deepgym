@@ -31,7 +31,7 @@ from deepgym.models import Action, MultiTurnEnvironment, Observation, RunResult,
 
 TRACE_SCHEMA_VERSION = '1.0'
 
-SamplingValue = str | int | float | bool | None
+SamplingValue = str | int | FiniteFloat | bool | None
 
 
 def sha256_text(text: str) -> str:
@@ -204,7 +204,8 @@ class TraceStep(BaseModel):
     failed before the session recorded it."""
 
     reward: float | None = Field(default=None, ge=0.0, le=1.0)
-    """Step verifier score; None when the environment has no step verifier or it failed."""
+    """Step verifier score; None without a step verifier, or when it failed or reported
+    its own failure (see :func:`deepgym.models.is_verdict`)."""
 
     step_verifier: dict[str, JsonValue] | None = None
     """The step verifier's parsed output (score, passed, details, ...)."""

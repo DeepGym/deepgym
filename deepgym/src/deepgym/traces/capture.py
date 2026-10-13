@@ -20,7 +20,7 @@ from typing import TextIO, TypeVar
 from uuid import uuid4
 
 from deepgym.exceptions import DeepGymError, VerifierError
-from deepgym.models import Action, MultiTurnEnvironment, Observation, RunResult
+from deepgym.models import Action, MultiTurnEnvironment, Observation, RunResult, is_verdict
 from deepgym.session import Session, StepResult
 from deepgym.traces.schema import (
     TRACE_SCHEMA_VERSION,
@@ -164,10 +164,9 @@ class TracedSession:
                 self._add_step(
                     TraceStep(
                         **record,
+                        **(self._step_score(trajectory.step_rewards[-1]) if verified else {}),
                         applied=applied,
                         observation=observation and observation.model_copy(deep=True),
-                        reward=trajectory.step_rewards[-1] if verified else None,
-                        step_verifier=self._session.step_verdict if verified else None,
                         error=_describe(exc),
                         duration_ms=_elapsed_ms(start),
                     )
@@ -176,9 +175,8 @@ class TracedSession:
             self._add_step(
                 TraceStep(
                     **record,
+                    **(self._step_score(result.reward) if scored else {}),
                     observation=result.observation.model_copy(deep=True),
-                    reward=result.reward if scored else None,
-                    step_verifier=self._session.step_verdict if scored else None,
                     duration_ms=_elapsed_ms(start),
                 )
             )
@@ -221,6 +219,16 @@ class TracedSession:
         if exc is not None and self._error is None:
             self._error = _describe(exc)
         self.close()
+
+    def _step_score(self, reward: float) -> dict[str, object]:
+        """Return the step verifier's output, with *reward* only if that output is a verdict.
+
+        A step verifier that reports its own failure (exit code 2, or an ``error_type``
+        that isn't the model's fault) scores 0 in the session, but that 0 judged nothing.
+        """
+        output = self._session.step_verdict
+        judged = output is not None and is_verdict(output['exit_code'], output.get('error_type'))
+        return {'reward': reward if judged else None, 'step_verifier': output}
 
     def _check_open(self) -> None:
         """Refuse to touch the session once the trace is closed."""

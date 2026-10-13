@@ -540,6 +540,8 @@ class TestCapture:
         with dg.trace(WRITE_ENV, AGENT) as tr:
             with pytest.raises(DeepGymError, match='not running'):
                 tr.step(Action(action_type='done'))
+            with pytest.raises(DeepGymError, match='never started'):
+                tr.score()
             tr.start()
             tr.step(Action(action_type='done'))
             with pytest.raises(DeepGymError, match='not running'):

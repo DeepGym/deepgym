@@ -186,11 +186,13 @@ class TracedSession:
         """Run the final verifier and record its result.
 
         Raises:
-            DeepGymError: If the trace is closed.
+            DeepGymError: If the trace is closed or the episode never started.
             VerifierError: As :meth:`Session.score`; the error is recorded first.
         """
         with self._lock:
             self._check_open()
+            if self._initial is None:
+                raise DeepGymError('The episode never started; call start() first')
             result = self._recorded(self._session.score)
             self._result = result.model_copy(deep=True)
             self._write({'event': 'result', 'result': self._result})

@@ -104,6 +104,19 @@ _CARGO_SWAPPED = (
     '[package]\nname = "calc"\nversion = "1.0.0"\n\n'
     '[lib]\ntest = false\n\n[[bin]]\nname = "calc"\ntest = true\n'
 )
+# Disabling auto-discovery drops hidden integration tests without touching a target table.
+_CARGO_NO_AUTOTESTS = _CARGO.replace(
+    'version = "1.0.0"\n', 'version = "1.0.0"\nautotests = false\n'
+)
+_PACKAGE_STUB_DEP = _PACKAGE.replace(
+    '"scripts": {"test": "pytest"}\n',
+    '"scripts": {"test": "pytest"},\n  "devDependencies": {"jest": "file:./stub"}\n',
+)
+_SETUP_CFG = '[metadata]\nname = calc\n\n[tool:pytest]\npython_files = test_*.py\n'
+# pytest reads option names case-sensitively; ConfigParser lowercases them unless told not to.
+_SETUP_CFG_CASE = _SETUP_CFG.replace('python_files', 'PYTHON_FILES')
+# A %(...)s value raises during interpolation; the comparison must fail closed, not crash.
+_SETUP_CFG_INTERP = _SETUP_CFG + 'addopts = -p %(missing)s\n'
 
 
 @pytest.mark.parametrize(
@@ -147,6 +160,36 @@ _CARGO_SWAPPED = (
             True,
             id='cargo-target-swap',
         ),
+        pytest.param(
+            {'Cargo.toml': _CARGO},
+            {'Cargo.toml': _CARGO_NO_AUTOTESTS},
+            True,
+            id='cargo-autotests-off',
+        ),
+        pytest.param(
+            {'package.json': _PACKAGE},
+            {'package.json': _PACKAGE_STUB_DEP},
+            True,
+            id='package-dep-repoint',
+        ),
+        pytest.param(
+            {'setup.cfg': _SETUP_CFG},
+            {'setup.cfg': _SETUP_CFG.replace('name = calc', 'name = calculator')},
+            False,
+            id='setup-cfg-metadata',
+        ),
+        pytest.param(
+            {'setup.cfg': _SETUP_CFG},
+            {'setup.cfg': _SETUP_CFG_CASE},
+            True,
+            id='setup-cfg-key-case',
+        ),
+        pytest.param(
+            {'setup.cfg': _SETUP_CFG},
+            {'setup.cfg': _SETUP_CFG_INTERP},
+            True,
+            id='setup-cfg-interpolation-fails-closed',
+        ),
     ],
 )
 def test_config_edits_outside_the_test_section_are_allowed(
@@ -164,17 +207,28 @@ def test_config_edits_outside_the_test_section_are_allowed(
     assert result.score == (0.0 if refused else 1.0)
 
 
-@pytest.mark.parametrize('name', ['.npmrc', 'Makefile', 'scripts/latest.sh'])
-def test_launcher_config_files(tmp_path: Path, sandbox_dg: DeepGym, name: str) -> None:
-    # The test command reads .npmrc / Makefile by convention, so a new one is refused; an
-    # unrelated shell script whose name merely contains 'test' is not.
+@pytest.mark.parametrize(
+    ('name', 'refused'),
+    [
+        ('.npmrc', True),
+        ('Makefile', True),
+        ('pytest.toml', True),
+        ('package-lock.json', True),
+        ('scripts/latest.sh', False),
+    ],
+)
+def test_launcher_and_lockfiles(
+    tmp_path: Path, sandbox_dg: DeepGym, name: str, refused: bool
+) -> None:
+    # The test command reads .npmrc / Makefile by convention, pytest.toml is pytest config, and
+    # a lockfile can stub the harness, so a new one is refused; a shell script whose name merely
+    # contains 'test' is not.
     env = _env(tmp_path)
-    launcher = name.endswith(('.npmrc', 'Makefile'))
 
-    result = sandbox_dg.run(env, _diff(Path(env.repo_dir), {name: 'x\n', **_FIX}))
+    result = sandbox_dg.run(env, _diff(Path(env.repo_dir), {name: 'x = 1\n', **_FIX}))
 
-    assert result.error_type == ('test_infra_tampering' if launcher else None)
-    assert result.score == (0.0 if launcher else 1.0)
+    assert result.error_type == ('test_infra_tampering' if refused else None)
+    assert result.score == (0.0 if refused else 1.0)
 
 
 def test_production_package_named_test_is_refused_known_false_positive(

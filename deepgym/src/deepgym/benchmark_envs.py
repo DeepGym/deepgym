@@ -306,20 +306,30 @@ class PatchVerifier:
                 '.tox', '.nox', '_pytest', 'pytest', '.venv', 'venv', 'virtualenv',
             }
             _INFRA_FILES = {
-                'conftest.py', 'pytest.py', 'pytest.ini', '.pytest.ini', 'tox.ini', 'noxfile.py',
-                'tests.py', 'sitecustomize.py', 'usercustomize.py', '.pythonrc', '.pythonrc.py',
-                '.pythonstartup', '.rspec', 'rakefile', 'phpunit.xml', 'phpunit.xml.dist',
-                'phpunit.dist.xml', 'pom.xml', 'build.gradle', 'build.gradle.kts',
-                'settings.gradle', 'settings.gradle.kts', 'build.rs', 'makefile', 'gnumakefile',
-                '.npmrc', '.yarnrc', '.yarnrc.yml', 'setup.py',
+                'conftest.py', 'pytest.py', 'pytest.ini', '.pytest.ini', 'pytest.toml',
+                '.pytest.toml', 'tox.ini', 'noxfile.py', 'tests.py', 'sitecustomize.py',
+                'usercustomize.py', '.pythonrc', '.pythonrc.py', '.pythonstartup', '.rspec',
+                'rakefile', 'phpunit.xml', 'phpunit.xml.dist', 'phpunit.dist.xml', 'pom.xml',
+                'build.gradle', 'build.gradle.kts', 'settings.gradle', 'settings.gradle.kts',
+                'build.rs', 'makefile', 'gnumakefile', '.npmrc', '.yarnrc', '.yarnrc.yml',
+                'setup.py',
+                # Lockfiles: a repointed or stubbed dependency could replace the test harness,
+                # and a code fix never needs to rewrite one.
+                'package-lock.json', 'npm-shrinkwrap.json', 'yarn.lock', 'pnpm-lock.yaml',
+                'poetry.lock', 'pipfile.lock', 'cargo.lock', 'go.sum', 'gemfile.lock',
             }
             _JS_TOOLS = {
                 'jest', 'vitest', 'vite', 'karma', 'babel', 'ava', 'playwright', 'cypress',
                 'mocha', 'nyc', 'wdio',
             }
             _JS_EXTS = {'js', 'jsx', 'ts', 'tsx', 'mjs', 'cjs', 'mts', 'cts'}
-            # package.json keys that are test configuration; the rest of the file is code.
-            _PACKAGE_KEYS = ('scripts', 'jest', 'mocha', 'ava', 'babel', 'nyc', 'c8', 'vitest', 'tap', 'wdio')
+            # package.json keys that run or resolve tests; the rest of the file is code. A
+            # dependency change can point the test runner at a stub, so dependency keys count.
+            _PACKAGE_KEYS = (
+                'scripts', 'jest', 'mocha', 'ava', 'babel', 'nyc', 'c8', 'vitest', 'tap', 'wdio',
+                'bin', 'dependencies', 'devDependencies', 'peerDependencies',
+                'optionalDependencies', 'bundledDependencies', 'resolutions', 'overrides',
+            )
             # Config files that are test infrastructure only in part; _config_tampered decides.
             _CONFIG_FILES = {'pyproject.toml', 'setup.cfg', 'package.json', 'cargo.toml'}
             _SYMLINK = b'\\0deepgym-symlink'
@@ -373,46 +383,65 @@ class PatchVerifier:
                     return None
 
 
+            def _table(value) -> dict:
+                # A TOML/JSON value as a dict, or {} if it is some other shape.
+                return value if isinstance(value, dict) else {}
+
+
+            def _test_part_changed(name: str, old_text: str, new_text: str) -> bool:
+                # Whether the test-relevant part of a parsed config file changed. Raises on
+                # anything it cannot parse or compare; the caller turns that into tampering.
+                if name == 'package.json':
+                    before, after = _table(json.loads(old_text or '{}')), _table(json.loads(new_text or '{}'))
+                    return any(before.get(key) != after.get(key) for key in _PACKAGE_KEYS)
+                if name == 'setup.cfg':
+                    import configparser
+
+                    # interpolation=None: a '%(x)s' value must not raise; optionxform=str: pytest
+                    # reads option names case-sensitively, so a case-only change still counts.
+                    before, after = (configparser.ConfigParser(interpolation=None) for _ in range(2))
+                    before.optionxform = after.optionxform = str
+                    before.read_string(old_text)
+                    after.read_string(new_text)
+                    keys = ('tool:pytest', 'options.entry_points', 'options', 'nosetests', 'tox:tox')
+
+                    def view(cfg):
+                        return {key: dict(cfg[key]) for key in cfg.sections() if key in keys}
+
+                    return view(before) != view(after)
+                before, after = _toml_tables(old_text), _toml_tables(new_text)
+                if before is None or after is None:
+                    raise ValueError('no TOML parser in this runtime')
+                if name == 'cargo.toml':
+                    keys = ('lib', 'bin', 'test', 'bench', 'features', 'dependencies',
+                            'dev-dependencies', 'build-dependencies')
+                    if any(before.get(key) != after.get(key) for key in keys):
+                        return True
+                    # Package-level auto-discovery toggles which hidden targets cargo test runs.
+                    auto = ('autotests', 'autobenches', 'autobins', 'autoexamples', 'autolib', 'build')
+                    pkg_before, pkg_after = _table(before.get('package')), _table(after.get('package'))
+                    return any(pkg_before.get(key) != pkg_after.get(key) for key in auto)
+                tool_keys = ('pytest', 'coverage', 'tox', 'nose')
+                before_tool, after_tool = _table(before.get('tool')), _table(after.get('tool'))
+                return any(before_tool.get(key) != after_tool.get(key) for key in tool_keys) or (
+                    before.get('build-system') != after.get('build-system')
+                )
+
+
             def _config_tampered(name: str, old: bytes | None, new: bytes | None) -> bool:
                 # Whether turning *old* into *new* changes the test-relevant part of a config file.
-                # Fails closed: anything that can't be parsed and shown unchanged counts as tampering.
+                # Fails closed: a symlink, or anything that cannot be parsed and shown unchanged,
+                # counts as tampering, so a parse error becomes a trained zero, never a masked run.
                 if _SYMLINK in (old, new):
                     return True
                 old_text = (old or b'').decode('utf-8', 'replace')
                 new_text = (new or b'').decode('utf-8', 'replace')
                 if old_text == new_text:
                     return False
-                if name == 'package.json':
-                    try:
-                        before, after = json.loads(old_text or '{}'), json.loads(new_text or '{}')
-                    except ValueError:
-                        return True
-                    if not (isinstance(before, dict) and isinstance(after, dict)):
-                        return True
-                    return any(before.get(key) != after.get(key) for key in _PACKAGE_KEYS)
-                if name == 'setup.cfg':
-                    import configparser
-
-                    before, after = configparser.ConfigParser(), configparser.ConfigParser()
-                    try:
-                        before.read_string(old_text)
-                        after.read_string(new_text)
-                    except configparser.Error:
-                        return True
-                    keys = ('tool:pytest', 'options.entry_points', 'options', 'nosetests', 'tox:tox')
-                    view = lambda cfg: {k: dict(cfg[k]) for k in cfg.sections() if k in keys}
-                    return view(before) != view(after)
-                before, after = _toml_tables(old_text), _toml_tables(new_text)
-                if before is None or after is None:
+                try:
+                    return _test_part_changed(name, old_text, new_text)
+                except Exception:
                     return True
-                if name == 'cargo.toml':
-                    keys = ('lib', 'bin', 'test', 'bench', 'features', 'dev-dependencies')
-                    return any(before.get(key) != after.get(key) for key in keys)
-                tool_keys = ('pytest', 'coverage', 'tox', 'nose')
-                before_tool, after_tool = before.get('tool', {}), after.get('tool', {})
-                return any(before_tool.get(key) != after_tool.get(key) for key in tool_keys) or (
-                    before.get('build-system') != after.get('build-system')
-                )
 
 
             def _read_config(path: Path) -> bytes | None:

@@ -843,7 +843,10 @@ Kinds:
   isn't tagged `patch`: that tag adds attacks whose diffs add test files, which this
   verifier can never apply; tag it once you let patches add files.
 - `multi-turn`: an agent works in a directory that starts with the folder's other
-  files (here `runs.py`), then the final verifier tests the result.
+  files (here `runs.py`), then the final verifier tests the result. Only fixes
+  earn reward: cases the shipped `runs.py` already gets right must keep passing
+  (breaking one zeroes the score), and the score is the share of the cases it got
+  wrong that now pass, so an agent that changes nothing earns nothing.
   `reference_actions.json` is the scripted episode that must score 1.0. A file
   that links outside the folder is refused rather than copied in. Local
   sessions aren't isolated; use a sandbox mode for untrusted agents. The final
@@ -999,7 +1002,7 @@ Check environments before you train on them:
 ```bash
 deepgym qa coin_change two_sum          # or --all
 deepgym qa ./word_stats --mutants       # an environment folder
-deepgym qa --all --mode daytona --reruns 5
+deepgym qa --all --mode daytona --reruns 5   # computer-use envs too: they need a desktop
 OPENAI_BASE_URL=http://localhost:8000/v1 OPENAI_API_KEY=EMPTY \
   deepgym qa coin_change --mode docker --model Qwen/Qwen3-8B --samples 8
 ```
@@ -1010,22 +1013,31 @@ Each single-turn environment must pass:
 - `deterministic`: the reference scores the same on every rerun. Skipped with
   `--reruns 0`, since one run proves nothing.
 - `empty_fails`, `stub_fails`: an empty file, and a stub of the reference's
-  functions that return `None`, both score below 1.0. `stub_fails` is skipped
-  when the reference is a script with no top-level function. A verifier that
-  crashes on them instead of scoring them is inconclusive, not a pass.
+  functions that return `None`, both earn nothing: any reward above float noise
+  fails, since a verifier that pays for doing nothing teaches a policy to do
+  nothing. `stub_fails` is skipped when the reference is a script with no
+  top-level function. A verifier that crashes on them instead of scoring them is
+  inconclusive, not a pass.
 - `hack_resistant`: none of the heuristic reward-hack attacks behind
-  `deepgym audit` reaches the pass threshold. If none got through but some
-  crashed or couldn't run, the check is inconclusive, not passed. The attacks are
+  `deepgym audit` reaches the exploit threshold (0.50). The attacks define the
+  env's own entry point (from the reference, the functions the verifier calls, or
+  the task) returning a constant, nothing, NaN or its input. If none got through
+  but some crashed or couldn't run, the check is inconclusive, not passed. The attacks are
   Python solutions, so the check is skipped where they can't apply: a Harbor task
   runs bash, and a verifier that rejects every attack as a malformed answer (a
   repo-patch env takes diffs) was never attacked. A skipped check counts neither
   way, and the report lists it under `not_run`.
 - `mutants_killed` (with `--mutants`): every AST mutant of the reference scores
   below the pass threshold (see Write your own environment).
-- `difficulty` (with `--model`): pass@1 and pass@k over k samples from an
-  OpenAI-compatible endpoint. Fails as `too_easy` or `too_hard` when every or no
-  sample is solved, because then group-relative RL gets no signal from the task.
-  Inconclusive if the verifier couldn't judge a sample.
+- `difficulty` (with `--model`): pass@1, pass@k, and the mean and spread of the
+  rewards over k samples from an OpenAI-compatible endpoint. Reported, never
+  gated: it passes once measured and flags `too_easy` (every sample solved),
+  `too_hard` (no sample earned anything) and `no_variance` (every sample earned
+  the same), since group-relative RL learns nothing from equal rewards. Partial
+  rewards are variance: `[0.2, 0.8]` is neither too hard nor flat. Rate limits
+  (429), timeouts and 5xx are retried with backoff; if a sample never comes back,
+  or the verifier couldn't judge one, the check is inconclusive. A refused
+  request (a bad key or model) stops the run.
 
 `--model` runs model-generated code, so with `--mode local` (the default) or
 `auto` (which can fall back to local) it refuses to start unless you pass
@@ -1033,12 +1045,19 @@ Each single-turn environment must pass:
 
 Each check and each environment gets a `status`: `pass`, `fail`, `inconclusive`
 or `skip`. An environment fails if any check fails, is inconclusive if any check
-is, and passes otherwise; skipped checks don't count either way. A multi-turn
-folder with `reference_actions.json` replays it for `reference_passes`,
-`deterministic` and `empty_fails` (an agent that quits at once), and lists its
-other checks under `not_run`. Other
-multi-turn, computer-use and benchmark-backed environments are skipped: neither
-passed nor failed. The command exits 0 when the checked environments pass (skipped ones
+is, and passes otherwise; skipped checks don't count either way.
+
+A multi-turn environment with a `reference_actions.json` (the computer-use
+built-ins ship one per variant) replays it for `reference_passes` and
+`deterministic`, then runs three scripted agents that act without working on the
+task, each of which must earn nothing: `empty_fails` quits at once, `busy_fails`
+uses every allowed action in turn and `random_fails` acts at random (seeded), the
+last two for the whole step budget. A verifier that pays for activity instead of
+the outcome fails. Computer-use envs need a desktop, so they run with
+`--mode daytona` and are skipped elsewhere. Every report lists the checks that
+`ran` and those `not_run`. Multi-turn envs without a reference, and
+benchmark-backed ones, are skipped: neither passed nor failed. The command exits 0
+when the checked environments pass (skipped ones
 alongside are fine), 1 if any fails, and 2 if none fails but some are
 inconclusive or none could be checked. It writes one report per environment to
 `~/.deepgym/qa/<env>.json` (set `DEEPGYM_QA_DIR` to change it):
@@ -1048,6 +1067,7 @@ inconclusive or none could be checked. It writes one report per environment to
   "environment": "coin_change",
   "status": "pass",
   "passed": true,
+  "ran": ["reference_passes", "deterministic", "empty_fails", "stub_fails", "hack_resistant"],
   "not_run": [],
   "checks": [
     {"name": "reference_passes", "status": "pass", "passed": true, "details": "score 1.00 (25/25 passed)"}

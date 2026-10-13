@@ -72,15 +72,24 @@ class CliContainer:
     def build(cls, context: Path) -> str:
         """Build the Dockerfile in *context*, unless an identical build exists; return its tag.
 
-        The tag hashes every file in *context*, so changing any of them means a new build.
+        The tag hashes every path in *context* with its permission bits, and each file's
+        bytes or each link's target, so changing any of them means a new build.
 
         Raises:
             SandboxError: If the build fails or times out.
         """
         digest = hashlib.sha256()
-        for path in sorted(p for p in context.rglob('*') if p.is_file()):
-            data = path.read_bytes()
-            digest.update(f'{path.relative_to(context).as_posix()}\0{len(data)}\0'.encode())
+        for path in sorted(context.rglob('*')):
+            mode = path.lstat().st_mode
+            if path.is_symlink():
+                data = os.readlink(path).encode()
+            elif path.is_file():
+                data = path.read_bytes()
+            else:
+                data = b''
+            digest.update(
+                f'{path.relative_to(context).as_posix()}\0{mode:o}\0{len(data)}\0'.encode()
+            )
             digest.update(data)
         tag = f'{_NAME_PREFIX}build:{digest.hexdigest()[:16]}'
         if cls._cli('image', 'inspect', tag, timeout=30).returncode == 0:

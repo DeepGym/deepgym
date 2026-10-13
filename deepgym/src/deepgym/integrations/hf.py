@@ -32,6 +32,10 @@ files, test cases, timeouts, verifier mode, image and the rest. Only a plain
 ``Environment`` round-trips; subclasses (repo-patch, benchmark, mixed environments) are
 refused. Rows in the 1.0 schema (task, verifier_code, test_cases, timeout) still load.
 
+Every environment needs an ``env_name`` of its own: pushes refuse a blank name, and
+loading by name, or loading all, refuses a dataset with a blank or repeated one rather
+than drop an environment.
+
 A Hub dataset is untrusted input, so pushing and loading run the same checks (see
 :func:`environment_from_dict`) and data can't change how the sandbox runs it: no
 ``env_vars``, no host paths, no verifier mode the verifier doesn't read as, plain
@@ -47,7 +51,8 @@ from __future__ import annotations
 import json
 import logging
 import posixpath
-from collections.abc import Mapping
+from collections import Counter
+from collections.abc import Mapping, Sequence
 from types import ModuleType
 from typing import TYPE_CHECKING, Any
 
@@ -131,6 +136,31 @@ def _hub_environment(manifest: Mapping[str, Any], *, trust_image: bool) -> Envir
     return env
 
 
+def _check_names(names: Sequence[object], source: str) -> None:
+    """Refuse missing, blank or repeated environment names, so no environment is lost.
+
+    Environments are keyed by name, so a repeated or blank one would replace another.
+
+    Args:
+        names: Every environment's name, in order.
+        source: What holds them (a push, a repo id), for the error.
+
+    Raises:
+        ValueError: Naming the positions without a name, or the names given twice.
+    """
+    blank = [i for i, name in enumerate(names) if not isinstance(name, str) or not name.strip()]
+    if blank:
+        raise ValueError(
+            f'{source}: environments at {blank} have no env_name; each needs a name of its own'
+        )
+    repeated = sorted(name for name, count in Counter(names).items() if count > 1)
+    if repeated:
+        raise ValueError(
+            f'{source}: env_name {repeated} names more than one environment; '
+            'each needs a name of its own'
+        )
+
+
 def environment_to_dict(env: Environment, env_name: str = '') -> dict[str, str]:
     """Serialise an Environment to a flat dict for HF dataset rows.
 
@@ -196,7 +226,7 @@ def environment_from_dict(row: Mapping[str, Any], *, trust_image: bool = False) 
 def push_environment_to_hub(
     env: Environment,
     repo_id: str,
-    env_name: str = '',
+    env_name: str,
     *,
     private: bool = False,
     token: str | None = None,
@@ -209,7 +239,7 @@ def push_environment_to_hub(
     Args:
         env: Environment to push.
         repo_id: HF dataset repo ID, e.g. ``'your-org/deepgym-coin-change'``.
-        env_name: Friendly name stored in the dataset row.
+        env_name: Name stored in the dataset row; it must not be blank.
         private: Whether to create the dataset as private.
         token: HF API token (uses HF_TOKEN env var / cached login if None).
 
@@ -219,6 +249,7 @@ def push_environment_to_hub(
     Raises:
         ImportError: If ``datasets`` package is not installed.
         TypeError, ValueError: If *env* can't round-trip (see :func:`environment_to_dict`).
+        ValueError: If *env_name* is blank.
     """
     return push_environments_to_hub({env_name: env}, repo_id, private=private, token=token)
 
@@ -233,7 +264,7 @@ def push_environments_to_hub(
     """Push multiple environments to HuggingFace Hub as a single dataset.
 
     Args:
-        envs: Mapping of ``{env_name: Environment}``.
+        envs: Mapping of ``{env_name: Environment}``; no name may be blank.
         repo_id: HF dataset repo ID, e.g. ``'your-org/deepgym-environments'``.
         private: Whether to create the dataset as private.
         token: HF API token (uses HF_TOKEN env var / cached login if None).
@@ -245,7 +276,9 @@ def push_environments_to_hub(
         ImportError: If ``datasets`` package is not installed.
         TypeError, ValueError: If an environment can't round-trip (see
             :func:`environment_to_dict`).
+        ValueError: If a name is blank.
     """
+    _check_names(list(envs), f'Push to {repo_id}')
     datasets = _require_datasets()
     rows = [environment_to_dict(env, env_name=name) for name, env in envs.items()]
     dataset = datasets.Dataset.from_list(rows)
@@ -334,18 +367,18 @@ def load_environment_from_hub(
     Raises:
         ImportError: If ``datasets`` package is not installed.
         ValueError: If ``env_name`` is specified but not found in the dataset, or the
-            row can't be read (see :func:`environment_from_dict`).
+            dataset's names aren't all non-blank and distinct (as
+            :func:`load_all_environments_from_hub` requires), or the row can't be read
+            (see :func:`environment_from_dict`).
     """
     dataset = _load_rows(repo_id, split, revision, token)
 
     if env_name is not None:
-        matches = [row for row in dataset if row.get('env_name') == env_name]
-        if not matches:
-            available = [row.get('env_name', '') for row in dataset]
-            raise ValueError(
-                f'Environment {env_name!r} not found in {repo_id}. Available: {available}'
-            )
-        row = matches[0]
+        names = [row.get('env_name') for row in dataset]
+        _check_names(names, repo_id)
+        if env_name not in names:
+            raise ValueError(f'Environment {env_name!r} not found in {repo_id}. Available: {names}')
+        row = dataset[names.index(env_name)]
     else:
         row = dataset[0]
 
@@ -370,19 +403,20 @@ def load_all_environments_from_hub(
         trust_image: Run the images or snapshots the rows name; refused otherwise.
 
     Returns:
-        Dict mapping ``env_name`` to ``Environment``. Rows without an
-        ``env_name`` are keyed by their zero-based index.
+        Dict mapping ``env_name`` to ``Environment``.
 
     Raises:
         ImportError: If ``datasets`` package is not installed.
-        ValueError: If a row can't be read (see :func:`environment_from_dict`).
+        ValueError: If a row has no ``env_name`` or shares one with another row, so one
+            of them would be lost, or a row can't be read (see :func:`environment_from_dict`).
     """
     dataset = _load_rows(repo_id, split, revision, token)
-    result: dict[str, Environment] = {}
-    for i, row in enumerate(dataset):
-        key = row.get('env_name') or str(i)
-        result[key] = environment_from_dict(row, trust_image=trust_image)
-    return result
+    names = [row.get('env_name') for row in dataset]
+    _check_names(names, repo_id)
+    return {
+        name: environment_from_dict(row, trust_image=trust_image)
+        for name, row in zip(names, dataset, strict=True)
+    }
 
 
 def push_results_to_hub(

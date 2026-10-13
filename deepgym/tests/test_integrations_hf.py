@@ -254,7 +254,22 @@ class TestPushEnvironmentToHub:
     def test_raises_import_error_when_datasets_missing(self, simple_env: Environment) -> None:
         with patch('builtins.__import__', side_effect=ImportError('no datasets')):
             with pytest.raises(ImportError, match='huggingface_hub and datasets'):
-                push_environment_to_hub(simple_env, repo_id='org/repo')
+                push_environment_to_hub(simple_env, repo_id='org/repo', env_name='add')
+
+    @pytest.mark.parametrize('name', ['', '  '])
+    def test_a_blank_name_is_refused_before_anything_is_pushed(
+        self, simple_env: Environment, name: str
+    ) -> None:
+        """Loading keys environments by name, so a nameless one would be lost."""
+        module = _datasets_module([])
+
+        with patch('deepgym.integrations.hf._require_datasets', return_value=module):
+            with pytest.raises(ValueError, match='no env_name'):
+                push_environment_to_hub(simple_env, repo_id='org/repo', env_name=name)
+            with pytest.raises(ValueError, match='no env_name'):
+                push_environments_to_hub({'add': simple_env, name: simple_env}, 'org/repo')
+
+        module.Dataset.from_list.assert_not_called()
 
     def test_returns_the_commit_to_pin(self, simple_env: Environment) -> None:
         module = _datasets_module([])
@@ -433,14 +448,34 @@ class TestLoadAllEnvironmentsFromHub:
 
         assert set(envs.keys()) == {'add', 'sub'}
 
-    def test_unnamed_rows_keyed_by_index(self, simple_env: Environment) -> None:
-        rows = [environment_to_dict(simple_env), environment_to_dict(simple_env)]
+    @pytest.mark.parametrize(
+        ('names', 'error'),
+        [
+            # A blank name used to become the row's index and replace the row named '0'.
+            (['', '0'], 'no env_name'),
+            (['add', 'add'], 'more than one environment'),
+        ],
+        ids=['blank', 'repeated'],
+    )
+    def test_names_that_would_drop_an_environment_are_refused(
+        self,
+        simple_env: Environment,
+        full_env: Environment,
+        tmp_path: Path,
+        names: list[str],
+        error: str,
+    ) -> None:
+        """Rows written as push_to_hub uploads them (parquet) and loaded with datasets."""
+        datasets = pytest.importorskip('datasets')
+        rows = [environment_to_dict(env, name) for env, name in zip((full_env, simple_env), names)]
+        (tmp_path / 'data').mkdir()
+        datasets.Dataset.from_list(rows).to_parquet(tmp_path / 'data' / 'train.parquet')
 
-        module = _datasets_module(rows)
-        with patch('deepgym.integrations.hf._require_datasets', return_value=module):
-            envs = load_all_environments_from_hub('org/repo', revision='abc123')
-
-        assert set(envs) == {'0', '1'}
+        with pytest.raises(ValueError, match=error):
+            load_all_environments_from_hub(str(tmp_path), trust_image=True)
+        # Loading one by name would pick a row the bulk load can't keep apart from another.
+        with pytest.raises(ValueError, match=error):
+            load_environment_from_hub(str(tmp_path), env_name=names[1], trust_image=True)
 
 
 def test_rows_survive_a_real_parquet_round_trip(

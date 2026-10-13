@@ -45,7 +45,8 @@ RUNTIME_SOURCE = Path(__file__).with_name('solution_runtime.py').read_text(encod
 # Extra seconds past the run's deadline for the verifier to finish and print.
 DEADLINE_GRACE_S = 5
 
-_SANDBOX_ROOT = '/opt/deepgym'
+SANDBOX_ROOT = '/opt/deepgym'
+"""Where judge, runtime and solution files go in a sandbox (see :data:`SANDBOX_SETUP`)."""
 SOLVER_USER = 'dgsolver'
 
 # Run once per sandbox (Daytona or Apple container), as its default user (root or a sudoer).
@@ -54,14 +55,14 @@ set -e
 if [ "$(id -u)" = 0 ]; then SUDO=; else SUDO="sudo -n"; fi
 id {SOLVER_USER} >/dev/null 2>&1 || \\
   $SUDO useradd --system --no-create-home --shell /usr/sbin/nologin {SOLVER_USER}
-$SUDO mkdir -p {_SANDBOX_ROOT}/judge {_SANDBOX_ROOT}/runtime {_SANDBOX_ROOT}/solution \\
-  {_SANDBOX_ROOT}/tmp
-$SUDO chown -R "$(id -u):$(id -g)" {_SANDBOX_ROOT}
-chmod 755 {_SANDBOX_ROOT} {_SANDBOX_ROOT}/runtime
-chmod 700 {_SANDBOX_ROOT}/judge
-chmod 755 {_SANDBOX_ROOT}/solution
+$SUDO mkdir -p {SANDBOX_ROOT}/judge {SANDBOX_ROOT}/runtime {SANDBOX_ROOT}/solution \\
+  {SANDBOX_ROOT}/tmp
+$SUDO chown -R "$(id -u):$(id -g)" {SANDBOX_ROOT}
+chmod 755 {SANDBOX_ROOT} {SANDBOX_ROOT}/runtime
+chmod 700 {SANDBOX_ROOT}/judge
+chmod 755 {SANDBOX_ROOT}/solution
 # Judge temp files: the solution user may enter known subdirectories, never list.
-chmod 711 {_SANDBOX_ROOT}/tmp
+chmod 711 {SANDBOX_ROOT}/tmp
 # 1 if the solution can get its own (offline) network namespace here.
 netns=0
 command -v setpriv >/dev/null && $SUDO unshare --net true 2>/dev/null && netns=1
@@ -275,11 +276,11 @@ def sandbox_isolation(setup_output: str, *, require_offline: bool = False) -> tu
 def sandbox_uploads(job: JudgeJob) -> list[tuple[bytes, str]]:
     """(content, sandbox path) pairs for the judge, runtime, and solution files."""
     uploads = [
-        (content.encode('utf-8'), f'{_SANDBOX_ROOT}/judge/{rel}')
+        (content.encode('utf-8'), f'{SANDBOX_ROOT}/judge/{rel}')
         for rel, content in job.judge_files().items()
     ]
-    uploads.append((RUNTIME_SOURCE.encode('utf-8'), f'{_SANDBOX_ROOT}/runtime/{RUNTIME_FILE}'))
-    uploads.append((job.solution.encode('utf-8'), f'{_SANDBOX_ROOT}/solution/solution.py'))
+    uploads.append((RUNTIME_SOURCE.encode('utf-8'), f'{SANDBOX_ROOT}/runtime/{RUNTIME_FILE}'))
+    uploads.append((job.solution.encode('utf-8'), f'{SANDBOX_ROOT}/solution/solution.py'))
     return uploads
 
 
@@ -292,14 +293,14 @@ def sandbox_judge(
         SandboxError: If *require_offline* is set but the solution can't be cut off the network.
     """
     isolation, python = sandbox_isolation(setup_output, require_offline=require_offline)
-    judge_dir = f'{_SANDBOX_ROOT}/judge'
-    args = job.verifier_args(judge_dir, f'{_SANDBOX_ROOT}/solution/solution.py')
+    judge_dir = f'{SANDBOX_ROOT}/judge'
+    args = job.verifier_args(judge_dir, f'{SANDBOX_ROOT}/solution/solution.py')
     command = (
         f'umask 077 && cd {judge_dir} && DEEPGYM_DEADLINE=$(( $(date +%s) + {job.timeout} )) '
         f'exec {shlex.quote(python)} {shlex.join(args)}'
     )
-    env = job.runtime_env(isolation, f'{_SANDBOX_ROOT}/runtime/{RUNTIME_FILE}', python)
+    env = job.runtime_env(isolation, f'{SANDBOX_ROOT}/runtime/{RUNTIME_FILE}', python)
     # Private temp dir + umask 077: the judge's own temp files stay unreadable to the
     # solution; run_solution shares only the directories it hands over.
-    env['TMPDIR'] = f'{_SANDBOX_ROOT}/tmp'
+    env['TMPDIR'] = f'{SANDBOX_ROOT}/tmp'
     return f'bash -c {shlex.quote(command)}', env

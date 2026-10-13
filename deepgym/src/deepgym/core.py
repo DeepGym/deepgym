@@ -194,7 +194,7 @@ class DeepGym:
             return Session(env, LocalBackend())
         box = DaytonaSandbox(self._daytona, env)
         desktop = DaytonaDesktop(box, env.timeout_per_step, env.setup_timeout)
-        return Session(env, SandboxBackend(box, desktop if env.desktop else None))
+        return Session(env, SandboxBackend(box, desktop=desktop if env.desktop else None))
 
     def run_episode(
         self, env: MultiTurnEnvironment, agent: Callable[[Observation], Action]

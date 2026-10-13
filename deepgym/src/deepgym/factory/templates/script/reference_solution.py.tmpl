@@ -1,0 +1,27 @@
+"""Reference solution for $name: it must score 1.0 on every run."""
+
+import sys
+
+
+def longest_run(values: list[int]) -> int:
+    """Return the length of the longest strictly increasing run of neighbors."""
+    if not values:
+        return 0
+    best = current = 1
+    for previous, value in zip(values, values[1:]):
+        if value > previous:
+            current += 1
+            best = max(best, current)
+        else:
+            current = 1
+    return best
+
+
+def main() -> None:
+    """Read integers from standard input and print the answer."""
+    values = [int(token) for token in sys.stdin.read().split()]
+    print(longest_run(values))
+
+
+if __name__ == '__main__':
+    main()

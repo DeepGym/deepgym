@@ -45,8 +45,21 @@ class DeepGym:
         self,
         api_key: str | None = None,
         mode: Literal['auto', 'daytona', 'local'] | Provider = 'auto',
+        *,
+        confine_local_judge: bool = False,
     ) -> None:
+        """Pick the backend: a sandbox provider, Daytona, or local subprocesses.
+
+        Args:
+            api_key: Daytona API key; DAYTONA_API_KEY if None.
+            mode: 'auto' (Daytona if configured, else local), 'daytona', 'local', or a
+                sandbox provider name.
+            confine_local_judge: In local mode, run each whole judge inside the local
+                sandbox too, for verifiers that might run code in-process (mutation
+                testing); needs sandbox-exec or bwrap.
+        """
         self._daytona = None
+        local = LocalExecutor(confined=confine_local_judge)
         self._local_executor: LocalExecutor | None = None
         self._provider: Provider | None = mode if mode in PROVIDERS else None
 
@@ -59,7 +72,7 @@ class DeepGym:
             logger.info('Initialising DeepGym with %s sandboxes', self._provider)
         elif mode == 'local':
             logger.info('Initialising DeepGym in local mode (no Daytona)')
-            self._local_executor = LocalExecutor()
+            self._local_executor = local
         elif mode == 'daytona':
             self._daytona = self._init_daytona(daytona_api_key, daytona_api_url)
         else:
@@ -70,10 +83,10 @@ class DeepGym:
                     logger.info('Initialised DeepGym with Daytona backend')
                 except DeepGymError:
                     logger.warning('Daytona init failed, falling back to local mode')
-                    self._local_executor = LocalExecutor()
+                    self._local_executor = local
             else:
                 logger.info('No DAYTONA_API_KEY set, using local executor')
-                self._local_executor = LocalExecutor()
+                self._local_executor = local
 
     @property
     def backend(self) -> str:

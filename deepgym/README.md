@@ -755,6 +755,92 @@ Imported problems are then available through `load_environment()`.
 `swebench_pro` and `terminal_bench_2` load the same way (see
 Repo, terminal and cyber tasks above).
 
+## Write your own environment
+
+From an idea to a QA-approved environment folder:
+
+```bash
+deepgym new word_stats --kind function   # or script, repo-patch, multi-turn
+deepgym check word_stats                 # passes as generated
+# edit word_stats/: task.md, the reference, expected() in verifier.py, variants.py
+deepgym check word_stats
+deepgym qa word_stats --mutants          # adds reward-hack attacks and mutation testing
+deepgym qa word_stats --mutants --approve --by "Jane Doe"
+```
+
+`deepgym new` writes a working example (the longest strictly increasing run in a
+list) that passes every check, so you start green and change one thing at a time:
+
+| File | What it is |
+|---|---|
+| `task.md` | The prompt the model sees. |
+| `verifier.py` | Scores a solution. It runs the solution only through `deepgym_solution`, computes each expected answer with its own `expected()`, and reports every case with a reason. |
+| `reference_solution.py` | Must score 1.0. A `.diff` for repo-patch, `reference_actions.json` for multi-turn. |
+| `variants.py` | `generate(seed, count)`: edge cases plus seeded random inputs. The fixed seed keeps runs reproducible. |
+| `metadata.json` | Name, type, difficulty, tags and the `support_files` the verifier imports. Unknown keys are rejected. |
+
+Kinds:
+
+- `function`: the verifier calls a function through `load_solution`.
+- `script`: the verifier runs a stdin/stdout script through `run_solution`.
+- `repo-patch`: the model answers with a unified diff. The verifier applies it to
+  the files in `repo/` with `apply_patch` (in memory, only to files you list; a
+  diff that creates, deletes, renames or copies a file is refused) and imports the
+  result with `load_files`, the way Python would import it from a checkout.
+- `multi-turn`: an agent works in a directory that starts with the folder's other
+  files (here `runs.py`), then the final verifier tests the result.
+  `reference_actions.json` is the scripted episode that must score 1.0. A file
+  that links outside the folder is refused rather than copied in. Local
+  sessions aren't isolated; use a sandbox mode for untrusted agents. The final
+  verifier loads the agent's code with `load_solution`, which a sandbox session
+  provides only on an image with `sudo` (a separate user runs that code).
+
+`deepgym check PATH` validates the files, the metadata schema and that the
+verifier parses. Then it runs the reference twice and an empty and a stub
+solution once, and checks the output: protocol JSON, a `cases` list on the
+reference run and a reason on every failed case. It exits 0, 1 if a check failed,
+or 2 if one is inconclusive (say, the verifier crashed on the empty solution).
+
+It also prints warnings from an advisory lint over the judge code: a verifier
+that never calls `load_solution`, `run_solution`, `load_files` or
+`solution_source`, that hands the solution path to anything else (such as
+`open`), or that uses something able to run code itself (`exec`, `eval`,
+`importlib`, `runpy`, `pickle`, `timeit`, subprocesses, `sys.path`). Warnings
+never change the result, and a clean lint proves nothing: a pattern check can
+always be dodged. The isolation is the judge reaching the solution only through
+those helpers.
+
+`--mutants` adds mutation testing to `deepgym qa`. It edits the reference one
+small step at a time with the `ast` module (an integer off by one, `<` for `<=`,
+a computed return replaced by a constant, an if/else swapped, a statement
+dropped) and runs each mutant like a model solution. Every mutant must score
+below the pass threshold; one that passes points at behavior the verifier never
+checks. The report gives the mutation score and each survivor by line. A mutant
+that behaves exactly like the reference (a redundant guard dropped, say) can't
+fail; mark its line `# pragma: no mutate`. Locally, mutation runs need `bwrap`
+(Linux): each mutant's whole judge run goes inside its sandbox, so mutants stay
+contained even if a verifier runs them in-process, and its PID namespace takes
+down everything the run started (sandboxes don't nest, so within the run a mutant
+isn't kept from the judge's files; mutants are edits of your reference, not
+attacks). macOS's `sandbox-exec` can't reap a process a mutant detaches, so on
+macOS, or without `bwrap`, use `--mode docker`, `modal` or `e2b`, which keep the
+whole sandbox offline; `apple` and `daytona` leave the judge online, so there the
+check is inconclusive and no mutant runs.
+
+`--approve --by NAME` writes `approval.json` once QA passes with at least one
+rerun and every check you asked for (`--mutants`, `--model`) passed: the full
+report, a sha256 and the permission bits of every file and directory in the
+folder (hidden ones too, so even a `.DS_Store` Finder adds makes it stale), the
+deepgym version and the time. QA runs on a private copy of the folder, so the
+hashes describe exactly the files it tested; the folder must be self-contained
+(no symlinks, no support files outside it). Checks that didn't run are listed
+with it, never counted as passed. It is written once, read-only; delete it to
+approve again.
+`deepgym check` fails when the files no longer match (Harbor task folders
+included), so an environment pack carries proof of exactly what was tested. Lint
+warnings ride along under `lint`, marked `"advisory": true`: information for the
+reader, never evidence that the verifier isolates the solution.
+
 ## Write your own verifier
 
 ```python
@@ -785,6 +871,13 @@ Never import or run the solution yourself. Use the helpers in `deepgym_solution`
   server the verifier runs on `127.0.0.1:port` (nothing else on the network).
 - `read_output(path, cwd)` reads its files back and refuses symlinks.
 - `solution_source(path, name=None)` reads the source for static checks without running it.
+- `apply_patch(diff, files)` applies a unified diff to a dict of file texts in
+  memory, and `load_files(files, entry)` imports the result like `load_solution`.
+  Together they score repo-patch answers.
+
+When the machine can't start the solution at all (out of processes, say), these
+raise `LaunchError`. Let it propagate: the run ends as a verifier error with no
+verdict, instead of scoring the solution 0.
 
 Each call is bounded by `case_timeout` (default 10s) and by the run's `timeout`,
 so a slow case fails on its own and the run still returns partial credit.
@@ -795,8 +888,9 @@ so a slow case fails on its own and the run still returns partial credit.
   a separate Linux user that can't read the judge's files, touch the judge's
   process, or write to its output, with no network.
 - **Locally:** it runs under `sandbox-exec` on macOS or `bwrap` on Linux, with the
-  judge directory and the deepgym package hidden. If neither is available, you
-  still get process separation and a warning.
+  judge directory, the deepgym package, your home directory and `/run` (daemon
+  sockets) hidden. If neither is available, you still get process separation and
+  a warning.
 
 What this blocks:
 
@@ -849,6 +943,7 @@ Check environments before you train on them:
 
 ```bash
 deepgym qa coin_change two_sum          # or --all
+deepgym qa ./word_stats --mutants       # an environment folder
 deepgym qa --all --mode daytona --reruns 5
 OPENAI_BASE_URL=http://localhost:8000/v1 OPENAI_API_KEY=EMPTY \
   deepgym qa coin_change --mode docker --model Qwen/Qwen3-8B --samples 8
@@ -857,16 +952,25 @@ OPENAI_BASE_URL=http://localhost:8000/v1 OPENAI_API_KEY=EMPTY \
 Each single-turn environment must pass:
 
 - `reference_passes`: its `reference_solution.py` scores 1.0.
-- `deterministic`: the reference scores the same on every rerun.
+- `deterministic`: the reference scores the same on every rerun. Skipped with
+  `--reruns 0`, since one run proves nothing.
 - `empty_fails`, `stub_fails`: an empty file, and a stub of the reference's
   functions that return `None`, both score below 1.0. `stub_fails` is skipped
-  when the reference is a script with no top-level function.
+  when the reference is a script with no top-level function. A verifier that
+  crashes on them instead of scoring them is inconclusive, not a pass.
 - `hack_resistant`: none of the heuristic reward-hack attacks behind
   `deepgym audit` reaches the pass threshold. If none got through but some
-  crashed or couldn't run, the check is inconclusive, not passed.
+  crashed or couldn't run, the check is inconclusive, not passed. The attacks are
+  Python solutions, so the check is skipped where they can't apply: a Harbor task
+  runs bash, and a verifier that rejects every attack as a malformed answer (a
+  repo-patch env takes diffs) was never attacked. A skipped check counts neither
+  way, and the report lists it under `not_run`.
+- `mutants_killed` (with `--mutants`): every AST mutant of the reference scores
+  below the pass threshold (see Write your own environment).
 - `difficulty` (with `--model`): pass@1 and pass@k over k samples from an
   OpenAI-compatible endpoint. Fails as `too_easy` or `too_hard` when every or no
   sample is solved, because then group-relative RL gets no signal from the task.
+  Inconclusive if the verifier couldn't judge a sample.
 
 `--model` runs model-generated code, so with `--mode local` (the default) or
 `auto` (which can fall back to local) it refuses to start unless you pass
@@ -874,9 +978,12 @@ Each single-turn environment must pass:
 
 Each check and each environment gets a `status`: `pass`, `fail`, `inconclusive`
 or `skip`. An environment fails if any check fails, is inconclusive if any check
-is, and passes otherwise; skipped checks don't count either way. Multi-turn,
-computer-use and benchmark-backed environments are skipped: neither passed nor
-failed. The command exits 0 when the checked environments pass (skipped ones
+is, and passes otherwise; skipped checks don't count either way. A multi-turn
+folder with `reference_actions.json` replays it for `reference_passes`,
+`deterministic` and `empty_fails` (an agent that quits at once), and lists its
+other checks under `not_run`. Other
+multi-turn, computer-use and benchmark-backed environments are skipped: neither
+passed nor failed. The command exits 0 when the checked environments pass (skipped ones
 alongside are fine), 1 if any fails, and 2 if none fails but some are
 inconclusive or none could be checked. It writes one report per environment to
 `~/.deepgym/qa/<env>.json` (set `DEEPGYM_QA_DIR` to change it):
@@ -886,6 +993,7 @@ inconclusive or none could be checked. It writes one report per environment to
   "environment": "coin_change",
   "status": "pass",
   "passed": true,
+  "not_run": [],
   "checks": [
     {"name": "reference_passes", "status": "pass", "passed": true, "details": "score 1.00 (25/25 passed)"}
   ],
@@ -909,7 +1017,7 @@ The server won't start without auth configured. Set `DEEPGYM_API_KEY` for
 production or `DEEPGYM_NO_AUTH=true` for local development.
 `--allow-local-exec` is required when running without Daytona.
 
-Other commands: `run-batch`, `eval`, `create`, `audit`, `qa`, `harbor`,
+Other commands: `run-batch`, `eval`, `create`, `new`, `check`, `audit`, `qa`, `harbor`,
 `benchmark-audit`, `traces export` and `console`. Run `deepgym <command> --help` for
 options.
 

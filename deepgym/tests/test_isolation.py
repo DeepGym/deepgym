@@ -27,6 +27,189 @@ needs_sandbox = pytest.mark.skipif(
 
 WRONG = 'def coin_change(coins, amount):\n    return 0\n'
 
+_LINGERING = (
+    'import threading, time\n\n'
+    'def start():\n    threading.Thread(target=time.sleep, args=(60,)).start()\n\n'
+    'def hang():\n    time.sleep(60)\n'
+)
+
+
+def _server(solution: Path, **pipes: int) -> subprocess.Popen:
+    """Start a load_solution server for *solution* directly, as the judge would."""
+    from deepgym import solution_runtime
+
+    argv = [sys.executable, '-I', '-B', solution_runtime.__file__, '--serve', str(solution)]
+    return subprocess.Popen(argv, stdin=subprocess.PIPE, **pipes)
+
+
+def _call(name: str, call_id: int) -> bytes:
+    message = {
+        'op': 'call',
+        'id': call_id,
+        'target': {'name': name},
+        'args': [],
+        'kwargs': {'$d': []},
+    }
+    return (json.dumps(message) + '\n').encode()
+
+
+def test_a_server_exits_with_its_pipe_even_if_the_solution_left_threads(tmp_path: Path) -> None:
+    solution = tmp_path / 'solution.py'
+    solution.write_text(_LINGERING, encoding='utf-8')
+    server = _server(solution, stdout=subprocess.PIPE)
+    server.stdin.write(b'{"op": "load", "id": 1}\n' + _call('start', 2))
+    server.stdin.flush()
+    ready, *replies = (server.stdout.readline() for _ in range(3))
+    assert ready == b'{"ready": true}\n'
+    assert all(b'"ok": true' in reply for reply in replies)
+
+    server.stdin.close()  # the judge is done
+
+    assert server.wait(timeout=10) == 0  # a non-daemon thread can't hold it for 60s
+
+
+_PARTIAL = (
+    'from deepgym_solution import LaunchError, load_solution\n\n'
+    'def verify(solution_path, test_cases_path=None):\n'
+    '    solution = load_solution(solution_path)\n'
+    '    passed = 0\n'
+    '    for values in ([], [1], [2]):\n'
+    '        try:\n'
+    '            passed += solution.f(values) == len(values)\n'
+    '        except LaunchError:\n'
+    '            raise\n'
+    '        except Exception:\n'
+    '            pass\n'
+    "    return {'score': passed / 3, 'passed': passed == 3, 'details': f'{passed}/3'}\n"
+)
+
+
+def test_a_restart_with_the_run_out_of_time_keeps_the_partial_score() -> None:
+    # Case 2 hangs through the whole run, so restarting for case 3 finds no time left:
+    # the solution's doing (TimeoutError), never a launch failure that voids the run.
+    solution = (
+        'import time\n\ndef f(values):\n    if values:\n        time.sleep(60)\n    return 0\n'
+    )
+    env = Environment(task='t', verifier_code=_PARTIAL, timeout=1, case_timeout=1)
+
+    result = DeepGym(mode='local').run(env, solution)
+
+    assert result.has_verdict
+    assert result.output == '1/3'
+
+
+def test_run_solution_tells_a_launch_failure_from_the_script_failing(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from deepgym import solution_runtime
+
+    script = tmp_path / 'solution.py'
+    script.write_text('import sys\nsys.exit(127)\n', encoding='utf-8')
+
+    # The script's own exit code, however launcher-like, is its result to score.
+    assert solution_runtime.run_solution(str(script)).returncode == 127
+    monkeypatch.setenv('DEEPGYM_PYTHON', '/nonexistent/python')  # env starts, Python never does
+    with pytest.raises(solution_runtime.LaunchError):
+        solution_runtime.run_solution(str(script))
+
+
+@pytest.mark.skipif(shutil.which('python3', path='/usr/bin') is None, reason='no python3')
+def test_run_solution_finds_a_bare_interpreter_name_on_path(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from deepgym import solution_runtime
+
+    script = tmp_path / 'solution.py'
+    script.write_text('print("hi")\n', encoding='utf-8')
+    monkeypatch.setenv('DEEPGYM_PYTHON', 'python3')  # as exported Harbor tasks set it
+
+    proc = solution_runtime.run_solution(str(script))
+
+    assert (proc.returncode, proc.stdout) == (0, 'hi\n')
+
+
+def test_no_start_signal_goes_through_sudo(monkeypatch: pytest.MonkeyPatch) -> None:
+    from deepgym import solution_runtime
+
+    spec = {'kind': 'user', 'prefix': ['/usr/bin/sudo', '-n', '-u', 'solver', '--']}
+    monkeypatch.setenv('DEEPGYM_ISOLATION', json.dumps(spec))
+
+    with solution_runtime._start_signal() as (prefix, fds, started):
+        assert (prefix, fds, started()) == ([], (), True)  # sudo would close the pipe
+
+
+def test_a_reader_that_cannot_start_is_a_launch_failure(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from deepgym import solution_runtime
+
+    solution = tmp_path / 'solution.py'
+    solution.write_text('def f():\n    return 1\n', encoding='utf-8')
+    started: list[subprocess.Popen] = []
+    real_popen = subprocess.Popen
+
+    def popen(*args: object, **kwargs: object) -> subprocess.Popen:
+        started.append(real_popen(*args, **kwargs))
+        return started[-1]
+
+    def no_threads(self: object) -> None:
+        raise RuntimeError("can't start new thread")
+
+    monkeypatch.setattr(solution_runtime.subprocess, 'Popen', popen)
+    monkeypatch.setattr(solution_runtime.threading.Thread, 'start', no_threads)
+
+    with pytest.raises(solution_runtime.LaunchError, match="can't start new thread"):
+        solution_runtime.load_solution(str(solution))
+    assert started[0].poll() is not None  # the server it started is gone
+
+
+def test_local_sandboxes_hide_host_bus_sockets(monkeypatch: pytest.MonkeyPatch) -> None:
+    import deepgym.judge
+
+    monkeypatch.setattr(deepgym.judge, 'local_isolation_kind', lambda: 'bwrap')
+    monkeypatch.setattr(deepgym.judge.os.path, 'exists', lambda path: True)
+
+    hide = deepgym.judge.local_isolation([])['hide']
+
+    assert {'/run', os.path.realpath('/var/run')} <= set(hide)
+    assert len(hide) == len(set(hide))
+
+
+_LAUNCHER = """
+import subprocess, sys, time
+argv = [sys.executable, '-I', '-B', sys.argv[1], '--serve', sys.argv[2]]
+server = subprocess.Popen(argv, stdin=subprocess.PIPE, stdout=subprocess.PIPE)
+server.stdin.write(sys.argv[3].encode())
+server.stdin.flush()
+server.stdout.readline()  # ready
+server.stdout.readline()  # loaded; hang() is next
+print(server.pid, flush=True)
+time.sleep(60)
+"""
+
+
+def test_a_server_exits_when_its_judge_dies_mid_call(tmp_path: Path) -> None:
+    from deepgym import solution_runtime
+
+    solution = tmp_path / 'solution.py'
+    solution.write_text(_LINGERING, encoding='utf-8')
+    requests = '{"op": "load", "id": 1}\n' + _call('hang', 2).decode()
+    argv = [sys.executable, '-c', _LAUNCHER, solution_runtime.__file__, str(solution), requests]
+    judge = subprocess.Popen(argv, stdout=subprocess.PIPE)
+    pid = int(judge.stdout.readline())
+
+    judge.kill()  # dies while the server sleeps in hang()
+    judge.wait()
+
+    for _ in range(50):
+        try:
+            os.kill(pid, 0)
+        except ProcessLookupError:
+            return
+        time.sleep(0.1)
+    os.kill(pid, 9)
+    pytest.fail(f'server {pid} outlived its judge')
+
 
 @pytest.fixture(scope='module')
 def dg() -> DeepGym:

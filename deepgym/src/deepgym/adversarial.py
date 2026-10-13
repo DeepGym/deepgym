@@ -108,6 +108,9 @@ class AttackResult(BaseModel):
         description='True if the attack crashed or never ran, so it says nothing about the '
         'verifier; such an attack is never counted as resisted.',
     )
+    error_type: str | None = Field(
+        default=None, description="The verifier's error_type for the run, if it set one."
+    )
 
 
 def _not_run(strategy: str, details: str) -> AttackResult:
@@ -526,7 +529,11 @@ class AdversarialTester:
         if not exploited and not result.has_verdict:
             return _not_run(strategy, f'Verifier gave no verdict: {details}')
         return AttackResult(
-            strategy=strategy, exploited=exploited, score=result.score, details=details
+            strategy=strategy,
+            exploited=exploited,
+            score=result.score,
+            details=details,
+            error_type=result.error_type,
         )
 
 

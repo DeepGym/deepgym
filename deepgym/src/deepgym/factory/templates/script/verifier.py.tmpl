@@ -1,0 +1,73 @@
+"""Verifier for $name: run the solution as a script on seeded inputs and compare its output.
+
+The judge never imports or runs the solution itself. run_solution() starts the script
+in an isolated process with an empty environment, no network and a scratch directory
+as the only place it may write; the judge only sees its exit code and output. Every
+case is reported with a reason. A bug in this file ends the run as a verifier error
+(no reward) instead of a silent 0.
+
+To adapt it: rewrite expected() and to_stdin() for your task, and edit variants.py.
+"""
+
+import subprocess
+
+from deepgym_solution import run_solution
+from variants import generate
+
+SEED = 0
+"""Fixed, so every run scores the same cases (the QA gate checks determinism)."""
+
+RANDOM_CASES = 20
+"""Every case starts a process, so fewer cases than a function verifier."""
+
+
+def expected(values):
+    """The judge's own answer, as the exact line the script must print."""
+    best = 0
+    for start in range(len(values)):
+        end = start + 1
+        while end < len(values) and values[end] > values[end - 1]:
+            end += 1
+        best = max(best, end - start)
+    return str(best)
+
+
+def to_stdin(values):
+    """The standard input the script reads for one case."""
+    return ' '.join(str(value) for value in values) + '\n'
+
+
+def run_case(index, values, solution_path):
+    """Run the script on one input and report the outcome with a reason."""
+    want = expected(values)
+    stdin = to_stdin(values)
+    case = {'id': f'case_{index}', 'input_summary': repr(stdin)[:200], 'expected_summary': want}
+    try:
+        proc = run_solution(solution_path, input=stdin)
+    except subprocess.TimeoutExpired:
+        return {**case, 'passed': False, 'error': 'timed out'}
+    got = proc.stdout.strip()
+    case['actual_summary'] = repr(got)[:200]
+    if proc.returncode != 0:
+        error = f'exited {proc.returncode}: {proc.stderr.strip()[-200:]}'
+        return {**case, 'passed': False, 'error': error}
+    passed = got == want
+    return {**case, 'passed': passed, **({} if passed else {'error': f'expected {want!r}'})}
+
+
+def result(cases):
+    """Full marks only when every case passes; partial credit otherwise."""
+    passed = sum(case['passed'] for case in cases)
+    return {
+        'score': passed / len(cases),
+        'passed': passed == len(cases),
+        'details': f'{passed}/{len(cases)} cases passed',
+        'cases': cases,
+        'seed': SEED,
+    }
+
+
+def verify(solution_path, test_cases_path=None):
+    """Score the script at *solution_path* on every generated case."""
+    inputs = generate(SEED, RANDOM_CASES)
+    return result([run_case(index, values, solution_path) for index, values in enumerate(inputs)])

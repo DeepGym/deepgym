@@ -14,7 +14,15 @@ from deepgym.core import DeepGym
 from deepgym.exceptions import DeepGymError
 from deepgym.integrations.zai import ZaiChatClient
 from deepgym.models import Environment
-from deepgym.qa import QACheck, QAReport, client_from_env, format_table, run_qa, write_report
+from deepgym.qa import (
+    QACheck,
+    QAOptions,
+    QAReport,
+    client_from_env,
+    format_table,
+    run_qa,
+    write_report,
+)
 from deepgym.qa.checks import hack_resistant, single_turn_checks, stub_solution
 from deepgym.qa.difficulty import difficulty_check
 from tests.test_adversarial import CRASHING_VERIFIER, RAISING_VERIFIER
@@ -78,6 +86,23 @@ def test_single_turn_checks_catch_a_verifier_that_passes_anything(local_dg: Deep
     assert not checks['stub_fails'].passed
 
 
+def test_reference_runs_without_a_verdict_prove_nothing(local_dg: DeepGym) -> None:
+    # Full marks, but the verifier reported its own error: not a verdict.
+    body = "return {'score': 1.0, 'passed': True, 'error_type': 'runtime_error'}\n"
+
+    checks = _by_name(single_turn_checks(_env(body), _ADD_REFERENCE, local_dg, reruns=1))
+
+    assert checks['reference_passes'].status == 'inconclusive'
+    assert checks['deterministic'].status == 'inconclusive'
+
+
+def test_one_reference_run_says_nothing_about_determinism(local_dg: DeepGym) -> None:
+    checks = _by_name(single_turn_checks(_env(_ADD_VERIFIER), _ADD_REFERENCE, local_dg, reruns=0))
+
+    assert checks['deterministic'].status == 'skip'
+    assert checks['deterministic'].details.startswith('one run says nothing about determinism')
+
+
 def test_single_turn_checks_catch_nondeterministic_scores(local_dg: DeepGym) -> None:
     env = _env('import random\nreturn random.random()\n')
 
@@ -95,6 +120,21 @@ def test_single_turn_checks_fail_without_a_reference(local_dg: DeepGym) -> None:
         ('empty_fails', True),
     ]
     assert checks[0].details == 'no reference_solution.py found'
+
+
+def test_a_verifier_error_on_empty_or_stub_is_inconclusive_not_a_pass(local_dg: DeepGym) -> None:
+    # sol.add raises AttributeError in the judge for the empty solution: no verdict on it.
+    strict = (
+        'from deepgym_solution import load_solution\n'
+        'sol = load_solution(solution_path)\n'
+        'return 1.0 if sol.add(2, 3) == 5 else 0.0\n'
+    )
+
+    checks = _by_name(single_turn_checks(_env(strict), _ADD_REFERENCE, local_dg, reruns=0))
+
+    assert checks['empty_fails'].status == 'inconclusive'
+    assert checks['empty_fails'].details.startswith('the verifier errored instead of judging')
+    assert checks['stub_fails'].status == 'pass'  # the stub's add() returns None: a real 0
 
 
 def test_single_turn_checks_skip_the_stub_of_a_script_reference(local_dg: DeepGym) -> None:
@@ -133,7 +173,7 @@ def test_hack_resistant_is_inconclusive_when_the_verifier_errors(local_dg: DeepG
 
 
 def test_run_qa_passes_a_builtin_env(local_dg: DeepGym) -> None:
-    report = run_qa('reverse_string', local_dg, reruns=1)
+    report = run_qa('reverse_string', local_dg, QAOptions(reruns=1))
 
     assert report.passed
     assert [check.name for check in report.checks] == [
@@ -180,7 +220,7 @@ def test_write_report_uses_the_console_format(
 
     assert path == tmp_path / 'cyber_toy.json'
     data = json.loads(path.read_text(encoding='utf-8'))
-    assert set(data) == {'environment', 'status', 'passed', 'checks', 'created_at'}
+    assert set(data) == {'environment', 'status', 'passed', 'not_run', 'checks', 'created_at'}
     assert data['environment'] == 'cyber/toy'
     assert (data['status'], data['passed']) == ('fail', False)
     assert data['checks'] == [
@@ -225,6 +265,10 @@ def test_format_table_lists_failures_and_a_summary() -> None:
     assert 'odd: hack_resistant: z' in table
     assert 'gui: ' not in table
     assert 'good: ' not in table
+    scored = QACheck(name='mutants_killed', status='pass', details='mutation score 3/3')
+    assert 'e: mutants_killed: mutation score 3/3' in format_table(
+        [QAReport(environment='e', checks=[scored])]
+    )
     assert table.endswith('1 passed, 1 failed, 1 inconclusive, 1 skipped')
 
 
@@ -268,6 +312,21 @@ def test_difficulty_check(
     assert seen[0]['messages'] == [{'role': 'user', 'content': _ADD_TASK}]
     assert seen[0]['temperature'] == 1.0
     assert 'thinking' not in seen[0]
+
+
+def test_difficulty_is_inconclusive_when_a_sample_gets_no_verdict(local_dg: DeepGym) -> None:
+    body = (
+        'source = open(solution_path).read()\n'
+        "if 'BOOM' in source:\n"
+        "    raise RuntimeError('a verifier bug')\n"
+        "return 1.0 if 'a + b' in source else 0.0\n"
+    )
+    boom = 'Here:\n```python\nBOOM = 1\n```'
+
+    check = difficulty_check(_env(body), local_dg, _client([_RIGHT, boom], []), samples=2)
+
+    assert check.status == 'inconclusive'  # never a pass@1 of 0.50 from one real verdict
+    assert check.details == '1/2 samples got no verdict (the verifier errored)'
 
 
 def test_client_from_env(monkeypatch: pytest.MonkeyPatch) -> None:

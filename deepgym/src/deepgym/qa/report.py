@@ -17,13 +17,23 @@ QAStatus = Literal['pass', 'fail', 'inconclusive', 'skip']
 SKIPPED = 'skipped'
 """Name of the single check a report carries when the environment isn't checkable."""
 
+MUTANTS_CHECK = 'mutants_killed'
+"""Name of the mutation-testing check (see :mod:`deepgym.qa.mutants`)."""
+
+DIFFICULTY_CHECK = 'difficulty'
+"""Name of the model difficulty probe's check (see :mod:`deepgym.qa.difficulty`)."""
+
+_ALWAYS_NOTED = frozenset({DIFFICULTY_CHECK, MUTANTS_CHECK})
+"""Checks whose details the table prints even when they pass: they carry a score."""
+
 _COLUMNS = {
     'reference_passes': 'ref',
     'deterministic': 'det',
     'empty_fails': 'empty',
     'stub_fails': 'stub',
     'hack_resistant': 'hack',
-    'difficulty': 'diff',
+    MUTANTS_CHECK: 'mut',
+    DIFFICULTY_CHECK: 'diff',
 }
 _CELLS: dict[QAStatus, str] = {'pass': 'ok', 'fail': 'FAIL', 'inconclusive': '?', 'skip': 'skip'}
 
@@ -76,6 +86,12 @@ class QAReport(BaseModel):
         """True only on a pass: not when it failed, was inconclusive or was skipped."""
         return self.status == 'pass'
 
+    @computed_field
+    @property
+    def not_run(self) -> list[str]:
+        """Checks that were skipped: they count neither way, so a pass never rests on them."""
+        return [check.name for check in self.checks if check.status == 'skip']
+
 
 def report_dir() -> Path:
     """Directory QA reports live in: ``$DEEPGYM_QA_DIR``, default ``~/.deepgym/qa``."""
@@ -98,7 +114,7 @@ def write_report(report: QAReport) -> Path:
 
 
 def format_table(reports: Sequence[QAReport]) -> str:
-    """Render one row per environment, then details of undecided, failed and difficulty checks."""
+    """Render one row per environment, then details of undecided, failed and scored checks."""
     width = max(len('environment'), *(len(report.environment) for report in reports))
     rows = [['environment'.ljust(width), *_COLUMNS.values(), 'result']]
     notes: list[str] = []
@@ -111,10 +127,17 @@ def format_table(reports: Sequence[QAReport]) -> str:
                 report.status.upper(),
             ]
         )
+        noted = (
+            ('fail', 'inconclusive')
+            if report.status == 'skip'
+            else ('fail', 'inconclusive', 'skip')
+        )
         notes.extend(
-            f'{report.environment}: {check.name}: {check.details}'
+            f'{report.environment}: {check.name}: '
+            + ('not run: ' if check.status == 'skip' else '')
+            + check.details
             for check in report.checks
-            if check.status in ('fail', 'inconclusive') or check.name == 'difficulty'
+            if check.status in noted or check.name in _ALWAYS_NOTED
         )
     table = '\n'.join('  '.join(f'{cell:<5}' for cell in row).rstrip() for row in rows)
     statuses = [report.status for report in reports]
@@ -123,3 +146,10 @@ def format_table(reports: Sequence[QAReport]) -> str:
         f'{statuses.count("inconclusive")} inconclusive, {statuses.count("skip")} skipped'
     )
     return '\n\n'.join(section for section in (table, '\n'.join(notes), summary) if section)
+
+
+def format_checks(checks: Sequence[QACheck]) -> str:
+    """Render one environment's checks, one line each, then the combined result."""
+    width = max(len(check.name) for check in checks)
+    lines = [f'{_CELLS[c.status]:<5} {c.name.ljust(width)}  {c.details}' for c in checks]
+    return '\n'.join([*lines, '', f'result: {overall(c.status for c in checks).upper()}'])

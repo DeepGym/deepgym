@@ -15,7 +15,7 @@ from deepgym import registry as registry_module
 from deepgym.benchmark_envs import TerminalBenchEnvironment
 from deepgym.core import DeepGym
 from deepgym.harbor import HarborEnvironment, export_environment
-from deepgym.qa import run_qa
+from deepgym.qa import QAOptions, run_qa
 from deepgym.registry import load_environment, register_benchmark
 from deepgym.sandboxes.apple import AppleContainer
 from deepgym.sandboxes.docker import DockerContainer
@@ -196,7 +196,7 @@ def test_qa_gates_a_registered_harbor_task(
     monkeypatch.setattr(registry_module, '_get_cache_dir', lambda: tmp_path)
     register_benchmark('fixtures', [HELLO], {})
 
-    report = run_qa('fixtures/hello', dg, reruns=0)
+    report = run_qa('fixtures/hello', dg, QAOptions(reruns=0))
 
     checks = {check.name: check.status for check in report.checks}
     assert report.status == 'pass', report.checks

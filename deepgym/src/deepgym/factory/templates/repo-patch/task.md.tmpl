@@ -1,0 +1,27 @@
+# $title
+
+This repository has one file, `runs.py`:
+
+```python
+"""Run-length helpers."""
+
+
+def longest_run(values: list[int]) -> int:
+    """Return the length of the longest strictly increasing run of neighbors."""
+    best = current = 1
+    for previous, value in zip(values, values[1:]):
+        if value >= previous:
+            current += 1
+            best = max(best, current)
+        else:
+            current = 1
+    return best
+```
+
+`longest_run` has bugs. Fix it so that:
+
+- An empty list returns `0`, and a single element returns `1`.
+- Only strictly increasing neighbors extend a run: `[1, 2, 2, 3]` returns `2`.
+- The signature stays the same.
+
+Answer with a unified diff against `runs.py` (headers `--- a/runs.py` and `+++ b/runs.py`).

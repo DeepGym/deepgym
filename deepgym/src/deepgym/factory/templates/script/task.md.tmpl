@@ -1,0 +1,20 @@
+# $title
+
+Write a Python script that reads whitespace-separated integers from standard input and
+prints one line: the length of the longest run of consecutive numbers where each number is
+strictly greater than the one before it.
+
+## Rules
+
+- No input numbers means no run: print `0`.
+- A single number is a run of length `1`.
+- Equal neighbors end a run: for `1 2 2 3` the runs are `1 2` and `2 3`, so print `2`.
+- Use only the standard library. Print nothing else.
+
+## Examples
+
+| stdin       | stdout |
+|-------------|--------|
+| `1 2 3 1 2` | `3`    |
+| `5 4 3`     | `1`    |
+| (empty)     | `0`    |

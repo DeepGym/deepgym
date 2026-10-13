@@ -1,0 +1,94 @@
+"""Final verifier for $name: test the agent's runs.py once the episode ends.
+
+It runs in the agent's work directory. The loader puts variants.py (metadata
+support_files) in front of this file rather than letting it import from that
+directory, where the agent could have rewritten it; that is where generate() comes
+from. load_solution() runs the agent's runs.py in an isolated process, and every
+call crosses that boundary as plain data, so the agent's code can't read the
+expected answers or hand back an object that equals anything. Every case is
+reported with a reason. A crash in this file exits 2 (verifier error, no reward)
+instead of a silent 0.
+
+To adapt it: point ENTRY and FUNCTION at what the agent must build, rewrite
+expected() and edit variants.py.
+"""
+
+import json
+import sys
+
+try:
+    from deepgym_solution import LaunchError, load_solution
+except ImportError as exc:  # a verifier error, never a silent 0
+    raise ImportError(
+        'deepgym_solution is unavailable: sandbox sessions provide it only on images with '
+        'sudo (a separate user runs the agent code); run this env locally or pick such an image'
+    ) from exc
+
+ENTRY = 'runs.py'
+"""The file the agent must fix, relative to its work directory."""
+
+FUNCTION = 'longest_run'
+
+SEED = 0
+"""Fixed, so every run scores the same cases (the QA gate checks determinism)."""
+
+RANDOM_CASES = 40
+
+
+def expected(values):
+    """The judge's own answer. Keep it simple and independent of the reference."""
+    best = 0
+    for start in range(len(values)):
+        end = start + 1
+        while end < len(values) and values[end] > values[end - 1]:
+            end += 1
+        best = max(best, end - start)
+    return best
+
+
+def run_case(index, values, function):
+    """Call the agent's code on one input and report the outcome with a reason."""
+    want = expected(values)
+    case = {'id': f'case_{index}', 'input_summary': repr(values)[:200]}
+    case['expected_summary'] = repr(want)[:200]
+    try:
+        got = function(values)
+    except LaunchError:
+        raise  # the machine couldn't start it: a verifier error, never the solution's 0
+    except Exception as exc:  # the agent's code raised or timed out on this input
+        return {**case, 'passed': False, 'error': f'raised {type(exc).__name__}: {exc}'[:300]}
+    passed = type(got) is type(want) and got == want
+    reason = {} if passed else {'error': f'expected {want!r}, got {got!r}'[:300]}
+    return {**case, 'passed': passed, 'actual_summary': repr(got)[:200], **reason}
+
+
+def result(cases, problem=None):
+    """Full marks only when every case passes; partial credit otherwise."""
+    passed = sum(case['passed'] for case in cases)
+    return {
+        'score': passed / len(cases) if cases else 0.0,
+        'passed': bool(cases) and passed == len(cases),
+        'details': problem or f'{passed}/{len(cases)} cases passed',
+        'cases': cases,
+        'seed': SEED,
+    }
+
+
+def verify():
+    """Score the agent's ENTRY file on every generated case."""
+    try:
+        function = getattr(load_solution(ENTRY), FUNCTION, None)
+    except LaunchError:
+        raise  # the machine couldn't start it: a verifier error, never the solution's 0
+    except Exception as exc:  # missing or broken file: the agent's fault, a real 0
+        return result([], f'{ENTRY} failed to load: {type(exc).__name__}: {exc}')
+    if not callable(function):
+        return result([], f'{ENTRY} has no function named {FUNCTION}')
+    inputs = generate(SEED, RANDOM_CASES)  # noqa: F821 - defined by the prepended variants.py
+    return result([run_case(index, values, function) for index, values in enumerate(inputs)])
+
+
+if __name__ == '__main__':
+    outcome = verify()
+    print(json.dumps({'schema_version': '1.0', **outcome}))
+    sys.exit(0 if outcome['passed'] else 1)

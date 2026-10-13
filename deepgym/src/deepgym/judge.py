@@ -154,8 +154,10 @@ _runs_root_lock = threading.Lock()
 _runs_root: list[str] = []
 
 
-def _local_runs_root() -> str:
+def local_runs_root() -> str:
     """One parent for every local run in this process, hidden from all solutions.
+
+    Anything else no local solution may read (an approval's snapshot) goes here too.
 
     Locked: parallel batch runs must share it, or each would hide only its own.
     """
@@ -171,32 +173,48 @@ def local_isolation(expose: list[str]) -> dict:
     """Isolation spec for a local run.
 
     Hides the home directory (repo clones, other worktrees, ~/.deepgym), all
-    runs, and the deepgym package. Re-exposes the Python installation and this
-    run's own *expose* directories; the package is hidden again even if it sits
-    inside the Python installation.
+    runs, the deepgym package, and /run and /var/run: daemon sockets there (Docker,
+    D-Bus, systemd) would act outside the sandbox on request, read-only mount or not.
+    Re-exposes the Python installation and this run's own *expose* directories; the
+    package is hidden again even if it sits inside the Python installation.
     """
     kind = local_isolation_kind()
     if kind == 'none':
         return {'kind': 'none'}
     package = os.path.realpath(Path(__file__).resolve().parent)
-    hide = [str(Path.home()), _local_runs_root()]
+    hide = [str(Path.home()), local_runs_root(), '/run', '/var/run']
     pythons = {os.path.realpath(p) for p in (sys.prefix, sys.base_prefix, sys.exec_prefix)}
     return {
         'kind': kind,
-        'hide': [os.path.realpath(p) for p in hide if os.path.exists(p)],
+        'hide': list(dict.fromkeys(os.path.realpath(p) for p in hide if os.path.exists(p))),
         'expose': [*sorted(pythons), *expose],
         'rehide': [package],
     }
 
 
 @contextlib.contextmanager
-def local_judge(job: JudgeJob) -> Iterator[tuple[list[str], dict[str, str], str]]:
+def local_judge(
+    job: JudgeJob, *, confined: bool = False
+) -> Iterator[tuple[list[str], dict[str, str], str]]:
     """Materialize *job* under the hidden runs root; yield (argv, env, cwd) for the judge.
 
     Sibling runs (e.g. other rollouts in a GRPO batch) can't read each other's
     judge files, solutions, or scratch: they all live under the hidden root.
+
+    *confined* also sandboxes the judge itself, for verifiers that might run code
+    in-process (mutation testing). The whole run goes inside one sandbox-exec or bwrap
+    sandbox: it writes only to the run's temp directory, sees nothing of the host
+    beyond the Python install and this run, has no network and gets a minimal
+    environment. The solution then runs in plain child processes inside it, since
+    sandbox-exec can't nest: the host is protected from everything in the run, but
+    the solution is not kept from the judge's files, so use this only for code that
+    isn't adversarial, such as mutants of a reference. The run's processes are torn
+    down with it and CPU-capped (see the runtime's ``--confine``).
+
+    Raises:
+        SandboxError: If *confined* but this machine has no sandbox-exec or bwrap.
     """
-    run_dir = tempfile.mkdtemp(dir=_local_runs_root())
+    run_dir = tempfile.mkdtemp(dir=local_runs_root())
     judge_dir, runtime_dir, solution_dir, tmp_dir = (
         f'{run_dir}/{part}' for part in ('judge', 'runtime', 'solution', 'tmp')
     )
@@ -211,15 +229,24 @@ def local_judge(job: JudgeJob) -> Iterator[tuple[list[str], dict[str, str], str]
         Path(runtime_path).write_text(RUNTIME_SOURCE, encoding='utf-8')
         solution_path = f'{solution_dir}/solution.py'
         Path(solution_path).write_text(job.solution, encoding='utf-8')
+        judge = [sys.executable, *job.verifier_args(judge_dir, solution_path)]
+        deadline = {'DEEPGYM_DEADLINE': str(time.time() + job.timeout), 'TMPDIR': tmp_dir}
+        if confined:
+            outer = local_isolation([run_dir])
+            if outer['kind'] == 'none':
+                raise SandboxError('confining the judge needs sandbox-exec or bwrap')
+            env = {
+                'PATH': os.environ.get('PATH', os.defpath),
+                **job.runtime_env(outer, runtime_path, sys.executable),
+                **deadline,
+            }
+            confine = [sys.executable, '-I', '-B', runtime_path, '--confine', tmp_dir]
+            yield [*confine, *judge], env, judge_dir
+            return
         isolation = local_isolation([runtime_dir, solution_dir])
-        env = {
-            **os.environ,
-            **job.runtime_env(isolation, runtime_path, sys.executable),
-            'DEEPGYM_DEADLINE': str(time.time() + job.timeout),
-            # Verifier temp files (and solution scratch dirs) stay inside this run.
-            'TMPDIR': tmp_dir,
-        }
-        yield [sys.executable, *job.verifier_args(judge_dir, solution_path)], env, judge_dir
+        # Verifier temp files (and solution scratch dirs) stay inside this run.
+        env = {**os.environ, **job.runtime_env(isolation, runtime_path, sys.executable), **deadline}
+        yield judge, env, judge_dir
     finally:
         shutil.rmtree(run_dir, ignore_errors=True)
 

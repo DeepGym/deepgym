@@ -11,7 +11,8 @@ from pathlib import Path
 from string import Template
 
 from deepgym.computer_use import ComputerUseEnvironment
-from deepgym.models import Environment
+from deepgym.models import REFERENCE_FILES, Environment, MultiTurnEnvironment
+from deepgym.verifier_template import split_future_imports
 
 logger = logging.getLogger(__name__)
 
@@ -269,13 +270,27 @@ _COMPUTER_USE_SPEC_FILES = frozenset(
 )
 
 
+_IGNORED_NAMES = frozenset({'__pycache__', '.git', '.DS_Store'})
+"""File and directory names that are never part of an environment folder."""
+
+
 def _read_text_files(root: Path, prefix: str = '') -> dict[str, str]:
-    """Map every text file under *root* (skipping __pycache__) to its contents."""
-    return {
-        f'{prefix}{path.relative_to(root).as_posix()}': path.read_text(encoding='utf-8')
-        for path in sorted(root.rglob('*'))
-        if path.is_file() and '__pycache__' not in path.parts
-    }
+    """Map every text file under *root* (skipping :data:`_IGNORED_NAMES`) to its contents.
+
+    Raises:
+        ValueError: If a file links outside *root*: whatever it points at would be
+            staged into the session as the env's own file.
+    """
+    real = root.resolve()
+    files = {}
+    for path in sorted(root.rglob('*')):
+        rel = path.relative_to(root)
+        if not path.is_file() or _IGNORED_NAMES.intersection(rel.parts):
+            continue
+        if not path.resolve().is_relative_to(real):
+            raise ValueError(f'{rel.as_posix()} links outside {root.name}; copy the file in')
+        files[f'{prefix}{rel.as_posix()}'] = path.read_text(encoding='utf-8')
+    return files
 
 
 def _load_computer_use_env(env_dir: Path, metadata: dict, variant: int) -> ComputerUseEnvironment:
@@ -320,9 +335,65 @@ def _load_computer_use_env(env_dir: Path, metadata: dict, variant: int) -> Compu
     )
 
 
+_MULTI_TURN_SPEC_FILES = frozenset(
+    {
+        'task.md',
+        'verifier.py',
+        'metadata.json',
+        'setup.sh',
+        'reference_actions.json',
+        'approval.json',
+        *REFERENCE_FILES,
+    }
+)
+
+
+def _load_multi_turn_env(env_dir: Path, settings: dict) -> MultiTurnEnvironment:
+    """Build a MultiTurnEnvironment from task.md, verifier.py, setup.sh and starting files.
+
+    Every other file (minus support files) is written into the session work directory
+    before setup runs. The final verifier runs inline in that directory, where the agent
+    could rewrite anything it imported, so support files are prepended to it instead,
+    with every part's ``from __future__`` imports hoisted to the top.
+    """
+    support = _read_support_files(env_dir, settings.get('support_files', []))
+    verifier = (env_dir / 'verifier.py').read_text(encoding='utf-8')
+    parts = [split_future_imports(source) for source in [*support.values(), verifier]]
+    support_paths = {(env_dir / rel).resolve() for rel in settings.get('support_files', [])}
+    setup_path = env_dir / 'setup.sh'
+    return MultiTurnEnvironment(
+        name=env_dir.name,
+        task=(env_dir / 'task.md').read_text(encoding='utf-8'),
+        files={
+            rel: text
+            for rel, text in _read_text_files(env_dir).items()
+            if rel not in _MULTI_TURN_SPEC_FILES and (env_dir / rel).resolve() not in support_paths
+        },
+        setup_script=setup_path.read_text(encoding='utf-8') if setup_path.exists() else '',
+        final_verifier_code=''.join(future for future, _ in parts)
+        + '\n\n'.join(rest for _, rest in parts),
+        **{
+            key: settings[key]
+            for key in ('difficulty', 'domain', 'tags', 'max_steps', 'timeout_per_step', 'image')
+            if key in settings
+        },
+    )
+
+
+def load_environment_dir(env_dir: Path) -> Environment | MultiTurnEnvironment:
+    """Load the environment in folder *env_dir*, registered or not.
+
+    Raises:
+        ValueError: If *env_dir* isn't a directory or required files are missing.
+    """
+    if not env_dir.is_dir():
+        raise ValueError(f'{env_dir} is not a directory')
+    return _load_env_from_dir(env_dir)
+
+
 def _load_env_from_dir(
     env_dir: Path, metadata: dict | None = None, variant: int = 0
-) -> Environment | ComputerUseEnvironment:
+) -> Environment | MultiTurnEnvironment:
     """Build an Environment from an environment directory.
 
     Args:
@@ -381,6 +452,8 @@ def _load_env_from_dir(
         json.loads(metadata_path.read_text(encoding='utf-8')) if metadata_path.exists() else {}
     )
     settings = {**file_metadata, **(metadata or {})}
+    if env_type == 'multi-turn':
+        return _load_multi_turn_env(env_dir, settings)
     return Environment(
         name=env_dir.name,
         task=task,
@@ -444,7 +517,7 @@ def _read_support_files(env_dir: Path, paths: list[str]) -> dict[str, str]:
     return files
 
 
-def load_environment(name: str, variant: int = 0) -> Environment | ComputerUseEnvironment:
+def load_environment(name: str, variant: int = 0) -> Environment | MultiTurnEnvironment:
     """Load an environment by name from the built-in library.
 
     Search order: registry.json entries, then built-in envs, then cache.
@@ -534,7 +607,7 @@ def load_environment(name: str, variant: int = 0) -> Environment | ComputerUseEn
     raise ValueError(f"Environment '{name}' not found. Available: {available}")
 
 
-def load_suite(suite_name: str) -> list[Environment | ComputerUseEnvironment]:
+def load_suite(suite_name: str) -> list[Environment | MultiTurnEnvironment]:
     """Load a suite of environments by difficulty, type, family, or 'all'.
 
     Computer-use environments need an agent rather than a single output, so
@@ -574,7 +647,7 @@ def load_suite(suite_name: str) -> list[Environment | ComputerUseEnvironment]:
             f'or families: {families}'
         )
 
-    environments: list[Environment | ComputerUseEnvironment] = []
+    environments: list[Environment | MultiTurnEnvironment] = []
     for entry in entries:
         env_dir = _find_env_dir(entry['path'])
         if env_dir is not None:

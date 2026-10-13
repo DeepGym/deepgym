@@ -1,0 +1,26 @@
+# $title
+
+Write a Python function `longest_run(values: list[int]) -> int` that returns the length of
+the longest run of consecutive elements in `values` where each element is strictly greater
+than the one before it.
+
+## Rules
+
+- An empty list has no run: return `0`.
+- A single element is a run of length `1`.
+- Equal neighbors end a run: `[1, 2, 2, 3]` has runs `[1, 2]` and `[2, 3]`, so the answer is `2`.
+
+## Examples
+
+```python
+longest_run([1, 2, 3, 1, 2])  # -> 3
+longest_run([5, 4, 3])        # -> 1
+longest_run([])               # -> 0
+```
+
+## Signature
+
+```python
+def longest_run(values: list[int]) -> int:
+    ...
+```

@@ -143,7 +143,7 @@ if __name__ == "__main__":
 """
 
 
-def _is_main_guard(node: ast.stmt) -> bool:
+def is_main_guard(node: ast.stmt) -> bool:
     """Return True for a top-level ``if __name__ == '__main__':`` statement."""
     if not isinstance(node, ast.If) or not isinstance(node.test, ast.Compare):
         return False
@@ -167,7 +167,7 @@ def detect_verifier_mode(source: str) -> ResolvedMode:
         tree = ast.parse(source)
     except SyntaxError:
         return 'body'
-    if any(_is_main_guard(node) for node in tree.body):
+    if any(is_main_guard(node) for node in tree.body):
         return 'script'
     if any(isinstance(node, ast.Return) for node in tree.body):
         return 'body'
@@ -176,7 +176,7 @@ def detect_verifier_mode(source: str) -> ResolvedMode:
     return 'body'
 
 
-def _split_future_imports(source: str) -> tuple[str, str]:
+def split_future_imports(source: str) -> tuple[str, str]:
     """Return (future import lines, rest of source); __future__ imports must come first."""
     try:
         tree = ast.parse(source)
@@ -203,7 +203,7 @@ def wrap_verifier(user_code: str) -> str:
         content = open(solution_path).read()
         return 1.0 if "def sort" in content else 0.0
     """
-    future, body = _split_future_imports(user_code)
+    future, body = split_future_imports(user_code)
     return _BODY_TEMPLATE.format(
         future=future,
         body=textwrap.indent(body.rstrip() or 'pass', '    '),

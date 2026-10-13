@@ -1,0 +1,10 @@
+[
+  {
+    "action_type": "write_file",
+    "path": "runs.py",
+    "content": "\"\"\"Run-length helpers.\"\"\"\n\n\ndef longest_run(values: list[int]) -> int:\n    \"\"\"Return the length of the longest strictly increasing run of neighbors.\"\"\"\n    if not values:\n        return 0\n    best = current = 1\n    for previous, value in zip(values, values[1:]):\n        if value > previous:\n            current += 1\n            best = max(best, current)\n        else:\n            current = 1\n    return best\n"
+  },
+  {
+    "action_type": "done"
+  }
+]

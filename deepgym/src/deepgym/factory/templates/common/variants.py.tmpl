@@ -1,0 +1,17 @@
+"""Seeded case generator for $name: the same seed always gives the same cases.
+
+The verifier calls generate() and computes every expected answer itself, so the
+cases never reach the solution. Replace the inputs below with your task's.
+"""
+
+import random
+
+EDGE_CASES = [[], [7], [3, 3, 3], [1, 2, 3, 4], [4, 3, 2, 1], [1, 2, 2, 3, 4]]
+"""Boundary inputs that catch off-by-one bugs; they always run first."""
+
+
+def generate(seed, count):
+    """Return the edge cases, then *count* random inputs drawn from *seed*."""
+    rng = random.Random(seed)
+    randoms = [[rng.randint(-3, 3) for _ in range(rng.randint(0, 12))] for _ in range(count)]
+    return EDGE_CASES + randoms

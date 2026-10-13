@@ -10,7 +10,7 @@ from enum import Enum
 from pathlib import Path, PurePosixPath
 from typing import Any, Literal, get_args
 
-from pydantic import BaseModel, Field, field_validator, model_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from deepgym.exceptions import InvalidScoreError
 
@@ -67,6 +67,9 @@ VerifierMode = Literal['auto', 'script', 'verify_function', 'body']
 # Files the judge directory always contains; support files can't shadow them.
 RESERVED_JUDGE_FILES = frozenset({'verifier.py', 'deepgym_solution.py', 'test_cases.json'})
 
+REFERENCE_FILES = ('reference_solution.py', 'reference_solution.diff')
+"""Where an env folder keeps the model output that must score 1.0 (a diff for repo patches)."""
+
 
 class Environment(BaseModel):
     """Define a task environment for RL evaluation.
@@ -112,11 +115,13 @@ class Environment(BaseModel):
 
     @property
     def reference_solution(self) -> str | None:
-        """A model output that should score 1.0: reference_solution.py next to the verifier."""
+        """A model output that should score 1.0: the first of REFERENCE_FILES next to the
+        verifier (reference_solution.py, or reference_solution.diff for a repo patch)."""
         if self.verifier_path is None:
             return None
-        path = self.verifier_path.parent / 'reference_solution.py'
-        return path.read_text(encoding='utf-8') if path.is_file() else None
+        folder = self.verifier_path.parent
+        path = next((folder / name for name in REFERENCE_FILES if (folder / name).is_file()), None)
+        return path.read_text(encoding='utf-8') if path else None
 
     language: str = 'python'
     """Programming language for the solution."""
@@ -157,6 +162,37 @@ class Environment(BaseModel):
 
     env_vars: dict[str, str] | None = None
     """Environment variables to inject into the sandbox."""
+
+
+class EnvMetadata(BaseModel):
+    """Schema of an environment folder's metadata.json, as ``deepgym check`` validates it.
+
+    Unknown keys are rejected so a typo ('dificulty') fails instead of silently
+    falling back to a default.
+    """
+
+    model_config = ConfigDict(frozen=True, extra='forbid')
+
+    id: str | None = None
+    name: str = Field(min_length=1)
+    type: Literal['coding', 'computer-use', 'tool-use', 'multi-turn'] = 'coding'
+    difficulty: Literal['easy', 'medium', 'hard'] = 'medium'
+    domain: str = 'coding'
+    family: str | None = None
+    tags: list[str] = Field(default_factory=list)
+    support_files: list[str] = Field(default_factory=list)
+    """Files the verifier imports, relative to the folder (single-turn: placed next to it;
+    multi-turn: prepended to it, since it runs where the agent can rewrite files)."""
+    verifier_mode: VerifierMode = 'auto'
+    timeout: int = Field(default=30, ge=1)
+    case_timeout: int = Field(default=10, ge=1)
+    image: str | None = None
+    max_steps: int = Field(default=10, ge=1)
+    timeout_per_step: int = Field(default=30, ge=1)
+    repo_dir: str | None = None
+    """Image-based repo patch envs (test_patch.diff): where the repo lives in the image."""
+    test_command: str | None = None
+    """Image-based repo patch envs: the command whose exit code scores the patch."""
 
 
 class CaseResult(BaseModel):

@@ -13,6 +13,10 @@ themselves::
     # As a client of a server the judge runs on 127.0.0.1:port; no other network.
     proc = run_solution(solution_path, [f'http://127.0.0.1:{port}/'], loopback_port=port)
 
+    # A repo task: apply the model's diff to fixture files in memory, then import the result.
+    files = apply_patch(solution_source(solution_path), {'calc.py': fixture_text})
+    solution = load_files(files, 'calc.py')
+
 The solution process can't read the judge's files or memory, so it can't see
 expected answers, patch the verifier, or print a fake score. Only plain data
 crosses the boundary (None, bool, int, float, str, bytes, list, tuple, set,
@@ -23,8 +27,8 @@ Each call is bounded by DEEPGYM_CASE_TIMEOUT and by the run's overall
 DEEPGYM_DEADLINE, so a slow case fails on its own instead of sinking the run.
 
 Stdlib only: this file is copied next to the verifier as ``deepgym_solution.py``
-and also runs as the solution-side server (``python -I deepgym_solution.py --serve``)
-and loopback forwarder (``--forward``).
+and also runs as the solution-side server (``python -I deepgym_solution.py --serve``),
+loopback forwarder (``--forward``) and judge confiner (``--confine``).
 """
 
 from __future__ import annotations
@@ -38,6 +42,7 @@ import json
 import math
 import os
 import queue
+import re
 import selectors
 import shlex
 import signal
@@ -57,10 +62,22 @@ if hasattr(sys, 'set_int_max_str_digits'):
 _MAX_DEPTH = 100
 _MAX_MESSAGE = 64 * 1024 * 1024
 _LOAD_TIMEOUT_S = 30.0
+_READY = '{"ready": true}\n'
+"""The server's first line, written before it touches the solution."""
+_CONFINE_GRACE_S = 3
+"""Seconds past the deadline a confined judge gets; the host waits 5 (DEADLINE_GRACE_S)."""
 
 
 class SolutionError(Exception):
     """Raise when the solution raised a non-builtin exception or broke the protocol."""
+
+
+class LaunchError(RuntimeError):
+    """Raise when the judge can't start the solution's process (out of processes, say).
+
+    The machine failed, not the solution: a verifier lets this propagate, so the run
+    ends as a verifier error with no verdict instead of scoring the solution 0.
+    """
 
 
 # ---------------------------------------------------------------------------
@@ -227,7 +244,10 @@ def _launch_argv(
     """Wrap *command* to run as the isolated solution: empty env, writes only in *workdir*.
 
     *loopback_port* only matters on macOS, where the solution shares the judge's
-    network stack; elsewhere :func:`_loopback` forwards the port.
+    network stack; elsewhere :func:`_loopback` forwards the port. A ``none`` spec with
+    ``no_fork`` (inside a macOS-confined judge, see :func:`_confine`) lets the command
+    start no processes at all, *allow_fork* or not: nothing there could reap one that
+    detaches.
     """
     spec = _isolation()
     writable = [workdir]
@@ -252,6 +272,8 @@ def _launch_argv(
             argv += ['--bind', path, path]
         argv += ['--unshare-all', '--die-with-parent', '--new-session', '--chdir', workdir]
         return [*argv, *clean, *command]
+    if spec.get('no_fork'):
+        return [*clean, _python(), '-I', '-S', '-c', _NO_FORK, *command]
     return [*clean, *command]
 
 
@@ -283,6 +305,19 @@ def _relay(listener: socket.socket, connect: Callable[[], socket.socket]) -> Non
 
     threading.Thread(target=accept, daemon=True).start()
 
+
+# Run as a prefix: the command (argv[1:]) and whatever it runs may start no processes.
+_NO_FORK = (
+    'import os, resource, sys; resource.setrlimit(resource.RLIMIT_NPROC, (0, 0)); '
+    'os.execvp(sys.argv[1], sys.argv[1:])'
+)
+
+# Run as a prefix: say on fd argv[1] that the solution's Python is up, close it so the
+# script never holds it, then exec the rest.
+_STARTED = (
+    'import os, sys; fd = int(sys.argv[1]); os.write(fd, b"1"); os.close(fd); '
+    'os.execvp(sys.argv[2], sys.argv[2:])'
+)
 
 # Run in a child: bind the inherited socket (argv[1]) at argv[2] with umask 0.
 _BIND_ANY_USER = (
@@ -344,6 +379,48 @@ def _scratch_dir() -> str:
     return tempfile.mkdtemp(prefix='deepgym_run_')
 
 
+@contextlib.contextmanager
+def _start_signal() -> Iterator[tuple[list[str], tuple[int, ...], Callable[[], bool]]]:
+    """Yield a command prefix that writes to a pipe once the solution's Python is up,
+    the descriptors to pass on, and a check of whether it did.
+
+    The script never holds the pipe, so it can't fake a launch failure. setpriv and
+    unshare pass the pipe on; sudo (a sandbox judge that isn't root) closes it, so
+    there nothing is checked.
+    """
+    spec = _isolation()
+    if any(os.path.basename(arg) == 'sudo' for arg in spec.get('prefix', [])):
+        yield [], (), lambda: True
+        return
+    read_end, write_end = os.pipe()
+    os.set_blocking(read_end, False)
+
+    def started() -> bool:
+        try:
+            return os.read(read_end, 1) == b'1'
+        except BlockingIOError:
+            return False
+
+    try:
+        yield [_python(), '-I', '-S', '-c', _STARTED, str(write_end)], (write_end,), started
+    finally:
+        os.close(read_end)
+        os.close(write_end)
+
+
+@contextlib.contextmanager
+def _launching() -> Iterator[None]:
+    """Turn the judge's own errors while starting the solution into :class:`LaunchError`.
+
+    That is OS errors and RuntimeError (a thread that can't start); no solution code
+    runs inside.
+    """
+    try:
+        yield
+    except (OSError, RuntimeError) as exc:
+        raise LaunchError(f'could not start the solution: {exc}') from exc
+
+
 def _kill(proc: subprocess.Popen) -> None:
     """Kill an isolated process and everything in its process group."""
     spec = _isolation()
@@ -397,9 +474,11 @@ def run_solution(
 
     Raises:
         subprocess.TimeoutExpired: If it runs past *timeout* (default: the case timeout).
+        LaunchError: If the process can't be started, or never got Python going.
     """
     path = os.path.abspath(solution_path)
-    workdir = os.path.abspath(cwd or _scratch_dir())
+    with _launching():
+        workdir = os.path.abspath(cwd or _scratch_dir())
     command = [_python(), '-B', path, *args]
     limit = _call_timeout() if timeout is None else min(timeout, _remaining())
     # Output goes to files, not pipes: a forked child holding a pipe open would
@@ -408,19 +487,26 @@ def run_solution(
         tempfile.TemporaryFile() as out,
         tempfile.TemporaryFile() as err,
         _loopback(loopback_port) as forwarder,
+        _start_signal() as (prefix, signal_fds, started),
     ):
-        proc = subprocess.Popen(
-            _launch_argv([*forwarder, *command], workdir, env, allow_subprocess, loopback_port),
-            stdin=subprocess.PIPE if input is not None else subprocess.DEVNULL,
-            stdout=out,
-            stderr=err,
-            cwd=workdir,
-            start_new_session=True,
-        )
+        launch = [*prefix, *forwarder, *command]
+        argv = _launch_argv(launch, workdir, env, allow_subprocess, loopback_port)
+        with _launching():
+            proc = subprocess.Popen(
+                argv,
+                stdin=subprocess.PIPE if input is not None else subprocess.DEVNULL,
+                stdout=out,
+                stderr=err,
+                cwd=workdir,
+                start_new_session=True,
+                pass_fds=signal_fds,
+            )
         try:
             proc.communicate(None if input is None else input.encode(), timeout=limit)
         finally:
             _kill(proc)
+        if not started():
+            raise LaunchError('the solution process did not start')
         out.seek(0)
         err.seek(0)
         stdout = out.read(_MAX_MESSAGE).decode('utf-8', 'replace')
@@ -492,6 +578,124 @@ def solution_source(solution_path: str, name: str | None = None) -> str:
     return source
 
 
+_HUNK_HEADER = re.compile(r'@@ -(\d+)(?:,(\d+))? \+\d+(?:,(\d+))? @@')
+# Git's extended headers for the file operations apply_patch refuses.
+_FILE_OPS = re.compile(r'(?:new|deleted) file mode |(?:rename|copy) (?:from|to) ')
+# str.splitlines also breaks at U+2028 and other separators a string literal may contain.
+_LINE = re.compile(r'.*\n|.+\Z')
+
+
+def _diff_path(header: str) -> str:
+    """File name from a ``--- a/x`` or ``+++ b/x`` line, without the a/ or b/ prefix.
+
+    Git quotes a path with special characters C-style (``"b/caf\\303\\251.py"``), or with
+    the characters left as they are under ``core.quotePath=false``; that is decoded first.
+    """
+    path = header[4:].split('\t')[0].strip()
+    if len(path) > 1 and path[0] == path[-1] == '"':
+        # Literal characters go in as UTF-8 bytes, which unicode_escape maps one to one
+        # onto Latin-1 characters, exactly as it maps the octal escapes.
+        escaped = path[1:-1].encode('utf-8').decode('unicode_escape')
+        path = escaped.encode('latin-1').decode('utf-8')
+    return path[2:] if path.startswith(('a/', 'b/')) else path
+
+
+def _apply_hunks(name: str, text: str, lines: list[str], index: int) -> tuple[str, int]:
+    """Apply the hunks starting at ``lines[index]`` to *text*; return it and the next index.
+
+    As ``git apply`` does, text after the last hunk is left alone unless it starts like
+    a hunk header (``@@ -``), which makes the patch corrupt.
+
+    Raises:
+        ValueError: If no hunk follows the file header, or a hunk is malformed or
+            doesn't match.
+    """
+    source = _LINE.findall(text)
+    # Added lines take the file's line ending; the patch's own was stripped with its \r.
+    newline = '\r\n' if source and source[0].endswith('\r\n') else '\n'
+    output: list[str] = []
+    pos, first = 0, index
+    while index < len(lines) and (header := _HUNK_HEADER.match(lines[index])):
+        old_left, new_left = int(header[2] or 1), int(header[3] or 1)
+        # A pure insertion (-N,0) goes after line N; any other hunk starts at line N.
+        start = int(header[1]) if old_left == 0 else max(int(header[1]) - 1, 0)
+        if start < pos:
+            raise ValueError(f'{name}: hunks overlap or are out of order')
+        if start > len(source):
+            raise ValueError(f'{name}: hunk starts at line {header[1]}, past the end of the file')
+        output += source[pos:start]
+        pos, index, tag = start, index + 1, ' '
+        # Counts cover the hunk's lines; a "\ No newline" marker may follow the last one.
+        while (
+            old_left > 0 or new_left > 0 or (index < len(lines) and lines[index].startswith('\\'))
+        ):
+            if index >= len(lines):
+                raise ValueError(f'{name}: patch ends inside a hunk')
+            line = lines[index]
+            index += 1
+            if line.startswith('\\'):  # "\ No newline at end of file" for the line before
+                if tag == '+':
+                    output[-1] = output[-1].removesuffix(newline)
+                continue
+            # A blank line inside a hunk is blank context whose leading space was stripped.
+            tag, body = (line[0], line[1:]) if line else (' ', '')
+            if tag == '+':
+                output.append(body + newline)
+                new_left -= 1
+                continue
+            if tag not in ' -':
+                raise ValueError(f'{name}: unexpected line in hunk: {line[:80]!r}')
+            if pos >= len(source) or source[pos].rstrip('\r\n') != body:
+                raise ValueError(f'{name}: hunk does not match line {pos + 1}')
+            if tag == ' ':
+                output.append(source[pos])
+                new_left -= 1
+            old_left -= 1
+            pos += 1
+        if old_left < 0 or new_left < 0:
+            raise ValueError(f'{name}: hunk line counts do not match its header')
+    if index < len(lines) and lines[index].startswith('@@ -'):
+        raise ValueError(f'{name}: malformed hunk header {lines[index][:80]!r}')
+    if index == first:
+        raise ValueError(f'{name}: no hunk follows the file header')
+    return ''.join(output + source[pos:]), index
+
+
+def apply_patch(patch: str, files: dict[str, str]) -> dict[str, str]:
+    """Apply a unified diff to in-memory *files* and return the patched copy.
+
+    Text in, text out: nothing touches the filesystem, and only files already in
+    *files* can change (creating, deleting or renaming files isn't supported), so a
+    patch can't reach anything the judge didn't hand over. Hunks must match exactly
+    at the line their header names; text around the diff (prose, code fences) is ignored.
+
+    Raises:
+        ValueError: If the patch has no file diffs, edits an unknown file, creates,
+            deletes, renames or copies one, or a hunk doesn't match.
+    """
+    patched = dict(files)
+    lines = [line.removesuffix('\n').removesuffix('\r') for line in _LINE.findall(patch)]
+    if any(_FILE_OPS.match(line) for line in lines):
+        raise ValueError('creating, deleting, renaming or copying files is not supported')
+    index, applied = 0, False
+    while index < len(lines) - 1:
+        if not (lines[index].startswith('--- ') and lines[index + 1].startswith('+++ ')):
+            index += 1
+            continue
+        old, name = _diff_path(lines[index]), _diff_path(lines[index + 1])
+        if '/dev/null' in (old, name):
+            raise ValueError('creating or deleting files is not supported')
+        if old != name:
+            raise ValueError(f'patch renames {old!r} to {name!r}; renaming is not supported')
+        if name not in patched:
+            raise ValueError(f'patch edits {name!r}, which is not one of {sorted(files)}')
+        patched[name], index = _apply_hunks(name, patched[name], lines, index + 2)
+        applied = True
+    if not applied:
+        raise ValueError('no unified diff found (expected --- a/<file> and +++ b/<file> lines)')
+    return patched
+
+
 # ---------------------------------------------------------------------------
 # Judge side: module proxy over a pipe
 # ---------------------------------------------------------------------------
@@ -500,8 +704,9 @@ def solution_source(solution_path: str, name: str | None = None) -> str:
 class _Runner:
     """One solution-side server process, restarted after a timeout or crash."""
 
-    def __init__(self, solution_path: str) -> None:
-        self._path = os.path.abspath(solution_path)
+    def __init__(self, solution_path: str, files: dict[str, str] | None = None) -> None:
+        self._path = solution_path if files is not None else os.path.abspath(solution_path)
+        self._files = files
         self._proc: subprocess.Popen | None = None
         self._replies: queue.Queue[str | None] = queue.Queue()
         self._next_id = 0
@@ -510,21 +715,50 @@ class _Runner:
         atexit.register(self.close)
 
     def _start(self) -> None:
-        workdir = _scratch_dir()
-        command = [_python(), '-I', '-B', _runtime(), '--serve', self._path]
-        self._proc = subprocess.Popen(
-            _launch_argv(command, workdir),
-            stdin=subprocess.PIPE,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.DEVNULL,
-            cwd=workdir,
-            start_new_session=True,
-        )
-        # Requests are written without blocking, so a server that stops reading can't
-        # hold a call past its deadline (see _write).
-        os.set_blocking(self._proc.stdin.fileno(), False)
-        self._replies = queue.Queue()
-        threading.Thread(target=self._read, args=(self._proc, self._replies), daemon=True).start()
+        with _launching():
+            workdir = _scratch_dir()
+            path = self._path
+            if self._files is not None:
+                # Fresh copies on every (re)start: earlier runs may have rewritten them.
+                for rel, text in self._files.items():
+                    target = os.path.join(workdir, rel)
+                    os.makedirs(os.path.dirname(target), exist_ok=True)
+                    with open(target, 'w', encoding='utf-8') as handle:
+                        handle.write(text)
+                path = os.path.join(workdir, self._path)
+            command = [_python(), '-I', '-B', _runtime(), '--serve', path]
+            if self._files is not None:
+                command.append(workdir)
+            self._proc = subprocess.Popen(
+                _launch_argv(command, workdir),
+                stdin=subprocess.PIPE,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.DEVNULL,
+                cwd=workdir,
+                start_new_session=True,
+            )
+            try:
+                # Requests are written without blocking, so a server that stops reading
+                # can't hold a call past its deadline (see _write).
+                os.set_blocking(self._proc.stdin.fileno(), False)
+                self._replies = queue.Queue()
+                reader = threading.Thread(target=self._read, args=(self._proc, self._replies))
+                reader.daemon = True
+                reader.start()
+            except BaseException:
+                self._dead()
+                raise
+        # The server reports in before it touches the solution, so a failure before that
+        # (a launcher that never got Python going) is the machine's, not the solution's.
+        try:
+            ready = self._replies.get(timeout=min(_LOAD_TIMEOUT_S, _remaining()))
+        except queue.Empty:
+            ready = None
+        if ready != _READY:
+            self._dead()
+            if _remaining() <= 0:  # earlier calls used up the run: the solution's doing
+                raise TimeoutError('the run is out of time')
+            raise LaunchError('the solution process did not start')
         self.exports = self._send({'op': 'load'}, min(_LOAD_TIMEOUT_S, _remaining()))
 
     @staticmethod
@@ -694,13 +928,45 @@ def load_solution(solution_path: str) -> _RemoteModule:
     return _RemoteModule(_Runner(solution_path))
 
 
+def load_files(files: dict[str, str], entry: str) -> _RemoteModule:
+    """Import *entry* from *files* in the isolated domain and return a proxy for it.
+
+    For code the judge assembles itself, such as a fixture repo with the model's patch
+    applied (see :func:`apply_patch`). The files are written into the isolated
+    process's own fresh directory, the only place it can read and write besides its
+    runtime, so the entry module can import its siblings. Paths are relative.
+
+    Raises:
+        ValueError: If a path is absolute, climbs out with '..', or *entry* isn't in *files*.
+        Exception: The code's own import error (SyntaxError, ImportError, ...).
+        TimeoutError: If importing takes too long.
+    """
+    for rel in files:
+        parts = rel.replace('\\', '/').split('/')
+        if os.path.isabs(rel) or '..' in parts or '' in parts:
+            raise ValueError(f'file path {rel!r} must be relative, without ".." or empty parts')
+    if entry not in files:
+        raise ValueError(f'entry {entry!r} is not one of {sorted(files)}')
+    return _RemoteModule(_Runner(entry, dict(files)))
+
+
 # ---------------------------------------------------------------------------
 # Solution side: the server
 # ---------------------------------------------------------------------------
 
 
-def _serve(solution_path: str) -> None:
-    """Load the solution and answer calls over the original stdin/stdout pipes."""
+def _serve(solution_path: str, root: str | None = None) -> None:
+    """Load the solution and answer calls over the original stdin/stdout pipes.
+
+    With *root* (files from :func:`load_files`), the entry is imported the normal way
+    with *root* on the path, so its packages run their ``__init__``, it sits in
+    ``sys.modules`` under its dotted name and import cycles resolve; otherwise it is
+    module ``solution`` with its own directory on the path.
+
+    It exits when the judge closes the pipe, even if the solution left threads
+    running, and within half a second of the judge dying mid-call (its parent
+    changes), so a server never outlives its run where nothing else would reap it.
+    """
     requests = os.fdopen(os.dup(0), 'r', encoding='utf-8')
     replies = os.fdopen(os.dup(1), 'w', encoding='utf-8')
     null = os.open(os.devnull, os.O_RDWR)
@@ -708,6 +974,17 @@ def _serve(solution_path: str) -> None:
     os.dup2(2, 1)
     handles: dict[int, Any] = {}
     module: Any = None
+    # Bound before the solution loads: it may rebind os or time.
+    getppid, sleep, exit_now, parent = os.getppid, time.sleep, os._exit, os.getppid()
+
+    def watch_judge() -> None:
+        while getppid() == parent:
+            sleep(0.5)
+        exit_now(1)
+
+    threading.Thread(target=watch_judge, daemon=True).start()
+    replies.write(_READY)
+    replies.flush()
 
     def decode(data: Any) -> Any:
         return _decode(data, lambda tag: handles[tag['$h']])
@@ -723,9 +1000,24 @@ def _serve(solution_path: str) -> None:
         try:
             op = message['op']
             if op == 'load':
-                spec = importlib.util.spec_from_file_location('solution', solution_path)
-                module = importlib.util.module_from_spec(spec)
-                spec.loader.exec_module(module)
+                # -I leaves the module's own directory off the path.
+                if root is None:
+                    sys.path.insert(0, os.path.dirname(os.path.abspath(solution_path)))
+                    spec = importlib.util.spec_from_file_location('solution', solution_path)
+                    module = importlib.util.module_from_spec(spec)
+                    spec.loader.exec_module(module)
+                else:
+                    # A top-level file named like a module this process already loaded
+                    # (json.py, say) would import as that module, not as the file.
+                    tops = {entry.removesuffix('.py') for entry in os.listdir(root)}
+                    if taken := sorted(tops & sys.modules.keys()):
+                        raise ImportError(
+                            f'files {taken} name modules the runtime already loaded; rename them'
+                        )
+                    name = os.path.splitext(os.path.relpath(solution_path, root))[0]
+                    name = name.replace(os.sep, '.').removesuffix('.__init__')  # pkg, once
+                    sys.path.insert(0, root)
+                    module = importlib.import_module(name)
                 exports = {
                     name: 'callable' if callable(obj) else 'value'
                     for name, obj in vars(module).items()
@@ -747,6 +1039,7 @@ def _serve(solution_path: str) -> None:
             }
         replies.write(json.dumps(reply) + '\n')
         replies.flush()
+    exit_now(0)
 
 
 def _forward(port: int, judge_socket: str, command: list[str]) -> int:
@@ -761,11 +1054,63 @@ def _forward(port: int, judge_socket: str, command: list[str]) -> int:
     return subprocess.call(command)
 
 
+def _confine(workdir: str, command: list[str]) -> int:
+    """Run *command* (a whole judge) in this process's DEEPGYM_ISOLATION sandbox.
+
+    It may write only in *workdir*, sees nothing of the host beyond what the spec
+    exposes, and has no network; it keeps this process's working directory. Whatever
+    it starts shares that sandbox, so it is told to add no isolation of its own
+    (sandbox-exec can't nest): for a judge that might run code in-process (as under
+    mutation testing), the sandbox holds the entire run.
+
+    Nothing outlives it on CPU: the judge runs in its own process group, killed when it
+    exits or at the run's deadline (plus :data:`_CONFINE_GRACE_S`, inside the host's own
+    timeout), and every process of the run inherits a hard CPU limit of about twice the
+    run's time, which setsid() doesn't escape. Under bwrap the PID namespace dies with
+    the run. sandbox-exec has no such namespace, so there the code the judge launches
+    (load_solution and run_solution, allow_subprocess or not) may start no processes;
+    code the judge ran in-process could still start one that detaches and lingers,
+    idle, which is why mutation testing runs locally only under bwrap (see
+    :func:`deepgym.qa.mutants.mutation_check`).
+
+    Returns:
+        The judge's exit code, or 124 if it outran the deadline.
+    """
+    import resource  # Unix only, like the sandboxes this runs in
+
+    env = {key: value for key, value in os.environ.items() if key != 'DEEPGYM_ISOLATION'}
+    inner = json.dumps({'kind': 'none', 'no_fork': _isolation()['kind'] == 'macos'})
+    argv = _launch_argv(command, workdir, {**env, 'DEEPGYM_ISOLATION': inner}, allow_fork=True)
+    if '--chdir' in argv:  # bwrap: start where an unconfined judge would, not in workdir
+        argv[argv.index('--chdir') + 1] = os.getcwd()
+    seconds = _remaining()
+    limit = None
+    if math.isfinite(seconds):
+        limit = seconds + _CONFINE_GRACE_S
+        cpu = math.ceil(2 * limit)
+        resource.setrlimit(resource.RLIMIT_CPU, (cpu, cpu))
+    judge = subprocess.Popen(argv, start_new_session=True)
+    try:
+        return judge.wait(timeout=limit)
+    except subprocess.TimeoutExpired:
+        return 124
+    finally:
+        with contextlib.suppress(ProcessLookupError, PermissionError):
+            os.killpg(judge.pid, signal.SIGKILL)
+        with contextlib.suppress(Exception):
+            judge.wait(timeout=5)
+
+
 if __name__ == '__main__' and sys.argv[1:2] == ['--serve']:
-    _serve(sys.argv[2])
+    _serve(sys.argv[2], *sys.argv[3:4])
 elif __name__ == '__main__' and sys.argv[1:2] == ['--forward']:
     sys.exit(_forward(int(sys.argv[2]), sys.argv[3], sys.argv[4:]))
+elif __name__ == '__main__' and sys.argv[1:2] == ['--confine']:
+    sys.exit(_confine(sys.argv[2], sys.argv[3:]))
 elif __name__ == '__main__':
-    usage = '--serve <solution.py> | --forward <port> <socket> <command...>'
+    usage = (
+        '--serve <solution.py> | --forward <port> <socket> <command...> '
+        '| --confine <dir> <command...>'
+    )
     print(f'usage: {shlex.quote(sys.argv[0])} {usage}', file=sys.stderr)
     sys.exit(2)

@@ -11,7 +11,7 @@ from deepgym.integrations.verl import extract_code
 from deepgym.integrations.zai import ZaiChatClient
 from deepgym.models import Environment
 from deepgym.qa.checks import solved
-from deepgym.qa.report import QACheck, verdict
+from deepgym.qa.report import DIFFICULTY_CHECK, QACheck, verdict
 
 if TYPE_CHECKING:
     from deepgym.core import DeepGym
@@ -41,7 +41,7 @@ def difficulty_check(env: Environment, dg: DeepGym, client: ZaiChatClient, sampl
     The last fenced code block of each completion is the solution. A sample counts
     as solved at full marks. When every sample is solved (too_easy) or none is
     (too_hard), group-relative RL gets no signal from this env for this model, so
-    the check fails.
+    the check fails. A sample the verifier couldn't judge makes it inconclusive.
 
     Raises:
         httpx.HTTPError: If the model endpoint rejects a request.
@@ -53,10 +53,13 @@ def difficulty_check(env: Environment, dg: DeepGym, client: ZaiChatClient, sampl
     with ThreadPoolExecutor(max_workers=samples) as pool:
         completions = list(pool.map(sample, range(samples)))
     results = dg.run_batch(env, [extract_code(text) for text in completions]).results
+    if errored := sum(not result.has_verdict for result in results):
+        details = f'{errored}/{samples} samples got no verdict (the verifier errored)'
+        return QACheck(name=DIFFICULTY_CHECK, status='inconclusive', details=details)
     count = sum(solved(result) for result in results)
     flag = 'too_easy: ' if count == samples else 'too_hard: ' if count == 0 else ''
     details = (
         f'{flag}pass@1={count / samples:.2f} pass@{samples}={float(count > 0):.2f} '
         f'({count}/{samples} solved by {client.model})'
     )
-    return QACheck(name='difficulty', status=verdict(not flag), details=details)
+    return QACheck(name=DIFFICULTY_CHECK, status=verdict(not flag), details=details)

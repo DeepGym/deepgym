@@ -1,0 +1,15 @@
+"""Reference solution for $name: it must score 1.0 on every run."""
+
+
+def longest_run(values: list[int]) -> int:
+    """Return the length of the longest strictly increasing run of neighbors."""
+    if not values:
+        return 0
+    best = current = 1
+    for previous, value in zip(values, values[1:]):
+        if value > previous:
+            current += 1
+            best = max(best, current)
+        else:
+            current = 1
+    return best

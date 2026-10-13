@@ -300,7 +300,14 @@ def _extract_json_line(stdout: str) -> str | None:
 
 
 class LocalExecutor:
-    """Run verifiers locally, with the solution in a sandboxed subprocess where available."""
+    """Run verifiers locally, with the solution in a sandboxed subprocess where available.
+
+    *confined* puts each whole judge run in the sandbox too (see
+    :func:`~deepgym.judge.local_judge`).
+    """
+
+    def __init__(self, *, confined: bool = False) -> None:
+        self.confined = confined
 
     def run(self, job: JudgeJob) -> ExecutionResult:
         """Run *job*'s verifier as a local subprocess.
@@ -310,7 +317,7 @@ class LocalExecutor:
             VerifierError: If the verifier prints no protocol JSON.
         """
         _validate_env_vars(job.env_vars)
-        with local_judge(job) as (argv, env, cwd):
+        with local_judge(job, confined=self.confined) as (argv, env, cwd):
             try:
                 proc = subprocess.run(
                     argv,

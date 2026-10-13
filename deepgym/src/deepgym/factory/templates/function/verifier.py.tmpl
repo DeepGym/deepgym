@@ -1,0 +1,74 @@
+"""Verifier for $name: call the solution's function on seeded cases and compare.
+
+The judge never imports or runs the solution itself. load_solution() starts it in an
+isolated process, and every call crosses that boundary as plain data, so the
+solution can't read the expected answers or hand back an object that equals
+anything. Every case is reported with a reason. A bug in this file ends the run as a
+verifier error (no reward) instead of a silent 0.
+
+To adapt it: rename ENTRY, rewrite expected() for your task, and edit variants.py.
+"""
+
+from deepgym_solution import LaunchError, load_solution
+from variants import generate
+
+ENTRY = 'longest_run'
+"""The function task.md asks for."""
+
+SEED = 0
+"""Fixed, so every run scores the same cases (the QA gate checks determinism)."""
+
+RANDOM_CASES = 40
+
+
+def expected(values):
+    """The judge's own answer. Keep it simple and independent of the reference."""
+    best = 0
+    for start in range(len(values)):
+        end = start + 1
+        while end < len(values) and values[end] > values[end - 1]:
+            end += 1
+        best = max(best, end - start)
+    return best
+
+
+def run_case(index, values, function):
+    """Call the solution on one input and report the outcome with a reason."""
+    want = expected(values)
+    case = {'id': f'case_{index}', 'input_summary': repr(values)[:200]}
+    case['expected_summary'] = repr(want)[:200]
+    try:
+        got = function(values)
+    except LaunchError:
+        raise  # the machine couldn't start it: a verifier error, never the solution's 0
+    except Exception as exc:  # the solution raised or timed out on this input
+        return {**case, 'passed': False, 'error': f'raised {type(exc).__name__}: {exc}'[:300]}
+    passed = type(got) is type(want) and got == want
+    reason = {} if passed else {'error': f'expected {want!r}, got {got!r}'[:300]}
+    return {**case, 'passed': passed, 'actual_summary': repr(got)[:200], **reason}
+
+
+def result(cases, problem=None):
+    """Full marks only when every case passes; partial credit otherwise."""
+    passed = sum(case['passed'] for case in cases)
+    return {
+        'score': passed / len(cases) if cases else 0.0,
+        'passed': bool(cases) and passed == len(cases),
+        'details': problem or f'{passed}/{len(cases)} cases passed',
+        'cases': cases,
+        'seed': SEED,
+    }
+
+
+def verify(solution_path, test_cases_path=None):
+    """Score the solution at *solution_path* on every generated case."""
+    try:
+        function = getattr(load_solution(solution_path), ENTRY, None)
+    except LaunchError:
+        raise  # the machine couldn't start it: a verifier error, never the solution's 0
+    except Exception as exc:  # the solution doesn't import or load: its fault, a real 0
+        return result([], f'solution failed to load: {type(exc).__name__}: {exc}')
+    if not callable(function):
+        return result([], f'solution does not define a function named {ENTRY}')
+    inputs = generate(SEED, RANDOM_CASES)
+    return result([run_case(index, values, function) for index, values in enumerate(inputs)])

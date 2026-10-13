@@ -3,14 +3,20 @@
 from __future__ import annotations
 
 import argparse
+import contextlib
 import json
 import os
 import sys
 import time
 from pathlib import Path
+from typing import TYPE_CHECKING
 
+from deepgym.factory.scaffold import KINDS
 from deepgym.judge import local_isolation_kind
 from deepgym.sandboxes import PROVIDERS
+
+if TYPE_CHECKING:
+    from deepgym.qa.report import QAStatus
 
 
 def _build_parser() -> argparse.ArgumentParser:
@@ -97,7 +103,12 @@ def _build_parser() -> argparse.ArgumentParser:
         description='Exits 0 when the checked environments pass (skipped ones are neutral), '
         '1 if any fails, 2 if none fails but some are inconclusive or none could be checked.',
     )
-    qa_p.add_argument('envs', nargs='*', metavar='ENV', help='Registered environment names')
+    qa_p.add_argument(
+        'envs',
+        nargs='*',
+        metavar='ENV',
+        help='Registered environment names, or environment folders (any existing directory)',
+    )
     qa_p.add_argument('--all', action='store_true', help='Check every registered environment')
     qa_p.add_argument(
         '--mode',
@@ -122,6 +133,48 @@ def _build_parser() -> argparse.ArgumentParser:
         help='Let --model run model-generated code on this machine (--mode local or auto)',
     )
     qa_p.add_argument('--json', action='store_true', help='Print the reports as JSON')
+    qa_p.add_argument(
+        '--mutants',
+        action='store_true',
+        help='Also run AST mutants of the reference; any mutant that passes fails the env',
+    )
+    qa_p.add_argument(
+        '--approve',
+        action='store_true',
+        help='If one environment folder passes, write its approval.json (needs --by)',
+    )
+    qa_p.add_argument('--by', default=None, metavar='NAME', help='Who approves, for --approve')
+
+    # ── new ───────────────────────────────────────────────────────────
+    new_p = sub.add_parser(
+        'new',
+        help='Scaffold a new environment folder',
+        description='Create a working example environment to edit: task.md, verifier.py, '
+        'a reference solution, a seeded case generator (variants.py) and metadata.json.',
+    )
+    new_p.add_argument('name', help='Environment name, lowercase snake_case')
+    new_p.add_argument(
+        '--kind',
+        required=True,
+        choices=KINDS,
+        help='function: call a function; script: run a stdin/stdout script; repo-patch: '
+        'apply a diff to fixture files; multi-turn: score an agent episode',
+    )
+    new_p.add_argument('--dir', default='.', help='Parent directory (default: current directory)')
+
+    # ── check ─────────────────────────────────────────────────────────
+    check_p = sub.add_parser(
+        'check',
+        help='Validate an environment folder and run its reference, empty and stub solutions',
+        description='Exits 0 when every check passes, 1 if any fails, 2 if some are inconclusive.',
+    )
+    check_p.add_argument('path', help='Environment folder')
+    check_p.add_argument(
+        '--mode',
+        default='local',
+        choices=['local', 'daytona', 'auto', *PROVIDERS],
+        help='Where verifiers and solutions run (default: local)',
+    )
 
     # ── harbor ────────────────────────────────────────────────────────
     harbor_p = sub.add_parser('harbor', help='Import Harbor tasks, or export envs as Harbor tasks')
@@ -398,36 +451,108 @@ def _cmd_audit(args: argparse.Namespace) -> None:
 
 def _cmd_qa(args: argparse.Namespace) -> None:
     from deepgym.core import DeepGym
-    from deepgym.qa import client_from_env, format_table, run_qa, write_report
+    from deepgym.exceptions import DeepGymError
+    from deepgym.factory.approval import approve, content_hashes, missing_evidence, snapshot
+    from deepgym.factory.check import lint_env
+    from deepgym.qa import QAOptions, client_from_env, format_table, run_qa, write_report
     from deepgym.qa.report import overall
     from deepgym.registry import entry_label, list_environments
 
-    names = [entry_label(entry) for entry in list_environments()] if args.all else args.envs
-    if not names:
+    if args.all:
+        targets: list[str | Path] = [entry_label(entry) for entry in list_environments()]
+    else:
+        targets = [Path(name) if Path(name).is_dir() else name for name in args.envs]
+    if not targets:
         print('Error: name at least one environment or pass --all', file=sys.stderr)
         sys.exit(1)
     if args.reruns < 0 or args.samples < 2:
         print('Error: --reruns must be >= 0 and --samples >= 2', file=sys.stderr)
+        sys.exit(1)
+    if args.approve and not (args.by and len(targets) == 1 and isinstance(targets[0], Path)):
+        print(
+            'Error: --approve needs --by NAME and exactly one environment folder', file=sys.stderr
+        )
+        sys.exit(1)
+    if args.approve and args.reruns < 1:
+        print('Error: --approve needs --reruns 1 or more to check determinism', file=sys.stderr)
         sys.exit(1)
     if args.model and args.mode in ('local', 'auto'):
         _guard_local_model_code(args.mode, args.allow_local_exec)
 
     client = client_from_env(args.model) if args.model else None
     dg = DeepGym(mode=args.mode)
-    reports = []
-    for name in names:
-        report = run_qa(name, dg, reruns=args.reruns, client=client, samples=args.samples)
-        write_report(report)
-        reports.append(report)
+    options = QAOptions(
+        reruns=args.reruns, client=client, samples=args.samples, mutants=args.mutants
+    )
+    with contextlib.ExitStack() as stack:
+        folder = targets[0]
+        if args.approve:
+            # QA runs on a private copy, so the approval names exactly the files tested.
+            targets = [stack.enter_context(snapshot(folder))]
+            tested = content_hashes(targets[0])
+        reports = []
+        for target in targets:
+            report = run_qa(target, dg, options)
+            write_report(report)
+            reports.append(report)
+        unproven = missing_evidence(reports[0])
+        approval = None
+        if args.approve and reports[0].passed and not unproven:
+            if content_hashes(targets[0]) != tested:
+                raise DeepGymError('the copy QA ran on changed during QA; nothing approved')
+            approval = approve(folder, reports[0], args.by, tested, lint_env(targets[0]))
 
     if args.json:
         print(json.dumps([report.model_dump(mode='json') for report in reports], indent=2))
     else:
         print(format_table(reports))
-    status = overall(report.status for report in reports)
+    if approval is not None:
+        print(f'Approved: {approval}', file=sys.stderr)
+    elif args.approve and reports[0].passed:
+        print(f'Not approved: needed checks did not run: {", ".join(unproven)}', file=sys.stderr)
+        sys.exit(1)
+    elif args.approve:
+        print(f'Not approved: QA result is {reports[0].status}', file=sys.stderr)
+    _exit_for(overall(report.status for report in reports))
+
+
+def _exit_for(status: QAStatus) -> None:
+    """Exit 1 on 'fail', 2 on 'inconclusive' or 'skip' (not everything was verified)."""
     if status != 'pass':
-        # 2: nothing failed, but not everything (inconclusive) or nothing (skip) was verified.
         sys.exit(1 if status == 'fail' else 2)
+
+
+def _cmd_new(args: argparse.Namespace) -> None:
+    from deepgym.factory.scaffold import scaffold
+
+    path = scaffold(args.name, args.kind, Path(args.dir))
+    print(f'Created {path}:')
+    for file in sorted(p.relative_to(path).as_posix() for p in path.rglob('*') if p.is_file()):
+        print(f'  {file}')
+    print(
+        '\nIt is a working example. Rewrite task.md, the reference, expected() in '
+        f'verifier.py and variants.py for your task, then run:\n'
+        f'  deepgym check {path}\n'
+        f'  deepgym qa {path} --mutants'
+    )
+
+
+def _cmd_check(args: argparse.Namespace) -> None:
+    from deepgym.core import DeepGym
+    from deepgym.factory.check import check_env, lint_env
+    from deepgym.qa.report import format_checks, overall
+    from deepgym.verifier_lint import ADVISORY_NOTE
+
+    path = Path(args.path)
+    if not path.is_dir():
+        print(f'Error: {path} is not a directory', file=sys.stderr)
+        sys.exit(1)
+    checks = check_env(path, DeepGym(mode=args.mode))
+    print(format_checks(checks))
+    if warnings := lint_env(path):
+        print(f'\nwarnings ({ADVISORY_NOTE})')
+        print('\n'.join(f'  warning: {warning}' for warning in warnings))
+    _exit_for(overall(check.status for check in checks))
 
 
 def _guard_local_model_code(mode: str, allowed: bool) -> None:
@@ -780,7 +905,9 @@ def _parse_split_overrides(values: list[str]) -> dict[str, str]:
 _COMMANDS = {
     'audit': _cmd_audit,
     'benchmark-audit': _cmd_benchmark_audit,
+    'check': _cmd_check,
     'harbor': _cmd_harbor,
+    'new': _cmd_new,
     'qa': _cmd_qa,
     'run': _cmd_run,
     'run-batch': _cmd_run_batch,

@@ -28,7 +28,34 @@ __all__ = [
     'build_image',
     'check_provider',
     'open_sandbox',
+    'sandbox_class',
 ]
+
+
+def sandbox_class(provider: Provider) -> type[Sandbox]:
+    """Return the class that implements *provider*, imported on demand (SDKs are extras).
+
+    Raises:
+        DeepGymError: If *provider* isn't one of :data:`PROVIDERS`.
+    """
+    match provider:
+        case 'apple':
+            from deepgym.sandboxes.apple import AppleContainer
+
+            return AppleContainer
+        case 'docker':
+            from deepgym.sandboxes.docker import DockerContainer
+
+            return DockerContainer
+        case 'modal':
+            from deepgym.sandboxes.modal import ModalSandbox
+
+            return ModalSandbox
+        case 'e2b':
+            from deepgym.sandboxes.e2b import E2BSandbox
+
+            return E2BSandbox
+    raise DeepGymError(f'Unknown sandbox provider {provider!r}; choose from {PROVIDERS}')
 
 
 def open_sandbox(provider: Provider, image: str | None = None) -> Sandbox:
@@ -41,24 +68,7 @@ def open_sandbox(provider: Provider, image: str | None = None) -> Sandbox:
     Raises:
         SandboxError: If the sandbox can't be started.
     """
-    match provider:
-        case 'apple':
-            from deepgym.sandboxes.apple import AppleContainer
-
-            return AppleContainer(image)
-        case 'docker':
-            from deepgym.sandboxes.docker import DockerContainer
-
-            return DockerContainer(image)
-        case 'modal':
-            from deepgym.sandboxes.modal import ModalSandbox
-
-            return ModalSandbox(image)
-        case 'e2b':
-            from deepgym.sandboxes.e2b import E2BSandbox
-
-            return E2BSandbox(image)
-    raise DeepGymError(f'Unknown sandbox provider {provider!r}; choose from {PROVIDERS}')
+    return sandbox_class(provider)(image)
 
 
 def build_image(backend: str, context: Path) -> str:

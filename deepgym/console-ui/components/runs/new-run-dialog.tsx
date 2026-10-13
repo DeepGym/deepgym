@@ -21,7 +21,9 @@ interface NewRunDialogProps {
   open: boolean;
   /** Environment to preselect, e.g. from an environment's "New run" button. */
   initialEnv: string | null;
+  /** Cancel: close without starting anything. */
   onClose: () => void;
+  /** The started runs. The parent navigates to them, which also closes the dialog. */
   onCreated: (runs: RunSummary[]) => void;
 }
 
@@ -47,11 +49,10 @@ function NewRunForm({ initialEnv, onClose, onCreated }: Omit<NewRunDialogProps, 
     setError(undefined);
     try {
       const body = { environments: [...selected], mode, solution: source === 'custom' ? solution : null };
+      // Stays submitting: onCreated's navigation closes the dialog, so it can't start the runs twice.
       onCreated(await api<RunSummary[]>('/runs', { method: 'POST', body: JSON.stringify(body) }));
-      onClose();
     } catch (caught) {
       setError(errorText(caught));
-    } finally {
       setSubmitting(false);
     }
   };

@@ -57,6 +57,8 @@ from deepgym.sandbox import (
     check_exit,
     error_result,
     parse_verifier_output,
+    split_wrapped_output,
+    wrap_stderr,
 )
 from deepgym.sandboxes import TRUSTED_PATH, ExecResult, Sandbox
 
@@ -111,6 +113,14 @@ class StepResult(NamedTuple):
     done: bool
 
 
+class VerifierOutput(NamedTuple):
+    """What a session verifier printed, with stdout and stderr kept apart."""
+
+    exit_code: int
+    stdout: str
+    stderr: str
+
+
 class SessionBackend(Protocol):
     """Where a session's actions actually run."""
 
@@ -125,13 +135,12 @@ class SessionBackend(Protocol):
         """Write a file relative to the work directory."""
         ...
 
-    def verify(
-        self, code: str, timeout: int, env: dict[str, str] | None = None, *, quiet: bool = False
-    ) -> ExecResult:
+    def verify(self, code: str, timeout: int, env: dict[str, str] | None = None) -> VerifierOutput:
         """Run verifier *code* in the work directory, out of the agent's reach where possible.
 
         Where the backend can isolate code from the verifier, it sets ``DEEPGYM_RUNTIME``
-        and the other variables ``deepgym_solution`` needs. *quiet* discards stderr.
+        and the other variables ``deepgym_solution`` needs. Its stdout and stderr come back
+        apart, so only stdout can carry a verdict.
         """
         ...
 
@@ -166,7 +175,16 @@ class LocalBackend:
         self._runtime.write_text(RUNTIME_SOURCE, encoding='utf-8')
 
     def exec(self, command: str, timeout: int, env: dict[str, str] | None = None) -> ExecResult:
-        """Run *command* with bash in the temp directory.
+        """Run *command* with bash in the temp directory; output is stdout, then stderr.
+
+        Raises:
+            TimeoutError: If the command exceeds *timeout* seconds.
+        """
+        exit_code, stdout, stderr = self._run(command, timeout, env)
+        return ExecResult(exit_code, stdout + ('\n' + stderr if stderr else ''))
+
+    def _run(self, command: str, timeout: int, env: dict[str, str] | None) -> VerifierOutput:
+        """Run *command* with bash in the temp directory, keeping stdout and stderr apart.
 
         Raises:
             TimeoutError: If the command exceeds *timeout* seconds.
@@ -189,7 +207,7 @@ class LocalBackend:
             _kill_group(proc.pid)
             proc.communicate()
             raise TimeoutError(f'Command exceeded {timeout}s timeout') from exc
-        return ExecResult(proc.returncode, stdout + ('\n' + stderr if stderr else ''))
+        return VerifierOutput(proc.returncode, stdout, stderr)
 
     def write_file(self, path: str, content: bytes) -> None:
         """Write *content* to *path* inside the temp directory."""
@@ -197,9 +215,7 @@ class LocalBackend:
         target.parent.mkdir(parents=True, exist_ok=True)
         target.write_bytes(content)
 
-    def verify(
-        self, code: str, timeout: int, env: dict[str, str] | None = None, *, quiet: bool = False
-    ) -> ExecResult:
+    def verify(self, code: str, timeout: int, env: dict[str, str] | None = None) -> VerifierOutput:
         """Run verifier *code* inline; it shares the agent's user here.
 
         Code it loads through ``deepgym_solution`` runs in the local judge's sandbox.
@@ -209,9 +225,7 @@ class LocalBackend:
             'DEEPGYM_RUNTIME': str(self._runtime),
             'DEEPGYM_PYTHON': sys.executable,
         }
-        return self.exec(
-            _inline_python(self.python, code, quiet=quiet), timeout, {**runtime, **(env or {})}
-        )
+        return self._run(_inline_python(self.python, code), timeout, {**runtime, **(env or {})})
 
     def start_desktop(self) -> None:
         """Refuse: the local backend has no display."""
@@ -529,31 +543,33 @@ class SandboxBackend:
         if done.exit_code != 0:
             raise SandboxError(f'Failed to write {path}: {done.output[-500:]}')
 
-    def verify(
-        self, code: str, timeout: int, env: dict[str, str] | None = None, *, quiet: bool = False
-    ) -> ExecResult:
+    def verify(self, code: str, timeout: int, env: dict[str, str] | None = None) -> VerifierOutput:
         """Run verifier *code* as the verifier user, from a file only that user can read.
 
         Its HOME is its own folder, which nobody but root can write: the agent's home holds
         dotfiles the agent wrote, which tools a verifier runs (git, pip, ...) would obey.
         ``DEEPGYM_AGENT_HOME`` says where the agent's home is, for verifiers that inspect it.
+        The provider mixes stdout and stderr, so they are split as in the judge (see
+        :func:`~deepgym.sandbox.wrap_stderr`).
 
         Raises:
             TimeoutError: If the verifier exceeds *timeout* seconds.
         """
         script = f'{_VERIFIER_DIR}/{uuid4().hex}.py'
         self._sandbox.upload(code.encode('utf-8'), script)
-        stderr = ' 2>/dev/null' if quiet else ''
-        return self._sandbox.exec(
+        command, marker = wrap_stderr(
+            f'{self._offline}{self._as_verifier} {self.python} -I {script}'
+        )
+        done = self._sandbox.exec(
             trusted(
-                f'{self._offline}{self._as_verifier} {self.python} -I {script}{stderr}; '
-                f'status=$?; rm -f {script}; exit $status',
+                f'{command}; status=$?; rm -f {script}; exit $status',
                 {'HOME': _VERIFIER_DIR, **self._verifier_base, **self._runtime_env, **(env or {})},
             ),
             cwd=self._workdir,
             env=self._clear,
             timeout=timeout,
         )
+        return VerifierOutput(done.exit_code, *split_wrapped_output(done.output, marker))
 
     def start_desktop(self) -> None:
         """Start the desktop with its session and apps running as the agent, offline.
@@ -819,12 +835,15 @@ class Session:
                     error_type='no_verifier',
                 )
             start = time.perf_counter()
-            exit_code, stdout = self._backend.verify(
+            exit_code, stdout, stderr = self._backend.verify(
                 _guarded(self._env.final_verifier_code), self._env.timeout_per_step
             )
-            result = parse_verifier_output(stdout, f'exit_code={exit_code}')
+            stderr = stderr.strip()
+            result = parse_verifier_output(stdout, f'exit_code={exit_code} stderr: {stderr!r}')
             elapsed_ms = (time.perf_counter() - start) * 1000
-            return build_run_result(result, elapsed_ms, self.sandbox_id, exit_code=exit_code)
+            return build_run_result(
+                result, elapsed_ms, self.sandbox_id, stderr=stderr, exit_code=exit_code
+            )
 
     def close(self) -> None:
         """Release the backend, waiting for any in-flight step to finish."""
@@ -902,7 +921,7 @@ class Session:
     def _step_reward(self, output: str) -> float:
         """Run the step verifier and return its score in [0, 1].
 
-        Stderr is discarded so warnings can't break the plain-float form.
+        Only its stdout counts, so warnings on stderr can't break the plain-float form.
 
         Raises:
             InvalidScoreError: If the score is NaN, infinite, or outside [0, 1].
@@ -914,11 +933,10 @@ class Session:
         self._step_verdict = None
         self._backend.write_file(_STEP_OUTPUT, output.encode('utf-8'))
         try:
-            exit_code, stdout = self._backend.verify(
+            exit_code, stdout, _ = self._backend.verify(
                 _guarded(self._env.step_verifier_code),
                 self._env.timeout_per_step,
                 env={'STEP_OUTPUT_PATH': _STEP_OUTPUT, 'STEP_NUMBER': str(self._step)},
-                quiet=True,
             )
         except TimeoutError as exc:
             raise VerifierError(f'Step verifier timed out at step {self._step}') from exc
@@ -1001,15 +1019,15 @@ def _guarded(code: str) -> str:
     return _VERIFIER_GUARD.format(code=code)
 
 
-def _inline_python(python: str, code: str, *, quiet: bool = False) -> str:
+def _inline_python(python: str, code: str) -> str:
     """Build a command that runs *code* isolated (-I) without writing it to disk.
 
     Verifiers never touch the sandbox filesystem, so an agent process can't swap
-    the file between upload and execution. *quiet* discards stderr.
+    the file between upload and execution.
     """
     encoded = base64.b64encode(code.encode('utf-8')).decode('ascii')
     loader = f"import base64;exec(compile(base64.b64decode('{encoded}'),'<verifier>','exec'))"
-    return f'{python} -I -c "{loader}"' + (' 2>/dev/null' if quiet else '')
+    return f'{python} -I -c "{loader}"'
 
 
 def _signals_done(output: str) -> bool:

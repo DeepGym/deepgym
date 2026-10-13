@@ -169,35 +169,41 @@ def wrap_stderr(command: str) -> tuple[str, str]:
     the marker or a newline, so that line is always the wrapper's own. The wrapper's own
     tools come from :data:`~deepgym.sandboxes.TRUSTED_PATH`, so nothing the solution
     plants on the image's PATH runs as root after it; *command* keeps the image's PATH.
+    The wrapped command ends with *command*'s exit status, so others may follow it.
 
     Returns:
-        The wrapped command and its marker, for :func:`parse_wrapped_output`.
+        The wrapped command and its marker, for :func:`split_wrapped_output`.
     """
     marker = f'deepgym-stderr-{uuid4().hex}'
     path = f'PATH={TRUSTED_PATH}'
     wrapped = (
         f'err=$({path}; mktemp) && {{ {command} 2>"$err"; rc=$?; printf "\\n%s " {marker}; '
-        f'({path}; base64 < "$err" | tr -d "\\n"; rm -f "$err"); exit $rc; }}'
+        f'({path}; base64 < "$err" | tr -d "\\n"; rm -f "$err"); (exit $rc); }}'
     )
     return wrapped, marker
+
+
+def split_wrapped_output(output: str, marker: str) -> tuple[str, str]:
+    """Return (stdout, stderr) of a command wrapped by :func:`wrap_stderr`.
+
+    Only the last line can carry the marker; an earlier copy is just stdout. Without it
+    (the wrapper didn't finish) the whole output counts as stdout.
+    """
+    stdout, _, last = output.rstrip('\n').rpartition('\n')
+    tag, _, encoded = last.partition(' ')
+    if tag != marker:
+        return output, ''
+    return stdout, base64.b64decode(encoded).decode('utf-8', 'replace').strip()
 
 
 def parse_wrapped_output(output: str, marker: str, exit_code: int) -> ExecutionResult:
     """Parse the verdict from the stdout of a command wrapped by :func:`wrap_stderr`.
 
-    Only the last line can carry the marker; an earlier copy is just verifier stdout.
-    Without it (the wrapper didn't finish) the whole output counts as stdout.
-
     Raises:
         InvalidScoreError: If the score is NaN, infinite, or outside [0, 1].
         VerifierError: If stdout has no protocol JSON.
     """
-    stdout, _, last = output.rstrip('\n').rpartition('\n')
-    tag, _, encoded = last.partition(' ')
-    if tag == marker:
-        stderr = base64.b64decode(encoded).decode('utf-8', 'replace').strip()
-    else:
-        stdout, stderr = output, ''
+    stdout, stderr = split_wrapped_output(output, marker)
     return ExecutionResult(
         parse_verifier_output(stdout.strip(), f'exit_code={exit_code} stderr: {stderr!r}'),
         stderr=stderr,

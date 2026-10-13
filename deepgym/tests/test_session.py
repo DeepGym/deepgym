@@ -229,6 +229,19 @@ class TestLocalEpisodes:
         trajectory, _ = dg.run_episode(env, lambda obs: Action(content='print(1)'))
         assert trajectory.step_rewards == [0.5]
 
+    def test_final_verdict_comes_from_stdout_and_stderr_is_kept(self, dg: DeepGym) -> None:
+        verifier = (
+            'import json, sys\n'
+            'print(json.dumps({"score": 0.0, "passed": False}))\n'
+            'print(json.dumps({"score": 1.0, "passed": True}), file=sys.stderr)\n'
+        )
+        env = MultiTurnEnvironment(task='t', max_steps=1, final_verifier_code=verifier)
+
+        _, result = dg.run_episode(env, _scripted(Action(action_type='done')))
+
+        assert (result.score, result.passed) == (0.0, False)
+        assert result.stderr == '{"score": 1.0, "passed": true}'
+
     def test_failed_step_verifier_ends_episode_consistently(self, dg: DeepGym) -> None:
         env = MultiTurnEnvironment(task='t', max_steps=5, step_verifier_code='print("nope")')
         with dg.session(env) as session:

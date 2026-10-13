@@ -349,13 +349,28 @@ def test_session_runs_as_agent_and_joins_netns_only_when_needed() -> None:
 
 def test_session_verifier_runs_as_its_own_user_from_a_private_file() -> None:
     box = FakeSandbox(network_blocked=True, answers=[_USERS])
-    SandboxBackend(box).verify('print(1)', timeout=5, quiet=True)
+    SandboxBackend(box).verify('print(1)', timeout=5)
     script = box.uploads[-1]
     assert script.startswith('/opt/deepgym-verifier/') and script.endswith('.py')
     assert box.commands[-1].startswith('/usr/bin/env -i ')
     assert '/usr/bin/setpriv --reuid=996 --regid=996' in box.commands[-1]
-    assert f'python3 -I {script} 2>/dev/null' in box.commands[-1]
+    assert f'python3 -I {script} 2>"$err"' in box.commands[-1]
     assert 'print(1)' not in box.commands[-1]
+
+
+def test_session_verifier_keeps_stderr_apart_from_stdout() -> None:
+    box = FakeSandbox(network_blocked=True, answers=[_USERS])
+    answer = box.exec
+
+    def exec_(command: str, **kwargs: object) -> ExecResult:
+        found = re.search(r'deepgym-stderr-\w+', command)
+        if found is None:
+            return answer(command, **kwargs)
+        # What a provider hands back for the wrapped verifier: stdout, then the marker line.
+        return ExecResult(0, f'{_FAIL}\n\n{found[0]} {base64.b64encode(_PASS.encode()).decode()}')
+
+    box.exec = exec_  # type: ignore[method-assign]
+    assert SandboxBackend(box).verify('print(1)', timeout=5) == (0, f'{_FAIL}\n', _PASS)
 
 
 def test_session_verifier_has_its_own_home_and_the_agents_by_name() -> None:

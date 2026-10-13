@@ -366,9 +366,9 @@ from fastapi import FastAPI
 from deepgym.integrations.openrlhf import create_openrlhf_router
 
 app = FastAPI()
-app.include_router(create_openrlhf_router(env, dg))
+app.include_router(create_openrlhf_router(env, dg, infra_failure_score='nan'))
 # Run with: uvicorn app:app --port 8000
-# Train with: --remote_rm_url http://localhost:8000/reward/score
+# Train with: --remote_rm_url http://localhost:8000/reward/score --algo.dynamic_filtering_enable
 ```
 
 OpenRLHF sends one request per rollout, all at once. They run in FastAPI's thread pool,
@@ -385,22 +385,18 @@ default), and no request waits past 150 s (OpenRLHF gives up at 180 s); a first 
 still going then scores 0, since the model's code may be what slows it. If the second
 grading fails too or doesn't finish in time, the first one never got a slot in time, or a
 query doesn't contain its prompt, the sample gets the router's `infra_failure_score`,
-never a score from a run that didn't finish:
+never a score from a run that didn't finish. It has no default: creating the router
+without it raises an error, so the choice is made at setup, where no policy can reach it.
 
-- `'zero'` (the default): 0.0, logged as a warning with its error type. OpenRLHF trains
-  on it as a failed answer; that is the limit of its API.
-- `'nan'`: NaN. With `--algo.dynamic_filtering_enable`, OpenRLHF drops the sample's whole
-  prompt group (the group's mean score is NaN, which is outside any range). Without
-  dynamic filtering it trains on the NaN and the run breaks, so use it only with dynamic
-  filtering on.
+- `'nan'` (recommended): NaN. With `--algo.dynamic_filtering_enable`, OpenRLHF drops
+  the sample's whole prompt group (the group's mean score is NaN, which is outside any
+  range). Without dynamic filtering it trains on the NaN and the run breaks, so use it
+  only with dynamic filtering on.
+- `'zero'`: 0.0. OpenRLHF trains on DeepGym's failure as a failed answer, an accepted
+  leak.
 
-```python
-app.include_router(create_openrlhf_router(env, dg, infra_failure_score='nan'))
-# Train with: --algo.dynamic_filtering_enable --remote_rm_url ...
-```
-
-Either way the sample counts toward a warning logged when more than 5% of a batch gets
-no verdict.
+Either way the sample is logged as a warning with its error type, and counts toward a
+warning logged when more than 5% of a batch gets no verdict.
 
 ### lm-evaluation-harness
 

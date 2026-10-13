@@ -230,22 +230,25 @@ def test_config_edits_outside_the_test_section_are_allowed(
 @pytest.mark.parametrize(
     ('name', 'refused'),
     [
+        # Build scripts and runner config run code, so `make test` / a gradle task / build.rs
+        # could be rewritten to exit 0 without running the tests: refused.
         ('.npmrc', True),
         ('pytest.toml', True),
         ('.cargo/config.toml', True),
-        # Build files and lockfiles are often part of a real fix, so they are not refused
-        # (a tampered `make test` or stubbed dependency is caught by the per-test report gate).
-        ('Makefile', False),
+        ('Makefile', True),
+        ('pom.xml', True),
+        ('build.rs', True),
+        ('vendor/github.com/x/y.go', True),
+        # A lockfile or go.sum cannot forge a pass on its own (the stub a repoint needs is
+        # caught by its bin), and a real dependency fix updates them: allowed.
         ('package-lock.json', False),
         ('go.sum', False),
         ('scripts/latest.sh', False),
     ],
 )
-def test_launcher_configs_refused_build_files_allowed(
+def test_build_and_runner_files_refused_lockfiles_allowed(
     tmp_path: Path, sandbox_dg: DeepGym, name: str, refused: bool
 ) -> None:
-    # .npmrc / pytest.toml / .cargo/config.toml select or configure the test runner, so a new
-    # one is refused; a Makefile, lockfile or unrelated shell script is left to a real fix.
     env = _env(tmp_path)
 
     result = sandbox_dg.run(env, _diff(Path(env.repo_dir), {name: 'x = 1\n', **_FIX}))

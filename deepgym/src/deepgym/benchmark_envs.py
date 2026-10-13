@@ -312,15 +312,22 @@ class PatchVerifier:
                 '__snapshots__', '__mocks__',
             }
             _HARNESS_DIRS = {
-                'node_modules', 'site-packages', 'dist-packages', '.pytest_cache',
+                'node_modules', 'site-packages', 'dist-packages', 'vendor', '.pytest_cache',
                 '.tox', '.nox', '_pytest', '.venv', 'venv', 'virtualenv', '.cargo',
             }
+            # Build scripts and runner config that execute code: `make test`, a gradle/maven
+            # test task or a build.rs can be rewritten to exit 0 without running the tests, so
+            # any edit is refused. (A lockfile or go.sum cannot forge a pass on its own -- the
+            # stub package a repoint needs is caught by its own runner `bin` -- so those stay
+            # allowed, as a real dependency fix updates them.)
             _INFRA_FILES = {
                 'conftest.py', 'pytest.py', 'pytest.ini', '.pytest.ini', 'pytest.toml',
                 '.pytest.toml', 'tox.ini', 'noxfile.py', 'tests.py', 'sitecustomize.py',
                 'usercustomize.py', '.pythonrc', '.pythonrc.py', '.pythonstartup', '.rspec',
-                'phpunit.xml', 'phpunit.xml.dist', 'phpunit.dist.xml',
-                '.npmrc', '.yarnrc', '.yarnrc.yml', 'setup.py',
+                'phpunit.xml', 'phpunit.xml.dist', 'phpunit.dist.xml', 'pom.xml', 'build.gradle',
+                'build.gradle.kts', 'settings.gradle', 'settings.gradle.kts', 'build.rs',
+                'rakefile', 'makefile', 'gnumakefile', '.npmrc', '.yarnrc', '.yarnrc.yml',
+                'setup.py',
             }
             # Executable extensions: a code file inside a test directory can run at import or
             # be imported by a test, so it is refused there; a data file is not.

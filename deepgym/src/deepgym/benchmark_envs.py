@@ -292,32 +292,49 @@ class PatchVerifier:
 
             # Test infrastructure a model's diff must not touch outside the hidden test
             # patch's own paths (those are put back anyway): the tests, their helpers,
-            # data and snapshots, everything a test runner loads by name or from its
-            # config, and the installed test harness and dependencies.
+            # data and snapshots, everything a test runner or interpreter loads by name
+            # or from its config, and the installed test harness and dependencies. This
+            # is a denylist and so is necessarily incomplete; the per-test report gate is
+            # the real defence. It cannot stop a diff to the code under test that forces
+            # an exit (os._exit / atexit at import), which the binary reward still trusts.
             _TEST_DIRS = {
                 'test', 'tests', 'testing', '__tests__', 'testdata', 'spec', 'specs',
                 '__snapshots__', '__mocks__',
             }
             _HARNESS_DIRS = {
                 'node_modules', 'site-packages', 'dist-packages', 'vendor', '.pytest_cache',
-                '.tox', '.nox',
+                '.tox', '.nox', '_pytest', 'pytest', '.venv', 'venv', 'virtualenv',
             }
             _INFRA_FILES = {
-                'conftest.py', 'pytest.ini', '.pytest.ini', 'tox.ini', 'noxfile.py', 'tests.py',
-                'sitecustomize.py', 'usercustomize.py', '.rspec', 'rakefile', 'phpunit.xml',
-                'phpunit.xml.dist', 'phpunit.dist.xml', 'pom.xml', 'build.gradle',
-                'build.gradle.kts', 'settings.gradle', 'settings.gradle.kts', 'build.rs',
+                'conftest.py', 'pytest.py', 'pytest.ini', '.pytest.ini', 'tox.ini', 'noxfile.py',
+                'tests.py', 'sitecustomize.py', 'usercustomize.py', '.pythonrc', '.pythonrc.py',
+                '.pythonstartup', '.rspec', 'rakefile', 'phpunit.xml', 'phpunit.xml.dist',
+                'phpunit.dist.xml', 'pom.xml', 'build.gradle', 'build.gradle.kts',
+                'settings.gradle', 'settings.gradle.kts', 'build.rs', 'makefile', 'gnumakefile',
+                '.npmrc', '.yarnrc', '.yarnrc.yml', 'setup.py',
             }
-            _JS_TOOLS = {'jest', 'vitest', 'vite', 'karma', 'babel', 'ava', 'playwright', 'cypress'}
+            _JS_TOOLS = {
+                'jest', 'vitest', 'vite', 'karma', 'babel', 'ava', 'playwright', 'cypress',
+                'mocha', 'nyc', 'wdio',
+            }
             _JS_EXTS = {'js', 'jsx', 'ts', 'tsx', 'mjs', 'cjs', 'mts', 'cts'}
-            # Files that are test configuration only in part: these keys or sections.
-            _PACKAGE_KEYS = ('scripts', 'jest', 'mocha', 'ava', 'babel', 'nyc', 'c8', 'vitest', 'tap')
+            # package.json keys that are test configuration; the rest of the file is code.
+            _PACKAGE_KEYS = ('scripts', 'jest', 'mocha', 'ava', 'babel', 'nyc', 'c8', 'vitest', 'tap', 'wdio')
+            # Config files that are test infrastructure only in part; _config_tampered decides.
             _CONFIG_FILES = {'pyproject.toml', 'setup.cfg', 'package.json', 'cargo.toml'}
+            _SYMLINK = b'\\0deepgym-symlink'
 
 
-            def _infra_reason(repo_dir: Path, rel: str) -> str | None:
+            def _components(rel: str) -> list[str]:
+                # Lowercased path components, dropping '' and '.' (git -z paths are raw, normalized).
+                return [part for part in rel.lower().split('/') if part not in ('', '.')]
+
+
+            def _infra_reason(repo_root: Path, rel: str) -> str | None:
                 # Why *rel* is test infrastructure judging by its path alone, or None.
-                parts = rel.lower().split('/')
+                parts = _components(rel)
+                if not parts:
+                    return None
                 name, dirs = parts[-1], parts[:-1]
                 if any(part in _TEST_DIRS for part in dirs):
                     return 'in a test directory'
@@ -326,65 +343,116 @@ class PatchVerifier:
                     for part in parts
                 ):
                     return 'test harness or installed dependency'
-                if any((repo_dir / Path(*rel.split('/')[:depth]) / 'pyvenv.cfg').is_file() for depth in range(len(dirs) + 1)):
+                raw = rel.split('/')
+                if any((repo_root / Path(*raw[:depth]) / 'pyvenv.cfg').is_file() for depth in range(len(raw))):
                     return 'inside a virtualenv'
                 segments = name.split('.')
                 if (
                     name in _INFRA_FILES
-                    or name.endswith(('_test.py', '_test.go', '_spec.rb', '.pth'))
+                    or name.endswith(('_test.py', '_test.go', '_spec.rb', '.pth', '.gradle', '.gradle.kts'))
                     or (name.startswith('test_') and name.endswith('.py'))
-                    or (name.endswith('.sh') and 'test' in name)
-                    or (len(segments) > 2 and segments[-2] in ('test', 'spec') and segments[-1] in _JS_EXTS)
-                    or (len(segments) > 2 and segments[0] in _JS_TOOLS and segments[1] in ('config', 'conf', 'setup', 'workspace', 'preset'))
-                    or segments[0] == 'setuptests'
+                    or (segments[0] in ('test', 'tests', 'spec', 'suite_test') and segments[-1] == 'go')
+                    or (len(segments) > 2 and segments[-2] in ('test', 'spec', 'e2e', 'setup') and segments[-1] in _JS_EXTS)
+                    or (len(segments) > 1 and segments[0] in _JS_TOOLS and segments[1] in ('config', 'conf', 'setup', 'workspace', 'preset'))
+                    or segments[0] in ('setuptests', 'jest', 'vitest')
                     or name.startswith(('.babelrc', '.mocharc', '.nycrc', '.c8rc'))
                 ):
                     return 'test file or test configuration'
                 return None
 
 
-            def _pytest_section(text: str) -> list[str]:
-                # The lines of pyproject.toml's [tool.pytest...] or setup.cfg's [tool:pytest].
-                lines, inside = [], False
-                for line in text.splitlines():
-                    header = line.strip().lower().replace(' ', '')
-                    if header.startswith('['):
-                        inside = header.startswith(('[tool.pytest', '[tool:pytest'))
-                    if inside:
-                        lines.append(line)
-                return lines
+            def _toml_tables(text: str) -> dict | None:
+                # Parse TOML to compare config semantically; None if this runtime can't parse it.
+                try:
+                    import tomllib
+                except ModuleNotFoundError:
+                    return None
+                try:
+                    return tomllib.loads(text)
+                except (ValueError, TypeError):
+                    return None
 
 
             def _config_tampered(name: str, old: bytes | None, new: bytes | None) -> bool:
-                # Whether a diff turning *old* into *new* changes the test part of a config file.
+                # Whether turning *old* into *new* changes the test-relevant part of a config file.
+                # Fails closed: anything that can't be parsed and shown unchanged counts as tampering.
+                if _SYMLINK in (old, new):
+                    return True
                 old_text = (old or b'').decode('utf-8', 'replace')
                 new_text = (new or b'').decode('utf-8', 'replace')
-                changed = set(old_text.splitlines()) ^ set(new_text.splitlines())
+                if old_text == new_text:
+                    return False
                 if name == 'package.json':
                     try:
                         before, after = json.loads(old_text or '{}'), json.loads(new_text or '{}')
                     except ValueError:
                         return True
-                    if not isinstance(before, dict) or not isinstance(after, dict):
+                    if not (isinstance(before, dict) and isinstance(after, dict)):
                         return True
                     return any(before.get(key) != after.get(key) for key in _PACKAGE_KEYS)
+                if name == 'setup.cfg':
+                    import configparser
+
+                    before, after = configparser.ConfigParser(), configparser.ConfigParser()
+                    try:
+                        before.read_string(old_text)
+                        after.read_string(new_text)
+                    except configparser.Error:
+                        return True
+                    keys = ('tool:pytest', 'options.entry_points', 'options', 'nosetests', 'tox:tox')
+                    view = lambda cfg: {k: dict(cfg[k]) for k in cfg.sections() if k in keys}
+                    return view(before) != view(after)
+                before, after = _toml_tables(old_text), _toml_tables(new_text)
+                if before is None or after is None:
+                    return True
                 if name == 'cargo.toml':
-                    return any(word in line.lower() for line in changed for word in ('test', 'harness', 'bench'))
-                return _pytest_section(old_text) != _pytest_section(new_text) or any(
-                    'pytest' in line.lower() for line in changed
+                    keys = ('lib', 'bin', 'test', 'bench', 'features', 'dev-dependencies')
+                    return any(before.get(key) != after.get(key) for key in keys)
+                tool_keys = ('pytest', 'coverage', 'tox', 'nose')
+                before_tool, after_tool = before.get('tool', {}), after.get('tool', {})
+                return any(before_tool.get(key) != after_tool.get(key) for key in tool_keys) or (
+                    before.get('build-system') != after.get('build-system')
                 )
 
 
             def _read_config(path: Path) -> bytes | None:
-                # A config file's bytes; a symlink reads as a value no real file has.
+                # A config file's bytes; a symlink reads as a sentinel no real file has.
                 if path.is_symlink():
-                    return b'\\0symlink'
+                    return _SYMLINK
                 return path.read_bytes() if path.is_file() else None
 
 
+            def _mode_change_paths(patch_text: str) -> list[str]:
+                # The files whose mode changes or that become symlinks. A real code fix edits
+                # content; a mode flip or a symlink (which can aim a protected path at attacker
+                # content) is refused outright.
+                flagged, current = [], '(file)'
+                for line in patch_text.splitlines():
+                    if line.startswith('diff --git '):
+                        current = line[len('diff --git ') :]
+                    elif line.startswith(('old mode ', 'new mode ')) or line in (
+                        'new file mode 120000',
+                        'deleted file mode 120000',
+                    ):
+                        flagged.append(current)
+                return list(dict.fromkeys(flagged))
+
+
+            def _git_root(repo_dir: Path, timeout: int) -> Path:
+                # The repository top-level: numstat reports paths relative to it, not to repo_dir.
+                proc = subprocess.run(
+                    ['git', '-C', str(repo_dir), 'rev-parse', '--show-toplevel'],
+                    capture_output=True,
+                    text=True,
+                    timeout=timeout,
+                )
+                return Path(proc.stdout.strip()) if proc.returncode == 0 and proc.stdout.strip() else repo_dir
+
+
             def _patch_paths(repo_dir: Path, patch_file: Path, timeout: int) -> list[str] | None:
-                # Every path a patch reads or writes, as git's own parser sees it:
-                # --numstat names each post-image path, -R --numstat each pre-image one.
+                # Every path a patch reads or writes, as git's own parser sees it: --numstat
+                # names each post-image path, -R --numstat each pre-image one, and -z emits raw
+                # (unquoted) bytes so non-ASCII names are not mis-parsed.
                 paths = []
                 for reverse in ([], ['-R']):
                     proc = subprocess.run(
@@ -395,7 +463,14 @@ class PatchVerifier:
                     if proc.returncode != 0:
                         return None
                     records = proc.stdout.decode('utf-8', 'surrogateescape').split('\\0')
-                    paths += [record.split('\\t', 2)[2] for record in records if record]
+                    for record in records:
+                        fields = record.split('\\t', 2)
+                        # A path field present (3 fields, non-empty) is the changed path; a bare
+                        # record is a rename endpoint from the -z old/new form.
+                        if len(fields) == 3 and fields[2]:
+                            paths.append(fields[2])
+                        elif len(fields) == 1 and record:
+                            paths.append(record)
                 return list(dict.fromkeys(paths))
 
 
@@ -627,13 +702,16 @@ class PatchVerifier:
                             },
                             1,
                         )
+                    repo_root = _git_root(repo_dir, timeout)
                     hidden_set = set(hidden)
                     exposed = [rel for rel in model_paths if rel not in hidden_set]
-                    tampered = {rel: _infra_reason(repo_dir, rel) for rel in exposed}
+                    tampered = {rel: _infra_reason(repo_root, rel) for rel in exposed}
+                    for flagged in _mode_change_paths(patch_text):
+                        tampered[flagged] = 'changes a file mode or creates a symlink'
                     configs = {
-                        rel: _read_config(repo_dir / rel)
+                        rel: _read_config(repo_root / rel)
                         for rel in exposed
-                        if rel.lower().split('/')[-1] in _CONFIG_FILES
+                        if _components(rel) and _components(rel)[-1] in _CONFIG_FILES
                     }
 
                     apply_patch = subprocess.run(
@@ -659,8 +737,8 @@ class PatchVerifier:
                         )
 
                     for rel, old in configs.items():
-                        name = rel.lower().split('/')[-1]
-                        if _config_tampered(name, old, _read_config(repo_dir / rel)):
+                        name = _components(rel)[-1]
+                        if _config_tampered(name, old, _read_config(repo_root / rel)):
                             tampered[rel] = tampered[rel] or 'changes test configuration'
                     tampered = {rel: reason for rel, reason in sorted(tampered.items()) if reason}
                     if tampered:

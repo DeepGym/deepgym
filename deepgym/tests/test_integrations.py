@@ -79,6 +79,29 @@ class TestTRLIntegration:
         fn = make_trl_async_reward_fn(env=env)
         assert callable(fn)
 
+    async def test_trl_reward_fns_score_every_completion_format_alike(
+        self, env: Environment, local_dg: DeepGym
+    ) -> None:
+        """Plain, fenced, conversational and tool-calling completions of one answer score alike."""
+        fenced = f'Here you go:\n```python\n{GOOD_SOLUTION}```'
+        tool_call = {'type': 'function', 'function': {'name': 'run', 'arguments': {}}}
+        completions = [
+            GOOD_SOLUTION,
+            fenced,
+            [{'role': 'assistant', 'content': GOOD_SOLUTION}],
+            [{'role': 'assistant', 'content': [{'type': 'text', 'text': fenced}]}],
+            [
+                {'role': 'assistant', 'content': '', 'tool_calls': [tool_call]},
+                {'role': 'tool', 'name': 'run', 'content': 'ok'},
+                {'role': 'assistant', 'content': fenced},
+            ],
+        ]
+
+        sync_scores = make_trl_reward_fn(env=env, dg=local_dg)(completions=completions)
+        async_scores = await make_trl_async_reward_fn(env=env, dg=local_dg)(completions=completions)
+
+        assert sync_scores == async_scores == [1.0] * len(completions)
+
 
 class TestVerlIntegration:
     """Verify verl reward function wrappers."""

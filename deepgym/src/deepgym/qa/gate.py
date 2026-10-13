@@ -28,7 +28,9 @@ def run_qa(
     envs such as swebench_pro or mimo_code (they score through their own runner)
     get a single 'skipped' check with status 'skip', so the report is neither a
     pass nor a failure. Harbor tasks with a solution/solve.sh are checked with it as
-    the reference. An environment that fails to load gets a failed 'load' check.
+    the reference; their hack_resistant check is 'skip', because its attacks are Python
+    solutions and prove nothing about a bash runner. An environment that fails to load
+    gets a failed 'load' check.
 
     Args:
         name: Registered environment name, e.g. 'coin_change'.
@@ -60,7 +62,13 @@ def run_qa(
         return _skipped(name, 'benchmark-backed env scores through its own runner')
 
     checks = single_turn_checks(env, reference, dg, reruns)
-    checks.append(hack_resistant(env, dg))
+    # The heuristic attacks are Python solutions. Any other runner (a Harbor task's bash)
+    # would reject them for the wrong reason, so the check is skipped, never passed.
+    if env.language == 'python':
+        checks.append(hack_resistant(env, dg))
+    else:
+        details = f'the attacks are Python solutions; this environment runs {env.language}'
+        checks.append(QACheck(name='hack_resistant', status='skip', details=details))
     if client is not None:
         checks.append(difficulty_check(env, dg, client, samples))
     return QAReport(environment=name, checks=checks)

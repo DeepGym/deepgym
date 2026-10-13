@@ -47,6 +47,7 @@ class HarborEnvironment(Environment):
             name=task.name,
             task=task.instruction,
             type='tool-use',
+            language='bash',
             domain='terminal',
             tags=['harbor'],
             image=task.docker_image,

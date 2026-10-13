@@ -9,12 +9,15 @@ call starts the episode and returns the starting screen (the model can't see it
 before then), so prompts should tell the model to begin with a screenshot.
 
 verl turns a tool's exception into tool-error text and the rollout goes on
-(``ToolAgentLoop._call_tool``), so a sandbox that fails to start would otherwise end
-the rollout with no session and a plain 0.0. The tool remembers that failure instead,
-and a rollout whose sandbox failed to start, or whose step or final verifier failed,
-gets no verdict: like :mod:`deepgym.integrations.verl_mask`, the loop keeps it out of training
-(see :func:`~deepgym.integrations.verl_mask.exclude_unscored`) and logs ``error`` 1.0
-in ``reward_extra_info``. A rollout where the model never called the tool scores 0.0.
+(``ToolAgentLoop._call_tool``), so a sandbox that fails to start, or a provider that
+fails mid-action, would otherwise end the rollout with a final verifier judging a state
+the model never got to shape. The tool remembers any such failure instead: a rollout
+whose sandbox failed to start, whose action failed for any reason other than the action
+itself (an invalid or disallowed action comes back as text), or whose step or final
+verifier failed, gets no verdict. Like :mod:`deepgym.integrations.verl_mask`, the loop
+keeps it out of training (see :func:`~deepgym.integrations.verl_mask.exclude_unscored`)
+and logs ``error`` 1.0 in ``reward_extra_info``. A rollout where the model never called
+the tool scores 0.0.
 
 Agent loop config (``actor_rollout_ref.rollout.agent.agent_loop_config_path``)::
 
@@ -70,7 +73,7 @@ _STARTED_NOTE = (
     'Episode started. Your action was not applied; this is the starting screen. '
     'Repeat the action if it is still needed.'
 )
-_FAILED_NOTE = 'The environment failed to start, so this episode will not be scored.'
+_FAILED_NOTE = 'The environment failed, so this episode will not be scored.'
 
 _COORD = {'type': 'integer', 'description': 'Screenshot pixel coordinate.'}
 
@@ -153,9 +156,10 @@ class DeepGymSessionTool(BaseTool):
         """Apply one action. Bad calls come back as text so the model can correct itself.
 
         Raises:
-            Exception: Whatever starting the sandbox raised. verl shows it to the model as
+            Exception: Whatever starting the sandbox, or applying a valid action, raised
+                (a provider outage, a failed step verifier). verl shows it to the model as
                 tool-error text; the episode is remembered as failed, gets no verdict, and
-                isn't retried.
+                takes no more actions.
         """
         episode = self._episode_of[instance_id]
         async with self._locks.setdefault(episode, asyncio.Lock()):
@@ -179,6 +183,9 @@ class DeepGymSessionTool(BaseTool):
                 return ToolResponse(text=f'Invalid action: {exc.errors()[0]["msg"]}'), 0.0, {}
             except ActionError as exc:
                 return ToolResponse(text=str(exc)), 0.0, {}
+            except Exception as exc:
+                self._failed[episode] = _no_verdict(exc)
+                raise
             return _to_response(obs), reward, {'done': done}
 
     async def release(self, instance_id: str, **kwargs: Any) -> None:
@@ -190,25 +197,29 @@ class DeepGymSessionTool(BaseTool):
 
         Returns:
             The final verifier's result; a result without a verdict if the sandbox failed
-            to start or the verifier raised; None if the episode never started (the model
-            made no tool call) or *score* is False.
+            to start, an action failed (see :meth:`execute`) or the verifier raised; None
+            if the episode never started (the model made no tool call) or *score* is False.
         """
         self._specs.pop(episode, None)
         self._locks.pop(episode, None)
         failed = self._failed.pop(episode, None)
         session = self._sessions.pop(episode, None)
-        if session is None:
-            return failed if score else None
         try:
-            return await asyncio.to_thread(session.score) if score else None
+            if not score:
+                return None
+            if failed is not None or session is None:
+                # A failure decides the episode, whatever state it left behind.
+                return failed
+            return await asyncio.to_thread(session.score)
         except Exception as exc:
             return _no_verdict(exc)
         finally:
-            try:
-                await asyncio.to_thread(session.close)
-            except SandboxError as exc:
-                # The episode was judged; keep its result and leave the leak visible.
-                logger.warning('Could not delete sandbox %s: %s', session.sandbox_id, exc)
+            if session is not None:
+                try:
+                    await asyncio.to_thread(session.close)
+                except SandboxError as exc:
+                    # The episode was judged; keep its result and leave the leak visible.
+                    logger.warning('Could not delete sandbox %s: %s', session.sandbox_id, exc)
 
     async def _open(self, episode: str) -> Observation:
         """Create and start the episode's session; never lose it if we're cancelled meanwhile."""
@@ -274,7 +285,7 @@ class DeepGymAgentLoop(ToolAgentLoop):
 
 
 def _no_verdict(exc: Exception) -> RunResult:
-    """Log *exc*, raised while starting or scoring an episode, and record that it got no verdict."""
+    """Log *exc*, raised while starting, acting in or scoring an episode, as its lack of verdict."""
     logger.warning('DeepGym episode got no verdict: %s: %s', type(exc).__name__, exc)
     return error_result(exc)
 

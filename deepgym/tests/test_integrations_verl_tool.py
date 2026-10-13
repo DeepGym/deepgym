@@ -17,7 +17,7 @@ import pytest
 
 from deepgym.exceptions import DeepGymError, SandboxError
 from deepgym.models import MultiTurnEnvironment
-from deepgym.session import Session
+from deepgym.session import LocalBackend, Session
 
 WRITES_HELLO = (
     'import json, pathlib\n'
@@ -100,8 +100,16 @@ def verl(monkeypatch: pytest.MonkeyPatch) -> types.ModuleType:
         },
         'verl.experimental.agent_loop.tool_agent_loop': {'ToolAgentLoop': _ToolAgentLoop},
         'verl.experimental.agent_loop.single_turn_agent_loop': {'SingleTurnAgentLoop': object},
+        'verl.trainer.ppo.reward': {'get_custom_reward_fn': lambda config: None},
     }
-    for name in ('verl', 'verl.tools', 'verl.experimental', 'verl.experimental.agent_loop'):
+    for name in (
+        'verl',
+        'verl.tools',
+        'verl.experimental',
+        'verl.experimental.agent_loop',
+        'verl.trainer',
+        'verl.trainer.ppo',
+    ):
         package = types.ModuleType(name)
         package.__path__ = []
         monkeypatch.setitem(sys.modules, name, package)
@@ -240,6 +248,39 @@ def test_a_step_verifier_failure_is_not_a_zero(
     assert output.response_mask == [0, 0, 0]
 
 
+@pytest.mark.parametrize('use_v1', [True, False])
+def test_a_provider_outage_during_an_action_is_not_a_zero(
+    verl: types.ModuleType, monkeypatch: pytest.MonkeyPatch, use_v1: bool
+) -> None:
+    """An outage blocks the model's correct command; the state it left is not a verdict.
+
+    verl shows the error to the model and the rollout goes on to 'done', so the tool must
+    remember the failure, or the final verifier would grade the unwritten file as a 0.
+    """
+    real_exec = LocalBackend.exec
+
+    def exec_(backend: LocalBackend, command: str, timeout: int, env: Any = None) -> Any:
+        if 'out.txt' in command:
+            raise ConnectionError('provider unavailable')  # SDKs raise their own errors
+        return real_exec(backend, command, timeout, env)
+
+    monkeypatch.setattr(LocalBackend, 'exec', exec_)
+    tool = _tool(verl)
+    loop = verl.DeepGymAgentLoop([tool], WRITE_AND_FINISH, use_v1)
+
+    if use_v1:
+        with pytest.raises(DeepGymError, match='No verdict'):
+            asyncio.run(loop.run({}, tools_kwargs={}))
+    else:
+        output = asyncio.run(loop.run({}, tools_kwargs={}))
+        assert output.extra_fields['reward_extra_info']['error'] == 1.0
+        assert output.response_mask == [0, 0, 0]
+    assert loop.responses[1:] == ["Error executing tool 'computer': provider unavailable"] + [
+        verl._FAILED_NOTE
+    ]
+    assert not tool._sessions
+
+
 def test_a_failed_sandbox_delete_keeps_the_score(
     verl: types.ModuleType, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
 ) -> None:
@@ -262,7 +303,8 @@ def test_a_failed_sandbox_delete_keeps_the_score(
 
 
 def test_bad_calls_come_back_as_text(verl: types.ModuleType) -> None:
-    _, _, responses = _rollout(
+    """A bad call is the model's own doing: the episode still gets its verdict."""
+    _, output, responses = _rollout(
         verl,
         [
             {'action_type': 'screenshot'},
@@ -272,6 +314,7 @@ def test_bad_calls_come_back_as_text(verl: types.ModuleType) -> None:
     )
     assert responses[1].startswith('Invalid action')
     assert 'not allowed' in responses[2]
+    assert output.extra_fields['reward_extra_info']['error'] == 0.0
 
 
 def test_failed_rollout_still_deletes_sandbox(

@@ -399,13 +399,11 @@ class PatchVerifier:
                 'mocha', 'nyc', 'wdio',
             }
             _JS_EXTS = {'js', 'jsx', 'ts', 'tsx', 'mjs', 'cjs', 'mts', 'cts'}
-            # package.json keys that run or expose a test runner; the rest of the file, including
-            # the dependency ranges a real fix updates, is left alone. Repointing a runner
-            # dependency to a stub still needs that stub package to declare a 'bin', which this
-            # catches on the stub's own package.json, and the report gate is the backstop.
+            # package.json keys that configure a test runner, compared whole; scripts and bin are
+            # judged in _test_part_changed. The rest of the file, including the dependency ranges
+            # a real fix updates, is left alone.
             _PACKAGE_KEYS = (
-                'scripts', 'bin', 'jest', 'mocha', 'ava', 'babel', 'nyc', 'c8', 'vitest', 'tap',
-                'wdio', 'workspaces',
+                'jest', 'mocha', 'ava', 'babel', 'nyc', 'c8', 'vitest', 'tap', 'wdio', 'workspaces',
             )
             # Config files that are test infrastructure only in part; _config_tampered decides.
             # The keys it compares are knowingly incomplete (a runner reads more than any list
@@ -505,16 +503,37 @@ class PatchVerifier:
                 return _TOML_LOADS[0](text)
 
 
-            def _test_part_changed(name: str, old_text: str, new_text: str) -> bool | None:
-                # Whether the test-relevant part of a config file changed, or None for a change it
-                # can't classify. Raises on anything it cannot parse or compare; the caller turns
+            def _test_part_changed(rel: str, old_text: str, new_text: str) -> bool | None:
+                # Whether the test-relevant part of config file *rel* changed, or None for a change
+                # it can't classify. Raises on anything it cannot parse or compare; the caller turns
                 # that into tampering (fails closed).
+                parts = _components(rel)
+                name = parts[-1]
                 if name == 'package.json':
                     before = json.loads(old_text or '{}')
                     after = json.loads(new_text or '{}')
                     before = before if isinstance(before, dict) else {}
                     after = after if isinstance(after, dict) else {}
-                    return any(before.get(key) != after.get(key) for key in _PACKAGE_KEYS)
+                    if any(before.get(key) != after.get(key) for key in _PACKAGE_KEYS):
+                        return True
+                    # A script named for tests (test, pretest, test:unit) is refused. One such a
+                    # script runs by name (npm run unit) may be the runner, and so may a nested
+                    # package's bin once a dependency is repointed to that package: uncertain. The
+                    # root package's own bin and any other script are a fix's business.
+                    scripts = [doc.get('scripts') if isinstance(doc.get('scripts'), dict) else {} for doc in (before, after)]
+                    keys = scripts[0].keys() | scripts[1].keys()
+                    changed = {key for key in keys if scripts[0].get(key) != scripts[1].get(key)}
+                    tests = {key for key in keys if 'test' in key}
+                    if changed & tests:
+                        return True
+                    related, frontier = set(), tests
+                    while frontier:
+                        text = ' '.join(str(script.get(key, '')) for script in scripts for key in frontier)
+                        frontier = {key for key in keys - tests - related if re.search(rf'(?<![\\w:.-]){re.escape(key)}(?![\\w:.-])', text)}
+                        related |= frontier
+                    related |= {key for key in keys if key[:3] == 'pre' and key[3:] in related or key[:4] == 'post' and key[4:] in related}
+                    nested_bin = len(parts) > 1 and before.get('bin') != after.get('bin')
+                    return None if changed & related or nested_bin else False
                 if name == 'setup.cfg':
                     import configparser
 
@@ -590,7 +609,7 @@ class PatchVerifier:
                 if old_text == new_text:
                     return False
                 try:
-                    return _test_part_changed(name, old_text, new_text)
+                    return _test_part_changed(rel, old_text, new_text)
                 except Exception:
                     return True
 
@@ -604,10 +623,14 @@ class PatchVerifier:
                 # whose folder is unknown (../, ~, $VAR, `cmd`); an absolute one only if it ends in
                 # /rel. So test/posts.js names another file than src/socket.io/posts.js, and
                 # test_calc.py is not calc.py. A Python file is also named by its module (-p plugin),
-                # under the same suffix rule.
+                # under the same suffix rule. A value attached to a short flag (-cci.ini) is tried
+                # without the flag too; --opt=value is split at the '='.
                 base = rel.rsplit('/', 1)[-1]
                 stem = rel[:-3].removesuffix('/__init__') if rel.endswith('.py') else None
+                words = []
                 for word in filter(None, re.split(r'[\\s\\'"=:;,|&()<>]+', text)):
+                    words += [word, word[2:]] if re.match(r'-[A-Za-z].', word) else [word]
+                for word in words:
                     if stem and re.fullmatch(r'[A-Za-z_][\\w.]*', word):
                         module = word.replace('.', '/')
                         if stem == module or stem.endswith('/' + module):

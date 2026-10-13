@@ -14,10 +14,12 @@ interface StatProps {
   delta?: Delta | null;
   /** Secondary line, after the delta when there is one (e.g. "vs prev 7d"). */
   hint?: string;
+  /** Breakdown on its own line, shown whether or not there is a delta (e.g. "judged 70%"). */
+  note?: string | null;
 }
 
 /** Headline number tile with an optional delta. */
-export function Stat({ label, value, delta, hint }: StatProps) {
+export function Stat({ label, value, delta, hint, note }: StatProps) {
   return (
     <div className="flex min-w-0 flex-col gap-1 rounded-2xl border border-border-button-default bg-background-secondary-default/70 px-4 py-3 shadow-card">
       <span className="text-mono-label text-text-tertiary">{label}</span>
@@ -29,6 +31,7 @@ export function Stat({ label, value, delta, hint }: StatProps) {
           {hint}
         </span>
       )}
+      {note && <span className="truncate text-caption-1-medium text-text-tertiary">{note}</span>}
     </div>
   );
 }

@@ -23,9 +23,14 @@ interface Kpi {
   better: Better;
   /** Hint when there is no delta to show. */
   hint: (totals: RunTotals) => string;
+  /** Breakdown shown even next to a delta, such as the judged figure; null for none. */
+  note?: (totals: RunTotals) => string | null;
 }
 
 const count = (value: number | null) => String(value ?? 0);
+
+/** Runs without a verdict count as 0 in the headline; when there are any, show the judged figure too. */
+const judged = (totals: RunTotals, value: string) => (totals.no_verdict_count ? `judged ${value}` : null);
 
 const KPIS: Kpi[] = [
   {
@@ -42,7 +47,8 @@ const KPIS: Kpi[] = [
     format: formatPercent,
     unit: 'rate',
     better: 'higher',
-    hint: (t) => (t.no_verdict_count ? `judged ${formatPercent(judgedPassRate(t))}` : `${t.passed} passed`),
+    hint: (t) => `${t.passed} passed`,
+    note: (t) => judged(t, formatPercent(judgedPassRate(t))),
   },
   {
     label: 'Avg score',
@@ -50,7 +56,8 @@ const KPIS: Kpi[] = [
     format: formatScore,
     unit: 'score',
     better: 'higher',
-    hint: (t) => (t.no_verdict_count ? `judged ${formatScore(t.judged_mean_score)}` : 'finished runs'),
+    hint: () => 'finished runs',
+    note: (t) => judged(t, formatScore(t.judged_mean_score)),
   },
   {
     label: 'No verdict',
@@ -58,7 +65,8 @@ const KPIS: Kpi[] = [
     format: count,
     unit: 'count',
     better: 'lower',
-    hint: (t) => `${formatPercent(noVerdictShare(t))} of finished, counted as 0`,
+    hint: () => 'counted as 0 above',
+    note: (t) => (t.no_verdict_count ? `${formatPercent(noVerdictShare(t))} of finished` : null),
   },
   {
     label: 'Errors',
@@ -93,6 +101,7 @@ export function KpiTiles({ stats, range, children }: KpiTilesProps) {
             value={kpi.format(kpi.value(current))}
             delta={change}
             hint={change ? `vs prev ${range}` : kpi.hint(current)}
+            note={kpi.note?.(current)}
           />
         );
       })}

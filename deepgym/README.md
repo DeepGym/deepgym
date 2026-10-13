@@ -786,7 +786,9 @@ Kinds:
 - `repo-patch`: the model answers with a unified diff. The verifier applies it to
   the files in `repo/` with `apply_patch` (in memory, only to files you list; a
   diff that creates, deletes, renames or copies a file is refused) and imports the
-  result with `load_files`, the way Python would import it from a checkout.
+  result with `load_files`, the way Python would import it from a checkout. It
+  isn't tagged `patch`: that tag adds attacks whose diffs add test files, which this
+  verifier can never apply; tag it once you let patches add files.
 - `multi-turn`: an agent works in a directory that starts with the folder's other
   files (here `runs.py`), then the final verifier tests the result.
   `reference_actions.json` is the scripted episode that must score 1.0. A file

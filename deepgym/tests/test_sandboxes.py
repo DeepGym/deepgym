@@ -895,57 +895,69 @@ def test_x11vnc_probe_counts_silence_as_off_only_once_it_reached_the_display(
     assert ('ACCEPTED' in run.stdout) is accepted, run.stdout + run.stderr
 
 
-_ELF = b'\x7fELF\x02\x01\x01'
-
-
-# The lines that identify Debian's own /usr/bin/chromium wrapper, as on the Daytona image.
-_DEBIAN_WRAPPER = 'APPNAME=chromium\nLIBDIR=/usr/lib/$APPNAME\nexec $LIBDIR/$APPNAME "$@"'
-
-
-def _browser(path: Path, policy: bytes) -> Path:
-    """Write a fake Chromium build that reads *policy* as its managed policy dir."""
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_bytes(_ELF + b'x' + policy + b'x')
-    path.chmod(0o755)
-    return path
-
-
 @pytest.mark.parametrize(
-    ('layout', 'accepted'),
+    ('layout', 'launched'),
     [
-        ('debian', True), ('debian_missing_lib', False), ('relocated', True),
-        ('wrapper_chain', True), ('wrapper_chain_other_policy', False),
-        ('unfollowable_wrapper', True), ('other_policy_dir', False), ('absent', True),
+        ('opt_on_image_path', 'opt'), ('compiled_launcher', 'compiled'),
+        ('debian_wrapper', 'debian'), ('chromium_browser', 'chromium-browser'),
+        ('google_chrome', 'google-chrome'), ('absent', None),
     ],
 )  # fmt: skip
-def test_chromium_policy_check_follows_the_binary_path_finds(
-    tmp_path: Path, layout: str, accepted: bool
+def test_browser_pin_is_what_setups_path_finds_and_it_launches(
+    tmp_path: Path, layout: str, launched: str | None
 ) -> None:
-    """The check reads the Chromium the session's PATH runs and names it for launch_app.sh to
-    run exactly: a link resolves; only Debian's own wrapper (matched by its LIBDIR line) maps
-    to ../lib; any other script is followed through its `exec /path`, and one that can't be
-    followed falls back to the policy dir every Chromium build reads."""
-    from deepgym.sandboxes.daytona.desktop import _CHROMIUM_READS_POLICY
+    """The pin is whatever setup's own PATH finds first (chromium, then chromium-browser, then
+    google-chrome), with no binary inspected, and launching through it runs that browser: an
+    install only under /opt on the image PATH, a compiled launcher, or Debian's wrapper."""
+    from deepgym.sandboxes.daytona.desktop import _PIN_BROWSER
 
-    bindir = tmp_path / 'bin'
-    bindir.mkdir()
-    hit = bindir / 'chromium'
-    good, other = b'/etc/chromium/policies', b'/etc/opt/chrome/policies'
-    if layout.startswith('debian'):
-        _fake_tool(bindir, 'chromium', _DEBIAN_WRAPPER)
-        if layout == 'debian':
-            _browser(tmp_path / 'lib' / 'chromium' / 'chromium', good)
-    elif layout in ('relocated', 'other_policy_dir'):
-        real = _browser(tmp_path / 'opt' / 'chromium' / 'chromium', good if accepted else other)
-        hit.symlink_to(real)
-    elif layout.startswith('wrapper_chain'):
-        real = _browser(tmp_path / 'opt' / 'chrome-real', good if accepted else other)
-        _fake_tool(bindir, 'chromium', f'exec {real} --no-first-run "$@"')
-    elif layout == 'unfollowable_wrapper':
-        _fake_tool(bindir, 'chromium', 'exec "$BROWSER" "$@"')
-    script = _CHROMIUM_READS_POLICY.format(session_path=bindir) + '\necho "launch=$launch"'
+    entry = tmp_path / ('opt/chromium' if layout == 'opt_on_image_path' else 'bin')
+    entry.mkdir(parents=True)
+    names = {'chromium_browser': 'chromium-browser', 'google_chrome': 'google-chrome'}
+    pinned = entry / names.get(layout, 'chromium')
+    if layout == 'compiled_launcher':
+        pinned.symlink_to(sys.executable)  # a real compiled binary, not a script
+    elif layout == 'debian_wrapper':
+        (tmp_path / 'lib').mkdir()
+        _fake_tool(tmp_path / 'lib', 'chromium', "echo 'launched debian'")
+        wrapper = f'APPNAME=chromium\nLIBDIR=/usr/lib/$APPNAME\nexec {tmp_path}/lib/chromium "$@"'
+        _fake_tool(entry, pinned.name, wrapper)
+    elif launched is not None:
+        _fake_tool(entry, pinned.name, f"echo 'launched {launched}'")
+    image_path = f'{entry}:{tmp_path}/empty'
+    run_pin = '\nif [ -n "$launch" ]; then "$launch" -c "print(\'launched compiled\')"; fi'
+    script = _PIN_BROWSER.format(path=shlex.quote(image_path)) + '\necho "launch=$launch"' + run_pin
     run = _run_snippet(script)
-    assert ('ACCEPTED' in run.stdout) is accepted, run.stdout + run.stderr
-    if accepted:
-        launch = os.path.realpath(hit) if layout != 'absent' else ''
-        assert f'launch={launch}\n' in run.stdout, run.stdout
+    assert run.returncode == 0, run.stdout + run.stderr
+    assert f'launch={pinned if launched else ""}\n' in run.stdout, run.stdout
+    if launched:
+        assert f'launched {launched}' in run.stdout, run.stdout
+
+
+def test_lockdown_writes_the_chromium_policy_to_every_dir_and_inspects_no_binary(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The managed policy lands in the dir every Chromium-family build reads (Chromium, Google
+    Chrome, chromium-browser), root-owned, and the agent may write neither file nor folder.
+    The browser is pinned by name lookup only: no ELF check, wrapper following or grep."""
+    from deepgym.sandboxes.daytona.desktop import _POLICY_PATHS
+
+    dg, client = _daytona_client(monkeypatch, _LOCKDOWN_OK, _STARTED_OK)
+    with dg.session(ComputerUseEnvironment(task='t')) as session:
+        session.start()
+    prepare = next(c for c in client.boxes[0].events if '/usr/local/bin/xfce4-session' in c)
+    unwritable = _POLICY_PATHS.split()
+    for directory in (
+        '/etc/chromium/policies/managed',
+        '/etc/opt/chrome/policies/managed',
+        '/etc/chromium-browser/policies/managed',
+    ):
+        assert directory in prepare
+        # The file and the folder holding it are both on the agent's must-not-write list.
+        assert directory in unwritable and f'{directory}/deepgym.json' in unwritable
+    assert 'is not owned by root' in prepare and 'the agent can still write' in prepare
+    assert 'command -v chromium || command -v chromium-browser || command -v google-chrome' in (
+        prepare
+    )
+    for inspection in ('177ELF', 'head -c', 'grep -qF /etc/chromium/policies', 'LIBDIR'):
+        assert inspection not in prepare

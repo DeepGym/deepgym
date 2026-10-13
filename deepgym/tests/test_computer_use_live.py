@@ -46,6 +46,19 @@ _ESCAPES = {
     ),
     'custom_actions': 'test -r /usr/lib/x86_64-linux-gnu/thunarx-3/thunar-uca.so && echo ESCAPED',
     'vnc_remote': 'timeout 10 x11vnc -display :0 -Q ping 2>&1 | grep -q ans=ping && echo ESCAPED',
+    # The managed Chromium policy is in every one of the three Chromium-family dirs, readable
+    # and root-owned, and the agent can write neither the file nor its folder.
+    'chromium_policy': (
+        'for d in /etc/chromium/policies/managed /etc/opt/chrome/policies/managed '
+        '/etc/chromium-browser/policies/managed; do [ -r "$d/deepgym.json" ] && '
+        '[ "$(stat -c %u "$d/deepgym.json")" = 0 ] && '
+        '! [ -w "$d/deepgym.json" ] && ! [ -w "$d" ] || echo ESCAPED; done'
+    ),
+    # launch_app.sh runs the pin, which is what setup's own PATH (this one) finds.
+    'browser_pin': (
+        '[ "$(readlink /usr/local/bin/deepgym-chromium)" = "$(command -v chromium)" ] '
+        '|| echo ESCAPED'
+    ),
     # The desktop runs as the agent, not as the sudoer that runs Daytona's daemon (pid 1).
     'desktop_user': (
         'u=$(ps -o user= -C xfce4-session | head -1); '

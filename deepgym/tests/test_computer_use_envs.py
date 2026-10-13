@@ -207,18 +207,23 @@ CHROMIUM_FLAGS = {
 
 def test_chromium_flags_stay_on_the_allowlist() -> None:
     script = load_environment('settings_tabs').files['_shared/launch_app.sh']
-    command = script[
-        script.index('nohup /usr/local/bin/deepgym-chromium') : script.index('http://')
-    ]
+    command = script[script.index('nohup "$browser"') : script.index('http://')]
     assert set(re.findall(r'--[a-z-]+', command)) == CHROMIUM_FLAGS
 
 
-def test_launch_runs_exactly_the_chromium_the_lockdown_checked() -> None:
-    """launch_app.sh runs the link the desktop lockdown pins to the Chromium it checked, never
-    whatever its own PATH would find (setup keeps the image's PATH, the check doesn't)."""
+def test_launch_runs_the_pinned_browser_or_falls_back_to_chromium(tmp_path: Path) -> None:
+    """launch_app.sh runs exactly the browser the desktop lockdown pinned (the link's target),
+    so the launch is that binary; with no pin it runs `chromium` from its PATH, as before."""
     script = load_environment('settings_tabs').files['_shared/launch_app.sh']
-    assert 'nohup /usr/local/bin/deepgym-chromium ' in script
-    assert not re.search(r'nohup chromium\b', script)
+    assert 'nohup "$browser" ' in script and not re.search(r'nohup chromium\b', script)
+    select = script[script.index('browser=chromium') : script.index('(setsid nohup python3')]
+    link = tmp_path / 'pin'
+    for pinned in (None, '/opt/chromium/chromium'):
+        if pinned:
+            link.symlink_to(pinned)
+        code = select.replace('/usr/local/bin/deepgym-chromium', str(link)) + 'echo "$browser"'
+        out = subprocess.run(['/bin/sh', '-c', code], capture_output=True, text=True).stdout
+        assert out.strip() == (pinned or 'chromium')
 
 
 def test_computer_use_suite_is_separate() -> None:

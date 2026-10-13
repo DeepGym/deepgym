@@ -10,13 +10,14 @@
 # the whole desktop, so the verifier/root boundary doesn't rest on it. Kiosk mode shows no
 # warning bar for the flag, so nothing needs hiding.
 #
-# /usr/local/bin/deepgym-chromium is the Chromium the desktop lockdown checked reads its
-# managed policy, linked there by the lockdown. Running it, not `chromium` through this
-# script's PATH (the image's), means the launch can't pick a different, unchecked binary.
+# The desktop lockdown links /usr/local/bin/deepgym-chromium to the browser this script's
+# PATH found when it ran (its managed policy is in every dir such builds read). Run exactly
+# that path, so the launch is the pinned binary; without a pin, run `chromium` as before.
 set -euo pipefail
-[ -x /usr/local/bin/deepgym-chromium ] || { echo 'the desktop lockdown found no Chromium' >&2; exit 1; }
+browser=chromium
+if [ -L /usr/local/bin/deepgym-chromium ]; then browser=$(readlink /usr/local/bin/deepgym-chromium); fi
 (setsid nohup python3 _shared/state_server.py >/tmp/deepgym_server.log 2>&1 &)
-(setsid nohup /usr/local/bin/deepgym-chromium --no-first-run --no-default-browser-check --disable-gpu \
+(setsid nohup "$browser" --no-first-run --no-default-browser-check --disable-gpu \
   --disable-features=Translate --password-store=basic --kiosk --no-sandbox \
   --remote-debugging-port=9222 --user-data-dir=/tmp/deepgym_chrome \
   http://127.0.0.1:8000/ >/tmp/deepgym_chrome.log 2>&1 &)

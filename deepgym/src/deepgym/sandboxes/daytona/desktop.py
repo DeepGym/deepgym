@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import shlex
 from collections.abc import Callable
+from pathlib import PurePosixPath
 
 from deepgym.exceptions import ActionError, SandboxError
 from deepgym.models import Action
@@ -59,38 +60,32 @@ _LAUNCHERS = (
 # Printed last by both scripts below. Without it the desktop counts as not locked down.
 _LOCKED = 'deepgym-desktop-locked'
 
-# Where the lockdown links the Chromium it checked. launch_app.sh runs exactly this path, so
-# the check and the launch can't resolve different binaries (setup keeps the image's PATH).
+# The managed policy goes in every dir a Chromium-family build reads its managed policy from
+# (Chromium, Google Chrome, Ubuntu's chromium-browser), so whichever build runs reads it,
+# with no binary inspected to guess which build it is.
+_POLICY_DIRS = (
+    '/etc/chromium/policies/managed',
+    '/etc/opt/chrome/policies/managed',
+    '/etc/chromium-browser/policies/managed',
+)
+# Each policy file and every folder above it below /etc: the agent must write none of them,
+# since a writable folder would let it swap the file.
+_POLICY_FILES = tuple(PurePosixPath(directory, 'deepgym.json') for directory in _POLICY_DIRS)
+_POLICY_PATHS = ' '.join(
+    str(path)
+    for policy in _POLICY_FILES
+    for path in (policy, *policy.parents)
+    if PurePosixPath('/etc') in path.parents
+)
+
+# Where the lockdown links the browser it pinned. launch_app.sh runs exactly this target, so
+# the launch is that binary, not whatever its own PATH would find later.
 _CHROMIUM_PIN = '/usr/local/bin/deepgym-chromium'
 
-# Find the Chromium the agent's session PATH would run, set $launch to it for the pin, and
-# check that the build it ends in reads the managed policy dir the lockdown writes. A link
-# resolves through realpath. Only Debian's own wrapper (matched by its LIBDIR line) maps to
-# ../lib/chromium/chromium; any other script is followed through a plain `exec /path` line,
-# a few hops at most. A wrapper that can't be followed falls back to the policy dir every
-# Chromium build reads, which the lockdown has written. No Chromium on that PATH: nothing.
-_CHROMIUM_READS_POLICY = """launch=
-if hit=$(PATH={session_path}; command -v chromium); then
-  launch=$(realpath "$hit")
-  bin=$launch
-  hops=0
-  follow='s/^[[:space:]]*exec[[:space:]][[:space:]]*"*\\([^[:space:]"]*\\).*/\\1/p'
-  while [ -n "$bin" ] && [ "$(head -c 4 "$bin")" != "$(printf '\\177ELF')" ]; do
-    hops=$((hops + 1))
-    if [ "$hops" -gt 4 ]; then bin=; break; fi
-    if grep -qF 'LIBDIR=/usr/lib/$APPNAME' "$bin"; then
-      bin="$(dirname "$bin")/../lib/chromium/chromium"
-      if ! [ -f "$bin" ]; then echo "Debian's Chromium wrapper has no $bin"; exit 1; fi
-    else
-      next=$(sed -n "$follow" "$bin" | head -n 1)
-      case "$next" in /*) ;; *) next=;; esac
-      if [ -n "$next" ] && [ -e "$next" ]; then bin=$(realpath "$next"); else bin=; fi
-    fi
-  done
-  if [ -n "$bin" ] && ! grep -qF /etc/chromium/policies "$bin"; then
-    echo "the Chromium at $hit does not read /etc/chromium/policies"; exit 1
-  fi
-fi"""
+# The browser to pin: the first of these names that setup's own PATH finds, the way main ran
+# `chromium` from launch_app.sh, so any image keeps working. Nothing found: $launch is empty.
+_PIN_BROWSER = """launch=$(PATH={path}
+  command -v chromium || command -v chromium-browser || command -v google-chrome) || launch="""
 
 # Proves remote control is off by asking the running x11vnc, not by reading its argv. The
 # probe ignores any rc file (-norc), so an rc "connect" line can't send the query elsewhere.
@@ -127,9 +122,18 @@ home=$(tr '\\0' '\\n' < /proc/1/environ | sed -n 's/^HOME=//p')
 printf %s {rc} > "$home/.x11vncrc"
 chown "$(stat -c %u:%g "$home")" "$home/.x11vncrc"
 chmod 600 "$home/.x11vncrc"
-mkdir -p /etc/chromium/policies/managed
-printf %s {policy} > /etc/chromium/policies/managed/deepgym.json
-{chromium_check}
+for dir in {policy_dirs}; do
+  mkdir -p "$dir"
+  d=$dir
+  while [ "$d" != /etc ]; do chown 0:0 "$d"; chmod 755 "$d"; d=$(dirname "$d"); done
+  rm -f "$dir/deepgym.json"
+  printf %s {policy} > "$dir/deepgym.json"
+  chown 0:0 "$dir/deepgym.json"
+  chmod 644 "$dir/deepgym.json"
+  [ "$(stat -c %u "$dir/deepgym.json")" = 0 ] || {{
+    echo "$dir/deepgym.json is not owned by root"; exit 1; }}
+done
+{pin_browser}
 rm -f {chromium_pin}
 if [ -n "$launch" ]; then ln -s "$launch" {chromium_pin}; fi
 # Thunar's custom actions, "Open Terminal Here" included, all come from its uca plugin, and
@@ -149,14 +153,18 @@ left=$({as_agent} /bin/sh -c {agent_check} check $found)
 echo {marker}
 """
 
-# Runs as the agent, on the session's PATH: prints each launcher it can still run, and
-# each plugin or helper path (its arguments) it can still load or run.
+# Runs as the agent, on the session's PATH: prints each launcher it can still run, each
+# plugin or helper path (its arguments) it can still load or run, and each Chromium policy
+# file or folder it can still write.
 _AGENT_CHECK = """PATH={path}
 for bin in {launchers}; do
   if p=$(command -v "$bin") && [ -x "$p" ]; then echo "the agent can still run $bin"; fi
 done
 for path in "$@"; do
   if [ -r "$path" ] || [ -x "$path" ]; then echo "the agent can still use $path"; fi
+done
+for path in {unwritable}; do
+  if [ -w "$path" ]; then echo "the agent can still write $path"; fi
 done
 """
 
@@ -224,29 +232,35 @@ class DaytonaDesktop:
         self._action_timeout = action_timeout
         self._start_timeout = start_timeout
 
-    def start(self, as_agent: str, home: str, as_root: Callable[[str, int], ExecResult]) -> None:
+    def start(
+        self, as_agent: str, home: str, path: str, as_root: Callable[[str, int], ExecResult]
+    ) -> None:
         """Lock the desktop down, start it with its session run through *as_agent*, then
         check that the running desktop took the lockdown.
 
         Args:
             as_agent: Root command prefix that runs a command as the agent, offline.
             home: The agent's home directory.
+            path: The PATH setup runs with; the browser it finds is pinned for launch_app.sh.
             as_root: Runs a script as root, out of the image's environment, with a timeout.
 
         Raises:
             SandboxError: If a lockdown step or check fails, or the desktop doesn't start.
         """
         wrapper = _SESSION_WRAPPER.format(as_agent=as_agent, home=home, path=_SESSION_PATH)
-        agent_check = _AGENT_CHECK.format(path=_SESSION_PATH, launchers=_LAUNCHERS)
+        agent_check = _AGENT_CHECK.format(
+            path=_SESSION_PATH, launchers=_LAUNCHERS, unwritable=_POLICY_PATHS
+        )
         rc = shlex.quote(_X11VNC_RC)
         lockdown = _LOCKDOWN.format(
             wrapper=shlex.quote(wrapper),
             rc=rc,
             policy=shlex.quote(_CHROMIUM_POLICY),
+            policy_dirs=' '.join(_POLICY_DIRS),
             launchers=_LAUNCHERS,
             as_agent=as_agent,
             agent_check=shlex.quote(agent_check),
-            chromium_check=_CHROMIUM_READS_POLICY.format(session_path=_SESSION_PATH),
+            pin_browser=_PIN_BROWSER.format(path=shlex.quote(path)),
             chromium_pin=_CHROMIUM_PIN,
             marker=_LOCKED,
         )

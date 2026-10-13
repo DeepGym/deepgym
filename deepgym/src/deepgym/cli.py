@@ -849,7 +849,12 @@ def _print_verifier_audit(report) -> None:
     print(f'\n{"=" * 50}')
     print(f'  Verifier Audit: {report.verifier_id}')
     print(f'  Benchmark:      {report.benchmark}')
-    print(f'  Risk:           {report.risk_level.upper()} ({report.risk_score:.2f})')
+    print(f'  Status:         {report.status.upper()}')
+    if report.risk_score is None:
+        unjudged = f'{report.report.inconclusive}/{report.attacks_run}'
+        print(f'  Risk:           UNKNOWN ({unjudged} attacks got no verdict)')
+    else:
+        print(f'  Risk:           {report.risk_level.upper()} ({report.risk_score:.2f})')
     print(f'  Exploitable:    {report.exploitable}')
     print(f'  Attacks:        {report.exploits_found}/{report.attacks_run}')
     print(f'  Stored:         {report.stored}')

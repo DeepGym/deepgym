@@ -12,7 +12,6 @@ Usage:
 """
 
 import argparse
-import hashlib
 import logging
 import sys
 import time
@@ -22,8 +21,9 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / 'src'))
 
 from deepgym import DeepGym, Environment
-from deepgym.adversarial import BlackBoxAdversarialTester
+from deepgym.adversarial import PASS_THRESHOLD, BlackBoxAdversarialTester, BlackBoxReport
 from deepgym.exploit_db import ExploitDB, ExploitRecord
+from deepgym.reward_qa import fingerprint_verifier
 
 logger = logging.getLogger(__name__)
 
@@ -50,6 +50,75 @@ def _load_example_env(name: str) -> Environment | None:
     return Environment(
         task=task_path.read_text(encoding='utf-8'),
         verifier_code=verifier_path.read_text(encoding='utf-8'),
+    )
+
+
+def _attack_config(tester: BlackBoxAdversarialTester, task: str) -> str:
+    """How *tester* attacks *task*: a result is reused only for the same attack."""
+    return (
+        f'black-box; model={tester._model}; rounds={tester._max_rounds}; '
+        f'attempts={tester._attempts_per_round}; task={fingerprint_verifier(task)}'
+    )
+
+
+def _scan_one(
+    db: ExploitDB, tester: BlackBoxAdversarialTester, name: str, benchmark: str, env: Environment
+) -> str:
+    """Attack *env* unless an identical test is stored; save a conclusive result.
+
+    Returns:
+        A status line: skipped, INCONCLUSIVE (not saved, so the next scan retries it),
+        EXPLOITABLE or ROBUST.
+    """
+    verifier_hash = fingerprint_verifier(env.verifier_source)
+    config = _attack_config(tester, env.task)
+    if db.current(
+        name,
+        benchmark=benchmark,
+        attack_type='black-box',
+        verifier_hash=verifier_hash,
+        attack_config=config,
+    ):
+        return 'already tested (black-box), skipping'
+    start = time.time()
+    report = tester.test(env)
+    elapsed = time.time() - start
+    if report.status == 'inconclusive':
+        return f'INCONCLUSIVE, not saved ({"; ".join(report.problems[:3])}, {elapsed:.1f}s)'
+    db.save(_blackbox_record(name, benchmark, report, verifier_hash, config))
+    return (
+        f'{report.status.upper()} (best={report.best_exploit_score:.2f}, '
+        f'{report.total_rounds} rounds, {report.total_attempts} attempts, {elapsed:.1f}s)'
+    )
+
+
+def _blackbox_record(
+    name: str, benchmark: str, report: BlackBoxReport, verifier_hash: str, config: str
+) -> ExploitRecord:
+    """The ExploitDB record for a conclusive black-box *report*."""
+    attempts = [(r.round_num, a) for r in report.rounds for a in r.attempts]
+    return ExploitRecord(
+        verifier_id=name,
+        benchmark=benchmark,
+        exploitable=report.exploitable,
+        patterns=report.strategies_tried,
+        num_attacks=report.total_attempts,
+        num_exploits=sum(
+            not a.get('inconclusive') and a['score'] >= PASS_THRESHOLD for _, a in attempts
+        ),
+        max_exploit_score=report.best_exploit_score,
+        attacks=[
+            {
+                'round': round_num,
+                'strategy': a['strategy'],
+                'score': a['score'],
+                'inconclusive': bool(a.get('inconclusive')),
+            }
+            for round_num, a in attempts
+        ],
+        verifier_hash=verifier_hash,
+        attack_type='black-box',
+        attack_config=config,
     )
 
 
@@ -86,49 +155,9 @@ def scan_examples(
             print(f'  {name}: missing files, skipping')
             continue
 
-        existing = db.get(name, attack_type='black-box')
-        if existing:
-            print(f'  {name}: already tested (black-box), skipping')
-            continue
-
         print(f'  {name}...', end=' ', flush=True)
-        start = time.time()
-
         try:
-            report = tester.test(env)
-            verifier_code = (EXAMPLES_ROOT / name / 'verifier.py').read_text(encoding='utf-8')
-
-            record = ExploitRecord(
-                verifier_id=name,
-                benchmark='examples',
-                exploitable=report.exploitable,
-                patterns=report.strategies_tried,
-                num_attacks=report.total_attempts,
-                num_exploits=sum(1 for r in report.rounds for a in r.attempts if a['score'] >= 0.5),
-                max_exploit_score=report.best_exploit_score,
-                attacks=[
-                    {
-                        'round': r.round_num,
-                        'strategy': a['strategy'],
-                        'score': a['score'],
-                    }
-                    for r in report.rounds
-                    for a in r.attempts
-                ],
-                verifier_hash=hashlib.sha256(verifier_code.encode()).hexdigest()[:16],
-                attack_type='black-box',
-            )
-            db.save(record)
-
-            elapsed = time.time() - start
-            status = 'EXPLOITABLE' if report.exploitable else 'ROBUST'
-            print(
-                f'{status} (best={report.best_exploit_score:.2f}, '
-                f'{report.total_rounds} rounds, {report.total_attempts} attempts, '
-                f'{elapsed:.1f}s)'
-            )
-            _print_round_detail(report)
-
+            print(_scan_one(db, tester, name, 'examples', env))
         except KeyboardInterrupt:
             print('\nInterrupted by user.')
             break
@@ -187,52 +216,13 @@ def scan_benchmark(
         if not verifier_path.exists():
             continue
 
-        existing = db.get(d.name, attack_type='black-box')
-        if existing:
-            print(f'  [{i + 1}/{len(env_dirs)}] {d.name}: already tested, skipping')
-            continue
-
         verifier_code = verifier_path.read_text(encoding='utf-8')
         task = task_path.read_text(encoding='utf-8') if task_path.exists() else d.name
-
         env = Environment(task=task, verifier_code=verifier_code)
 
         print(f'  [{i + 1}/{len(env_dirs)}] {d.name}...', end=' ', flush=True)
-        start = time.time()
-
         try:
-            report = tester.test(env)
-
-            record = ExploitRecord(
-                verifier_id=d.name,
-                benchmark=benchmark,
-                exploitable=report.exploitable,
-                patterns=report.strategies_tried,
-                num_attacks=report.total_attempts,
-                num_exploits=sum(1 for r in report.rounds for a in r.attempts if a['score'] >= 0.5),
-                max_exploit_score=report.best_exploit_score,
-                attacks=[
-                    {
-                        'round': r.round_num,
-                        'strategy': a['strategy'],
-                        'score': a['score'],
-                    }
-                    for r in report.rounds
-                    for a in r.attempts
-                ],
-                verifier_hash=hashlib.sha256(verifier_code.encode()).hexdigest()[:16],
-                attack_type='black-box',
-            )
-            db.save(record)
-
-            elapsed = time.time() - start
-            status = 'EXPLOITABLE' if report.exploitable else 'ROBUST'
-            print(
-                f'{status} (best={report.best_exploit_score:.2f}, '
-                f'{report.total_rounds} rounds, {report.total_attempts} attempts, '
-                f'{elapsed:.1f}s)'
-            )
-
+            print(_scan_one(db, tester, d.name, benchmark, env))
         except KeyboardInterrupt:
             print('\nInterrupted by user.')
             break
@@ -259,9 +249,10 @@ def compare_results() -> None:
         db.close()
         return
 
-    white_ids = {r.verifier_id for r in white}
-    black_ids = {r.verifier_id for r in black}
-    common = white_ids & black_ids
+    # Task ids repeat across benchmarks, so a verifier is its (benchmark, id) pair.
+    white_lookup = {(r.benchmark, r.verifier_id): r for r in white}
+    black_lookup = {(r.benchmark, r.verifier_id): r for r in black}
+    common = white_lookup.keys() & black_lookup.keys()
 
     print(f'White-box results: {len(white)}')
     print(f'Black-box results: {len(black)}')
@@ -283,8 +274,6 @@ def compare_results() -> None:
 
     if common:
         print('\n--- Verifiers tested with both approaches ---')
-        white_lookup = {r.verifier_id: r for r in white}
-        black_lookup = {r.verifier_id: r for r in black}
         both_exploitable = 0
         white_only = 0
         black_only = 0
@@ -306,7 +295,7 @@ def compare_results() -> None:
                 neither += 1
                 label = 'ROBUST'
             print(
-                f'  {vid}: {label} '
+                f'  {vid[0]}/{vid[1]}: {label} '
                 f'(white={w.max_exploit_score:.2f}, black={b.max_exploit_score:.2f})'
             )
 
@@ -316,18 +305,6 @@ def compare_results() -> None:
         print(f'Neither (robust):  {neither}')
 
     db.close()
-
-
-def _print_round_detail(report) -> None:
-    """Print per-round detail for a black-box report.
-
-    Args:
-        report: A BlackBoxReport instance.
-    """
-    for r in report.rounds:
-        scores = [f'{a["score"]:.2f}' for a in r.attempts]
-        strategies = [a['strategy'] for a in r.attempts]
-        print(f'    Round {r.round_num}: scores=[{", ".join(scores)}] strategies={strategies}')
 
 
 def _print_summary(benchmark: str, db: ExploitDB) -> None:

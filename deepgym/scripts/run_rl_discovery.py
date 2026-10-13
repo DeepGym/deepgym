@@ -94,8 +94,11 @@ def _print_report(report: DiscoveryReport) -> None:
     print(f'  Rounds: {report.num_rounds}  |  Total candidates: {report.total_candidates}')
     print(f'  Score progression: {" -> ".join(f"{s:.3f}" for s in report.score_progression)}')
     print(f'  Final best score: {report.final_best_score:.3f}')
-    print(f'  Genuine solution: {report.is_genuine_solution}')
-    print(f'  Exploit discovered: {report.exploit_discovered}')
+    print(f'  Exploit suspected: {report.exploit_suspected}')
+    for suspect in report.suspected_exploits[:3]:
+        print(f'    round {suspect.round_num}, {suspect.score:.2f}: {"; ".join(suspect.reasons)}')
+    if report.unjudged_candidates:
+        print(f'  Unjudged candidates: {report.unjudged_candidates} (no verdict, not selected)')
     print(f'  Convergence: {report.convergence_type}')
 
     # Show per-round stats.
@@ -121,7 +124,7 @@ def _print_comparison(
     print('=' * 70)
 
     print(
-        f'\n{"Category":<20} {"Envs":<6} {"Exploits":<10} {"Genuine":<10} '
+        f'\n{"Category":<20} {"Envs":<6} {"Suspected":<10} {"Unverified":<10} '
         f'{"Avg Best":<10} {"Convergence Types"}'
     )
     print('-' * 80)
@@ -132,8 +135,8 @@ def _print_comparison(
             continue
 
         n = len(reports)
-        exploits = sum(1 for r in reports if r.exploit_discovered)
-        genuine = sum(1 for r in reports if r.is_genuine_solution)
+        exploits = sum(1 for r in reports if r.exploit_suspected)
+        genuine = sum(1 for r in reports if r.convergence_type == 'unverified')
         avg_best = sum(r.final_best_score for r in reports) / n
         types = {}
         for r in reports:
@@ -145,8 +148,8 @@ def _print_comparison(
     print()
 
     # The key insight.
-    weak_exploit_count = sum(1 for r in weak_reports if r.exploit_discovered)
-    hard_exploit_count = sum(1 for r in hardened_reports if r.exploit_discovered)
+    weak_exploit_count = sum(1 for r in weak_reports if r.exploit_suspected)
+    hard_exploit_count = sum(1 for r in hardened_reports if r.exploit_suspected)
 
     if weak_exploit_count > hard_exploit_count:
         print('KEY FINDING: Weak verifiers are more vulnerable to RL exploit discovery.')
@@ -168,11 +171,7 @@ def _print_comparison(
     for label, reports in [('Weak', weak_reports), ('Hardened', hardened_reports)]:
         for r in reports:
             arrow = ' -> '.join(f'{s:.2f}' for s in r.score_progression)
-            status = (
-                'EXPLOIT'
-                if r.exploit_discovered
-                else ('GENUINE' if r.is_genuine_solution else 'MIXED')
-            )
+            status = 'SUSPECTED EXPLOIT' if r.exploit_suspected else r.convergence_type.upper()
             print(f'  [{label}] {r.verifier_id[:40]:<40} {arrow}  [{status}]')
 
 

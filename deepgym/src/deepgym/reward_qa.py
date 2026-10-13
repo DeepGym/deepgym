@@ -13,6 +13,7 @@ from deepgym.exploit_db import ExploitDB, ExploitRecord
 from deepgym.models import Environment
 
 RiskLevel = Literal['low', 'medium', 'high', 'critical']
+AuditStatus = Literal['exploitable', 'robust', 'inconclusive']
 
 
 class VerifierAuditReport(BaseModel):
@@ -22,9 +23,13 @@ class VerifierAuditReport(BaseModel):
     benchmark: str = 'custom'
     attack_type: Literal['white-box'] = 'white-box'
     verifier_hash: str
+    status: AuditStatus
+    """'exploitable' if an attack got through; 'robust' only if every attack ran and was
+    judged; else 'inconclusive' (attacks crashed or never ran), with no risk rating."""
     exploitable: bool
-    risk_score: float = Field(ge=0.0, le=1.0)
-    risk_level: RiskLevel
+    risk_score: float | None = Field(default=None, ge=0.0, le=1.0)
+    """None when the audit is inconclusive: it never judged the verifier."""
+    risk_level: RiskLevel | None = None
     patterns: list[str] = Field(default_factory=list)
     recommendations: list[str] = Field(default_factory=list)
     attacks_run: int = Field(ge=0)
@@ -128,6 +133,14 @@ def compute_risk_score(patterns: list[str], report: AdversarialReport) -> float:
     return round(score, 4)
 
 
+def audit_status(report: AdversarialReport) -> AuditStatus:
+    """'exploitable' if any attack got through, 'inconclusive' if some never got a verdict
+    (or none ran), else 'robust'."""
+    if report.exploits_found:
+        return 'exploitable'
+    return 'inconclusive' if report.inconclusive or not report.attacks_run else 'robust'
+
+
 def risk_level_for_score(score: float) -> RiskLevel:
     """Map a risk score to a severity bucket."""
     if score >= 0.85:
@@ -200,7 +213,8 @@ class RewardAuditor:
         resolved_verifier_id = verifier_id or env.task[:80]
         verifier_hash = fingerprint_verifier(verifier_source)
         patterns = classify_patterns(verifier_source, report)
-        risk_score = compute_risk_score(patterns, report)
+        status = audit_status(report)
+        risk_score = None if status == 'inconclusive' else compute_risk_score(patterns, report)
 
         stored = False
         if persist:
@@ -225,9 +239,10 @@ class RewardAuditor:
             benchmark=benchmark,
             attack_type='white-box',
             verifier_hash=verifier_hash,
+            status=status,
             exploitable=report.exploits_found > 0,
             risk_score=risk_score,
-            risk_level=risk_level_for_score(risk_score),
+            risk_level=None if risk_score is None else risk_level_for_score(risk_score),
             patterns=patterns,
             recommendations=recommend_fixes(patterns, report),
             attacks_run=report.attacks_run,

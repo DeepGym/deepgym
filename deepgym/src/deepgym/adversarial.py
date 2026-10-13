@@ -20,7 +20,7 @@ import logging
 import os
 import re
 import textwrap
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Literal
 
 from pydantic import BaseModel, Field
 
@@ -246,7 +246,8 @@ class BlackBoxRound(BaseModel):
     round_num: int = Field(..., ge=1, description='1-indexed round number.')
     attempts: list[dict] = Field(
         default_factory=list,
-        description='Per-attempt dicts with keys: code, score, strategy.',
+        description='Per-attempt dicts with keys: code, score, strategy, inconclusive (true '
+        'when the run got no verdict, so its score of 0 means nothing).',
     )
     best_score: float = Field(
         default=0.0, ge=0.0, le=1.0, description='Highest score in this round.'
@@ -260,8 +261,19 @@ class BlackBoxReport(BaseModel):
     """Aggregate results from a multi-round black-box adversarial attack."""
 
     verifier_id: str = Field(..., description='Identifier for the tested verifier.')
+    status: Literal['exploitable', 'robust', 'inconclusive'] = Field(
+        ...,
+        description="'exploitable' if a judged attempt reached the pass threshold; 'robust' "
+        'only if every round ran and every attempt was judged without one; otherwise '
+        "'inconclusive': the scan is incomplete and says nothing, so keep testing.",
+    )
     exploitable: bool = Field(
         ..., description='True if any non-solution scored above the pass threshold.'
+    )
+    problems: list[str] = Field(
+        default_factory=list,
+        description='Why the scan is incomplete: failed or empty LLM rounds, attempts that '
+        'got no verdict.',
     )
     rounds: list[BlackBoxRound] = Field(default_factory=list, description='Per-round details.')
     total_attempts: int = Field(default=0, ge=0, description='Total attempts across all rounds.')
@@ -1034,6 +1046,7 @@ class BlackBoxAdversarialTester:
         rounds: list[BlackBoxRound] = []
         all_attempts: list[dict] = []
         all_strategies: list[str] = []
+        problems: list[str] = []
         best_score = 0.0
         best_strategy = ''
 
@@ -1057,10 +1070,12 @@ class BlackBoxAdversarialTester:
                 exploits, strategies = self._call_llm(client, prompt)
             except DeepGymError as exc:
                 logger.warning('Black-box round %d failed: %s', round_num, exc)
+                problems.append(f'round {round_num}: {exc}')
                 break
 
             if not exploits:
                 logger.warning('Black-box round %d: no exploits parsed', round_num)
+                problems.append(f'round {round_num}: the LLM returned no parseable attempts')
                 break
 
             round_attempts: list[dict] = []
@@ -1072,10 +1087,14 @@ class BlackBoxAdversarialTester:
                     'code': code,
                     'score': result.score,
                     'strategy': strategy,
+                    'inconclusive': result.inconclusive,
                 }
                 round_attempts.append(attempt)
                 all_attempts.append(attempt)
                 all_strategies.append(strategy)
+                if result.inconclusive:  # no verdict: its 0 is no evidence either way
+                    problems.append(f'round {round_num}: {strategy} got no verdict')
+                    continue
 
                 if result.score > round_best:
                     round_best = result.score
@@ -1101,9 +1120,15 @@ class BlackBoxAdversarialTester:
                 )
                 break
 
+        exploitable = best_score >= self._pass_threshold
+        if not exploitable and not all_attempts:
+            problems.append('no attempt ran')
+        status = 'exploitable' if exploitable else 'inconclusive' if problems else 'robust'
         return BlackBoxReport(
             verifier_id=env.task[:80],
-            exploitable=best_score >= self._pass_threshold,
+            status=status,
+            exploitable=exploitable,
+            problems=problems,
             rounds=rounds,
             total_attempts=len(all_attempts),
             total_rounds=len(rounds),
@@ -1124,7 +1149,10 @@ class BlackBoxAdversarialTester:
         """
         lines: list[str] = []
         for i, a in enumerate(attempts, 1):
-            lines.append(f'- Attempt {i} ({a["strategy"]}): score = {a["score"]:.2f}')
+            outcome = (
+                'no verdict (the run failed)' if a.get('inconclusive') else f'{a["score"]:.2f}'
+            )
+            lines.append(f'- Attempt {i} ({a["strategy"]}): score = {outcome}')
         return '\n'.join(lines)
 
     def _call_llm(

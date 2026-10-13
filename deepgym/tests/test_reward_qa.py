@@ -69,7 +69,7 @@ class TestRewardAuditor:
 
         db = ExploitDB(db_path=db_path)
         try:
-            assert (report.stored, db.get('flaky', 'white-box')) == (False, None)
+            assert (report.stored, db.get('flaky', benchmark='custom')) == (False, None)
         finally:
             db.close()
 
@@ -89,7 +89,7 @@ class TestRewardAuditor:
         assert report.stored is True
         db = ExploitDB(db_path=db_path)
         try:
-            record = db.get('weak-verifier', 'white-box')
+            record = db.get('weak-verifier', benchmark='custom')
             assert record is not None
             assert record.exploitable is True
             assert record.num_attacks == 1
@@ -142,3 +142,12 @@ class TestBenchmarkAudit:
         environments = load_environments_from_dir(tmp_path)
 
         assert set(environments) == {'env_a', 'nested/env_b'}
+
+
+def test_an_audit_that_judged_nothing_has_no_risk_rating(tmp_path: Path, dg: DeepGym) -> None:
+    env = Environment(task='Do anything', verifier_code=CRASHING_VERIFIER)
+
+    report = RewardAuditor(dg).audit(env, strategies=['empty', 'trivial'])
+
+    assert report.status == 'inconclusive'
+    assert (report.risk_score, report.risk_level) == (None, None)  # never a reassuring LOW

@@ -320,3 +320,44 @@ def test_payloads_carry_json_values_as_python(strategy: str, printed: list[str])
     run = subprocess.run([sys.executable, '-c', code], capture_output=True, text=True)
     assert run.returncode == 0, run.stderr  # JSON true and null used to be NameErrors
     assert run.stdout.split() == printed  # falsey expectations are kept, not dropped
+
+
+class _ScriptedLLM:
+    """Stands in for the Anthropic client: answers each round from a list."""
+
+    def __init__(self, replies: list[str]) -> None:
+        self.replies = iter(replies)
+        self.messages = self
+
+    def create(self, **kwargs: object) -> object:
+        reply = next(self.replies)
+        if isinstance(reply, Exception):
+            raise reply
+        return type('Message', (), {'content': [type('Text', (), {'text': reply})()]})()
+
+
+@pytest.mark.parametrize(
+    ('replies', 'verifier', 'problem'),
+    [
+        ([RuntimeError('overloaded')], 'return 0.0\n', 'round 1: Anthropic API call failed'),
+        (['no exploits here'], 'return 0.0\n', 'round 1: the LLM returned no parseable'),
+        (['---EXPLOIT 1: x---\nprint(1)'] * 2, "raise RuntimeError('judge down')\n", 'no verdict'),
+    ],
+)
+def test_an_incomplete_black_box_scan_is_inconclusive(
+    replies: list, verifier: str, problem: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import types
+
+    from deepgym.adversarial import BlackBoxAdversarialTester
+
+    llm = _ScriptedLLM(replies)
+    fake = types.ModuleType('anthropic')
+    fake.Anthropic = lambda api_key: llm
+    monkeypatch.setitem(sys.modules, 'anthropic', fake)  # no SDK or network needed
+    tester = BlackBoxAdversarialTester(DeepGym(mode='local'), api_key='k', max_rounds=2)
+
+    report = tester.test(Environment(task='Add numbers.', verifier_code=verifier))
+
+    assert (report.status, report.exploitable) == ('inconclusive', False)  # never ROBUST
+    assert any(problem in line for line in report.problems)

@@ -482,8 +482,13 @@ def _cmd_traces(args: argparse.Namespace) -> None:
         for file in (sorted(path.glob('*.jsonl')) if path.is_dir() else [path])
     ]
     out = Path(args.out)
-    if out.exists() and any(out.samefile(source) for source in [db, *files] if source):
-        print(f'Error: {out} is one of the inputs; write the export elsewhere', file=sys.stderr)
+    # An export inside a traces directory would be read back as a trace file next time.
+    inside = any(out.resolve().is_relative_to(path.resolve()) for path in paths if path.is_dir())
+    if inside or out.exists() and any(out.samefile(source) for source in [db, *files] if source):
+        print(
+            f'Error: {out} is an input or inside an input directory; write the export elsewhere',
+            file=sys.stderr,
+        )
         sys.exit(1)
 
     traces, untraced = EpisodeStore(db).traces() if db else ([], 0)

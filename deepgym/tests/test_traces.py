@@ -194,6 +194,14 @@ class TestSchema:
         assert trajectory.final_observation == trace.steps[2].observation
         assert trajectory.step_rewards == [0.5, 0.5]
 
+    def test_to_trajectory_never_moves_a_reward_to_another_step(self) -> None:
+        trace = graded_trace()
+        # An older trace: the first step's verifier gave no verdict and the episode went on.
+        unjudged = trace.steps[0].model_copy(update={'reward': None})
+        trace = trace.model_copy(update={'steps': (unjudged, *trace.steps[1:])})
+
+        assert trace.to_trajectory().step_rewards == []
+
 
 class TestProvenance:
     """Content hashes are stable and track what defines the environment."""

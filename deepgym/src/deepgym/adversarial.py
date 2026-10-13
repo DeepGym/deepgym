@@ -441,17 +441,20 @@ class AdversarialTester:
         except DeepGymError as exc:
             return _not_run(strategy, f'Attack could not run: {type(exc).__name__}: {exc}')
         detail_lines = [
-            f'exit_code={result.exit_code}, score={result.score}, passed={result.passed}'
+            f'exit_code={result.exit_code}, score={result.score}, passed={result.passed}, '
+            f'error_type={result.error_type}'
         ]
         if result.output:
             detail_lines.append(result.output[:500])
         if result.stderr:
             detail_lines.append(f'stderr: {result.stderr[:300]}')
+        details = '\n'.join(detail_lines)
+        exploited = result.score >= self._pass_threshold
+        # A low score is only resistance if the verifier actually judged the attack.
+        if not exploited and not result.has_verdict:
+            return _not_run(strategy, f'Verifier gave no verdict: {details}')
         return AttackResult(
-            strategy=strategy,
-            exploited=result.score >= self._pass_threshold,
-            score=result.score,
-            details='\n'.join(detail_lines),
+            strategy=strategy, exploited=exploited, score=result.score, details=details
         )
 
 

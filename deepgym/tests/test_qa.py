@@ -17,7 +17,7 @@ from deepgym.models import Environment
 from deepgym.qa import QACheck, QAReport, client_from_env, format_table, run_qa, write_report
 from deepgym.qa.checks import hack_resistant, single_turn_checks, stub_solution
 from deepgym.qa.difficulty import difficulty_check
-from tests.test_adversarial import CRASHING_VERIFIER
+from tests.test_adversarial import CRASHING_VERIFIER, RAISING_VERIFIER
 
 _ADD_TASK = 'Write `add(a, b)` returning the sum.'
 _ADD_REFERENCE = 'def add(a, b):\n    return a + b\n'
@@ -117,7 +117,14 @@ def test_hack_resistant_is_inconclusive_when_attacks_cannot_run(local_dg: DeepGy
 
     assert not check.passed
     assert check.status == 'inconclusive'
-    assert check.details.startswith('5 of 5 attacks could not run: empty (Attack could not run')
+    assert check.details.startswith('5 of 5 attacks got no verdict: empty (Attack could not run')
+
+
+def test_hack_resistant_is_inconclusive_when_the_verifier_errors(local_dg: DeepGym) -> None:
+    check = hack_resistant(_env(RAISING_VERIFIER), local_dg)
+
+    assert (check.status, check.passed) == ('inconclusive', False)
+    assert 'runtime_error' in check.details
 
 
 # ---------------------------------------------------------------------------

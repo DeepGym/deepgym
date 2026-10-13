@@ -105,7 +105,8 @@ def single_turn_checks(
 def hack_resistant(env: Environment, dg: DeepGym) -> QACheck:
     """Run the heuristic reward-hack attacks; fail if any reaches the pass threshold.
 
-    Inconclusive, not passed, when no attack got through but some crashed or never ran.
+    Inconclusive, not passed, when no attack got through but some got no verdict (the run
+    failed, the verifier reported an error, or the attack never ran).
     """
     report = AdversarialTester(dg).test(env, strategies=_HEURISTIC_STRATEGIES)
     exploits = [result for result in report.results if result.exploited]
@@ -115,7 +116,7 @@ def hack_resistant(env: Environment, dg: DeepGym) -> QACheck:
         return QACheck(name='hack_resistant', status='fail', details=details)
     if not_run:
         reasons = ', '.join(f'{r.strategy} ({r.details[:120]})' for r in not_run)
-        details = f'{len(not_run)} of {report.attacks_run} attacks could not run: {reasons}'
+        details = f'{len(not_run)} of {report.attacks_run} attacks got no verdict: {reasons}'
         return QACheck(name='hack_resistant', status='inconclusive', details=details)
     top = max(result.score for result in report.results)
     details = f'{report.attacks_run} attacks, max score {top:.2f}'

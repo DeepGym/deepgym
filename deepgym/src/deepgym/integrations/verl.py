@@ -82,11 +82,6 @@ def _environment(name: str, variant: int) -> Environment:
     return load_environment(name, variant=variant)  # type: ignore[return-value]
 
 
-# The model's own fault (a patch that is malformed or doesn't apply): a real 0 to train on,
-# not a missing verdict, so these samples must never be masked out of the loss.
-_MODEL_FAULTS = frozenset({'invalid_patch', 'patch_apply_failed'})
-
-
 def _score_one(dg: DeepGym, env: Environment, response: str) -> RunResult:
     # run_batch turns verifier and sandbox errors into a zero score instead of crashing training.
     return dg.run_batch(env, [extract_code(response)], max_parallel=1).results[0]
@@ -118,8 +113,9 @@ def compute_score(
     Returns:
         The same keys for every row, as verl requires to batch them: ``score``,
         ``passed`` (1.0 or 0.0), and ``error``, which is 1.0 when no verdict was
-        produced (sandbox or verifier failure, timeout, invalid score). The score is
-        then 0.0; :mod:`deepgym.integrations.verl_mask` masks such samples out of the loss.
+        produced (sandbox or verifier failure, timeout, invalid score; see
+        ``RunResult.has_verdict``). The score is then 0.0;
+        :mod:`deepgym.integrations.verl_mask` masks such samples out of the loss.
         A patch that is malformed or doesn't apply is the model's fault, so it scores
         0.0 with ``error`` 0.0 and is trained on.
 
@@ -132,7 +128,7 @@ def compute_score(
     return {
         'score': result.score,
         'passed': float(result.passed),
-        'error': float(result.error_type not in (None, *_MODEL_FAULTS)),
+        'error': float(not result.has_verdict),
     }
 
 

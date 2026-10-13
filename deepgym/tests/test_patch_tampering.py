@@ -126,6 +126,36 @@ _SETUP_CFG_INTERP = _SETUP_CFG + 'addopts = -p %(missing)s\n'
 _CARGO_WS = '[workspace]\nmembers = ["core", "decoy"]\ndefault-members = ["core"]\n'
 _CARGO_WS_EDIT = _CARGO_WS.replace('["core"]', '["decoy"]')
 
+# Codex review of the hand-written scanner (14da7b0); each must stay fixed with the real parser.
+_PY_QUIET = '[project]\nname = "calc"\n\n[tool.pytest.ini_options]\naddopts = "-q"\n'
+# 1: an inline table is pytest config too.
+_PY_INLINE = 'tool = { pytest = { ini_options = { addopts = "-k passing" } } }\n' + _PYPROJECT_PLAIN
+# 2: a unicode-escaped quoted key names the same table.
+_PY_UNICODE = _PY_QUIET.replace('[tool.pytest.ini_options]', '[tool."pyte\\u0073t".ini_options]')
+_PY_UNICODE = _PY_UNICODE.replace('-q', '-k passing')
+# 3: a header-looking line inside a multiline string must not switch tables.
+_PY_MULTILINE = '[tool.pytest.ini_options]\nmarkers = """\n[project]\n"""\naddopts = "-q"\n'
+# 4: array order matters (filterwarnings is applied in order).
+_PY_WARN = '[tool.pytest.ini_options]\nfilterwarnings = ["ignore::UserWarning", "error"]\n'
+_PY_WARN_SWAPPED = '[tool.pytest.ini_options]\nfilterwarnings = ["error", "ignore::UserWarning"]\n'
+_CARGO_TWO_TESTS = (
+    '[package]\nname = "calc"\nversion = "1.0.0"\n\n'
+    '[[test]]\nname = "a"\nrequired-features = ["x"]\n\n[[test]]\nname = "b"\n'
+)
+_CARGO_TWO_TESTS_MOVED = (
+    '[package]\nname = "calc"\nversion = "1.0.0"\n\n'
+    '[[test]]\nname = "a"\n\n[[test]]\nname = "b"\nrequired-features = ["x"]\n'
+)
+# 5: emptying a default feature disables a [[test]] that requires it.
+_CARGO_FEATURE = (
+    '[package]\nname = "calc"\nversion = "1.0.0"\n\n[features]\ndefault = ["validation"]\n'
+    'validation = []\n\n[[test]]\nname = "t"\nrequired-features = ["validation"]\n'
+)
+# 6: package metadata is not test configuration.
+_CARGO_METADATA = (
+    '[package]\nname = "calc"\nversion = "1.0.0"\n\n[package.metadata]\nrelease-notes = "a"\n'
+)
+
 
 @pytest.mark.parametrize(
     ('extra', 'edit', 'refused'),
@@ -217,6 +247,54 @@ _CARGO_WS_EDIT = _CARGO_WS.replace('["core"]', '["decoy"]')
             {'Cargo.toml': _CARGO_WS_EDIT},
             True,
             id='cargo-workspace-members',
+        ),
+        pytest.param(
+            {'pyproject.toml': _PYPROJECT_PLAIN},
+            {'pyproject.toml': _PY_INLINE},
+            True,
+            id='codex1-inline-table',
+        ),
+        pytest.param(
+            {'pyproject.toml': _PY_QUIET},
+            {'pyproject.toml': _PY_UNICODE},
+            True,
+            id='codex2-unicode-escaped-header',
+        ),
+        pytest.param(
+            {'pyproject.toml': _PY_MULTILINE},
+            {'pyproject.toml': _PY_MULTILINE.replace('-q', '-k passing')},
+            True,
+            id='codex3-header-inside-multiline-string',
+        ),
+        pytest.param(
+            {'pyproject.toml': _PY_WARN},
+            {'pyproject.toml': _PY_WARN_SWAPPED},
+            True,
+            id='codex4-filterwarnings-order',
+        ),
+        pytest.param(
+            {'Cargo.toml': _CARGO_TWO_TESTS},
+            {'Cargo.toml': _CARGO_TWO_TESTS_MOVED},
+            True,
+            id='codex4-required-features-moved',
+        ),
+        pytest.param(
+            {'Cargo.toml': _CARGO_FEATURE},
+            {'Cargo.toml': _CARGO_FEATURE.replace('default = ["validation"]', 'default = []')},
+            True,
+            id='codex5-test-feature-disabled',
+        ),
+        pytest.param(
+            {'Cargo.toml': _CARGO_METADATA},
+            {'Cargo.toml': _CARGO_METADATA.replace('"a"', '"b"')},
+            False,
+            id='codex6-package-metadata-allowed',
+        ),
+        pytest.param(
+            {'pyproject.toml': _PY_QUIET},
+            {'pyproject.toml': _PY_QUIET.replace('"-q"', '"-q"  # quieter output')},
+            False,
+            id='codex7-comment-only-allowed',
         ),
     ],
 )

@@ -705,9 +705,17 @@ _DAYTONA_USERS = (
 )
 
 
-def _daytona_client(monkeypatch: pytest.MonkeyPatch) -> tuple[DeepGym, FakeDaytona]:
+_LOCKED = 'deepgym-desktop-locked'
+# The desktop lockdown, then the check that the started desktop took it, each confirming.
+_LOCKDOWN_OK = ('/usr/local/bin/xfce4-session', _LOCKED)
+_STARTED_OK = ('ps -C xfce4-session', _LOCKED)
+
+
+def _daytona_client(
+    monkeypatch: pytest.MonkeyPatch, *answers: tuple[str, str]
+) -> tuple[DeepGym, FakeDaytona]:
     pytest.importorskip('daytona')
-    client = FakeDaytona([_STAGE, _DAYTONA_USERS])
+    client = FakeDaytona([_STAGE, _DAYTONA_USERS, *answers])
     monkeypatch.setattr(DeepGym, '_init_daytona', staticmethod(lambda *args: client))
     return DeepGym(mode='daytona'), client
 
@@ -737,7 +745,7 @@ def test_daytona_session_runs_agent_and_verifier_as_separate_users(
 def test_daytona_desktop_runs_as_the_agent_and_is_locked_down(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    dg, client = _daytona_client(monkeypatch)
+    dg, client = _daytona_client(monkeypatch, _LOCKDOWN_OK, _STARTED_OK)
     with dg.session(ComputerUseEnvironment(task='t')) as session:
         session.start()
     events = client.boxes[0].events
@@ -745,9 +753,29 @@ def test_daytona_desktop_runs_as_the_agent_and_is_locked_down(
     before = ' '.join(events[:started])
     assert '/usr/local/bin/xfce4-session' in before, 'the desktop must not run as the sudoer'
     prepare = next(c for c in events[:started] if '/usr/local/bin/xfce4-session' in c)
-    assert prepare.startswith('/usr/bin/sudo -n -E /bin/sh -c')
+    assert prepare.startswith("/usr/bin/sudo -n -E /bin/sh -c '/usr/bin/env -i ")
     assert '--reuid=997' in prepare and '/opt/deepgym-netns' in prepare
     for blocked in ('thunar-uca', 'Thunar/uca.xml', 'gio-launch-desktop', 'xfce4-terminal', 'idle'):
         assert blocked in prepare, f'{blocked} must be locked down before the desktop starts'
     for x11vnc_option in ('novncconnect', 'noremote', 'nocmds', 'safer'):
         assert x11vnc_option in prepare
+    assert '|| true' not in prepare and '2>/dev/null' not in prepare, 'no step may fail quietly'
+    check = next(c for c in events[started:] if 'ps -C xfce4-session' in c)
+    assert 'x11vncrc' in check and '-norc' in check
+
+
+@pytest.mark.parametrize(
+    ('answers', 'started'), [((), False), ((_LOCKDOWN_OK,), True)], ids=['lockdown', 'check']
+)
+def test_daytona_desktop_fails_closed_unless_the_lockdown_is_confirmed(
+    monkeypatch: pytest.MonkeyPatch, answers: tuple[tuple[str, str], ...], started: bool
+) -> None:
+    """Silence is not success: a lockdown or post-start check that doesn't confirm stops
+    the session, the desktop never starts after a failed lockdown, and the box is deleted."""
+    dg, client = _daytona_client(monkeypatch, *answers)
+    session = dg.session(ComputerUseEnvironment(task='t'))
+    with pytest.raises(SandboxError, match='desktop'), session:
+        session.start()
+    events = client.boxes[0].events
+    assert ('computer_use.start' in events) is started
+    assert events[-1] == 'deleted'

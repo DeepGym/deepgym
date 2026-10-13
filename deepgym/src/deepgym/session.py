@@ -579,7 +579,7 @@ class SandboxBackend:
             SandboxError: If the desktop doesn't start.
         """
         self._need_desktop('Desktop environments').start(
-            f'{self._offline}{self._as_agent}', _AGENT_HOME
+            f'{self._offline}{self._as_agent}', _AGENT_HOME, self.exec_trusted
         )
         self._agent_env['DISPLAY'] = _DISPLAY
 

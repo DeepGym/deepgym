@@ -5,6 +5,7 @@ import os
 import pytest
 
 from deepgym import Action, DeepGym, load_environment
+from deepgym.exceptions import SandboxError
 from tests.computer_use_trajectories import DONE, REFERENCE, variants
 from tests.test_sandboxes_live import _SPY
 
@@ -69,6 +70,32 @@ def test_a_shell_out_of_the_desktop_is_the_unprivileged_agent(dg: DeepGym) -> No
         result = session.score()
     assert not [name for name, out in escaped.items() if 'ESCAPED' in out], escaped
     assert result.score == 0.0, 'the spy must not forge the untouched desktop to a pass'
+
+
+# Each makes the image differ from what the lockdown expects, so the desktop must not start.
+_SABOTAGE = {
+    # Daytona's daemon would find the real session ahead of the wrapper, and run it as itself.
+    'session_as_sudoer': (
+        "dir=$(tr '\\0' '\\n' < /proc/1/environ | sed -n 's/^PATH=//p' | cut -d: -f1) && "
+        'mkdir -p "$dir" && ln -s /usr/bin/xfce4-session "$dir/xfce4-session"'
+    ),
+    'no_open_with_helper': 'mv "$(find /usr -name gio-launch-desktop)" /root/',
+    'x11vnc_skips_its_options': (
+        'mkdir /opt/real && mv /usr/bin/x11vnc /opt/real/x11vnc && '
+        'printf \'#!/bin/sh\\nexec /opt/real/x11vnc -norc "$@"\\n\' > /usr/bin/x11vnc && '
+        'chmod 755 /usr/bin/x11vnc'
+    ),
+}
+
+
+@pytest.mark.parametrize('sabotage', _SABOTAGE.values(), ids=list(_SABOTAGE))
+def test_desktop_refuses_to_start_unless_locked_down(dg: DeepGym, sabotage: str) -> None:
+    session = dg.session(load_environment('file_manager'))
+    with session:
+        broken = session._backend._sandbox.exec(sabotage, timeout=30)  # as root
+        assert broken.exit_code == 0, broken.output
+        with pytest.raises(SandboxError, match='desktop'):
+            session.start()
 
 
 # Root-side stand-in for any loopback service outside the agent's network namespace.

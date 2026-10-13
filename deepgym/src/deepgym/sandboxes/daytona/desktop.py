@@ -4,19 +4,32 @@ from __future__ import annotations
 
 import json
 import shlex
+from collections.abc import Callable
 
 from deepgym.exceptions import ActionError, SandboxError
 from deepgym.models import Action
 from deepgym.sandboxes.daytona.sandbox import DaytonaSandbox
+from deepgym.sandboxes.protocol import ExecResult
 
-# Daytona starts the xfce session by name, and /usr/local/bin comes first on its PATH. The
-# wrapper reruns itself as root, then starts the session as the agent in its offline
-# network namespace, on a D-Bus of its own.
+# PATH of the agent's xfce session, so of every app it starts.
+_SESSION_PATH = '/usr/local/bin:/usr/bin:/bin'
+
+# Daytona starts the xfce session by name, and no folder ahead of /usr/local/bin on its
+# PATH has one (the check after start proves the session is the agent's). The wrapper
+# reruns itself as root, then starts the session as the agent in its offline network
+# namespace, on a D-Bus of its own.
 _SESSION_WRAPPER = """#!/bin/sh
 [ "$(id -u)" = 0 ] || exec sudo -n -E "$0" "$@"
 exec {as_agent} env -i DISPLAY="$DISPLAY" HOME={home} LANG="$LANG" LC_ALL="$LC_ALL" \\
-  PATH=/usr/local/bin:/usr/bin:/bin dbus-run-session -- /usr/bin/xfce4-session "$@"
+  PATH={path} dbus-run-session -- /usr/bin/xfce4-session "$@"
 """
+
+# x11vnc runs as the sudoer outside the agent's network namespace and by default acts on
+# root-window properties any X client can set: VNC_CONNECT (connect out) and X11VNC_REMOTE
+# (remote control). Turn both off, and with -safer its -gui and -connect file channels too.
+_X11VNC_RC = 'novncconnect\nnoremote\nnocmds\nsafer\n'
+# x11vnc flags that would skip that file or undo a line of it.
+_X11VNC_OVERRIDES = '-norc -rc -yesremote -vncconnect -unsafe'
 
 _CHROMIUM_POLICY = json.dumps(
     {
@@ -37,24 +50,91 @@ _LAUNCHERS = (
     'xfce4-panel xfdesktop xfce4-settings-manager xfce4-settings-editor xfce4-keyboard-settings'
 )
 
-# Runs as root before the desktop starts, so nothing the session loads predates it.
-_LOCKDOWN = """set -e
+# Printed last by both scripts below. Without it the desktop counts as not locked down.
+_LOCKED = 'deepgym-desktop-locked'
+
+# Runs as root before the desktop starts, so nothing the session loads predates it. Every
+# step must take (nothing is skipped quietly), and the end checks, as the agent, that
+# nothing it locked still runs or loads.
+_LOCKDOWN = """set -eu
+if pgrep -x 'Xvfb|xfce4-session|x11vnc' >/dev/null; then
+  echo 'the desktop is already running, ahead of its lockdown'; exit 1
+fi
+rm -f /usr/local/bin/xfce4-session
 printf %s {wrapper} > /usr/local/bin/xfce4-session
 chmod 755 /usr/local/bin/xfce4-session
-# x11vnc runs as the sudoer outside the agent's network namespace and by default acts on
-# root-window properties any X client can set: VNC_CONNECT (connect out) and X11VNC_REMOTE
-# (remote control). Turn both off, and with -safer its -gui and -connect file channels too.
-printf 'novncconnect\\nnoremote\\nnocmds\\nsafer\\n' > "$HOME/.x11vncrc"
+# x11vnc reads ~/.x11vncrc, with the HOME Daytona's daemon (pid 1) runs with.
+home=$(tr '\\0' '\\n' < /proc/1/environ | sed -n 's/^HOME=//p')
+[ -d "$home" ] || {{ echo "x11vnc has no home to read its options from: '$home'"; exit 1; }}
+printf %s {rc} > "$home/.x11vncrc"
 mkdir -p /etc/chromium/policies/managed
 printf %s {policy} > /etc/chromium/policies/managed/deepgym.json
-# Thunar's custom actions, "Open Terminal Here" included, all come from this plugin.
-rm -f /usr/lib/*/thunarx-3/thunar-uca.so /etc/xdg/Thunar/uca.xml
-# Every GLib "Open With" launch, a typed custom command included, runs through this helper.
-chmod 000 /usr/lib/*/glib-2.0/gio-launch-desktop 2>/dev/null || true
+if command -v chromium >/dev/null; then
+  grep -qF /etc/chromium/policies /usr/lib/chromium/chromium || {{
+    echo 'this Chromium does not read /etc/chromium/policies'; exit 1; }}
+fi
+# Thunar's custom actions, "Open Terminal Here" included, all come from its uca plugin, and
+# every GLib "Open With" launch, a typed custom command included, runs through
+# gio-launch-desktop: find both wherever the image keeps them.
+found=$(find /usr \\( -name thunar-uca.so -o -name gio-launch-desktop \\))
+case "$found" in *gio-launch-desktop*) ;; *) echo 'gio-launch-desktop not found'; exit 1;; esac
+for path in $found; do
+  case "$path" in *.so) rm "$path";; *) chmod 000 "$path";; esac
+done
+rm -f /etc/xdg/Thunar/uca.xml
 for bin in {launchers}; do
-  path=$(command -v "$bin") && chmod 000 "$(readlink -f "$path")" || true
+  if path=$(command -v "$bin"); then chmod 000 "$(readlink -f "$path")"; fi
+done
+left=$({as_agent} /bin/sh -c {agent_check} check $found)
+[ -z "$left" ] || {{ echo "$left"; exit 1; }}
+echo {marker}
+"""
+
+# Runs as the agent, on the session's PATH: prints each launcher it can still run, and
+# each plugin or helper path (its arguments) it can still load or run.
+_AGENT_CHECK = """PATH={path}
+for bin in {launchers}; do
+  if p=$(command -v "$bin") && [ -x "$p" ]; then echo "the agent can still run $bin"; fi
+done
+for path in "$@"; do
+  if [ -r "$path" ] || [ -x "$path" ]; then echo "the agent can still use $path"; fi
 done
 """
+
+# Runs as root once Daytona has started the desktop: the session must be the agent's (so
+# the wrapper ran), and every x11vnc must read the options above.
+_CHECK_STARTED = """set -eu
+agent=$(stat -c %u {home})
+owners= vnc=
+for _ in $(seq 60); do
+  owners=$(ps -C xfce4-session -o uid= | tr -d ' ' | sort -u)
+  if [ "$owners" = "$agent" ] && vnc=$(pgrep -x x11vnc); then break; fi
+  sleep 0.5
+done
+[ "$owners" = "$agent" ] || {{
+  echo "xfce4-session runs as uid '$owners', not as the agent ($agent)"; exit 1; }}
+[ -n "$vnc" ] || {{ echo 'x11vnc is not running'; exit 1; }}
+for pid in $vnc; do
+  args=" $(tr '\\0' ' ' < /proc/$pid/cmdline | sed 's/ --/ -/g') "
+  for flag in {overrides}; do
+    case "$args" in *" $flag "*) echo "x11vnc runs with $flag"; exit 1;; esac
+  done
+  home=$(tr '\\0' '\\n' < /proc/$pid/environ | sed -n 's/^HOME=//p')
+  [ "$(cat "$home/.x11vncrc")" = "$(printf %s {rc})" ] || {{
+    echo "x11vnc reads no lockdown options from $home"; exit 1; }}
+done
+echo {marker}
+"""
+
+
+def _confirm(step: str, done: ExecResult) -> None:
+    """Accept a lockdown *step* only if its script exited 0 and printed :data:`_LOCKED` last.
+
+    Raises:
+        SandboxError: Otherwise.
+    """
+    if done.exit_code != 0 or done.output.split()[-1:] != [_LOCKED]:
+        raise SandboxError(f'Refusing the desktop, its {step} failed: {done.output[-500:]}')
 
 
 class DaytonaDesktop:
@@ -65,7 +145,9 @@ class DaytonaDesktop:
     a GUI app can start, the agent driving it can too. So the session (window manager,
     file manager, panels, and every app they start) runs as the agent, offline, and the
     lockdown removes the usual ways out of the GUI. Only Xvfb, x11vnc and Daytona's input
-    relay stay with the sudoer; none of them runs commands for X clients.
+    relay stay with the sudoer; none of them runs commands for X clients. The lockdown
+    fails closed: a step that doesn't take, or an image laid out other than it expects,
+    stops the session instead of starting a desktop that isn't locked down.
     """
 
     def __init__(self, box: DaytonaSandbox, action_timeout: int, start_timeout: int) -> None:
@@ -73,29 +155,39 @@ class DaytonaDesktop:
         self._action_timeout = action_timeout
         self._start_timeout = start_timeout
 
-    def start(self, as_agent: str, home: str) -> None:
-        """Lock the desktop down, then start it with its session run through *as_agent*.
+    def start(self, as_agent: str, home: str, as_root: Callable[[str, int], ExecResult]) -> None:
+        """Lock the desktop down, start it with its session run through *as_agent*, then
+        check that the running desktop took the lockdown.
 
         Args:
             as_agent: Root command prefix that runs a command as the agent, offline.
             home: The agent's home directory.
+            as_root: Runs a script as root, out of the image's environment, with a timeout.
 
         Raises:
-            SandboxError: If the lockdown fails or the desktop doesn't start.
+            SandboxError: If a lockdown step or check fails, or the desktop doesn't start.
         """
-        wrapper = _SESSION_WRAPPER.format(as_agent=as_agent, home=home)
-        script = _LOCKDOWN.format(
+        wrapper = _SESSION_WRAPPER.format(as_agent=as_agent, home=home, path=_SESSION_PATH)
+        agent_check = _AGENT_CHECK.format(path=_SESSION_PATH, launchers=_LAUNCHERS)
+        rc = shlex.quote(_X11VNC_RC)
+        lockdown = _LOCKDOWN.format(
             wrapper=shlex.quote(wrapper),
+            rc=rc,
             policy=shlex.quote(_CHROMIUM_POLICY),
             launchers=_LAUNCHERS,
+            as_agent=as_agent,
+            agent_check=shlex.quote(agent_check),
+            marker=_LOCKED,
         )
-        locked = self._box.exec(script, timeout=60)
-        if locked.exit_code != 0:
-            raise SandboxError(f'Desktop lockdown failed: {locked.output[-500:]}')
+        _confirm('lockdown', as_root(lockdown, 60))
         try:
             self._box.computer_use.start(request_timeout=self._start_timeout)
         except Exception as exc:
             raise SandboxError(f'Failed to start desktop: {exc}') from exc
+        check = _CHECK_STARTED.format(
+            home=shlex.quote(home), overrides=_X11VNC_OVERRIDES, rc=rc, marker=_LOCKED
+        )
+        _confirm('check', as_root(check, 60))
 
     def act(self, action: Action) -> None:
         """Apply a GUI action through Daytona computer use.

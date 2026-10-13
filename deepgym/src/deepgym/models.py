@@ -110,6 +110,14 @@ class Environment(BaseModel):
             return self.verifier_path.read_text(encoding='utf-8')
         return self.verifier_code
 
+    @property
+    def reference_solution(self) -> str | None:
+        """A model output that should score 1.0: reference_solution.py next to the verifier."""
+        if self.verifier_path is None:
+            return None
+        path = self.verifier_path.parent / 'reference_solution.py'
+        return path.read_text(encoding='utf-8') if path.is_file() else None
+
     language: str = 'python'
     """Programming language for the solution."""
 

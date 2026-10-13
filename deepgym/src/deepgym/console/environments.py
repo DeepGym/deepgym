@@ -33,11 +33,8 @@ def summarize(entry: dict) -> EnvironmentSummary:
 
 
 def reference_solution(env: Environment | MultiTurnEnvironment) -> str | None:
-    """Return the reference_solution.py shipped next to *env*'s verifier, if any."""
-    if not isinstance(env, Environment) or env.verifier_path is None:
-        return None
-    path = env.verifier_path.parent / 'reference_solution.py'
-    return path.read_text(encoding='utf-8') if path.is_file() else None
+    """Return *env*'s reference solution, if it is single-turn and has one."""
+    return env.reference_solution if isinstance(env, Environment) else None
 
 
 @router.get('', response_model=list[EnvironmentSummary])

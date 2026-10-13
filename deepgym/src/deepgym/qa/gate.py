@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
-from deepgym.models import Environment, MultiTurnEnvironment
+from deepgym.models import MultiTurnEnvironment
 from deepgym.qa.checks import hack_resistant, single_turn_checks
 from deepgym.qa.difficulty import difficulty_check
 from deepgym.qa.report import SKIPPED, QACheck, QAReport
@@ -54,7 +54,7 @@ def run_qa(
     if hasattr(env, 'prepare_batch_requests') or hasattr(env, 'run_with_deepgym'):
         return _skipped(name, 'benchmark-backed env scores through its own runner')
 
-    checks = single_turn_checks(env, _read_reference(env), dg, reruns)
+    checks = single_turn_checks(env, env.reference_solution, dg, reruns)
     checks.append(hack_resistant(env, dg))
     if client is not None:
         checks.append(difficulty_check(env, dg, client, samples))
@@ -67,10 +67,3 @@ def _skipped(name: str, reason: str) -> QAReport:
     check = QACheck(name=SKIPPED, status='skip', details=details)
     return QAReport(environment=name, checks=[check])
 
-
-def _read_reference(env: Environment) -> str | None:
-    """Return the source of reference_solution.py next to the verifier, or None."""
-    if env.verifier_path is None:
-        return None
-    path = env.verifier_path.parent / 'reference_solution.py'
-    return path.read_text(encoding='utf-8') if path.is_file() else None

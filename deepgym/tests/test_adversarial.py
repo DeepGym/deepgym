@@ -12,6 +12,7 @@ from deepgym.adversarial import (
     AdversarialReport,
     AdversarialTester,
     AttackResult,
+    LLMAdversarialTester,
 )
 from deepgym.core import DeepGym
 from deepgym.models import Environment
@@ -193,6 +194,36 @@ class TestAdversarialTesterIntegration:
         for r in report.results:
             assert isinstance(r, AttackResult)
             assert r.strategy in ('empty', 'trivial')
+
+
+CRASHING_VERIFIER = 'import os\n\nif __name__ == "__main__":\n    os._exit(3)\n'
+"""Dies before printing a verdict, so every run of it raises VerifierError."""
+
+
+class TestAttacksThatCannotRun:
+    """An attack that crashed or never ran says nothing about the verifier: inconclusive."""
+
+    def test_crashed_attacks_are_inconclusive_not_resisted(self, dg: DeepGym) -> None:
+        env = Environment(task='Anything', verifier_code=CRASHING_VERIFIER)
+
+        report = AdversarialTester(dg).test(env, strategies=['empty', 'trivial'])
+
+        assert not report.is_robust
+        assert [(r.exploited, r.inconclusive) for r in report.results] == [(False, True)] * 2
+        assert (report.exploits_found, report.inconclusive) == (0, 2)
+
+    def test_unavailable_llm_attack_is_inconclusive(
+        self, dg: DeepGym, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.delenv('ANTHROPIC_API_KEY', raising=False)
+        env = Environment(task='Anything', verifier_code='return 0.0\n')
+
+        reports = [
+            AdversarialTester(dg).test(env, strategies=['llm_attack']),
+            LLMAdversarialTester(dg).test(env),
+        ]
+
+        assert [(r.is_robust, r.inconclusive) for r in reports] == [(False, 1)] * 2
 
 
 class TestAttacksUseTheClient:

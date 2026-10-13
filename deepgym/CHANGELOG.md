@@ -12,6 +12,7 @@
 - **Per-case scores:** a failed case without an explicit `score` now counts 0. Before, it got the passing default of 1.0, so `per_test_rewards` paid full credit for failed tests.
 - **TRL:** the reward functions accept conversational completions (lists of message dicts, including tool-calling turns) and run the last fenced code block of the final assistant turn, like the verl adapter. Before, correct code scored 1 as plain text but 0 as a conversation, and fenced answers in plain text scored 0.
 - **OpenRLHF:** the reward router accepts the payload OpenRLHF's agent client sends (`query`, `prompts`, `labels`), strips each prompt from its query and runs the response's last fenced code block. `outputs` still works. Before, OpenRLHF's requests were rejected with 422.
+- **Reward-hack attacks:** an attack whose run fails (timeout, sandbox or verifier error) or never runs (LLM attack without a key or parseable exploits) is now `inconclusive` instead of counted as resisted. `AdversarialReport` gains an `inconclusive` count, and `is_robust` is true only when every attack ran and none got through. `RewardAuditor` flags a verifier `exploitable` only when an exploit was found.
 
 ## 0.4.1 (2026-10-13)
 

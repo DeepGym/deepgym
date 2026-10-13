@@ -23,7 +23,7 @@ from typing import TYPE_CHECKING
 
 from pydantic import BaseModel, Field
 
-from deepgym.exceptions import DeepGymError, TimeoutError
+from deepgym.exceptions import DeepGymError
 
 if TYPE_CHECKING:
     from deepgym.core import DeepGym
@@ -58,6 +58,18 @@ class AttackResult(BaseModel):
     exploited: bool = Field(..., description='True if the verifier was tricked into passing.')
     score: float = Field(..., description='Score the verifier assigned to the attack payload.')
     details: str = Field(default='', description='Human-readable explanation of the result.')
+    inconclusive: bool = Field(
+        default=False,
+        description='True if the attack crashed or never ran, so it says nothing about the '
+        'verifier; such an attack is never counted as resisted.',
+    )
+
+
+def _not_run(strategy: str, details: str) -> AttackResult:
+    """Result for an attack that crashed or never ran: no verdict either way."""
+    return AttackResult(
+        strategy=strategy, exploited=False, score=0.0, details=details, inconclusive=True
+    )
 
 
 class AdversarialReport(BaseModel):
@@ -68,8 +80,25 @@ class AdversarialReport(BaseModel):
     exploits_found: int = Field(
         ..., description='How many strategies successfully exploited the verifier.'
     )
+    inconclusive: int = Field(default=0, description='How many attacks crashed or never ran.')
     results: list[AttackResult] = Field(default_factory=list, description='Per-strategy results.')
-    is_robust: bool = Field(..., description='True when *no* exploits were found.')
+    is_robust: bool = Field(
+        ..., description='True when every attack ran and none exploited the verifier.'
+    )
+
+    @classmethod
+    def from_results(cls, env: Environment, results: list[AttackResult]) -> AdversarialReport:
+        """Summarize *results* of attacks against *env*."""
+        exploits = sum(result.exploited for result in results)
+        inconclusive = sum(result.inconclusive for result in results)
+        return cls(
+            environment=env.task[:120],
+            attacks_run=len(results),
+            exploits_found=exploits,
+            inconclusive=inconclusive,
+            results=results,
+            is_robust=exploits == 0 and inconclusive == 0,
+        )
 
 
 class BlackBoxRound(BaseModel):
@@ -181,14 +210,7 @@ class AdversarialTester:
                 result = self._execute_attack(env, attack_code, strategy)
                 results.append(result)
 
-        exploits_found = sum(1 for r in results if r.exploited)
-        return AdversarialReport(
-            environment=env.task[:120],
-            attacks_run=len(results),
-            exploits_found=exploits_found,
-            results=results,
-            is_robust=exploits_found == 0,
-        )
+        return AdversarialReport.from_results(env, results)
 
     # ------------------------------------------------------------------
     # Attack generation
@@ -373,24 +395,10 @@ class AdversarialTester:
             )
         except DeepGymError as exc:
             logger.warning('LLM attack skipped: %s', exc)
-            return [
-                AttackResult(
-                    strategy='llm_attack',
-                    exploited=False,
-                    score=0.0,
-                    details=f'LLM unavailable: {exc}',
-                )
-            ]
+            return [_not_run('llm_attack', f'LLM unavailable: {exc}')]
 
         if not exploits:
-            return [
-                AttackResult(
-                    strategy='llm_attack',
-                    exploited=False,
-                    score=0.0,
-                    details='LLM returned no parseable exploits.',
-                )
-            ]
+            return [_not_run('llm_attack', 'LLM returned no parseable exploits.')]
 
         results: list[AttackResult] = []
         for i, code in enumerate(exploits):
@@ -412,6 +420,8 @@ class AdversarialTester:
         """Run *attack_code* through *env*'s verifier on this tester's client.
 
         The attack runs exactly as a real solution would: isolated from the judge.
+        If the run itself fails (timeout, sandbox or verifier error), there is no
+        verdict, so the result is inconclusive rather than resisted.
 
         Parameters
         ----------
@@ -428,17 +438,8 @@ class AdversarialTester:
         """
         try:
             result = self._dg.run(env, attack_code)
-        except TimeoutError:
-            return AttackResult(
-                strategy=strategy, exploited=False, score=0.0, details='Verifier timed out.'
-            )
         except DeepGymError as exc:
-            return AttackResult(
-                strategy=strategy,
-                exploited=False,
-                score=0.0,
-                details=f'Execution error: {type(exc).__name__}: {exc}',
-            )
+            return _not_run(strategy, f'Attack could not run: {type(exc).__name__}: {exc}')
         detail_lines = [
             f'exit_code={result.exit_code}, score={result.score}, passed={result.passed}'
         ]
@@ -670,51 +671,20 @@ class LLMAdversarialTester:
             exploits = self._generate_exploits(env)
         except DeepGymError as exc:
             logger.warning('LLM adversarial test skipped: %s', exc)
-            return AdversarialReport(
-                environment=env.task[:120],
-                attacks_run=0,
-                exploits_found=0,
-                results=[
-                    AttackResult(
-                        strategy='llm_attack',
-                        exploited=False,
-                        score=0.0,
-                        details=f'LLM unavailable: {exc}',
-                    )
-                ],
-                is_robust=True,
+            return AdversarialReport.from_results(
+                env, [_not_run('llm_attack', f'LLM unavailable: {exc}')]
             )
 
         if not exploits:
-            return AdversarialReport(
-                environment=env.task[:120],
-                attacks_run=0,
-                exploits_found=0,
-                results=[
-                    AttackResult(
-                        strategy='llm_attack',
-                        exploited=False,
-                        score=0.0,
-                        details='LLM returned no parseable exploits.',
-                    )
-                ],
-                is_robust=True,
+            return AdversarialReport.from_results(
+                env, [_not_run('llm_attack', 'LLM returned no parseable exploits.')]
             )
 
-        results: list[AttackResult] = []
-        for i, code in enumerate(exploits):
-            label = f'llm_attack_{i + 1}'
-            result = self._executor._execute_attack(env, code, label)
-            results.append(result)
-
-        exploits_found = sum(1 for r in results if r.exploited)
-        return AdversarialReport(
-            environment=env.task[:120],
-            attacks_run=len(results),
-            exploits_found=exploits_found,
-            results=results,
-            is_robust=exploits_found == 0,
-        )
+        results = [
+            self._executor._execute_attack(env, code, f'llm_attack_{i + 1}')
+            for i, code in enumerate(exploits)
+        ]
+        return AdversarialReport.from_results(env, results)
 
     def _generate_exploits(self, env: Environment) -> list[str]:
         """Ask LLM to generate adversarial solutions.

@@ -151,7 +151,7 @@ def build_exploit_record(
     return ExploitRecord(
         verifier_id=verifier_id,
         benchmark=benchmark,
-        exploitable=not report.is_robust,
+        exploitable=report.exploits_found > 0,
         patterns=patterns,
         num_attacks=report.attacks_run,
         num_exploits=report.exploits_found,
@@ -224,7 +224,7 @@ class RewardAuditor:
             benchmark=benchmark,
             attack_type='white-box',
             verifier_hash=verifier_hash,
-            exploitable=not report.is_robust,
+            exploitable=report.exploits_found > 0,
             risk_score=risk_score,
             risk_level=risk_level_for_score(risk_score),
             patterns=patterns,

@@ -147,24 +147,16 @@ def _print_comparison(
 
     print()
 
-    # The key insight.
-    weak_exploit_count = sum(1 for r in weak_reports if r.exploit_suspected)
-    hard_exploit_count = sum(1 for r in hardened_reports if r.exploit_suspected)
-
-    if weak_exploit_count > hard_exploit_count:
-        print('KEY FINDING: Weak verifiers are more vulnerable to RL exploit discovery.')
-        print(
-            f'  Weak: {weak_exploit_count}/{len(weak_reports)} exploited  |  '
-            f'Hardened: {hard_exploit_count}/{len(hardened_reports)} exploited'
-        )
-    elif weak_exploit_count == 0 and hard_exploit_count == 0:
-        print('KEY FINDING: No exploits discovered in either category.')
-        print('  The selection pressure did not find reward hacks in this run.')
-    else:
-        print(
-            f'KEY FINDING: Weak={weak_exploit_count} exploits, '
-            f'Hardened={hard_exploit_count} exploits.'
-        )
+    # Suspicions are code signs, not proven exploits; unjudged candidates prove nothing.
+    weak_suspected = sum(1 for r in weak_reports if r.exploit_suspected)
+    hard_suspected = sum(1 for r in hardened_reports if r.exploit_suspected)
+    unjudged = sum(r.unjudged_candidates for r in [*weak_reports, *hardened_reports])
+    print(
+        f'SUSPECTED SHORTCUTS: weak {weak_suspected}/{len(weak_reports)}, '
+        f'hardened {hard_suspected}/{len(hardened_reports)} (signs in the code, not proof)'
+    )
+    if unjudged:
+        print(f'INCONCLUSIVE: {unjudged} candidates got no verdict, so no comparison is drawn.')
 
     # Score progression summary.
     print('\nSCORE PROGRESSION (best score per round):')

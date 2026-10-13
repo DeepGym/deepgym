@@ -38,6 +38,7 @@ import json
 import math
 import os
 import queue
+import selectors
 import shlex
 import signal
 import socket
@@ -519,6 +520,9 @@ class _Runner:
             cwd=workdir,
             start_new_session=True,
         )
+        # Requests are written without blocking, so a server that stops reading can't
+        # hold a call past its deadline (see _write).
+        os.set_blocking(self._proc.stdin.fileno(), False)
         self._replies = queue.Queue()
         threading.Thread(target=self._read, args=(self._proc, self._replies), daemon=True).start()
         self.exports = self._send({'op': 'load'}, min(_LOAD_TIMEOUT_S, _remaining()))
@@ -538,15 +542,18 @@ class _Runner:
     def _send(self, message: dict, timeout: float) -> Any:
         if timeout <= 0:
             raise TimeoutError('the run is out of time')
+        # The deadline covers sending the request too, not just waiting for the reply.
+        deadline = time.monotonic() + timeout
         self._next_id += 1
         message = {**message, 'id': self._next_id}
         try:
-            self._proc.stdin.write((json.dumps(message) + '\n').encode())
-            self._proc.stdin.flush()
-        except (BrokenPipeError, OSError) as exc:
+            sent = self._write((json.dumps(message) + '\n').encode(), deadline)
+        except OSError as exc:
             self._dead()
             raise SolutionError('the solution process exited') from exc
-        deadline = time.monotonic() + timeout
+        if not sent:
+            self._dead()
+            raise TimeoutError(f'solution call exceeded {timeout:.1f}s')
         while True:
             try:
                 raw = self._replies.get(timeout=max(0.0, deadline - time.monotonic()))
@@ -567,6 +574,22 @@ class _Runner:
                 self._dead()
                 raise SolutionError(f'malformed reply from the solution: {exc}') from exc
         raise _remote_exception(str(reply.get('type', '')), str(reply.get('message', '')))
+
+    def _write(self, data: bytes, deadline: float) -> bool:
+        """Write *data* to the server's stdin by *deadline*; return False if it doesn't fit.
+
+        A pipe holds about 64 KiB, so a big request to a server that stopped reading
+        (stuck or stopped, say) would otherwise block here for good.
+        """
+        fd = self._proc.stdin.fileno()
+        pending = memoryview(data)
+        with selectors.DefaultSelector() as selector:
+            selector.register(fd, selectors.EVENT_WRITE)
+            while pending:
+                if not selector.select(deadline - time.monotonic()):
+                    return False
+                pending = pending[os.write(fd, pending) :]
+        return True
 
     def _dead(self) -> None:
         if self._proc is not None:

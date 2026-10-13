@@ -162,6 +162,32 @@ return {'score': ok / 20, 'passed': False}
         assert result.score == 0.0
         assert time.monotonic() - start < 12
 
+    def test_request_to_a_solution_that_stopped_reading_fails_alone(self, dg: DeepGym) -> None:
+        """Sending the request counts against the case timeout, not just awaiting the reply."""
+        env = _env(
+            """
+import time
+time.sleep(1.5)
+try:
+    sol.size('x' * (1 << 20))
+except TimeoutError:
+    return 1.0
+return 0.0
+""",
+            case_timeout=1,
+            timeout=8,
+        )
+        # Once loaded, the solution stops its own process: it never reads the 1 MiB request.
+        solution = (
+            'import os, signal, threading\n'
+            'threading.Timer(0.5, os.kill, (os.getpid(), signal.SIGSTOP)).start()\n'
+            'def size(text):\n'
+            '    return len(text)\n'
+        )
+        start = time.monotonic()
+        assert dg.run(env, solution).score == 1.0
+        assert time.monotonic() - start < 6
+
     def test_crash_in_one_case_recovers(self, dg: DeepGym) -> None:
         env = _env(
             """

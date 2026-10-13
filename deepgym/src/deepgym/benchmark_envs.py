@@ -480,13 +480,17 @@ class PatchVerifier:
 
             def _git_root(repo_dir: Path, timeout: int) -> Path:
                 # The repository top-level: numstat reports paths relative to it, not to repo_dir.
+                # git appends exactly one newline, so strip only that -- a path may legitimately
+                # end in a space, and .strip() would then name a different, missing directory.
                 proc = subprocess.run(
                     ['git', '-C', str(repo_dir), 'rev-parse', '--show-toplevel'],
                     capture_output=True,
                     text=True,
                     timeout=timeout,
                 )
-                return Path(proc.stdout.strip()) if proc.returncode == 0 and proc.stdout.strip() else repo_dir
+                top = proc.stdout[:-1] if proc.stdout.endswith('\\n') else proc.stdout
+                top = top[:-1] if top.endswith('\\r') else top
+                return Path(top) if proc.returncode == 0 and top else repo_dir
 
 
             def _patch_paths(repo_dir: Path, patch_file: Path, timeout: int) -> list[str] | None:

@@ -7,6 +7,7 @@
 - **SWE-bench Pro: no stand-in tests.** A task with no test runner (no `test_commands`, and a language other than Python or JS/TS) now returns `error_type='unsupported_runner'` with score 0, so trainers mask it. Before, a `git diff --stat` stand-in exited 0 and a still-broken patch scored 1.0. A task with no tests no longer earns the 0.3 apply credit either, and the JS `npm install` step no longer counts as a passing test.
 - **Patch extraction:** a diff whose last line is a blank context line (a single space) is no longer corrupted by whitespace stripping, which failed correct patches.
 - **MiMo-V2.6-RL code tasks:** `scripts/import_mimo_rl.py` imports the 2,698 code tasks of `XiaomiMiMo/MiMo-V2.6-RL-oss` (Apache-2.0) as `mimo_code/<instance_id>` environments. Each is a `RepoPatchEnvironment`: its sandbox boots from the task's own image, the patch runner patches the repo in place, and the score is 1.0 if the test command exits 0, else 0.0. The cyber, general, webdev and music subsets aren't imported (see the README).
+- **verl:** a patch that is malformed or doesn't apply (`invalid_patch`, `patch_apply_failed`) now scores 0 and is trained on instead of being masked out as a missing verdict, so models are penalised for broken patches.
 
 ## 0.4.1 (2026-10-13)
 

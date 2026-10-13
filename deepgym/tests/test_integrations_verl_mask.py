@@ -98,3 +98,18 @@ def test_failed_scoring_masks_the_sample_out(
     assert output.reward_score == 0.0
     assert output.extra_fields['reward_extra_info']['error'] == 1.0
     assert output.response_mask == [0] * len('anything')
+
+
+@pytest.mark.parametrize('error_type', ['invalid_patch', 'patch_apply_failed'])
+def test_broken_patch_is_trained_on_as_zero(
+    verl: types.ModuleType, monkeypatch: pytest.MonkeyPatch, error_type: str
+) -> None:
+    verdict = f"{{'score': 0.0, 'passed': False, 'details': 'x', 'error_type': '{error_type}'}}"
+    broken_patch = Environment(task='t', verifier_code=f'return {verdict}\n')
+    monkeypatch.setattr(verl_reward, '_environment', lambda name, variant: broken_patch)
+
+    output = _rollout(verl, 'not a diff')
+
+    assert output.reward_score == 0.0
+    assert output.extra_fields['reward_extra_info']['error'] == 0.0
+    assert set(output.response_mask) == {1}

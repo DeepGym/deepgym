@@ -24,6 +24,10 @@ def test_client_opens_runs_and_sessions_from_the_envs_image(
         return FakeSandbox(
             network_blocked=True,
             answers=[
+                (
+                    'realpath',
+                    '997 997 996 996 0 /usr/bin/setpriv /usr/bin/nsenter -\n/tmp/deepgym',
+                ),
                 ('useradd', '0 999 987 /usr/bin/python3 0'),
                 ('DEEPGYM_DEADLINE', '{"score": 1.0, "passed": true}'),
             ],

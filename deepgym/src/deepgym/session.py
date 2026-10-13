@@ -14,6 +14,7 @@ import contextlib
 import json
 import logging
 import os
+import posixpath
 import shlex
 import shutil
 import signal
@@ -22,7 +23,7 @@ import sys
 import tempfile
 import threading
 import time
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from pathlib import Path, PurePosixPath
 from typing import TYPE_CHECKING, NamedTuple, Protocol
 from uuid import uuid4
@@ -55,7 +56,7 @@ from deepgym.sandbox import (
     check_exit,
     parse_verifier_output,
 )
-from deepgym.sandboxes import ExecResult, Sandbox
+from deepgym.sandboxes import TRUSTED_PATH, ExecResult, Sandbox
 
 if TYPE_CHECKING:
     from deepgym.sandboxes.daytona import DaytonaDesktop
@@ -68,6 +69,7 @@ _AGENT_USER = 'dgagent'
 _AGENT_HOME = f'/home/{_AGENT_USER}'
 # Separate unprivileged user for verifiers, so the agent can't read, signal or write to them.
 _VERIFIER_USER = 'dgverifier'
+_ADD_USER = 'useradd --system --no-create-home --shell /usr/sbin/nologin'
 # Root-only directory where file writes are staged before the session user copies them.
 _STAGING_DIR = '/opt/deepgym-staging'
 # Verifier scripts: readable by the verifier user only.
@@ -255,7 +257,9 @@ class SandboxBackend:
     across steps while the internet and the host are not.
 
     The agent owns the work directory, *workdir* (``/tmp/deepgym`` unless given), and
-    everything already in it.
+    everything already in it. Every command root runs here resolves binaries through
+    :data:`~deepgym.sandboxes.TRUSTED_PATH` with an empty environment (:func:`trusted`), or
+    by absolute path, never through the image's PATH, which may include that directory.
     """
 
     python = 'python3'
@@ -270,40 +274,60 @@ class SandboxBackend:
         self._sandbox = sandbox
         self._desktop = desktop
         self.sandbox_id = sandbox.id
-        self._workdir = workdir
-        quoted = shlex.quote(workdir)
         try:
             try:
-                check_workdir(workdir)
+                self._workdir = check_workdir(workdir)
             except ValueError as exc:
                 raise SandboxError(str(exc)) from exc
+            quoted = shlex.quote(self._workdir)
             users = sandbox.exec(
-                "command -v setpriv >/dev/null || { echo 'setpriv missing'; exit 1; } && "
-                f'useradd --system --create-home --home-dir {_AGENT_HOME} '
-                f'--shell /usr/sbin/nologin {_AGENT_USER} && chmod 755 {_AGENT_HOME} && '
-                f'useradd --system --no-create-home --shell /usr/sbin/nologin {_VERIFIER_USER} && '
-                f'mkdir -p {quoted} && chown -R {_AGENT_USER}: {quoted} && '
-                f'mkdir -p -m 700 {_STAGING_DIR} && mkdir -p -m 750 {_VERIFIER_DIR} && '
-                f'chgrp {_VERIFIER_USER} {_VERIFIER_DIR} && solver=0 && '
-                'if command -v sudo >/dev/null && [ -d /etc/sudoers.d ]; then '
-                f'useradd --system --no-create-home --shell /usr/sbin/nologin {SOLVER_USER} && '
-                f'echo {shlex.quote(_SUDOERS_RULE)} > /etc/sudoers.d/deepgym && '
-                f'chmod 440 /etc/sudoers.d/deepgym && mkdir -p -m 755 {_RUNTIME_DIR} && solver=1; '
-                f'fi && echo "$(id -u {_AGENT_USER}) $(id -g {_AGENT_USER}) '
-                f'$(id -u {_VERIFIER_USER}) $(id -g {_VERIFIER_USER}) $solver"',
+                trusted(
+                    "command -v setpriv >/dev/null || { echo 'setpriv missing'; exit 1; } && "
+                    f'useradd --system --create-home --home-dir {_AGENT_HOME} '
+                    f'--shell /usr/sbin/nologin {_AGENT_USER} && chmod 755 {_AGENT_HOME} && '
+                    f'{_ADD_USER} {_VERIFIER_USER} && '
+                    f'mkdir -p -m 700 {_STAGING_DIR} && mkdir -p -m 750 {_VERIFIER_DIR} && '
+                    f'chgrp {_VERIFIER_USER} {_VERIFIER_DIR} && solver=0 && '
+                    'if command -v sudo >/dev/null && [ -d /etc/sudoers.d ]; then '
+                    f'{_ADD_USER} {SOLVER_USER} && '
+                    f'echo {shlex.quote(_SUDOERS_RULE)} > /etc/sudoers.d/deepgym && '
+                    'chmod 440 /etc/sudoers.d/deepgym && '
+                    f'mkdir -p -m 755 {_RUNTIME_DIR} && solver=1; fi && mkdir -p {quoted} && '
+                    f'echo "$(id -u {_AGENT_USER}) $(id -g {_AGENT_USER}) '
+                    f'$(id -u {_VERIFIER_USER}) $(id -g {_VERIFIER_USER}) $solver '
+                    '$(command -v setpriv) $(command -v nsenter || echo -) '
+                    '$(command -v sudo || echo -)" && '
+                    f'realpath {quoted}'
+                ),
                 timeout=_TRANSFER_TIMEOUT_S,
             )
             if users.exit_code != 0:
                 raise SandboxError(f'Could not create the session users: {users.output[-500:]}')
-            agent_uid, agent_gid, verifier_uid, verifier_gid, solver = users.output.split()[-5:]
-            self._as_agent = _drop_to(agent_uid, agent_gid)
-            self._as_verifier = _drop_to(verifier_uid, verifier_gid, allow_sudo=solver == '1')
+            *_, ids, real = users.output.strip().splitlines()
+            agent_uid, agent_gid, verifier_uid, verifier_gid, solver, setpriv, nsenter, sudo = (
+                ids.split()[-8:]
+            )
+            # The folder may be a link in the image: own and use where it really leads.
+            try:
+                self._workdir = check_workdir(real.strip())
+            except ValueError as exc:
+                raise SandboxError(f'{workdir!r} leads to {real.strip()!r}: {exc}') from exc
+            owned = sandbox.exec(
+                trusted(f'chown -R {_AGENT_USER}: {shlex.quote(self._workdir)}'),
+                timeout=_TRANSFER_TIMEOUT_S,
+            )
+            if owned.exit_code != 0:
+                raise SandboxError(f'Could not hand over {self._workdir}: {owned.output[-500:]}')
+            self._as_agent = _drop_to(setpriv, agent_uid, agent_gid)
+            self._as_verifier = _drop_to(
+                setpriv, verifier_uid, verifier_gid, allow_sudo=solver == '1'
+            )
             self._env = {'HOME': _AGENT_HOME}
             self._runtime_env: dict[str, str] = {}
             if solver == '1':
                 runtime = f'{_RUNTIME_DIR}/{RUNTIME_FILE}'
                 sandbox.upload(RUNTIME_SOURCE.encode('utf-8'), runtime)
-                prefix = ['sudo', '-n', '-u', SOLVER_USER, '--']
+                prefix = [sudo, '-n', '-u', SOLVER_USER, '--']
                 self._runtime_env = {
                     'DEEPGYM_ISOLATION': json.dumps({'kind': 'user', 'prefix': prefix}),
                     'DEEPGYM_RUNTIME': runtime,
@@ -312,10 +336,15 @@ class SandboxBackend:
             self._offline = ''
             if not sandbox.network_blocked:
                 self._make_offline_namespace()
-                self._offline = f'nsenter --net={_NETNS} -- '
+                self._offline = f'{shlex.quote(nsenter)} --net={_NETNS} -- '
         except BaseException:
             self.close()
             raise
+
+    @property
+    def workdir(self) -> str:
+        """The work directory, as it really is in the sandbox (links resolved)."""
+        return self._workdir
 
     def _make_offline_namespace(self) -> None:
         """Make a loopback-only network namespace and bind-mount it at ``_NETNS``.
@@ -325,14 +354,16 @@ class SandboxBackend:
         addressable without trusting a PID that could be reused.
         """
         made = self._sandbox.exec(
-            f'setsid unshare --net -- python3 -c {shlex.quote(_LOOPBACK_UP_THEN_SLEEP)} '
-            '>/dev/null 2>&1 & pid=$!; '
-            'for _ in $(seq 100); do '
-            '[ "$(cat /proc/$pid/comm 2>/dev/null)" = sleep ] && break; sleep 0.05; done; '
-            '[ "$(cat /proc/$pid/comm 2>/dev/null)" = sleep ] && '
-            '[ "$(readlink /proc/$pid/ns/net)" != "$(readlink /proc/1/ns/net)" ] && '
-            f'touch {_NETNS} && mount --bind /proc/$pid/ns/net {_NETNS} && '
-            f'nsenter --net={_NETNS} true',
+            trusted(
+                f'setsid unshare --net -- python3 -I -c {shlex.quote(_LOOPBACK_UP_THEN_SLEEP)} '
+                '>/dev/null 2>&1 & pid=$!; '
+                'for _ in $(seq 100); do '
+                '[ "$(cat /proc/$pid/comm 2>/dev/null)" = sleep ] && break; sleep 0.05; done; '
+                '[ "$(cat /proc/$pid/comm 2>/dev/null)" = sleep ] && '
+                '[ "$(readlink /proc/$pid/ns/net)" != "$(readlink /proc/1/ns/net)" ] && '
+                f'touch {_NETNS} && mount --bind /proc/$pid/ns/net {_NETNS} && '
+                f'nsenter --net={_NETNS} true'
+            ),
             timeout=30,
         )
         if made.exit_code != 0:
@@ -354,19 +385,39 @@ class SandboxBackend:
             timeout=timeout,
         )
 
-    def exec_root(self, command: str, timeout: int, *, offline: bool) -> ExecResult:
-        """Run trusted *command* with bash as root in the work directory.
+    def exec_root(
+        self,
+        command: str,
+        timeout: int,
+        *,
+        offline: bool,
+        env: Mapping[str, str] | None = None,
+    ) -> ExecResult:
+        """Run a task's own *command* (such as its tests) with bash as root in the work directory.
 
-        Only for a sandbox no agent has acted in, such as a grader's fresh one. *offline*
-        joins the loopback-only namespace when the provider doesn't block the network.
+        It gets the image's environment with *env* on top, as the task expects. Only for a
+        sandbox no agent process runs in, such as a grader's fresh one. *offline* joins the
+        loopback-only namespace when the provider doesn't block the network.
 
         Raises:
             TimeoutError: If the command exceeds *timeout* seconds.
         """
         prefix = self._offline if offline else ''
         return self._sandbox.exec(
-            f'{prefix}bash -c {shlex.quote(command)}', cwd=self._workdir, timeout=timeout
+            f'{prefix}/bin/bash -c {shlex.quote(command)}',
+            cwd=self._workdir,
+            env=env,
+            timeout=timeout,
         )
+
+    def exec_trusted(self, command: str, timeout: int) -> ExecResult:
+        """Run a harness *command* as root with an empty environment and only trusted folders
+        on PATH (see :func:`trusted`), in the work directory.
+
+        Raises:
+            TimeoutError: If the command exceeds *timeout* seconds.
+        """
+        return self._sandbox.exec(trusted(command), cwd=self._workdir, timeout=timeout)
 
     def archive_workdir(self) -> bytes:
         """Kill every agent process, then return the work directory as a gzipped tar.
@@ -381,17 +432,19 @@ class SandboxBackend:
         # ponytail: the archive comes back through exec output, so it is held in memory
         # here; a provider download() would stream it if work directories outgrow the cap.
         packed = self._sandbox.exec(
-            f"{self._as_agent} sh -c 'kill -9 -1' >/dev/null 2>&1; "
-            f'tar -C {shlex.quote(self._workdir)} -czf {staged} . && '
-            f'size=$(wc -c < {staged}) && if [ "$size" -gt {_MAX_ARCHIVE_BYTES} ]; then '
-            f'echo "the archive is $size bytes, over {_MAX_ARCHIVE_BYTES}"; '
-            f'rm -f {staged}; exit 1; fi',
+            trusted(
+                f"{self._as_agent} sh -c 'kill -9 -1' >/dev/null 2>&1; "
+                f'tar -C {shlex.quote(self._workdir)} -czf {staged} . && '
+                f'size=$(wc -c < {staged}) && if [ "$size" -gt {_MAX_ARCHIVE_BYTES} ]; then '
+                f'echo "the archive is $size bytes, over {_MAX_ARCHIVE_BYTES}"; '
+                f'rm -f {staged}; exit 1; fi'
+            ),
             timeout=_TRANSFER_TIMEOUT_S,
         )
         if packed.exit_code != 0:
             raise SandboxError(f'Failed to archive {self._workdir}: {packed.output[-500:]}')
         encoded = self._sandbox.exec(
-            f'base64 {staged}; status=$?; rm -f {staged}; exit $status',
+            trusted(f'base64 {staged}; status=$?; rm -f {staged}; exit $status'),
             timeout=_TRANSFER_TIMEOUT_S,
         )
         try:
@@ -415,9 +468,11 @@ class SandboxBackend:
         self._sandbox.upload(archive, staged)
         quoted = shlex.quote(self._workdir)
         done = self._sandbox.exec(
-            f'rm -rf {quoted} && mkdir -p {quoted} && chown {_AGENT_USER}: {quoted} && '
-            f'{self._as_agent} tar -xzpf - -C {quoted} < {staged} && chown -hR 0:0 {quoted}; '
-            f'status=$?; rm -f {staged}; exit $status',
+            trusted(
+                f'rm -rf {quoted} && mkdir -p {quoted} && chown {_AGENT_USER}: {quoted} && '
+                f'{self._as_agent} tar -xzpf - -C {quoted} < {staged} && '
+                f'chown -hR 0:0 {quoted}; status=$?; rm -f {staged}; exit $status'
+            ),
             timeout=_TRANSFER_TIMEOUT_S,
         )
         if done.exit_code != 0:
@@ -437,8 +492,10 @@ class SandboxBackend:
         write = 'mkdir -p "$(dirname "$1")" && cat > "$1"'
         target = shlex.quote(f'{self._workdir}/{path}')
         done = self._sandbox.exec(
-            f'{self._as_agent} sh -c {shlex.quote(write)} write {target} < {staged}; '
-            f'status=$?; rm -f {staged}; exit $status',
+            trusted(
+                f'{self._as_agent} sh -c {shlex.quote(write)} write {target} < {staged}; '
+                f'status=$?; rm -f {staged}; exit $status'
+            ),
             timeout=60,
         )
         if done.exit_code != 0:
@@ -456,10 +513,12 @@ class SandboxBackend:
         self._sandbox.upload(code.encode('utf-8'), script)
         stderr = ' 2>/dev/null' if quiet else ''
         return self._sandbox.exec(
-            f'{self._offline}{self._as_verifier} {self.python} -I {script}{stderr}; '
-            f'status=$?; rm -f {script}; exit $status',
+            trusted(
+                f'{self._offline}{self._as_verifier} {self.python} -I {script}{stderr}; '
+                f'status=$?; rm -f {script}; exit $status',
+                {**self._env, **self._runtime_env, **(env or {})},
+            ),
             cwd=self._workdir,
-            env={**self._env, **self._runtime_env, **(env or {})},
             timeout=timeout,
         )
 
@@ -503,36 +562,52 @@ class SandboxBackend:
 
 
 def check_workdir(workdir: str, reserved: Sequence[str] = ()) -> str:
-    """Return *workdir* if an agent may own it.
+    """Return *workdir*, normalized, if an agent may own it.
+
+    ``.``, ``..`` and repeated slashes are resolved first (a leading ``//`` too), so no
+    spelling of a protected folder slips through. This is lexical; a sandbox also checks
+    where the folder really leads before handing it over.
 
     Args:
         workdir: The folder the agent will own, along with everything in it.
         reserved: More folders it must neither hold nor sit in.
 
     Raises:
-        ValueError: If it isn't absolute, has ``..``, holds /tmp, or holds or sits in a
-            folder root trusts (/usr, /etc, /root, ...), DeepGym's own, or *reserved*.
+        ValueError: If it isn't absolute, holds /tmp, or holds or sits in a folder root
+            trusts (/usr, /etc, /root, ...), DeepGym's own, or *reserved*.
     """
-    path = PurePosixPath(workdir)
-    if not path.is_absolute() or '..' in path.parts:
-        raise ValueError(f'Work directory {workdir!r} must be an absolute path without ".."')
+    if not workdir.startswith('/'):
+        raise ValueError(f'Work directory {workdir!r} must be an absolute path')
+    normal = '/' + posixpath.normpath(workdir).lstrip('/')
+    path = PurePosixPath(normal)
     if PurePosixPath('/tmp').is_relative_to(path):
         raise ValueError(f'Work directory {workdir!r} would hold /tmp')
     for other in (*_PROTECTED_PATHS, *map(PurePosixPath, reserved)):
         if other.is_relative_to(path) or path.is_relative_to(other):
             raise ValueError(f'Work directory {workdir!r} overlaps {other}')
-    return workdir
+    return normal
 
 
-def _drop_to(uid: str, gid: str, *, allow_sudo: bool = False) -> str:
-    """Command prefix that drops to *uid*/*gid* with no capabilities.
+def trusted(command: str, env: Mapping[str, str] | None = None) -> str:
+    """Wrap *command* to run with only *env* and :data:`~deepgym.sandboxes.TRUSTED_PATH`.
+
+    Nothing from the image's environment (PATH, PYTHON*, LD_*) reaches it, and
+    ``/usr/bin/env`` and ``/bin/sh`` are named by absolute path.
+    """
+    assignments = {'PATH': TRUSTED_PATH, **(env or {})}
+    variables = ' '.join(shlex.quote(f'{key}={value}') for key, value in assignments.items())
+    return f'/usr/bin/env -i {variables} /bin/sh -c {shlex.quote(command)}'
+
+
+def _drop_to(setpriv: str, uid: str, gid: str, *, allow_sudo: bool = False) -> str:
+    """Command prefix that drops to *uid*/*gid* with no capabilities, via *setpriv* by path.
 
     It also sets no-new-privs and empties the bounding set so no setuid binary can
     regain privileges, unless *allow_sudo*: sudo needs both, and its rules then decide.
     """
     lockdown = [] if allow_sudo else ['--bounding-set=-all', '--no-new-privs']
     return shlex.join([
-        'setpriv', f'--reuid={uid}', f'--regid={gid}', '--clear-groups', '--inh-caps=-all',
+        setpriv, f'--reuid={uid}', f'--regid={gid}', '--clear-groups', '--inh-caps=-all',
         *lockdown, '--',
     ])  # fmt: skip
 

@@ -125,7 +125,7 @@ def test_docker_runs_offline_and_removes_with_rm(cli_calls: list[list[str]]) -> 
     assert run[:2] == ['docker', 'run'] and {'--network', '--pids-limit', '--memory'} <= set(run)
     assert exec_ == [
         'docker', 'exec', '--workdir', '/w', '--env', 'A=1', box.id,
-        'timeout', '--kill-after=2', '5', 'sh', '-c', 'echo hi',
+        '/usr/bin/timeout', '--kill-after=2', '5', '/bin/sh', '-c', 'echo hi',
     ]  # fmt: skip
     assert upload[:3] == ['docker', 'exec', '--interactive']
     assert delete == ['docker', 'rm', '--force', box.id]
@@ -234,7 +234,8 @@ def test_modal_blocks_network_and_maps_results(monkeypatch: pytest.MonkeyPatch) 
     assert box.exec('false') == ExecResult(3, 'outerr')
     box.upload(b'x', '/a/b/c.txt')
     box.delete()
-    assert created['execs'][-1][:2] == ('sh', '-c') and 'mkdir -p /a/b' in created['execs'][-1][2]
+    assert created['execs'][-1][:2] == ('/bin/sh', '-c')
+    assert 'mkdir -p /a/b' in created['execs'][-1][2]
     assert created['w'] == '/a/b/c.txt' and created['terminated']
     module.ModalSandbox('python:3.11-slim')
     assert created['image'] == 'reg:python:3.11-slim'
@@ -318,20 +319,26 @@ def test_judge_trusts_a_provider_that_blocks_the_network() -> None:
     assert run_judge_in_sandbox(box, _JOB).verifier_result.score == 1.0
 
 
-# agent uid/gid, verifier uid/gid, and 0: no sudo, so no deepgym_solution for verifiers.
-_USERS = ('useradd', '997 997 996 996 0')
+# agent and verifier uid/gid; 0: no sudo, so no deepgym_solution for verifiers; the
+# setpriv, nsenter and sudo paths; then the work directory as realpath prints it.
+_USERS = (
+    'useradd',
+    '997 997 996 996 0 /usr/bin/setpriv /usr/bin/nsenter /usr/bin/sudo\n/tmp/deepgym',
+)
 
 
 def test_session_runs_as_agent_and_joins_netns_only_when_needed() -> None:
     blocked = FakeSandbox(network_blocked=True, answers=[_USERS])
     SandboxBackend(blocked).exec('ls', timeout=5)
-    assert blocked.commands[-1].startswith('setpriv --reuid=997 --regid=997')
+    assert blocked.commands[-1].startswith('/usr/bin/setpriv --reuid=997 --regid=997')
     assert '--no-new-privs' in blocked.commands[-1]
 
     open_ = FakeSandbox(network_blocked=False, answers=[_USERS])
     SandboxBackend(open_).exec('ls', timeout=5)
-    assert 'mount --bind /proc/$pid/ns/net /opt/deepgym-netns' in open_.commands[1]
-    assert open_.commands[-1].startswith('nsenter --net=/opt/deepgym-netns -- setpriv')
+    assert any('mount --bind /proc/$pid/ns/net /opt/deepgym-netns' in c for c in open_.commands)
+    assert open_.commands[-1].startswith(
+        '/usr/bin/nsenter --net=/opt/deepgym-netns -- /usr/bin/setpriv'
+    )
 
 
 def test_session_verifier_runs_as_its_own_user_from_a_private_file() -> None:
@@ -339,7 +346,8 @@ def test_session_verifier_runs_as_its_own_user_from_a_private_file() -> None:
     SandboxBackend(box).verify('print(1)', timeout=5, quiet=True)
     script = box.uploads[-1]
     assert script.startswith('/opt/deepgym-verifier/') and script.endswith('.py')
-    assert box.commands[-1].startswith('setpriv --reuid=996 --regid=996')
+    assert box.commands[-1].startswith('/usr/bin/env -i ')
+    assert '/usr/bin/setpriv --reuid=996 --regid=996' in box.commands[-1]
     assert f'python3 -I {script} 2>/dev/null' in box.commands[-1]
     assert 'print(1)' not in box.commands[-1]
 
@@ -349,7 +357,8 @@ def test_session_write_file_is_staged_then_written_as_agent() -> None:
     SandboxBackend(box).write_file('a/b.py', b'x')
     staged = box.uploads[-1]
     assert staged.startswith('/opt/deepgym-staging/')
-    assert box.commands[-1].startswith('setpriv --reuid=997')
+    assert box.commands[-1].startswith('/usr/bin/env -i ')
+    assert '/usr/bin/setpriv --reuid=997' in box.commands[-1]
     assert f'< {staged}' in box.commands[-1] and '/tmp/deepgym/a/b.py' in box.commands[-1]
 
 
@@ -401,7 +410,10 @@ def test_judge_killed_after_printing_a_pass_is_an_error() -> None:
 
 # Daytona's default snapshot runs commands as a sudoer; this is its private upload staging dir.
 _STAGE = ('mktemp -d', '/tmp/tmp.stage')
-_DAYTONA_USERS = ('useradd', '997 997 996 996 1')
+_DAYTONA_USERS = (
+    'useradd',
+    '997 997 996 996 1 /usr/bin/setpriv /usr/bin/nsenter /usr/bin/sudo\n/tmp/deepgym',
+)
 
 
 def _daytona_client(monkeypatch: pytest.MonkeyPatch) -> tuple[DeepGym, FakeDaytona]:
@@ -423,8 +435,8 @@ def test_daytona_session_runs_agent_and_verifier_as_separate_users(
             session.score()
     box = client.boxes[0]
     step = next(c for c in box.events if 'step-marker' in c)
-    assert step.startswith('sudo -n -E sh -c')
-    assert 'nsenter --net=/opt/deepgym-netns -- setpriv --reuid=997' in step
+    assert step.startswith('/usr/bin/sudo -n -E /bin/sh -c')
+    assert '/usr/bin/nsenter --net=/opt/deepgym-netns -- /usr/bin/setpriv --reuid=997' in step
     assert not any('SECRET' in c for c in box.events), 'verifier code must not be in a command'
     score = next(c for c in box.events if '/opt/deepgym-verifier/' in c and 'python3' in c)
     assert '--reuid=996' in score
@@ -444,7 +456,7 @@ def test_daytona_desktop_runs_as_the_agent_and_is_locked_down(
     before = ' '.join(events[:started])
     assert '/usr/local/bin/xfce4-session' in before, 'the desktop must not run as the sudoer'
     prepare = next(c for c in events[:started] if '/usr/local/bin/xfce4-session' in c)
-    assert prepare.startswith('sudo -n -E sh -c')
+    assert prepare.startswith('/usr/bin/sudo -n -E /bin/sh -c')
     assert '--reuid=997' in prepare and '/opt/deepgym-netns' in prepare
     for blocked in ('thunar-uca', 'Thunar/uca.xml', 'gio-launch-desktop', 'xfce4-terminal', 'idle'):
         assert blocked in prepare, f'{blocked} must be locked down before the desktop starts'

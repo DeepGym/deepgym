@@ -5,12 +5,10 @@ DPO, SFT, LoRA, PRM training, and more -- all from a single YAML file.
 
 This module provides:
 - Reward functions for Axolotl's GRPO/RL training loops
-- PRM (Process Reward Model) dataset generation from DeepGym's per-test results
 - Config generation helpers for Axolotl YAML files
 
 Since Axolotl wraps TRL's GRPOTrainer internally, the reward function interface
-matches TRL's signature. The PRM data generation leverages the fact that
-DeepGym's per-test-case results map directly to PRM stepwise supervision labels.
+matches TRL's signature.
 
 Usage (GRPO reward function):
     from deepgym.integrations.axolotl import make_axolotl_reward_fn
@@ -19,18 +17,6 @@ Usage (GRPO reward function):
 
     # In your Axolotl custom training script:
     trainer = GRPOTrainer(model=model, reward_funcs=[reward_fn])
-
-Usage (PRM dataset generation):
-    from deepgym.integrations.axolotl import generate_prm_dataset, write_prm_dataset
-
-    records = generate_prm_dataset(env, solutions_per_prompt=16)
-    write_prm_dataset(records, Path('prm_data.jsonl'))
-
-    # Then in axolotl config:
-    # datasets:
-    #   - path: prm_data.jsonl
-    #     type: stepwise_supervised
-    #     step_separator: "\\n\\n"
 
 Usage (config generation):
     from deepgym.integrations.axolotl import generate_axolotl_config
@@ -50,17 +36,11 @@ Sources:
 from __future__ import annotations
 
 import asyncio
-import json
-import logging
-from collections.abc import Awaitable, Callable, Sequence
-from pathlib import Path
-from typing import Any, Literal
+from collections.abc import Awaitable, Callable
+from typing import Literal
 
 from deepgym.core import DeepGym
-from deepgym.models import Environment, RunResult
-
-logger = logging.getLogger(__name__)
-
+from deepgym.models import Environment
 
 # ---------------------------------------------------------------------------
 # GRPO / RL reward functions
@@ -208,167 +188,6 @@ def make_axolotl_shaped_reward_fn(
 
 
 # ---------------------------------------------------------------------------
-# PRM (Process Reward Model) dataset generation
-# ---------------------------------------------------------------------------
-
-
-class PRMRecord(dict):
-    """A single PRM stepwise-supervision record.
-
-    Conforms to Axolotl's ``stepwise_supervised`` dataset format::
-
-        {
-            "prompt": "Which number is larger, 9.8 or 9.11?",
-            "completions": ["Step 1...", "Step 2..."],
-            "labels": [true, false]
-        }
-
-    For DeepGym, each "step" corresponds to one test case from the verifier.
-    The ``completions`` field contains test-case summaries, and ``labels``
-    are the per-test pass/fail booleans.
-    """
-
-
-def results_to_prm_record(
-    prompt: str,
-    solution: str,
-    result: RunResult,
-    step_separator: str = '\n\n',
-) -> PRMRecord | None:
-    """Convert a single DeepGym RunResult into a PRM training record.
-
-    Each test case in the verifier output becomes a "reasoning step" in the
-    PRM record. This maps DeepGym's per-test granularity to PRM's stepwise
-    supervision format.
-
-    Args:
-        prompt: The task prompt / problem statement.
-        solution: The model-generated solution code.
-        result: RunResult from running the solution.
-        step_separator: Separator between steps in the completions field.
-
-    Returns:
-        PRMRecord dict, or None if the result has no per-test cases.
-    """
-    if not result.cases:
-        return None
-
-    completions = []
-    labels = []
-
-    for case in result.cases:
-        summary_parts = []
-        if case.input_summary:
-            summary_parts.append(f'Input: {case.input_summary}')
-        if case.expected_summary:
-            summary_parts.append(f'Expected: {case.expected_summary}')
-        if case.actual_summary:
-            summary_parts.append(f'Got: {case.actual_summary}')
-        if case.error:
-            summary_parts.append(f'Error: {case.error}')
-
-        step_text = ' | '.join(summary_parts) if summary_parts else case.id
-        completions.append(step_text)
-        labels.append(case.passed)
-
-    record = PRMRecord(
-        prompt=prompt,
-        completions=completions,
-        labels=labels,
-        metadata={
-            'solution': solution,
-            'score': result.score,
-            'total_cases': len(result.cases),
-            'passed_cases': sum(1 for c in result.cases if c.passed),
-        },
-    )
-    return record
-
-
-def generate_prm_dataset(
-    env: Environment,
-    solutions: Sequence[str],
-    dg: DeepGym | None = None,
-    max_parallel: int = 32,
-    step_separator: str = '\n\n',
-) -> list[PRMRecord]:
-    """Generate PRM stepwise-supervision records from model solutions.
-
-    Run each solution through the DeepGym verifier and convert per-test-case
-    results into PRM training records. Solutions that produce no per-test
-    breakdown are skipped.
-
-    Args:
-        env: DeepGym environment with verifier.
-        solutions: Model-generated solutions to score.
-        dg: Optional DeepGym client (auto-created if None).
-        max_parallel: Maximum concurrent sandbox executions.
-        step_separator: Separator between steps in PRM completions.
-
-    Returns:
-        List of PRMRecord dicts ready for Axolotl training.
-    """
-    _dg = dg or DeepGym(mode='auto')
-    batch = _dg.run_batch(env, list(solutions), max_parallel=max_parallel)
-
-    records: list[PRMRecord] = []
-    for solution, result in zip(solutions, batch.results):
-        record = results_to_prm_record(
-            prompt=env.task,
-            solution=solution,
-            result=result,
-            step_separator=step_separator,
-        )
-        if record is not None:
-            records.append(record)
-
-    logger.info(
-        'Generated %d PRM records from %d solutions (%d skipped, no per-test cases)',
-        len(records),
-        len(solutions),
-        len(solutions) - len(records),
-    )
-    return records
-
-
-def write_prm_dataset(
-    records: Sequence[PRMRecord],
-    output_path: Path,
-    include_metadata: bool = False,
-) -> int:
-    """Write PRM records to a JSONL file compatible with Axolotl.
-
-    Each line contains a JSON object with ``prompt``, ``completions``,
-    and ``labels`` fields matching Axolotl's ``stepwise_supervised`` type.
-
-    Args:
-        records: PRM records to write.
-        output_path: Path to the output .jsonl file.
-        include_metadata: Whether to include the metadata field in output.
-
-    Returns:
-        Number of records written.
-    """
-    output_path.parent.mkdir(parents=True, exist_ok=True)
-
-    written = 0
-    with output_path.open('w', encoding='utf-8') as f:
-        for record in records:
-            row: dict[str, Any] = {
-                'prompt': record['prompt'],
-                'completions': record['completions'],
-                'labels': record['labels'],
-            }
-            if include_metadata:
-                row['metadata'] = record.get('metadata', {})
-            f.write(json.dumps(row, ensure_ascii=False) + '\n')
-            written += 1
-
-    logger.info('Wrote %d PRM records to %s', written, output_path)
-    return written
-
-
-# ---------------------------------------------------------------------------
 # Axolotl YAML config generation
 # ---------------------------------------------------------------------------
 
@@ -425,12 +244,11 @@ fsdp: null
 
 _PRM_CONFIG_TEMPLATE = """\
 # Axolotl PRM (Process Reward Model) config
-# Trained on stepwise-supervision data generated by DeepGym
+# Trains on a stepwise_supervised dataset (prompt, completions, labels) you provide
 # Generated by deepgym.integrations.axolotl
 #
 # Usage:
 #   pip install axolotl[flash-attn,deepspeed] deepgym
-#   deepgym generate-prm --env coin_change --solutions-dir ./solutions/ -o prm_data.jsonl
 #   axolotl train {config_filename}
 
 base_model: {base_model}

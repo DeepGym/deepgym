@@ -745,8 +745,8 @@ The server won't start without auth configured. Set `DEEPGYM_API_KEY` for
 production or `DEEPGYM_NO_AUTH=true` for local development.
 `--allow-local-exec` is required when running without Daytona.
 
-Other commands: `run-batch`, `eval`, `create`, `audit`, `qa`, `benchmark-audit`,
-`generate-prm` and `console`. Run `deepgym <command> --help` for options.
+Other commands: `run-batch`, `eval`, `create`, `audit`, `qa`, `benchmark-audit`
+and `console`. Run `deepgym <command> --help` for options.
 
 ## Console
 

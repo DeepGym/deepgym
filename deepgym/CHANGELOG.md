@@ -1,5 +1,9 @@
 # Changelog
 
+## Unreleased
+
+- **Axolotl: fake PRM data removed.** `generate_prm_dataset`, `results_to_prm_record`, `write_prm_dataset`, `PRMRecord` and `deepgym generate-prm` are gone. They relabelled a solution's per-test diagnostics ("Input: ... Expected: ... Got: ...") as reasoning steps with pass/fail labels, which is not process supervision. `generate_axolotl_config(method='prm')` stays, for stepwise data you bring.
+
 ## 0.4.2 (2026-10-13)
 
 - **Security: repo, terminal and cyber tasks no longer run on the host.** SWE-bench Pro, Terminal-Bench, CyberGym patch tasks and MiMo code tasks apply the model's patch or run its commands, then run tests, with no judge isolation. In `mode='local'` (and `auto` without Daytona) they used to do that on your machine; now they raise `SandboxError` and ask for `docker`, `apple`, `modal`, `e2b` or `daytona`. There is no opt-out. They also start their sandbox from the client's provider instead of always Daytona, and `scripts/run_cybergym_artifact_eval.py` drops `--mode local`.

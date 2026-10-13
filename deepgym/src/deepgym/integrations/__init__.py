@@ -1,7 +1,7 @@
 """DeepGym framework integrations.
 
 Available integrations:
-- axolotl: Axolotl GRPO reward functions, PRM dataset generation, config helpers
+- axolotl: Axolotl GRPO reward functions and config helpers
 - dapo: Thin DAPO reward/config helpers for verl-style training recipes
 - trl: HuggingFace TRL GRPOTrainer reward functions
 - verl: ByteDance verl compute_score and batch reward functions

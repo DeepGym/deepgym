@@ -62,10 +62,12 @@ Sources:
 
 from __future__ import annotations
 
+import asyncio
 import concurrent.futures
 import logging
 import math
 import time
+from collections.abc import Mapping
 from typing import Annotated, Literal
 
 try:
@@ -181,24 +183,41 @@ class OpenRLHFRewardResponse(BaseModel):
     error_types: list[str | None] = Field(default_factory=list)
 
 
-def _wait(run: concurrent.futures.Future[RunResult], deadline: float) -> RunResult | str:
+async def _settle(
+    runs: Mapping[int, concurrent.futures.Future[RunResult]], deadline: float
+) -> dict[int, RunResult | str]:
+    """Wait for *runs* until *deadline* (``time.monotonic``) and return each one's outcome.
+
+    The wait is on the event loop, so a request holds no thread while it's graded.
+    """
+    waits = [asyncio.wrap_future(run) for run in runs.values()]
+    if waits:
+        await asyncio.wait(waits, timeout=max(0.0, deadline - time.monotonic()))
+    for wait in waits:  # outcomes are read from the runs; this keeps asyncio from logging them
+        if wait.done():
+            wait.exception()
+        else:
+            wait.cancel()
+    return {i: _outcome(run) for i, run in runs.items()}
+
+
+def _outcome(run: concurrent.futures.Future[RunResult]) -> RunResult | str:
     """Return *run*'s result, or why the provider, the network or the clock stopped it.
 
     A run the provider or the network failed (see
-    :func:`~deepgym.exceptions.is_infrastructure_failure`), or one still waiting for a slot
-    at *deadline* (``time.monotonic``), which then never starts, comes back as its
-    error_type: there is no score to give. Anything else the model may have caused, so it
-    comes back as a result without a verdict, scored 0: a run that raised for any other
-    reason, or one still going at the deadline (it keeps its slot until it ends, and may
-    be slow because of the model's code).
+    :func:`~deepgym.exceptions.is_infrastructure_failure`), or one still waiting for a slot,
+    which then never starts, comes back as its error_type: there is no score to give.
+    Anything else the model may have caused, so it comes back as a result without a
+    verdict, scored 0: a run that raised for any other reason, or one still going (it
+    keeps its slot until it ends, and may be slow because of the model's code).
     """
-    try:
-        return run.result(timeout=max(0.0, deadline - time.monotonic()))
-    except concurrent.futures.TimeoutError:
-        if run.cancel():
-            return DEADLINE_EXCEEDED
+    if run.cancel():
+        return DEADLINE_EXCEEDED
+    if not run.done():
         unfinished = error_result(TimeoutError('still running at the request deadline'))
         return unfinished.model_copy(update={'error_type': DEADLINE_EXCEEDED})
+    try:
+        return run.result()
     except Exception as exc:
         if is_infrastructure_failure(exc):
             logger.warning('OpenRLHF: the provider or network failed a run: %s', exc)
@@ -215,9 +234,10 @@ def create_openrlhf_router(
 ) -> APIRouter:
     """Create a FastAPI router compatible with OpenRLHF's reward server protocol.
 
-    OpenRLHF sends one request per rollout, concurrently. The handler is synchronous, so
-    FastAPI runs each request in its worker thread pool (40 threads by default) and a
-    slow verification never blocks the event loop the other requests arrive on.
+    OpenRLHF sends one request per rollout, concurrently. Each run goes to one of the
+    router's ``max_parallel`` threads, and a request waits for its runs on the event loop,
+    holding no thread, so its 150 s start when it arrives and a slow verification never
+    holds up the other requests.
 
     Args:
         env: The environment every response is scored with.
@@ -245,20 +265,19 @@ def create_openrlhf_router(
     fallback = 0.0 if infra_failure_score == 'zero' else math.nan
 
     @router.post('/score', response_model=OpenRLHFRewardResponse)
-    def score(request: OpenRLHFRewardRequest) -> Response:
+    async def score(request: OpenRLHFRewardRequest) -> Response:
         """Score a batch of model responses and return a reward for every one."""
         deadline = time.monotonic() + _REQUEST_BUDGET_S
         responses = request.responses
         codes = {i: extract_code(r) for i, r in enumerate(responses) if r is not None}
         runs = {i: slots.submit(dg.run, env, code) for i, code in codes.items()}
-        outcomes = {i: _wait(run, deadline) for i, run in runs.items()}
+        outcomes = await _settle(runs, deadline)
         # A provider or network failure is graded once more, in the same slots and time.
         retry = [i for i, o in outcomes.items() if isinstance(o, str) and o != DEADLINE_EXCEEDED]
         if retry and time.monotonic() + _RETRY_DELAY_S < deadline:
-            time.sleep(_RETRY_DELAY_S)
+            await asyncio.sleep(_RETRY_DELAY_S)
             reruns = {i: slots.submit(dg.run, env, codes[i]) for i in retry}
-            for i, rerun in reruns.items():
-                outcome = _wait(rerun, deadline)
+            for i, outcome in (await _settle(reruns, deadline)).items():
                 if isinstance(outcome, RunResult) and outcome.has_verdict:
                     outcomes[i] = outcome
         rewards: list[float] = []

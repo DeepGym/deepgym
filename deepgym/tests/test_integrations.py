@@ -10,6 +10,7 @@ from typing import Literal
 
 import httpx
 import pytest
+from anyio import to_thread
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
@@ -618,10 +619,21 @@ class TestOpenRLHFIntegration:
 
         assert data == {'rewards': [0.0], 'error_types': ['runtime_error']}
 
-    def test_a_provider_failure_is_graded_once_more(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        """A failure is_infrastructure_failure calls ours gets one more grading of the response."""
+    @pytest.mark.parametrize(
+        'failure',
+        [ConnectionError('provider unavailable'), TimeoutError('provider call timed out')],
+        ids=['unavailable', 'call_timed_out'],
+    )
+    def test_a_provider_failure_is_graded_once_more(
+        self, monkeypatch: pytest.MonkeyPatch, failure: Exception
+    ) -> None:
+        """A failure is_infrastructure_failure calls ours gets one more grading of the response.
+
+        A provider call that times out raises the built-in TimeoutError, which since Python
+        3.11 is also what waiting too long for a run raises; it's still graded again.
+        """
         monkeypatch.setattr(openrlhf, '_RETRY_DELAY_S', 0.0)
-        dg = _ScriptedDeepGym({'right': [ConnectionError('provider unavailable')]})
+        dg = _ScriptedDeepGym({'right': [failure]})
 
         data = _post(MIXED, dg, {'prompts': ['p'] * 2, 'outputs': ['right', 'wrong']})
 
@@ -755,6 +767,28 @@ class TestOpenRLHFIntegration:
 
         assert fast.json()['rewards'] == [1.0]
         assert dg.finished == [extract_code(FENCED), 'slow']
+
+    async def test_a_request_holds_no_worker_thread_while_it_is_graded(self) -> None:
+        """Requests are graded together even with one worker thread, so none waits for one.
+
+        A request's 150 s would only start once it got a thread, and OpenRLHF gives up at 180.
+        """
+        to_thread.current_default_thread_limiter().total_tokens = 1
+        dg = _ScriptedDeepGym(seconds=0.5)
+        app = FastAPI()
+        app.include_router(
+            create_openrlhf_router(MIXED, dg, infra_failure_score='nan', max_parallel=2)
+        )
+        transport = httpx.ASGITransport(app=app)
+        payload = {'prompts': ['p'], 'outputs': ['right']}
+
+        async with httpx.AsyncClient(transport=transport, base_url='http://test') as client:
+            replies = await asyncio.gather(
+                *(client.post('/reward/score', json=payload) for _ in range(2))
+            )
+
+        assert [reply.json()['rewards'] for reply in replies] == [[1.0], [1.0]]
+        assert dg.most_running == 2
 
     def test_score_endpoint_empty(self, env: Environment, local_dg: DeepGym) -> None:
         router = create_openrlhf_router(env, local_dg, infra_failure_score='zero')

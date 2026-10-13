@@ -189,7 +189,7 @@ class TestSchema:
         with pytest.raises(ValidationError, match='step indexes'):
             trace.model_validate({**trace.model_dump(), 'steps': trace.model_dump()['steps'][::-1]})
 
-    def test_to_trajectory_skips_steps_without_observation(self) -> None:
+    def test_to_trajectory_skips_rejected_steps(self) -> None:
         trace = graded_trace()
 
         trajectory = trace.to_trajectory()
@@ -713,6 +713,18 @@ class TestCapture:
         assert step.applied and step.observation is None
         assert (step.reward, step.step_verifier['details']) == (0.5, 'step 1')
         assert step.error == 'SandboxError: screenshot failed'
+
+    def test_replay_keeps_an_action_whose_screenshot_failed(self, tmp_path: Path) -> None:
+        tr = _desktop_trace(WRITE_ENV, screenshots=1, path=tmp_path / 't.jsonl')
+        with tr:
+            tr.start()
+            with pytest.raises(SandboxError, match='screenshot failed'):
+                tr.step(Action(action_type='bash', content='echo hello > out.txt'))
+
+        trajectory = load_trace(tr.path).to_trajectory()
+
+        assert trajectory == tr._session.trajectory
+        assert (len(trajectory.steps), trajectory.step_rewards) == (1, [0.5])
 
     def test_failed_step_verifier_never_reuses_an_earlier_verdict(self, tmp_path: Path) -> None:
         verifier = 'import os\nprint(0.5 if os.environ["STEP_NUMBER"] == "1" else "garbage")\n'

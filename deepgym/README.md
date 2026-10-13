@@ -725,13 +725,13 @@ are closed after 30 minutes; at most 100 run at once.
 
 `dg.trace()` records an episode while it runs, as training data. A trace holds its
 provenance (environment name, variant and seed; hashes of the environment, task,
-verifiers and reference; the image the sandbox booted with its digest, pinned by the
-reference or resolved by the provider, or why there is none; deepgym version and the git
-commit of the deepgym checkout, null for an installed package; provider; and the agent,
-model and sampling config you pass), every step (the action, the model messages behind
-it with optional token ids and logprobs, what came back, the step reward with the step
-verifier's output, exit code, error) and every result of `score()`: the last is the
-verdict, with `has_verdict`, and earlier ones stay in `prior_results`.
+verifiers and reference; the image the sandbox booted with the digest its provider
+resolved, or why there is none; deepgym version and the git commit of the deepgym
+checkout, null for an installed package, with whether it had local changes; provider;
+and the agent, model and sampling config you pass), every step (the action, the model
+messages behind it with optional token ids and logprobs, what came back, the step reward
+with the step verifier's output, exit code, error) and every result of `score()`: the
+last is the verdict, with `has_verdict`, and earlier ones stay in `prior_results`.
 
 ```python
 from deepgym.traces import AgentMeta

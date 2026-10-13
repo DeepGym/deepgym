@@ -446,7 +446,9 @@ class Session:
 
     @property
     def step_verdict(self) -> dict[str, object] | None:
-        """The last step verifier output that scored (score, passed, details, ...), if any.
+        """The step verifier output of the last step (score, passed, details, ...).
+
+        None before any step verifier ran, or if the last one failed.
 
         ``exit_code`` is the verifier's exit code, in place of any key it printed by that name.
         """
@@ -617,6 +619,7 @@ class Session:
             VerifierError: If the step verifier times out, prints neither a float nor
                 JSON with a score, or doesn't exit cleanly (see :func:`check_exit`).
         """
+        self._step_verdict = None
         self._backend.write_file(_STEP_OUTPUT, output.encode('utf-8'))
         try:
             exit_code, stdout = self._backend.verify(

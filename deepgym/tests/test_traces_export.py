@@ -123,6 +123,18 @@ class TestExporters:
         with pytest.raises(ValueError, match='whole traces'):
             export_traces(_samples(), 'atif', tmp_path, rows='rl')
 
+    def test_atif_keeps_unjudged_step_verifier_output(self) -> None:
+        trace = graded_trace()
+        unjudged = trace.steps[0].model_copy(
+            update={'reward': None, 'step_verifier': {'score': 0, 'exit_code': 2}}
+        )
+        trace = trace.model_copy(update={'steps': (unjudged, *trace.steps[1:])})
+
+        document, _ = to_atif(trace)
+
+        action = next(step for step in document['steps'] if step.get('tool_calls'))
+        assert action['extra'] == {'step_verifier': {'score': 0, 'exit_code': 2}}
+
     def test_duplicate_trace_ids_are_refused(self, tmp_path: Path) -> None:
         with pytest.raises(ValueError, match='share ids'):
             export_traces([graded_trace(), graded_trace()], 'atif', tmp_path / 'atif')

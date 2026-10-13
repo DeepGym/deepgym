@@ -224,10 +224,16 @@ class TracedSession:
         """Return the step verifier's output, with *reward* only if that output is a verdict.
 
         A step verifier that reports its own failure (exit code 2, or an ``error_type``
-        that isn't the model's fault) scores 0 in the session, but that 0 judged nothing.
+        that isn't the model's fault) scores 0 in the session, but that 0 judged nothing;
+        so does one whose ``error_type`` isn't even a string.
         """
         output = self._session.step_verdict
-        judged = output is not None and is_verdict(output['exit_code'], output.get('error_type'))
+        error = None if output is None else output.get('error_type')
+        judged = (
+            output is not None
+            and (error is None or isinstance(error, str))
+            and is_verdict(output['exit_code'], error)
+        )
         return {'reward': reward if judged else None, 'step_verifier': output}
 
     def _check_open(self) -> None:

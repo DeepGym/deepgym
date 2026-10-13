@@ -79,22 +79,35 @@ def _reject_constant(name: str) -> None:
     raise AssertionError(f'{name} is not valid JSON')
 
 
-class _OneScreenshot(LocalBackend):
-    """A local backend with a 'desktop' whose screenshots fail after the first."""
+class _FailingScreenshots(LocalBackend):
+    """A local backend with a 'desktop' whose screenshots fail after the first *ok*."""
 
-    def __init__(self) -> None:
+    def __init__(self, ok: int) -> None:
         super().__init__()
-        self.shots = 0
+        self.left = ok
 
     def start_desktop(self) -> None:
         """Pretend a desktop started."""
 
     def screenshot(self) -> str:
-        """Return one screenshot, then fail."""
-        self.shots += 1
-        if self.shots > 1:
+        """Return a screenshot while any are left, then fail."""
+        self.left -= 1
+        if self.left < 0:
             raise SandboxError('screenshot failed')
         return base64.b64encode(b'png').decode()
+
+
+def _desktop_trace(env: MultiTurnEnvironment, *, screenshots: int, path: Path) -> TracedSession:
+    """Trace *env* as a desktop episode whose screenshots fail after *screenshots*."""
+    env = env.model_copy(update={'desktop': True})
+    provenance = Provenance(
+        env=EnvFingerprint.of(env),
+        agent=AGENT,
+        provider='local',
+        deepgym_version='test',
+        started_at=datetime.now(timezone.utc),
+    )
+    return TracedSession(Session(env, _FailingScreenshots(screenshots)), env, provenance, path)
 
 
 class TestSchema:
@@ -474,15 +487,7 @@ class TestCapture:
         assert json.loads((tmp_path / 'rl.jsonl').read_text())['step_rewards'] == [None]
 
     def test_failure_after_scoring_a_step_keeps_the_score(self, tmp_path: Path) -> None:
-        env = WRITE_ENV.model_copy(update={'desktop': True})
-        provenance = Provenance(
-            env=EnvFingerprint.of(env),
-            agent=AGENT,
-            provider='local',
-            deepgym_version='test',
-            started_at=datetime.now(timezone.utc),
-        )
-        tr = TracedSession(Session(env, _OneScreenshot()), env, provenance, tmp_path / 't.jsonl')
+        tr = _desktop_trace(WRITE_ENV, screenshots=1, path=tmp_path / 't.jsonl')
 
         with tr:
             tr.start()
@@ -493,6 +498,33 @@ class TestCapture:
         assert step.applied and step.observation is None
         assert (step.reward, step.step_verifier['details']) == (0.5, 'step 1')
         assert step.error == 'SandboxError: screenshot failed'
+
+    def test_failed_step_verifier_never_reuses_an_earlier_verdict(self, tmp_path: Path) -> None:
+        verifier = 'import os\nprint(0.5 if os.environ["STEP_NUMBER"] == "1" else "garbage")\n'
+        env = WRITE_ENV.model_copy(update={'step_verifier_code': verifier})
+        tr = _desktop_trace(env, screenshots=2, path=tmp_path / 't.jsonl')
+
+        with tr:
+            tr.start()
+            tr.step(Action(action_type='bash', content='echo one'))
+            # The step verifier fails, then the screenshot taken after it fails too.
+            with pytest.raises(SandboxError):
+                tr.step(Action(action_type='bash', content='echo two'))
+
+        first, second = load_trace(tr.path).steps
+        assert first.reward == 0.5
+        assert (second.reward, second.step_verifier) == (None, None)
+
+    def test_malformed_step_verifier_error_type_keeps_the_step(self, dg: DeepGym) -> None:
+        verifier = 'print(\'{"score": 0.5, "error_type": []}\')\n'
+        env = WRITE_ENV.model_copy(update={'step_verifier_code': verifier})
+
+        with dg.trace(env, AGENT) as tr:
+            tr.start()
+            tr.step(Action(action_type='bash', content='echo one'))
+
+        (step,) = load_trace(tr.path).steps
+        assert step.reward is None and step.step_verifier['error_type'] == []
 
     def test_closed_trace_refuses_everything(self, dg: DeepGym) -> None:
         tr = dg.trace(WRITE_ENV, AGENT)

@@ -162,9 +162,9 @@ def _turn(
             })),
             'metrics': None if reply is None else _metrics(reply),
             'llm_call_count': None if reply is None else 1,
-            'extra': None if step.reward is None else _compact({
+            'extra': _compact({
                 'reward': step.reward, 'step_verifier': step.step_verifier,
-            }),
+            }) or None,
         })
     )  # fmt: skip
     return turn

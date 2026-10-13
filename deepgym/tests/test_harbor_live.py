@@ -139,6 +139,32 @@ def test_exported_reward_parser_ignores_modules_in_the_work_directory(
     assert dg.run(env, env.reference_solution + decoy).score == 1.0
 
 
+def test_image_startup_variable_does_not_run_agent_code_as_root(
+    dg: DeepGym, tmp_path: Path
+) -> None:
+    if dg.backend not in ('apple', 'docker'):
+        pytest.skip('only the container CLIs build Dockerfiles')
+    task = tmp_path / 'bash-env'
+    shutil.copytree(HELLO, task)
+    (task / 'task.toml').write_text('[environment]\nworkdir = "/app"\n', encoding='utf-8')
+    (task / 'environment').mkdir()
+    # The image points root's bash at a startup file the agent will own once /app is theirs.
+    (task / 'environment' / 'Dockerfile').write_text(
+        'FROM python:3.12-slim\nENV BASH_ENV=/app/startup.sh\nWORKDIR /app\n', encoding='utf-8'
+    )
+    # Reward 1 only if the agent's startup file did NOT run as root (no marker root could write).
+    (task / 'tests' / 'test.sh').write_text(
+        '#!/bin/bash\n'
+        'if [ ! -e /root/pwned ] && [ "$(cat /app/hello.txt)" = hello ]; then r=1; else r=0; fi\n'
+        'echo $r > /logs/verifier/reward.txt\n',
+        encoding='utf-8',
+    )
+    env = HarborEnvironment.from_dir(task)
+    agent = "echo hello > /app/hello.txt\nprintf 'touch /root/pwned\\n' > /app/startup.sh\n"
+
+    assert dg.run(env, agent).score == 1.0
+
+
 def test_harness_ignores_programs_on_an_image_path_in_the_work_directory(
     dg: DeepGym, tmp_path: Path
 ) -> None:

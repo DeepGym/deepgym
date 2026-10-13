@@ -59,6 +59,34 @@ _LAUNCHERS = (
 # Printed last by both scripts below. Without it the desktop counts as not locked down.
 _LOCKED = 'deepgym-desktop-locked'
 
+# The Chromium the agent's session PATH would run must read the managed policy dir the
+# lockdown writes. Debian's /usr/bin/chromium is a wrapper script that runs
+# ../lib/chromium/chromium, so a file that isn't ELF is followed there; a build relocated
+# under /opt behind a link resolves through realpath. No Chromium on that PATH: nothing to do.
+_CHROMIUM_READS_POLICY = """if path=$(PATH={session_path}; command -v chromium); then
+  bin=$(realpath "$path")
+  if [ "$(head -c 4 "$bin")" != "$(printf '\\177ELF')" ]; then
+    bin="$(dirname "$bin")/../lib/chromium/chromium"
+  fi
+  if ! [ -f "$bin" ] || ! grep -qF /etc/chromium/policies "$bin"; then
+    echo "the Chromium at $path does not read /etc/chromium/policies"; exit 1
+  fi
+fi"""
+
+# Proves remote control is off by asking the running x11vnc, not by reading its argv. Only
+# the answer measured on a locked desktop means "off": the query went out over the display
+# and no x11vnc server took it (exit 1). An answer means it's on. Anything else (x11vnc
+# missing, no display, a timeout) means the probe proved nothing, so the desktop is refused.
+_X11VNC_REMOTE_OFF = """probe_rc=0
+probe=$(timeout 8 x11vnc -display {display} -Q ping 2>&1) || probe_rc=$?
+case "$probe" in *ans=*)
+  echo 'x11vnc still answers remote control, so -noremote did not take effect'; exit 1;;
+esac
+case "$probe_rc:$probe" in
+  "1:"*'sending remote command'*'could not connect to an x11vnc server'*) ;;
+  *) echo "the x11vnc remote-control probe proved nothing (exit $probe_rc): $probe"; exit 1;;
+esac"""
+
 # Runs as root before the desktop starts, so nothing the session loads predates it. Every
 # step must take (nothing is skipped quietly), and the end checks, as the agent, that
 # nothing it locked still runs or loads.
@@ -79,10 +107,7 @@ chown "$(stat -c %u:%g "$home")" "$home/.x11vncrc"
 chmod 600 "$home/.x11vncrc"
 mkdir -p /etc/chromium/policies/managed
 printf %s {policy} > /etc/chromium/policies/managed/deepgym.json
-if command -v chromium >/dev/null; then
-  grep -qF /etc/chromium/policies /usr/lib/chromium/chromium || {{
-    echo 'this Chromium does not read /etc/chromium/policies'; exit 1; }}
-fi
+{chromium_check}
 # Thunar's custom actions, "Open Terminal Here" included, all come from its uca plugin, and
 # every GLib "Open With" launch, a typed custom command included, runs through
 # gio-launch-desktop: find both wherever the image keeps them.
@@ -128,20 +153,21 @@ done
   echo "xfce4-session runs as uid '$owners', not as the agent ($agent)"; exit 1; }}
 [ -n "$vnc" ] || {{ echo 'x11vnc is not running'; exit 1; }}
 for pid in $vnc; do
-  for arg in $(tr '\\0' '\\n' < /proc/$pid/cmdline | tail -n +2 | sed 's/^--/-/'); do
+  args=$(tr '\\0' '\\n' < /proc/$pid/cmdline)
+  for arg in $(printf '%s\\n' "$args" | tail -n +2 | sed 's/^--/-/'); do
     case "$arg" in -*) case " {flags} " in *" $arg "*) ;; *)
       echo "x11vnc runs with $arg, which is not an allowed flag"; exit 1;; esac;; esac
   done
   home=$(tr '\\0' '\\n' < /proc/$pid/environ | sed -n 's/^HOME=//p')
   rc="$home/.x11vncrc"
-  [ "$(stat -c %u "$rc" 2>/dev/null)" = "$(stat -c %u /proc/$pid)" ] || {{
+  rc_owner=$(stat -c %u "$rc")
+  vnc_user=$(stat -c %u /proc/$pid)
+  [ "$rc_owner" = "$vnc_user" ] || {{
     echo "x11vnc cannot read $rc as the user it runs as"; exit 1; }}
   [ "$(cat "$rc")" = "$(printf %s {rc_value})" ] || {{
     echo "x11vnc reads no lockdown options from $home"; exit 1; }}
 done
-if timeout 8 x11vnc -display {display} -Q ping 2>/dev/null | grep -q 'ans='; then
-  echo 'x11vnc still answers remote control, so -noremote did not take effect'; exit 1
-fi
+{remote_off}
 echo {marker}
 """
 
@@ -196,6 +222,7 @@ class DaytonaDesktop:
             launchers=_LAUNCHERS,
             as_agent=as_agent,
             agent_check=shlex.quote(agent_check),
+            chromium_check=_CHROMIUM_READS_POLICY.format(session_path=_SESSION_PATH),
             marker=_LOCKED,
         )
         _confirm('lockdown', as_root(lockdown, 60))
@@ -204,8 +231,8 @@ class DaytonaDesktop:
         except Exception as exc:
             raise SandboxError(f'Failed to start desktop: {exc}') from exc
         check = _CHECK_STARTED.format(
-            home=shlex.quote(home), flags=_X11VNC_FLAGS, rc_value=rc, display=_DISPLAY,
-            marker=_LOCKED,
+            home=shlex.quote(home), flags=_X11VNC_FLAGS, rc_value=rc,
+            remote_off=_X11VNC_REMOTE_OFF.format(display=_DISPLAY), marker=_LOCKED,
         )  # fmt: skip
         _confirm('check', as_root(check, 60))
 

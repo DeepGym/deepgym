@@ -818,6 +818,7 @@ def test_daytona_desktop_runs_as_the_agent_and_is_locked_down(
     # x11vnc may run only with the flags Daytona starts it with, not "anything but a list".
     assert 'x11vncrc' in check and '-display -forever -shared -rfbport' in check
     assert '-norc' not in check
+    assert '2>/dev/null' not in check, 'a failed check must stop the desktop, not compare empty'
 
 
 @pytest.mark.parametrize(
@@ -835,3 +836,78 @@ def test_daytona_desktop_fails_closed_unless_the_lockdown_is_confirmed(
     events = client.boxes[0].events
     assert ('computer_use.start' in events) is started
     assert events[-1] == 'deleted'
+
+
+def _fake_tool(directory: Path, name: str, body: str) -> None:
+    tool = directory / name
+    tool.write_text(f'#!/bin/sh\n{body}\n')
+    tool.chmod(0o755)
+
+
+def _run_snippet(snippet: str, path: str = '') -> subprocess.CompletedProcess[str]:
+    """Run a lockdown shell snippet as the scripts do (sh -eu); it falls through on success."""
+    env = {'PATH': ':'.join(p for p in (path, '/usr/bin', '/bin') if p)}
+    return subprocess.run(
+        ['/bin/sh', '-c', f'set -eu\n{snippet}\necho ACCEPTED'],
+        capture_output=True, text=True, env=env, timeout=30,
+    )  # fmt: skip
+
+
+# What `x11vnc -Q ping` printed and exited with, measured live as root on a Daytona desktop.
+_SENT = 'echo \'>>> sending remote command: "qry=ping" via X11VNC_REMOTE X property.\' >&2\n'
+_X11VNC_PROBES = {
+    'remote_off': (
+        _SENT + "echo 'error: could not connect to an x11vnc server at :0  (rc=1)' >&2\nexit 1",
+        True,
+    ),
+    'remote_on': (_SENT + "echo 'ans=ping:c4f57cef:1'\nexit 0", False),
+    'no_display': ("echo '*** XOpenDisplay failed (:0)' >&2\nexit 1", False),
+    'timed_out': (_SENT + 'exit 124', False),
+    'not_installed': (None, False),
+}
+
+
+@pytest.mark.parametrize(('body', 'accepted'), _X11VNC_PROBES.values(), ids=list(_X11VNC_PROBES))
+def test_x11vnc_probe_counts_silence_as_off_only_once_it_reached_the_display(
+    tmp_path: Path, body: str | None, accepted: bool
+) -> None:
+    """Only "query sent, no x11vnc server answering" (exit 1) means remote control is off.
+    A probe that never ran (exit 127), never reached the display, or timed out fails closed."""
+    from deepgym.sandboxes.daytona.desktop import _X11VNC_REMOTE_OFF
+
+    _fake_tool(tmp_path, 'timeout', 'shift; exec "$@"')
+    if body is not None:
+        _fake_tool(tmp_path, 'x11vnc', body)
+    run = _run_snippet(_X11VNC_REMOTE_OFF.format(display=':0'), str(tmp_path))
+    assert ('ACCEPTED' in run.stdout) is accepted, run.stdout + run.stderr
+
+
+_ELF = b'\x7fELF\x02\x01\x01'
+
+
+@pytest.mark.parametrize(
+    ('layout', 'accepted'),
+    [('debian', True), ('relocated', True), ('other_policy_dir', False), ('absent', True)],
+)
+def test_chromium_policy_check_follows_the_binary_path_finds(
+    tmp_path: Path, layout: str, accepted: bool
+) -> None:
+    """The check reads the Chromium the session's PATH runs: Debian's wrapper script and its
+    ../lib binary, or a build relocated under /opt behind a link, not one fixed path."""
+    from deepgym.sandboxes.daytona.desktop import _CHROMIUM_READS_POLICY
+
+    bindir = tmp_path / 'bin'
+    bindir.mkdir()
+    if layout == 'debian':
+        (tmp_path / 'lib' / 'chromium').mkdir(parents=True)
+        (tmp_path / 'lib' / 'chromium' / 'chromium').write_bytes(_ELF + b'x/etc/chromium/policiesx')
+        _fake_tool(bindir, 'chromium', 'exec "$(dirname "$0")/../lib/chromium/chromium" "$@"')
+    elif layout in ('relocated', 'other_policy_dir'):
+        (tmp_path / 'opt' / 'chromium').mkdir(parents=True)
+        real = tmp_path / 'opt' / 'chromium' / 'chromium'
+        policy = b'/etc/chromium/policies' if layout == 'relocated' else b'/etc/opt/chrome/policies'
+        real.write_bytes(_ELF + b'x' + policy + b'x')
+        real.chmod(0o755)
+        (bindir / 'chromium').symlink_to(real)
+    run = _run_snippet(_CHROMIUM_READS_POLICY.format(session_path=bindir))
+    assert ('ACCEPTED' in run.stdout) is accepted, run.stdout + run.stderr

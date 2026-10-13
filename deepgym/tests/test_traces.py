@@ -531,6 +531,28 @@ class TestCapture:
         assert step.applied and (step.reward, step.step_verifier) == (None, None)
         assert isinstance(raised.value.__cause__, SandboxError)
 
+    def test_replay_gives_a_failed_step_no_reward(self, dg: DeepGym) -> None:
+        verifier = 'import os\nprint(0.5 if os.environ["STEP_NUMBER"] == "1" else "garbage")\n'
+        env = WRITE_ENV.model_copy(update={'step_verifier_code': verifier})
+
+        with dg.trace(env, AGENT) as tr:
+            tr.start()
+            tr.step(Action(action_type='bash', content='echo one'))
+            with pytest.raises(VerifierError):
+                tr.step(Action(action_type='bash', content='echo two'))
+
+        trajectory = load_trace(tr.path).to_trajectory()
+        assert (len(trajectory.steps), trajectory.step_rewards) == (2, [0.5])
+
+    def test_replay_without_a_step_verifier_counts_zero(self, dg: DeepGym) -> None:
+        env = WRITE_ENV.model_copy(update={'step_verifier_code': ''})
+
+        with dg.trace(env, AGENT) as tr:
+            tr.start()
+            tr.step(Action(action_type='bash', content='echo one'))
+
+        assert load_trace(tr.path).to_trajectory().step_rewards == [0.0]
+
     def test_malformed_step_verifier_error_type_keeps_the_step(self, dg: DeepGym) -> None:
         verifier = 'print(\'{"score": 0.5, "error_type": []}\')\n'
         env = WRITE_ENV.model_copy(update={'step_verifier_code': verifier})

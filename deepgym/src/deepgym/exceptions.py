@@ -20,6 +20,7 @@ _TRANSPORT_ERRORS = (
         'e2b.exceptions',
         ('SandboxUnreachableException', 'ServiceBusyException', 'RateLimitException'),
     ),
+    ('pyqwest', ('ReadError', 'WriteError', 'StreamError')),  # e2b's RPC transport
     (
         'modal.exception',
         (
@@ -34,6 +35,12 @@ _TRANSPORT_ERRORS = (
 """Exception classes, by module, that mean the network or the sandbox provider failed.
 
 A module that was never imported can't have raised one, so none is imported here.
+"""
+
+_SANDBOX_GONE_ERRORS = (('e2b.exceptions', ('SandboxNotRunningException',)),)
+"""Exception classes, by module, of a provider confirming the sandbox stopped.
+
+e2b raises one with the dropped connection that led it to check as its cause.
 """
 
 
@@ -95,21 +102,17 @@ def is_infrastructure_failure(exc: BaseException) -> bool:
     ``__cause__`` chain. Such a run got no verdict, and trainers keep it out of training.
 
     Anything else is the policy's doing and is scored: a command or verifier that ran out
-    of time (DeepGym's ``TimeoutError``, which ends the walk), a sandbox the provider reports
-    gone or stopped after the policy acted, a failed write, garbage output.
+    of time, a sandbox the provider reports gone or stopped after the policy acted, a
+    failed write, garbage output. DeepGym's ``TimeoutError`` and a provider confirming the
+    sandbox stopped end the walk, whatever their causes.
 
     ponytail: a provider 5xx caused by a policy that exhausted its sandbox still reads as
     infrastructure; the masked-rate warning in :mod:`deepgym.integrations.reward` shows it.
     """
-    transport = tuple(
-        error
-        for module, names in _TRANSPORT_ERRORS
-        if module in sys.modules
-        for name in names
-        if isinstance(error := getattr(sys.modules[module], name, None), type)
-    )
+    gone = _loaded(_SANDBOX_GONE_ERRORS)
+    transport = _loaded(_TRANSPORT_ERRORS)
     while exc is not None:
-        if isinstance(exc, TimeoutError):
+        if isinstance(exc, (TimeoutError, *gone)):
             return False
         if isinstance(exc, (ConnectionError, builtins.TimeoutError, *transport)):
             return True
@@ -118,6 +121,17 @@ def is_infrastructure_failure(exc: BaseException) -> bool:
             return True
         exc = exc.__cause__
     return False
+
+
+def _loaded(table: tuple[tuple[str, tuple[str, ...]], ...]) -> tuple[type, ...]:
+    """Return the classes *table* names from modules already imported."""
+    return tuple(
+        error
+        for module, names in table
+        if module in sys.modules
+        for name in names
+        if isinstance(error := getattr(sys.modules[module], name, None), type)
+    )
 
 
 def _status_code(exc: BaseException) -> int | None:

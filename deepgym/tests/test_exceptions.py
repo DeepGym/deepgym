@@ -122,6 +122,30 @@ def test_e2b_errors_are_told_apart() -> None:
     assert not is_infrastructure_failure(e2b.SandboxException('disk full'))
 
 
+def test_e2b_dropped_connections_turn_on_whether_the_sandbox_still_runs() -> None:
+    """e2b checks the sandbox after a dropped connection, and its answer decides.
+
+    Built with e2b's own handlers, wrapped as DeepGym's e2b sandbox wraps them.
+    """
+    pytest.importorskip('e2b')
+    from connectrpc.code import Code
+    from connectrpc.errors import ConnectError
+    from e2b.envd.api import handle_envd_api_transport_exception
+    from e2b.envd.rpc import handle_rpc_exception
+    from pyqwest import ReadError
+
+    command = _caused_by(ConnectError(Code.UNAVAILABLE, 'stream reset'), ReadError('reset'))
+    still_running = handle_rpc_exception(command, sandbox_running=True)
+    command_stopped = handle_rpc_exception(command, sandbox_running=False)
+    file_stopped = handle_envd_api_transport_exception(
+        httpx.ReadError('dropped', request=_REQUEST), sandbox_running=False
+    )
+
+    assert is_infrastructure_failure(still_running)
+    assert not is_infrastructure_failure(_caused_by(SandboxError('gone'), command_stopped))
+    assert not is_infrastructure_failure(_caused_by(SandboxError('gone'), file_stopped))
+
+
 def test_modal_errors_are_told_apart() -> None:
     """Modal's server errors and quotas are its own; a sandbox it reports dead isn't."""
     modal = pytest.importorskip('modal')

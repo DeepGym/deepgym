@@ -61,6 +61,23 @@ lm-evaluation-harness, `deepgym[all]` for everything.
 - Gymnasium-style `reset`/`step`/`state` API
 - Runs locally or in sandboxes from Daytona, Modal, E2B, Docker or Apple container
 
+## DeepGym and verl
+
+verl trains the model. DeepGym gives it tasks and scores the answers. Use them
+together: verl loads DeepGym's reward function with one config line (see [verl](#verl)).
+
+| | verl | DeepGym |
+|---|---|---|
+| What it is | RL training framework | RL environments and verifiable rewards |
+| Does the training | Yes: rollouts on vLLM/SGLang, updates on FSDP/Megatron, PPO, GRPO, DAPO and more | No, it plugs into verl, TRL, OpenRLHF or your own loop |
+| Tasks | You bring the dataset and write the reward function | 31 built-in environments, HumanEval/MBPP/BigCodeBench/EvalPlus importers, SWE-bench Pro, Terminal-Bench 2.0 |
+| Running model code | Your reward function, or a remote Sandbox Fusion service | Every run in a sandbox: Daytona, Modal, E2B, Docker, Apple container, or locally under sandbox-exec/bwrap |
+| Reward hacking | Up to your reward function | The solution runs apart from the verifier with no network, so it can't read the tests or forge the score; `deepgym qa` checks that empty, stub and hack solutions fail before you train |
+| Multi-turn agents | Agent loop and tool interface | One live sandbox per episode (shell or desktop), with a verl agent loop and session tool |
+| Computer use | Not built in | Desktop tasks, scored on the state the agent leaves behind |
+| Failed runs | A reward function can't drop a sample | A verl agent loop masks failed runs out of the loss |
+| Managing it | Training logs (wandb, TensorBoard) | `deepgym console`: environments, runs, episode replay, sandboxes, QA reports |
+
 ## For teams and enterprises
 
 If your team needs more than the open-source package, we can help with:

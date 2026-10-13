@@ -31,14 +31,14 @@ Mapping, one ATIF document per trace:
 from __future__ import annotations
 
 import base64
-import json
 from collections.abc import Callable, Sequence
 from pathlib import Path
 
 from pydantic import JsonValue
 
+from deepgym.exceptions import DeepGymError
 from deepgym.models import Observation
-from deepgym.traces.schema import Trace, TraceMessage, TraceStep
+from deepgym.traces.schema import Trace, TraceMessage, TraceStep, json_text
 
 ATIF_VERSION = 'ATIF-v1.7'
 
@@ -105,12 +105,18 @@ def write_atif(traces: Sequence[Trace], out: Path) -> int:
 
     Returns:
         The number of documents written.
+
+    Raises:
+        DeepGymError: If *out* already has files: documents left from an earlier export
+            would be read as part of this one.
     """
     out.mkdir(parents=True, exist_ok=True)
+    if any(out.iterdir()):
+        raise DeepGymError(f'{out} is not empty; export ATIF into a new directory')
     for trace in traces:
         document, images = to_atif(trace)
         (out / f'{trace.trace_id}.json').write_text(
-            json.dumps(document, indent=2, ensure_ascii=False) + '\n', encoding='utf-8'
+            json_text(document, indent=2) + '\n', encoding='utf-8'
         )
         for relative, png in images.items():
             target = out / relative

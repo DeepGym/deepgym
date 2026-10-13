@@ -69,6 +69,10 @@ def _reply(content: str) -> list[TraceMessage]:
     return [TraceMessage(role='assistant', content=content)]
 
 
+def _reject_constant(name: str) -> None:
+    raise AssertionError(f'{name} is not valid JSON')
+
+
 class TestSchema:
     """The trace schema round-trips and rejects inconsistent data."""
 
@@ -98,6 +102,10 @@ class TestSchema:
     def test_token_ids_and_logprobs_must_align(self) -> None:
         with pytest.raises(ValidationError, match='same length'):
             TraceMessage(role='assistant', content='x', token_ids=(1, 2), logprobs=(-0.1,))
+
+    def test_logprobs_must_be_finite(self) -> None:
+        with pytest.raises(ValidationError):
+            TraceMessage(role='assistant', content='x', logprobs=(float('nan'),))
 
     @pytest.mark.parametrize('trace_id', ['../escape', 'a/b', '', 'x' * 65])
     def test_trace_id_is_path_safe(self, trace_id: str) -> None:
@@ -273,6 +281,44 @@ class TestCapture:
 
         trace = load_trace(tr.path)
         assert trace.result is None and trace.error.startswith('VerifierError')
+
+    def test_no_final_verifier_is_no_verdict(self, dg: DeepGym) -> None:
+        env = WRITE_ENV.model_copy(update={'final_verifier_code': ''})
+
+        with dg.trace(env, AGENT) as tr:
+            tr.start()
+            tr.step(Action(action_type='done'))
+            tr.score()
+
+        trace = load_trace(tr.path)
+        assert trace.status == 'complete' and not trace.has_verdict
+        assert trace.result.error_type == 'no_verifier'
+
+    def test_no_actions_after_scoring(self, dg: DeepGym) -> None:
+        with dg.trace(WRITE_ENV, AGENT) as tr:
+            tr.start()
+            tr.step(Action(action_type='bash', content='echo hello > out.txt'))
+            tr.score()
+            with pytest.raises(DeepGymError, match='already scored'):
+                tr.step(Action(action_type='bash', content='rm out.txt'))
+
+        trace = load_trace(tr.path)
+        assert len(trace.steps) == 1 and trace.has_verdict
+
+    def test_nan_verifier_output_stays_strict_json(self, dg: DeepGym, tmp_path: Path) -> None:
+        env = WRITE_ENV.model_copy(
+            update={'step_verifier_code': 'print(\'{"score": 0.5, "metrics": {"x": NaN}}\')'}
+        )
+
+        with dg.trace(env, AGENT) as tr:
+            tr.start()
+            tr.step(Action(action_type='bash', content='echo hello > out.txt'))
+        export_traces([load_trace(tr.path)], 'jsonl', tmp_path / 'out.jsonl')
+
+        for path in (tr.path, tmp_path / 'out.jsonl'):
+            for line in path.read_text().splitlines():
+                json.loads(line, parse_constant=_reject_constant)
+        assert load_trace(tr.path).steps[0].step_verifier == {'score': 0.5, 'metrics': {'x': None}}
 
     def test_killed_process_leaves_an_incomplete_trace(self, traces_dir: Path) -> None:
         code = (

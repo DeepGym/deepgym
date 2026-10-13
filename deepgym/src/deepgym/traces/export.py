@@ -19,7 +19,6 @@ drops those traces instead. ATIF writes one document per trace (see :mod:`.atif`
 
 from __future__ import annotations
 
-import json
 from collections import Counter
 from collections.abc import Sequence
 from pathlib import Path
@@ -29,7 +28,7 @@ from pydantic import BaseModel, ConfigDict, JsonValue
 
 from deepgym.exceptions import DeepGymError
 from deepgym.traces.atif import write_atif
-from deepgym.traces.schema import Trace
+from deepgym.traces.schema import Trace, json_text
 
 if TYPE_CHECKING:
     import pyarrow as pa
@@ -146,7 +145,7 @@ def export_traces(
 def _write_jsonl(records: Sequence[Row], out: Path) -> None:
     out.parent.mkdir(parents=True, exist_ok=True)
     with out.open('w', encoding='utf-8') as file:
-        file.writelines(json.dumps(record, ensure_ascii=False) + '\n' for record in records)
+        file.writelines(json_text(record) + '\n' for record in records)
 
 
 def _write_parquet(records: Sequence[Row], out: Path, rows: RowShape) -> None:

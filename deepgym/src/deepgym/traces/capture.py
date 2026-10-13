@@ -27,6 +27,7 @@ from deepgym.traces.schema import (
     Trace,
     TraceMessage,
     TraceStep,
+    json_text,
 )
 
 _T = TypeVar('_T')
@@ -105,7 +106,7 @@ class TracedSession:
         """
         self._open()
         self._initial = self._recorded(self._session.start)
-        self._write({'event': 'reset', 'observation': self._initial.model_dump(mode='json')})
+        self._write({'event': 'reset', 'observation': self._initial})
         return self._initial
 
     def step(self, action: Action, messages: Sequence[TraceMessage] = ()) -> StepResult:
@@ -121,7 +122,13 @@ class TracedSession:
 
         Returns:
             The session's step result.
+
+        Raises:
+            DeepGymError: If the episode was already scored: its verdict would no longer
+                match the state the trace ends in.
         """
+        if self._result is not None:
+            raise DeepGymError('The episode was already scored; open a new trace to act again')
         trajectory = self._session.trajectory
         applied_before = len(trajectory.steps)
         record = {
@@ -163,7 +170,7 @@ class TracedSession:
             VerifierError: As :meth:`Session.score`; the error is recorded first.
         """
         self._result = self._recorded(self._session.score)
-        self._write({'event': 'result', 'result': self._result.model_dump(mode='json')})
+        self._write({'event': 'result', 'result': self._result})
         return self._result
 
     def close(self) -> None:
@@ -199,7 +206,7 @@ class TracedSession:
 
     def _add_step(self, step: TraceStep) -> None:
         self._steps.append(step)
-        self._write({'event': 'step', 'step': step.model_dump(mode='json')})
+        self._write({'event': 'step', 'step': step})
 
     def _open(self) -> TextIO:
         """Return the trace file, creating it with its start event on first use.
@@ -214,7 +221,7 @@ class TracedSession:
                 'schema_version': TRACE_SCHEMA_VERSION,
                 'trace_id': self.trace_id,
                 'task': self._env.task,
-                'provenance': self._provenance.model_dump(mode='json'),
+                'provenance': self._provenance,
             })  # fmt: skip
         return self._file
 
@@ -222,7 +229,7 @@ class TracedSession:
         """Append *event* to the trace file and flush it."""
         file = self._open()
         # ponytail: flush, not fsync: survives a crash or kill, not a power cut.
-        file.write(json.dumps(event) + '\n')
+        file.write(json_text(event) + '\n')
         file.flush()
 
 

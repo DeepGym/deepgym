@@ -13,6 +13,7 @@ import pytest
 
 from deepgym.cli import main
 from deepgym.console.episode_store import record_episode
+from deepgym.exceptions import DeepGymError
 from deepgym.models import Trajectory
 from deepgym.traces import Trace, export_traces, to_atif
 from tests.trace_samples import PNG, crashed_trace, graded_trace, unjudged_trace
@@ -121,6 +122,12 @@ class TestExporters:
     def test_atif_needs_whole_traces(self, tmp_path: Path) -> None:
         with pytest.raises(ValueError, match='whole traces'):
             export_traces(_samples(), 'atif', tmp_path, rows='rl')
+
+    def test_atif_refuses_a_populated_directory(self, tmp_path: Path) -> None:
+        export_traces(_samples(), 'atif', tmp_path / 'atif')
+
+        with pytest.raises(DeepGymError, match='not empty'):
+            export_traces(_samples(), 'atif', tmp_path / 'atif', only_valid=True)
 
 
 class TestCli:

@@ -18,10 +18,12 @@ from pydantic import (
     BaseModel,
     ConfigDict,
     Field,
+    FiniteFloat,
     JsonValue,
     computed_field,
     model_validator,
 )
+from pydantic_core import to_json
 
 from deepgym.models import Action, MultiTurnEnvironment, Observation, RunResult, Trajectory
 
@@ -33,6 +35,14 @@ SamplingValue = str | int | float | bool | None
 def sha256_text(text: str) -> str:
     """Return the hex SHA-256 of *text* encoded as UTF-8."""
     return hashlib.sha256(text.encode('utf-8')).hexdigest()
+
+
+def json_text(value: object, *, indent: int | None = None) -> str:
+    """Serialize *value*, models included, as strict JSON: NaN and infinities become null.
+
+    Verifier output can carry NaN, which ``json.dumps`` writes as the invalid token ``NaN``.
+    """
+    return to_json(value, indent=indent, inf_nan_mode='null').decode()
 
 
 def environment_sha256(env: MultiTurnEnvironment) -> str:
@@ -156,7 +166,7 @@ class TraceMessage(BaseModel):
     role: Literal['system', 'user', 'assistant', 'tool']
     content: str
     token_ids: tuple[int, ...] | None = None
-    logprobs: tuple[float, ...] | None = None
+    logprobs: tuple[FiniteFloat, ...] | None = None
 
     @model_validator(mode='after')
     def check_token_alignment(self) -> TraceMessage:

@@ -375,8 +375,10 @@ so a slow verification doesn't hold up the others.
 OpenRLHF can't skip a sample: it trains on whatever `rewards` holds, and a failed
 request would stop its training step, so the endpoint never fails one. A failure the
 model caused is judged and scores 0. A run the sandbox provider or the network failed is
-run again after a short pause. If it still has no verdict, or a query doesn't contain its
-prompt, the sample gets the router's `infra_failure_score`:
+run again after a short pause. If it still fails that way, or a query doesn't contain its
+prompt, the sample gets the router's `infra_failure_score` (any other run without a
+verdict, such as a verifier failure or a timeout, may follow from the model's output, so
+it scores 0 either way):
 
 - `'zero'` (the default): 0.0, logged as a warning with its error type. OpenRLHF trains
   on it as a failed answer; that is the limit of its API.

@@ -31,7 +31,7 @@ prompt's whole group when the mean of its scores falls outside
 So the endpoint never fails a request over a run. A judged run gets its score, and a
 failure the model caused is judged and scores 0 (``RunResult.has_verdict`` says which).
 A run the sandbox provider or the network failed is run again after a short pause. One
-that still has no verdict, or a query that doesn't contain its prompt, is rewarded the
+that still fails that way, or a query that doesn't contain its prompt, is rewarded the
 router's ``infra_failure_score``:
 
 - ``'zero'`` (the default): 0.0, logged as a warning with its error type and counted
@@ -40,6 +40,9 @@ router's ``infra_failure_score``:
 - ``'nan'``: NaN, so dynamic filtering drops the sample's group, and is counted the same
   way. Use it only with ``--algo.dynamic_filtering_enable``: without it OpenRLHF trains
   on the NaN and the run breaks.
+
+Any other run without a verdict (the verifier failed, or the run timed out) may follow
+from the model's output, so it scores 0 in either mode, with a warning.
 
 Note: This router is NOT automatically mounted by ``deepgym serve``.
 Create a custom FastAPI app to use it.
@@ -222,17 +225,21 @@ def create_openrlhf_router(
         error_types: list[str | None] = []
         for i in range(len(responses)):
             result = results.get(i)
-            judged = result is not None and result.has_verdict
-            masked.record(masked=not judged)
-            if judged:
+            if result is not None and result.has_verdict:
+                masked.record(masked=False)
                 rewards.append(result.score)
                 error_types.append(result.error_type)
                 continue
             error_type = PROMPT_MISMATCH if result is None else result.error_type or 'no_verdict'
+            # Only a lasting provider or network failure, or a lost prompt, is surely not the
+            # model's doing; any other failure may be its output breaking the verifier.
+            infra = result is None or error_type in _RETRYABLE
+            masked.record(masked=infra)
+            reward = fallback if infra else 0.0
             logger.warning(
-                'OpenRLHF: a sample got no verdict (%s); rewarded %s', error_type, fallback
+                'OpenRLHF: a sample got no verdict (%s); rewarded %s', error_type, reward
             )
-            rewards.append(fallback)
+            rewards.append(reward)
             error_types.append(error_type)
         body = OpenRLHFRewardResponse(rewards=rewards, error_types=error_types)
         # FastAPI's own rendering writes a NaN as null, or refuses it, by version.

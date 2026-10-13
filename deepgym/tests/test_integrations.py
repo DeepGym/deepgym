@@ -546,6 +546,14 @@ class TestOpenRLHFIntegration:
             'error_types': [None, 'runtime_error', 'prompt_mismatch'],
         }
 
+    def test_only_provider_failures_get_nan(self, local_dg: DeepGym) -> None:
+        """NaN drops the sample's group; a verifier the model's output broke must score 0."""
+        payload = {'prompts': ['p'], 'outputs': ['boom']}
+
+        data = _post(MIXED, local_dg, payload, infra_failure_score='nan')
+
+        assert data == {'rewards': [0.0], 'error_types': ['runtime_error']}
+
     def test_a_provider_failure_is_run_again(self, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.setattr(openrlhf, '_RETRY_DELAYS_S', (0.0, 0.0))
         dg = _FlakyDeepGym(failing_calls=1)

@@ -10,6 +10,7 @@ reached the disk; a trace that was never scored is incomplete.
 from __future__ import annotations
 
 import json
+import logging
 import os
 import threading
 import time
@@ -19,7 +20,7 @@ from pathlib import Path
 from typing import TextIO, TypeVar
 from uuid import uuid4
 
-from deepgym.exceptions import DeepGymError, VerifierError
+from deepgym.exceptions import DeepGymError, SandboxError, VerifierError
 from deepgym.models import Action, MultiTurnEnvironment, Observation, RunResult, is_verdict
 from deepgym.session import Session, StepResult
 from deepgym.traces.schema import (
@@ -32,6 +33,8 @@ from deepgym.traces.schema import (
 )
 
 _T = TypeVar('_T')
+
+logger = logging.getLogger(__name__)
 
 UNFINISHED = 'trace ended before the episode was closed (process crashed or was killed?)'
 
@@ -218,9 +221,18 @@ class TracedSession:
     def __exit__(
         self, exc_type: type[BaseException] | None, exc: BaseException | None, *_: object
     ) -> None:
+        """Close the trace and session; a failed sandbox delete is logged, never raised over
+        the body's outcome (an explicit close() raises it)."""
         if exc is not None and self._error is None:
             self._error = _describe(exc)
-        self.close()
+        try:
+            self.close()
+        except SandboxError:
+            logger.warning(
+                'Could not delete sandbox %s; it may still exist',
+                self._session.sandbox_id,
+                exc_info=True,
+            )
 
     def _step_score(self, reward: float) -> dict[str, object]:
         """Return the step verifier's output, with *reward* only if that output is a verdict.

@@ -12,7 +12,7 @@ from pydantic import ValidationError
 from deepgym import AsyncDeepGym, ComputerUseEnvironment, DeepGym
 from deepgym.exceptions import DeepGymError, SandboxError, VerifierError
 from deepgym.models import Action, MultiTurnEnvironment, Observation, Trajectory
-from deepgym.session import _signals_done
+from deepgym.session import Session, _signals_done, run_episode
 
 PASS_VERIFIER = (
     'import json\n'
@@ -430,3 +430,47 @@ class TestSessionGuards:
     def test_eval_rejects_agent_suites(self, dg: DeepGym) -> None:
         with pytest.raises(DeepGymError, match='needs an agent'):
             dg.eval('computer-use', {})
+
+
+def _fail_delete(monkeypatch: pytest.MonkeyPatch, session: Session) -> None:
+    """Make *session*'s backend close the way a provider that reports a failed delete does."""
+    real_close = session._backend.close
+
+    def close() -> None:
+        real_close()
+        raise SandboxError(f'Could not delete sandbox {session.sandbox_id}')
+
+    monkeypatch.setattr(session._backend, 'close', close)
+
+
+class TestCloseOnExit:
+    """Leaving a session's with-block never trades its outcome for a failed sandbox delete."""
+
+    def test_run_episode_keeps_its_result_when_the_delete_fails(
+        self, dg: DeepGym, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        session = dg.session(MultiTurnEnvironment(task='t', final_verifier_code=PASS_VERIFIER))
+        _fail_delete(monkeypatch, session)
+
+        trajectory, result = run_episode(session, _scripted(Action(action_type='done')))
+
+        assert result.passed and len(trajectory.steps) == 1
+        assert f'Could not delete sandbox {session.sandbox_id}' in caplog.text
+
+    def test_a_body_error_still_propagates_when_the_delete_fails(
+        self, dg: DeepGym, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        session = dg.session(MultiTurnEnvironment(task='t'))
+        _fail_delete(monkeypatch, session)
+
+        with pytest.raises(RuntimeError, match='agent crashed'), session:
+            raise RuntimeError('agent crashed')
+
+    def test_an_explicit_close_still_raises(
+        self, dg: DeepGym, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        session = dg.session(MultiTurnEnvironment(task='t'))
+        _fail_delete(monkeypatch, session)
+
+        with pytest.raises(SandboxError, match='Could not delete'):
+            session.close()

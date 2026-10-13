@@ -110,6 +110,18 @@ def test_a_corrupted_archive_is_a_sandbox_error() -> None:
     assert box.deleted
 
 
+def test_a_failed_delete_costs_neither_the_run_nor_the_grade() -> None:
+    agent_box, grader_box = _box(_ENCODED), _box(_PASS)
+    agent_box.delete_result = grader_box.delete_result = False
+
+    run = run_agent(agent_box, HarborTask.from_dir(HELLO), 'echo hello > /app/hello.txt')
+    result = grade(grader_box, HarborTask.from_dir(HELLO), _WORKSPACE, '/app')
+
+    assert run.workspace == _WORKSPACE
+    assert result.verifier_result.score == 1.0
+    assert agent_box.deleted and grader_box.deleted
+
+
 def test_agent_sandbox_is_deleted_when_archiving_fails() -> None:
     box = _box()
     real_exec = box.exec

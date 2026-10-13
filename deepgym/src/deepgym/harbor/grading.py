@@ -87,7 +87,7 @@ def grade(sandbox: Sandbox, task: HarborTask, workspace: bytes, workdir: str) ->
             exit_code=tests.exit_code,
         )
     finally:
-        backend.close()
+        sandbox.delete()  # Never raises; a failed delete is logged, not traded for the grade.
 
 
 def _test_env(backend: SandboxBackend, task: HarborTask, image: dict[str, str]) -> dict[str, str]:

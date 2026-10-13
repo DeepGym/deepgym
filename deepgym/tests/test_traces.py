@@ -312,6 +312,33 @@ class TestCapture:
         assert trace.error == 'RuntimeError: policy crashed'
         assert len(trace.steps) == 1 and trace.finished_at is not None
 
+    def test_a_failed_delete_on_exit_keeps_the_result_and_any_body_error(
+        self, dg: DeepGym, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        def failing_delete(tr: object) -> None:
+            backend = tr._session._backend
+            real_close = backend.close
+
+            def close() -> None:
+                real_close()
+                raise SandboxError('Could not delete sandbox local-session')
+
+            monkeypatch.setattr(backend, 'close', close)
+
+        with dg.trace(WRITE_ENV, AGENT) as tr:
+            failing_delete(tr)
+            tr.start()
+            tr.step(Action(action_type='bash', content='echo hello > out.txt'))
+            tr.step(Action(action_type='done'))
+            result = tr.score()
+        with pytest.raises(RuntimeError, match='policy crashed'), dg.trace(WRITE_ENV, AGENT) as tr:
+            failing_delete(tr)
+            tr.start()
+            raise RuntimeError('policy crashed')
+
+        assert result.passed
+        assert 'Could not delete sandbox local-session' in caplog.text
+
     def test_rejected_action_is_recorded(self, dg: DeepGym) -> None:
         env = WRITE_ENV.model_copy(update={'allowed_actions': frozenset({'bash', 'done'})})
 

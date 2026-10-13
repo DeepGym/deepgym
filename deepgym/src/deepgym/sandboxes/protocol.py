@@ -25,6 +25,9 @@ from deepgym.exceptions import TimeoutError
 TRUSTED_PATH = '/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin'
 """Root-owned system folders only; no agent work directory may hold or sit in them."""
 
+TIMEOUT_EXIT_CODES = frozenset({124, 137})
+"""Exit codes of coreutils ``timeout``: 124 after SIGTERM, 137 after the follow-up SIGKILL."""
+
 
 class ExecResult(NamedTuple):
     """Exit code and combined stdout/stderr of a shell command."""
@@ -62,6 +65,11 @@ class Sandbox(Protocol):
         """Write *content* to the absolute *path* as root, creating parent directories."""
         ...
 
-    def delete(self) -> None:
-        """Stop and remove the sandbox; never raises."""
+    def delete(self) -> bool:
+        """Stop and remove the sandbox; never raises.
+
+        Returns:
+            False if the provider reported a failure, so the sandbox may still exist; True
+            once it is gone, including when it was gone already.
+        """
         ...

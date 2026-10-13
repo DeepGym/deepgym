@@ -7,6 +7,8 @@ The default template's user is ``user``; every call here passes ``user='root'``.
 from __future__ import annotations
 
 import logging
+import shlex
+import time
 from collections.abc import Mapping
 
 from e2b import (
@@ -18,12 +20,14 @@ from e2b import (
 from e2b import Sandbox as E2BClient
 
 from deepgym.exceptions import SandboxError
-from deepgym.sandboxes.protocol import ExecResult, SandboxTimeoutError
+from deepgym.sandboxes.protocol import TIMEOUT_EXIT_CODES, ExecResult, SandboxTimeoutError
 
 logger = logging.getLogger(__name__)
 
 # E2B deletes a sandbox this long after creation even if delete() never runs.
 LIFETIME_S = 3600
+# How much longer than the command's own deadline the SDK waits for it to end.
+_WAIT_GRACE_S = 15
 
 
 class E2BSandbox:
@@ -47,34 +51,49 @@ class E2BSandbox:
     ) -> ExecResult:
         """Run *command* as root; output is stdout followed by stderr.
 
+        E2B's own timeout only stops waiting and leaves the command running, so the
+        deadline is enforced in the sandbox by coreutils ``timeout``, which kills the
+        command's process group before this returns.
+
         Raises:
             SandboxTimeoutError: If the command outruns *timeout* seconds.
         """
+        if timeout:
+            command = f'/usr/bin/timeout --kill-after=2 {timeout} /bin/sh -c {shlex.quote(command)}'
+        start = time.monotonic()
         try:
             result = self._sandbox.commands.run(
                 command,
                 user='root',
                 cwd=cwd,
                 envs=dict(env) if env else None,
-                timeout=timeout or LIFETIME_S,
+                timeout=timeout + _WAIT_GRACE_S if timeout else LIFETIME_S,
             )
         except CommandExitException as exc:
             # E2B raises on any non-zero exit; that's an ordinary result here.
-            return ExecResult(exc.exit_code, exc.stdout + exc.stderr)
+            result = exc
         except (SandboxNotRunningException, SandboxUnreachableException) as exc:
             # Both subclass TimeoutException, but mean the sandbox is gone.
             raise SandboxError(f'E2B sandbox {self.id} is not reachable: {exc}') from exc
         except TimeoutException as exc:
             raise SandboxTimeoutError(f'command exceeded {timeout}s') from exc
+        if timeout and result.exit_code in TIMEOUT_EXIT_CODES:
+            if time.monotonic() - start >= timeout:
+                raise SandboxTimeoutError(f'command exceeded {timeout}s')
         return ExecResult(result.exit_code, result.stdout + result.stderr)
 
     def upload(self, content: bytes, path: str) -> None:
         """Write *content* to *path* as root (E2B creates parent directories)."""
         self._sandbox.files.write(path, content, user='root')
 
-    def delete(self) -> None:
-        """Kill the sandbox; errors are logged (it may already be gone)."""
+    def delete(self) -> bool:
+        """Kill the sandbox; errors are logged. Return False if E2B reported a failure.
+
+        E2B's kill answers False, without raising, for a sandbox that is already gone.
+        """
         try:
             self._sandbox.kill()
         except Exception:
             logger.warning('Failed to delete e2b sandbox %s', self.id)
+            return False
+        return True

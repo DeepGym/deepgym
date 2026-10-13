@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import contextlib
 import hashlib
+import logging
 import os
 import shutil
 import subprocess
@@ -21,15 +22,20 @@ from uuid import uuid4
 from pydantic import BaseModel, ConfigDict
 
 from deepgym.exceptions import SandboxError
-from deepgym.sandboxes.protocol import TRUSTED_PATH, ExecResult, SandboxTimeoutError
+from deepgym.sandboxes.protocol import (
+    TIMEOUT_EXIT_CODES,
+    TRUSTED_PATH,
+    ExecResult,
+    SandboxTimeoutError,
+)
+
+logger = logging.getLogger(__name__)
 
 DEFAULT_IMAGE = os.environ.get('DEEPGYM_CONTAINER_IMAGE', 'python:3.12-slim')
 # Caps per sandbox, so hostile code can't starve the machine running the containers.
 _LIMITS = ('--cpus', '2', '--memory', '2g')
 _START_TIMEOUT_S = 300
 _BUILD_TIMEOUT_S = 1800
-# Exit codes from coreutils `timeout`: 124 after SIGTERM, 137 after the follow-up SIGKILL.
-_TIMEOUT_EXIT_CODES = frozenset({124, 137})
 _NAME_PREFIX = 'deepgym-'
 
 
@@ -140,7 +146,7 @@ class CliContainer:
             done = self._cli(*argv, timeout=(timeout or 3600) + 15)
         except subprocess.TimeoutExpired as exc:
             raise SandboxTimeoutError(f'command exceeded {timeout}s') from exc
-        if timeout and done.returncode in _TIMEOUT_EXIT_CODES:
+        if timeout and done.returncode in TIMEOUT_EXIT_CODES:
             if time.monotonic() - start >= timeout:
                 raise SandboxTimeoutError(f'command exceeded {timeout}s')
         output = done.stdout.decode('utf-8', 'replace') + done.stderr.decode('utf-8', 'replace')
@@ -163,10 +169,21 @@ class CliContainer:
         if done.returncode != 0:
             raise SandboxError(f'Failed to upload {path}: {done.stderr.decode()[-500:]}')
 
-    def delete(self) -> None:
-        """Stop and remove the container; errors are ignored (it may already be gone)."""
-        with contextlib.suppress(SandboxError):
+    def delete(self) -> bool:
+        """Stop and remove the container; never raises, and a failure is logged.
+
+        Returns:
+            False if removing it failed and it still runs, or the CLI can't list containers.
+        """
+        try:
             self.remove(self.id)
+        except SandboxError as exc:
+            with contextlib.suppress(SandboxError):
+                if all(box.id != self.id for box in self.running()):
+                    return True  # Gone already: --rm, or killed from the console.
+            logger.warning('Failed to remove container %s: %s', self.id, exc)
+            return False
+        return True
 
     @classmethod
     def remove(cls, name: str) -> None:

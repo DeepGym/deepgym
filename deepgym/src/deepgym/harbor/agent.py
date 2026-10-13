@@ -58,7 +58,7 @@ def run_agent(sandbox: Sandbox, task: HarborTask, script: str) -> AgentRun:
             timed_out = True
         return AgentRun(backend.archive_workdir(), backend.workdir, timed_out)
     finally:
-        backend.close()
+        sandbox.delete()  # Never raises; a failed delete is logged, not traded for the run.
 
 
 def _image_workdir(sandbox: Sandbox, name: str) -> str:

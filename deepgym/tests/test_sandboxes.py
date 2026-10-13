@@ -7,11 +7,13 @@ import asyncio
 import base64
 import contextlib
 import importlib
+import json
 import os
 import re
 import shlex
 import subprocess
 import sys
+import time
 import types
 from collections.abc import Mapping
 from pathlib import Path
@@ -26,6 +28,7 @@ from deepgym.sandbox import build_run_result, run_judge_in_sandbox
 from deepgym.sandboxes import ExecResult, SandboxTimeoutError, open_sandbox
 from deepgym.sandboxes.apple import AppleContainer
 from deepgym.sandboxes.cli import DEFAULT_IMAGE
+from deepgym.sandboxes.daytona import cleanup_sandbox
 from deepgym.sandboxes.docker import DockerContainer
 from deepgym.session import SandboxBackend
 
@@ -40,6 +43,7 @@ class FakeSandbox:
         self.commands: list[str] = []
         self.uploads: list[str] = []
         self.deleted = False
+        self.delete_result: bool | None = None
 
     def exec(
         self,
@@ -58,8 +62,9 @@ class FakeSandbox:
     def upload(self, content: bytes, path: str) -> None:
         self.uploads.append(path)
 
-    def delete(self) -> None:
+    def delete(self) -> bool | None:
         self.deleted = True
+        return self.delete_result
 
 
 class FakeDaytona:
@@ -180,6 +185,27 @@ def test_cli_start_timeout_removes_the_container(monkeypatch: pytest.MonkeyPatch
     assert calls[-1][:3] == ['docker', 'rm', '--force']
 
 
+def test_cli_delete_fails_only_while_the_container_still_runs(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    listing = ''
+
+    def fake_run(argv: list[str], **kwargs: object) -> subprocess.CompletedProcess:
+        if argv[1] == 'rm':
+            return subprocess.CompletedProcess(argv, 1, b'', b'daemon busy')
+        if argv[1] == 'ps':
+            return subprocess.CompletedProcess(argv, 0, listing.encode(), b'')
+        return subprocess.CompletedProcess(argv, 0, b'', b'')
+
+    monkeypatch.setattr(subprocess, 'run', fake_run)
+    box = DockerContainer(image='img')
+
+    listing = json.dumps({'Names': box.id, 'Image': 'img', 'State': 'running', 'CreatedAt': ''})
+    assert box.delete() is False
+    listing = ''  # gone already (--rm, or killed from the console): nothing left to delete
+    assert box.delete() is True
+
+
 def test_unknown_provider_is_rejected() -> None:
     with pytest.raises(DeepGymError, match='Unknown sandbox provider'):
         open_sandbox('nope')  # type: ignore[arg-type]
@@ -239,12 +265,18 @@ def test_modal_blocks_network_and_maps_results(monkeypatch: pytest.MonkeyPatch) 
     assert created['image'] == 'image'
     assert box.exec('false') == ExecResult(3, 'outerr')
     box.upload(b'x', '/a/b/c.txt')
-    box.delete()
+    assert box.delete() is True
     assert created['execs'][-1][:2] == ('/bin/sh', '-c')
     assert 'mkdir -p /a/b' in created['execs'][-1][2]
     assert created['w'] == '/a/b/c.txt' and created['terminated']
     module.ModalSandbox('python:3.11-slim')
     assert created['image'] == 'reg:python:3.11-slim'
+
+    def refuse() -> None:
+        raise RuntimeError('Modal is unavailable')
+
+    box._sandbox.terminate = refuse
+    assert box.delete() is False
 
 
 def test_e2b_runs_as_root_offline_and_maps_errors(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -261,12 +293,12 @@ def test_e2b_runs_as_root_offline_and_maps_errors(monkeypatch: pytest.MonkeyPatc
 
     class Commands:
         def run(self, cmd: str, **kwargs: object) -> object:
-            seen.update(kwargs)
-            if cmd == 'fail':
+            seen.update(kwargs, cmd=cmd)
+            if cmd.endswith('fail'):
                 raise ExitError()
-            if cmd == 'slow':
+            if cmd.endswith('slow'):
                 raise SlowError()
-            if cmd == 'gone':
+            if cmd.endswith('gone'):
                 raise GoneError()
             return types.SimpleNamespace(exit_code=0, stdout='ok', stderr='')
 
@@ -278,6 +310,11 @@ def test_e2b_runs_as_root_offline_and_maps_errors(monkeypatch: pytest.MonkeyPatc
         def create(**kwargs: object) -> 'Client':
             seen['create'] = kwargs
             return Client()
+
+        def kill(self) -> bool:
+            if seen.get('kill_fails'):
+                raise ConnectionError('E2B API unreachable')
+            return False  # E2B's answer for a sandbox that is already gone
 
     _install(monkeypatch, 'e2b', {
         'Sandbox': Client,
@@ -295,10 +332,71 @@ def test_e2b_runs_as_root_offline_and_maps_errors(monkeypatch: pytest.MonkeyPatc
     assert box.exec('fail') == ExecResult(2, 'oe')
     with pytest.raises(SandboxTimeoutError):
         box.exec('slow', timeout=1)
+    # The sandbox kills the command at its deadline; the SDK only waits a little longer.
+    assert seen['cmd'] == '/usr/bin/timeout --kill-after=2 1 /bin/sh -c slow'
+    assert seen['timeout'] > 1
     with pytest.raises(SandboxError, match='not reachable'):
         box.exec('gone', timeout=1)
     module.E2BSandbox('my-template')
     assert seen['create']['template'] == 'my-template'
+    assert box.delete() is True
+    seen['kill_fails'] = True
+    assert box.delete() is False
+
+
+@pytest.mark.skipif(not Path('/usr/bin/timeout').exists(), reason='needs /usr/bin/timeout')
+def test_e2b_timeout_kills_the_command_and_its_children(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """E2B's timeout only stops waiting for a command, so exec has to kill what it started."""
+
+    class SlowError(Exception):
+        pass
+
+    class ExitError(Exception):
+        def __init__(self, stdout: str, stderr: str, exit_code: int) -> None:
+            super().__init__(exit_code)
+            self.stdout, self.stderr, self.exit_code = stdout, stderr, exit_code
+
+    class Commands:
+        """Run commands the way E2B does: bash -c, and a timeout that leaves them running."""
+
+        def run(self, cmd: str, *, timeout: float, **kwargs: object) -> object:
+            proc = subprocess.Popen(
+                ['/bin/bash', '-c', cmd], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True
+            )
+            try:
+                stdout, stderr = proc.communicate(timeout=timeout)
+            except subprocess.TimeoutExpired as exc:
+                raise SlowError('context deadline exceeded') from exc
+            if proc.returncode:
+                raise ExitError(stdout, stderr, proc.returncode)
+            return types.SimpleNamespace(exit_code=0, stdout=stdout, stderr=stderr)
+
+    class Client:
+        sandbox_id = 'e2b-local'
+        commands = Commands()
+
+        @staticmethod
+        def create(**kwargs: object) -> 'Client':
+            return Client()
+
+    _install(monkeypatch, 'e2b', {
+        'Sandbox': Client,
+        'CommandExitException': ExitError,
+        'TimeoutException': SlowError,
+        'SandboxNotRunningException': type('NotRunningError', (SlowError,), {}),
+        'SandboxUnreachableException': type('UnreachableError', (SlowError,), {}),
+    })  # fmt: skip
+    monkeypatch.delitem(sys.modules, 'deepgym.sandboxes.e2b.sandbox', raising=False)
+    module = importlib.import_module('deepgym.sandboxes.e2b.sandbox')
+    marker = shlex.quote(str(tmp_path / 'still-running'))
+
+    with pytest.raises(SandboxTimeoutError):
+        module.E2BSandbox().exec(f'(sleep 2; touch {marker}) & sleep 2; touch {marker}', timeout=1)
+    time.sleep(3)
+
+    assert not (tmp_path / 'still-running').exists()
 
 
 # ---------------------------------------------------------------------------
@@ -331,6 +429,36 @@ _USERS = (
     'useradd',
     '997 997 996 996 0 /usr/bin/setpriv /usr/bin/nsenter /usr/bin/sudo\n/tmp/deepgym',
 )
+
+
+def test_session_close_raises_when_the_provider_cannot_delete() -> None:
+    box = FakeSandbox(network_blocked=True, answers=[_USERS])
+    backend = SandboxBackend(box)
+
+    box.delete_result = False
+    with pytest.raises(SandboxError, match='Could not delete'):
+        backend.close()
+
+    box.delete_result = None  # a provider written before delete() returned a status
+    backend.close()
+
+
+def test_daytona_delete_reports_failures_but_not_missing_sandboxes() -> None:
+    class NotFoundError(Exception):
+        status_code = 404
+
+    outcomes = iter([RuntimeError('Daytona API down'), NotFoundError('no such sandbox'), None])
+
+    class Client:
+        def delete(self, sandbox: object, wait: bool = False) -> None:
+            outcome = next(outcomes)
+            if outcome is not None:
+                raise outcome
+
+    box = types.SimpleNamespace(id='sb-1')
+    assert cleanup_sandbox(box, Client()) is False
+    assert cleanup_sandbox(box, Client()) is True
+    assert cleanup_sandbox(box, Client()) is True
 
 
 def test_session_runs_as_agent_and_joins_netns_only_when_needed() -> None:

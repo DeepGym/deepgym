@@ -600,8 +600,13 @@ class SandboxBackend:
         return self._need_desktop('Screenshots').screenshot()
 
     def close(self) -> None:
-        """Delete the sandbox."""
-        self._sandbox.delete()
+        """Delete the sandbox.
+
+        Raises:
+            SandboxError: If the provider reports the delete failed; the sandbox may still exist.
+        """
+        if self._sandbox.delete() is False:
+            raise SandboxError(f'Could not delete sandbox {self.sandbox_id}')
 
     def _need_desktop(self, what: str) -> DaytonaDesktop:
         """Return the desktop, or refuse *what* if this provider has none."""
@@ -854,7 +859,16 @@ class Session:
         return self
 
     def __exit__(self, *args: object) -> None:
-        self.close()
+        """Close the session; a failed delete is logged, never traded for the body's outcome.
+
+        An explicit close() raises instead, for callers that retry it (the API server).
+        """
+        try:
+            self.close()
+        except SandboxError:
+            logger.warning(
+                'Could not delete sandbox %s; it may still exist', self.sandbox_id, exc_info=True
+            )
 
     def _apply(self, action: Action) -> tuple[str, int | None]:
         """Execute *action*; return its text output and exit code (None if not a command)."""

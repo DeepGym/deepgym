@@ -72,9 +72,15 @@ class ModalSandbox:
         self.exec(f'PATH={TRUSTED_PATH} mkdir -p {folder}', timeout=60)
         self._sandbox.filesystem.write_bytes(content, path)
 
-    def delete(self) -> None:
-        """Terminate the sandbox; errors are logged (it may already be gone)."""
+    def delete(self) -> bool:
+        """Terminate the sandbox (a no-op once it has finished); errors are logged.
+
+        Returns:
+            False if Modal reported a failure.
+        """
         try:
             self._sandbox.terminate()
         except modal.exception.Error:
             logger.warning('Failed to delete modal sandbox %s', self.id)
+            return False
+        return True

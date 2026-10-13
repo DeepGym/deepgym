@@ -93,12 +93,21 @@ def create_sandbox(env: Environment, daytona: Daytona) -> Sandbox:
         raise SandboxError(f'Failed to create sandbox: {exc}') from exc
 
 
-def cleanup_sandbox(sandbox: Sandbox, daytona: Daytona, *, wait: bool = False) -> None:
-    """Delete a raw Daytona sandbox, logging rather than raising errors."""
+def cleanup_sandbox(sandbox: Sandbox, daytona: Daytona, *, wait: bool = False) -> bool:
+    """Delete a raw Daytona sandbox, logging rather than raising errors.
+
+    Returns:
+        False if Daytona reported a failure; True once the sandbox is gone, including when
+        Daytona no longer knows it (404).
+    """
     try:
         daytona.delete(sandbox, wait=wait)
-    except Exception:
+    except Exception as exc:
+        if getattr(exc, 'status_code', None) == 404:
+            return True
         logger.warning('Failed to clean up sandbox %s', getattr(sandbox, 'id', '?'))
+        return False
+    return True
 
 
 def _delete_labelled(daytona: Daytona, label: dict[str, str]) -> None:
@@ -225,6 +234,6 @@ class DaytonaSandbox:
         if moved.exit_code != 0:
             raise SandboxError(f'Failed to upload {path}: {moved.output[-500:]}')
 
-    def delete(self) -> None:
-        """Delete the sandbox; errors are logged."""
-        cleanup_sandbox(self._sandbox, self._daytona, wait=self._session)
+    def delete(self) -> bool:
+        """Delete the sandbox; errors are logged. Return False if Daytona reported a failure."""
+        return cleanup_sandbox(self._sandbox, self._daytona, wait=self._session)

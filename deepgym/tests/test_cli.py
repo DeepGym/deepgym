@@ -8,8 +8,10 @@ from unittest.mock import patch
 import httpx
 import pytest
 
+import deepgym.qa
 from deepgym.cli import _build_parser, _read_file_or_string, main
 from deepgym.integrations.zai import ZaiChatClient
+from deepgym.qa import QACheck, QAReport
 
 ENVS_DIR = Path(__file__).resolve().parent.parent / 'src' / 'deepgym' / 'envs'
 
@@ -309,12 +311,45 @@ class TestCLIQASubcommand:
             main()
 
         data = json.loads(capsys.readouterr().out)
-        assert [(r['environment'], r['passed']) for r in data] == [
-            ('reverse_string', True),
-            ('signup_form', True),
+        assert [(r['environment'], r['status'], r['passed']) for r in data] == [
+            ('reverse_string', 'pass', True),
+            ('signup_form', 'skip', False),
         ]
         saved = json.loads((tmp_path / 'reverse_string.json').read_text(encoding='utf-8'))
         assert saved['checks'] == data[0]['checks']
+
+    @pytest.mark.parametrize(
+        ('envs', 'status'),
+        [(['signup_form'], 'skip'), (['reverse_string', 'odd'], 'inconclusive')],
+    )
+    def test_qa_exits_two_without_a_verdict(
+        self,
+        envs: list[str],
+        status: str,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture,
+    ) -> None:
+        """Nothing failed, but nothing (skip) or not everything (inconclusive) was verified."""
+        monkeypatch.setenv('DEEPGYM_QA_DIR', str(tmp_path))
+        run_qa = deepgym.qa.run_qa
+
+        def fake_run_qa(name: str, *args: object, **kwargs: object) -> QAReport:
+            if name != 'odd':
+                return run_qa(name, *args, **kwargs)
+            check = QACheck(name='hack_resistant', status='inconclusive', details='crashed')
+            return QAReport(environment=name, checks=[check])
+
+        monkeypatch.setattr('deepgym.qa.run_qa', fake_run_qa)
+
+        with (
+            patch.object(sys, 'argv', ['deepgym', 'qa', *envs, '--reruns', '0', '--json']),
+            pytest.raises(SystemExit) as exc_info,
+        ):
+            main()
+
+        assert exc_info.value.code == 2
+        assert json.loads(capsys.readouterr().out)[-1]['status'] == status
 
     def test_qa_exits_one_when_an_env_fails(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture

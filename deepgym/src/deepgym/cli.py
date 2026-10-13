@@ -89,7 +89,12 @@ def _build_parser() -> argparse.ArgumentParser:
     audit_p.add_argument('--json', action='store_true', help='Print machine-readable JSON only')
 
     # ── qa ────────────────────────────────────────────────────────────
-    qa_p = sub.add_parser('qa', help='Quality-gate environments before training on them')
+    qa_p = sub.add_parser(
+        'qa',
+        help='Quality-gate environments before training on them',
+        description='Exits 0 when the checked environments pass (skipped ones are neutral), '
+        '1 if any fails, 2 if none fails but some are inconclusive or none could be checked.',
+    )
     qa_p.add_argument('envs', nargs='*', metavar='ENV', help='Registered environment names')
     qa_p.add_argument('--all', action='store_true', help='Check every registered environment')
     qa_p.add_argument(
@@ -370,6 +375,7 @@ def _cmd_audit(args: argparse.Namespace) -> None:
 def _cmd_qa(args: argparse.Namespace) -> None:
     from deepgym.core import DeepGym
     from deepgym.qa import client_from_env, format_table, run_qa, write_report
+    from deepgym.qa.report import overall
     from deepgym.registry import entry_label, list_environments
 
     names = [entry_label(entry) for entry in list_environments()] if args.all else args.envs
@@ -394,8 +400,10 @@ def _cmd_qa(args: argparse.Namespace) -> None:
         print(json.dumps([report.model_dump(mode='json') for report in reports], indent=2))
     else:
         print(format_table(reports))
-    if not all(report.passed for report in reports):
-        sys.exit(1)
+    status = overall(report.status for report in reports)
+    if status != 'pass':
+        # 2: nothing failed, but not everything (inconclusive) or nothing (skip) was verified.
+        sys.exit(1 if status == 'fail' else 2)
 
 
 def _guard_local_model_code(mode: str, allowed: bool) -> None:

@@ -17,6 +17,7 @@ from deepgym.models import Environment
 from deepgym.qa import QACheck, QAReport, client_from_env, format_table, run_qa, write_report
 from deepgym.qa.checks import hack_resistant, single_turn_checks, stub_solution
 from deepgym.qa.difficulty import difficulty_check
+from tests.test_adversarial import CRASHING_VERIFIER
 
 _ADD_TASK = 'Write `add(a, b)` returning the sum.'
 _ADD_REFERENCE = 'def add(a, b):\n    return a + b\n'
@@ -96,6 +97,12 @@ def test_single_turn_checks_fail_without_a_reference(local_dg: DeepGym) -> None:
     assert checks[0].details == 'no reference_solution.py found'
 
 
+def test_single_turn_checks_skip_the_stub_of_a_script_reference(local_dg: DeepGym) -> None:
+    checks = single_turn_checks(_env(_ADD_VERIFIER), 'print(5)\n', local_dg, reruns=0)
+
+    assert _by_name(checks)['stub_fails'].status == 'skip'
+
+
 def test_hack_resistant(local_dg: DeepGym) -> None:
     assert hack_resistant(_env(_ADD_VERIFIER), local_dg).passed
 
@@ -103,6 +110,14 @@ def test_hack_resistant(local_dg: DeepGym) -> None:
 
     assert not exploited.passed
     assert exploited.details.startswith('exploited by ')
+
+
+def test_hack_resistant_is_inconclusive_when_attacks_cannot_run(local_dg: DeepGym) -> None:
+    check = hack_resistant(_env(CRASHING_VERIFIER), local_dg)
+
+    assert not check.passed
+    assert check.status == 'inconclusive'
+    assert check.details.startswith('5 of 5 attacks could not run: empty (Attack could not run')
 
 
 # ---------------------------------------------------------------------------
@@ -127,15 +142,15 @@ def test_run_qa_passes_a_builtin_env(local_dg: DeepGym) -> None:
 def test_run_qa_skips_envs_it_cannot_check(name: str, local_dg: DeepGym) -> None:
     report = run_qa(name, local_dg)
 
-    assert report.status == 'SKIP'
-    assert report.passed
-    assert [check.name for check in report.checks] == ['skipped']
+    assert not report.passed
+    assert report.status == 'skip'
+    assert [(check.name, check.status) for check in report.checks] == [('skipped', 'skip')]
 
 
 def test_run_qa_reports_an_unloadable_env(local_dg: DeepGym) -> None:
     report = run_qa('no_such_env', local_dg)
 
-    assert report.status == 'FAIL'
+    assert report.status == 'fail'
     assert report.checks[0].name == 'load'
     assert 'not found' in report.checks[0].details
 
@@ -151,35 +166,59 @@ def test_write_report_uses_the_console_format(
     monkeypatch.setenv('DEEPGYM_QA_DIR', str(tmp_path))
     report = QAReport(
         environment='cyber/toy',
-        checks=[QACheck(name='reference_passes', passed=False, details='score 0.00')],
+        checks=[QACheck(name='reference_passes', status='fail', details='score 0.00')],
     )
 
     path = write_report(report)
 
     assert path == tmp_path / 'cyber_toy.json'
     data = json.loads(path.read_text(encoding='utf-8'))
-    assert set(data) == {'environment', 'passed', 'checks', 'created_at'}
+    assert set(data) == {'environment', 'status', 'passed', 'checks', 'created_at'}
     assert data['environment'] == 'cyber/toy'
-    assert data['passed'] is False
+    assert (data['status'], data['passed']) == ('fail', False)
     assert data['checks'] == [
-        {'name': 'reference_passes', 'passed': False, 'details': 'score 0.00'}
+        {'name': 'reference_passes', 'status': 'fail', 'passed': False, 'details': 'score 0.00'}
     ]
     assert datetime.fromisoformat(data['created_at'].replace('Z', '+00:00')).tzinfo is not None
 
 
+@pytest.mark.parametrize(
+    ('statuses', 'expected'),
+    [
+        (['pass', 'skip'], 'pass'),
+        (['pass', 'inconclusive', 'skip'], 'inconclusive'),
+        (['inconclusive', 'fail', 'pass'], 'fail'),
+        (['skip'], 'skip'),
+    ],
+)
+def test_report_status_is_the_worst_verdict_and_skips_are_neutral(
+    statuses: list[str], expected: str
+) -> None:
+    checks = [QACheck(name=f'c{i}', status=status, details='') for i, status in enumerate(statuses)]
+
+    report = QAReport(environment='e', checks=checks)
+
+    assert (report.status, report.passed) == (expected, expected == 'pass')
+
+
 def test_format_table_lists_failures_and_a_summary() -> None:
     reports = [
-        QAReport(environment='good', checks=[QACheck(name='empty_fails', passed=True, details='')]),
-        QAReport(environment='bad', checks=[QACheck(name='stub_fails', passed=False, details='x')]),
-        QAReport(environment='gui', checks=[QACheck(name='skipped', passed=True, details='y')]),
+        QAReport(environment=env, checks=[QACheck(name=check, status=status, details=details)])
+        for env, check, status, details in [
+            ('good', 'empty_fails', 'pass', ''),
+            ('bad', 'stub_fails', 'fail', 'x'),
+            ('odd', 'hack_resistant', 'inconclusive', 'z'),
+            ('gui', 'skipped', 'skip', 'y'),
+        ]
     ]
 
     table = format_table(reports)
 
     assert 'bad: stub_fails: x' in table
+    assert 'odd: hack_resistant: z' in table
     assert 'gui: ' not in table
     assert 'good: ' not in table
-    assert table.endswith('1 passed, 1 failed, 1 skipped')
+    assert table.endswith('1 passed, 1 failed, 1 inconclusive, 1 skipped')
 
 
 # ---------------------------------------------------------------------------

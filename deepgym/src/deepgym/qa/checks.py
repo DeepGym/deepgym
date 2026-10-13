@@ -7,7 +7,7 @@ from typing import TYPE_CHECKING
 
 from deepgym.adversarial import DEFAULT_STRATEGIES, AdversarialTester
 from deepgym.models import SCORE_TOLERANCE, Environment, RunResult
-from deepgym.qa.report import QACheck
+from deepgym.qa.report import QACheck, verdict
 
 if TYPE_CHECKING:
     from deepgym.core import DeepGym
@@ -46,7 +46,7 @@ def _summary(result: RunResult) -> str:
 
 
 def _scores_below_full(name: str, result: RunResult) -> QACheck:
-    return QACheck(name=name, passed=not solved(result), details=_summary(result))
+    return QACheck(name=name, status=verdict(not solved(result)), details=_summary(result))
 
 
 def _same_scores(results: list[RunResult]) -> QACheck:
@@ -56,7 +56,7 @@ def _same_scores(results: list[RunResult]) -> QACheck:
     else:
         listed = ', '.join(f'{score:.4f}' for score in scores)
         details = f'scores differ across {len(scores)} runs: {listed}'
-    return QACheck(name='deterministic', passed=len(set(scores)) == 1, details=details)
+    return QACheck(name='deterministic', status=verdict(len(set(scores)) == 1), details=details)
 
 
 def single_turn_checks(
@@ -79,7 +79,7 @@ def single_turn_checks(
     if reference is None:
         (empty,) = dg.run_batch(env, ['']).results
         missing = QACheck(
-            name='reference_passes', passed=False, details='no reference_solution.py found'
+            name='reference_passes', status='fail', details='no reference_solution.py found'
         )
         return [missing, _scores_below_full('empty_fails', empty)]
 
@@ -90,11 +90,12 @@ def single_turn_checks(
         _scores_below_full('stub_fails', results[runs + 1])
         if stub
         else QACheck(
-            name='stub_fails', passed=True, details='skipped: reference has no top-level function'
+            name='stub_fails', status='skip', details='reference has no top-level function'
         )
     )
+    first = results[0]
     return [
-        QACheck(name='reference_passes', passed=solved(results[0]), details=_summary(results[0])),
+        QACheck(name='reference_passes', status=verdict(solved(first)), details=_summary(first)),
         _same_scores(results[:runs]),
         _scores_below_full('empty_fails', results[runs]),
         stub_check,
@@ -102,12 +103,20 @@ def single_turn_checks(
 
 
 def hack_resistant(env: Environment, dg: DeepGym) -> QACheck:
-    """Run the heuristic reward-hack attacks; fail if any reaches the pass threshold."""
+    """Run the heuristic reward-hack attacks; fail if any reaches the pass threshold.
+
+    Inconclusive, not passed, when no attack got through but some crashed or never ran.
+    """
     report = AdversarialTester(dg).test(env, strategies=_HEURISTIC_STRATEGIES)
     exploits = [result for result in report.results if result.exploited]
+    not_run = [result for result in report.results if result.inconclusive]
     if exploits:
         details = 'exploited by ' + ', '.join(f'{r.strategy} ({r.score:.2f})' for r in exploits)
-    else:
-        top = max(result.score for result in report.results)
-        details = f'{report.attacks_run} attacks, max score {top:.2f}'
-    return QACheck(name='hack_resistant', passed=report.is_robust, details=details)
+        return QACheck(name='hack_resistant', status='fail', details=details)
+    if not_run:
+        reasons = ', '.join(f'{r.strategy} ({r.details[:120]})' for r in not_run)
+        details = f'{len(not_run)} of {report.attacks_run} attacks could not run: {reasons}'
+        return QACheck(name='hack_resistant', status='inconclusive', details=details)
+    top = max(result.score for result in report.results)
+    details = f'{report.attacks_run} attacks, max score {top:.2f}'
+    return QACheck(name='hack_resistant', status='pass', details=details)

@@ -26,8 +26,8 @@ def run_qa(
 
     Multi-turn and computer-use envs (they need an agent) and benchmark-backed
     envs such as swebench_pro or mimo_code (they score through their own runner)
-    get a single passing 'skipped' check. An environment that fails to load gets a failed
-    'load' check.
+    get a single 'skipped' check with status 'skip', so the report is neither a
+    pass nor a failure. An environment that fails to load gets a failed 'load' check.
 
     Args:
         name: Registered environment name, e.g. 'coin_change'.
@@ -46,7 +46,7 @@ def run_qa(
     try:
         env = load_environment(name)
     except ValueError as exc:
-        check = QACheck(name='load', passed=False, details=str(exc))
+        check = QACheck(name='load', status='fail', details=str(exc))
         return QAReport(environment=name, checks=[check])
     if isinstance(env, MultiTurnEnvironment):
         return _skipped(name, 'multi-turn/computer-use env needs an agent')
@@ -62,9 +62,10 @@ def run_qa(
 
 
 def _skipped(name: str, reason: str) -> QAReport:
-    """Return a passing report whose only check says why *name* wasn't checked."""
+    """Return a skipped report whose only check says why *name* wasn't checked."""
     details = f'{reason}; the gate checks single-turn envs'
-    return QAReport(environment=name, checks=[QACheck(name=SKIPPED, passed=True, details=details)])
+    check = QACheck(name=SKIPPED, status='skip', details=details)
+    return QAReport(environment=name, checks=[check])
 
 
 def _read_reference(env: Environment) -> str | None:

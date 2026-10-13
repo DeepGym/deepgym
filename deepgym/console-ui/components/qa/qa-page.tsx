@@ -10,19 +10,18 @@ import { useApi } from '@/lib/api';
 import { timeAgo } from '@/lib/format';
 import type { QAReport } from '@/lib/types';
 import { useQueryParam } from '@/lib/use-query-param';
-import { qaStatus } from '@/lib/verdict';
 import { QADrawer } from './qa-drawer';
 import { QAStatusBadge } from './qa-status';
 
 type QARow = QAReport & { id: string };
 
-const STATUS_ORDER = { fail: 0, skip: 1, pass: 2 };
+const STATUS_ORDER = { fail: 0, inconclusive: 1, skip: 2, pass: 3 };
 
 const columns: ColumnDef<QARow>[] = [
   { id: 'id', accessorKey: 'id', header: 'Environment', meta: { className: 'font-mono text-text-primary' } },
   {
     id: 'status',
-    accessorFn: (row) => STATUS_ORDER[qaStatus(row)],
+    accessorFn: (row) => STATUS_ORDER[row.status],
     header: 'Result',
     cell: ({ row }) => <QAStatusBadge report={row.original} />,
   },
@@ -38,7 +37,7 @@ const columns: ColumnDef<QARow>[] = [
     id: 'failed',
     accessorFn: (row) =>
       row.checks
-        .filter((check) => !check.passed)
+        .filter((check) => check.status === 'fail')
         .map((check) => check.name)
         .join(', '),
     header: 'Failing',

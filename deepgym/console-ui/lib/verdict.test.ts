@@ -1,5 +1,5 @@
 import { expect, test } from 'bun:test';
-import type { CaseResult, QAReport, RunSummary } from './types';
+import type { CaseResult, QAReport, QAStatus, RunSummary } from './types';
 import { caseReason, failuresFirst, recentActivity, scoreTone, verdictLine } from './verdict';
 
 const run = (id: string, created_at: string, extra: Partial<RunSummary> = {}): RunSummary => ({
@@ -19,10 +19,12 @@ const run = (id: string, created_at: string, extra: Partial<RunSummary> = {}): R
   ...extra,
 });
 
-const report = (environment: string, created_at: string, checks: QAReport['checks']): QAReport => ({
+/** A report with one check whose verdict is also the report's, as `deepgym qa` computes it. */
+const report = (environment: string, created_at: string, status: QAStatus): QAReport => ({
   environment,
-  passed: checks.every((check) => check.passed),
-  checks,
+  status,
+  passed: status === 'pass',
+  checks: [{ name: 'hack_resistant', status, passed: status === 'pass', details: '' }],
   created_at,
 });
 
@@ -34,28 +36,32 @@ test('activity merges runs and QA verdicts newest first, without skipped QA', ()
       run('c', '2026-10-13T12:30:00+00:00', { status: 'running', score: null, passed: null }),
     ],
     [
-      report('qa-env', '2026-10-13T11:00:00Z', [{ name: 'empty_fails', passed: false, details: '1.00' }]),
-      report('skip-env', '2026-10-13T13:00:00Z', [{ name: 'skipped', passed: true, details: 'no ref' }]),
+      report('qa-env', '2026-10-13T11:00:00Z', 'fail'),
+      report('odd-env', '2026-10-13T11:30:00Z', 'inconclusive'),
+      report('skip-env', '2026-10-13T13:00:00Z', 'skip'),
     ],
-    3,
+    4,
   );
   expect(items.map((item) => [item.key, item.status, item.subline])).toEqual([
     ['run-c', 'running', 'Run in progress'],
     ['run-b', 'failed', 'Run error: timeout'],
+    ['qa-odd-env', 'inconclusive', 'QA: 0 of 1 checks passed'],
     ['qa-qa-env', 'failed', 'QA: 0 of 1 checks passed'],
   ]);
-  expect(items[2].href).toBe('/qa/?env=qa-env');
+  expect(items[3].href).toBe('/qa/?env=qa-env');
 });
 
-test('failures first, then in-flight, then passed, keeping order within each status', () => {
+test('failures first, then inconclusive, in-flight, passed and skipped, keeping order within each status', () => {
   const rows = [
     { key: 'a', status: 'done' },
     { key: 'b', status: 'failed' },
     { key: 'c', status: 'running' },
     { key: 'd', status: 'failed' },
     { key: 'e', status: 'queued' },
+    { key: 'f', status: 'skipped' },
+    { key: 'g', status: 'inconclusive' },
   ] as const;
-  expect(failuresFirst([...rows]).map((row) => row.key)).toEqual(['b', 'd', 'c', 'e', 'a']);
+  expect(failuresFirst([...rows]).map((row) => row.key)).toEqual(['b', 'd', 'g', 'c', 'e', 'a', 'f']);
 });
 
 test('verdict line counts failures when failed and passes when passed', () => {

@@ -1,7 +1,7 @@
 /** Pure helpers behind the console's verdict views: statuses, colour bands, headlines and the activity feed. */
 
 import { formatScore } from './format';
-import type { CaseResult, QAReport, RunStatus, RunSummary } from './types';
+import type { CaseResult, QAReport, QAStatus, RunStatus, RunSummary } from './types';
 
 export type Tone = 'good' | 'warn' | 'bad';
 
@@ -13,15 +13,30 @@ export const isActive = <T extends { status: RunStatus }>(
   run: T,
 ): run is T & { status: 'queued' | 'running' } => run.status === 'queued' || run.status === 'running';
 
-export type TaskStatus = 'failed' | 'running' | 'queued' | 'done';
+export type TaskStatus = 'failed' | 'inconclusive' | 'running' | 'queued' | 'done' | 'skipped';
 
 /** A run's row status: in flight as is, otherwise its pass/fail verdict. */
 export const runTaskStatus = (run: RunSummary): TaskStatus =>
   isActive(run) ? run.status : run.passed ? 'done' : 'failed';
 
-const ATTENTION: Record<TaskStatus, number> = { failed: 0, running: 1, queued: 2, done: 3 };
+/** The row status of a QA check's or report's verdict. */
+export const QA_TASK_STATUS: Record<QAStatus, TaskStatus> = {
+  pass: 'done',
+  fail: 'failed',
+  inconclusive: 'inconclusive',
+  skip: 'skipped',
+};
 
-/** Rows that need attention first: failed, then running, queued, passed; order kept within each. */
+const ATTENTION: Record<TaskStatus, number> = {
+  failed: 0,
+  inconclusive: 1,
+  running: 2,
+  queued: 3,
+  done: 4,
+  skipped: 5,
+};
+
+/** Rows that need attention first: failed, inconclusive, running, queued, passed, then skipped; order kept within each. */
 export const failuresFirst = <T extends { status: TaskStatus }>(rows: T[]): T[] =>
   rows.toSorted((a, b) => ATTENTION[a.status] - ATTENTION[b.status]);
 
@@ -48,12 +63,6 @@ export function caseReason(item: CaseResult): string {
   if (item.error) return item.error;
   if (item.passed || !item.expected_summary) return item.actual_summary;
   return `expected ${item.expected_summary}, got ${item.actual_summary || 'nothing'}`;
-}
-
-/** pass, fail or skip (environments `deepgym qa` can't check carry one "skipped" check). */
-export function qaStatus(report: QAReport): 'pass' | 'fail' | 'skip' {
-  if (report.checks.some((check) => check.name === 'skipped')) return 'skip';
-  return report.passed ? 'pass' : 'fail';
 }
 
 export interface ActivityItem {
@@ -84,14 +93,14 @@ export function recentActivity(runs: RunSummary[], reports: QAReport[], limit: n
       href: `/runs/detail/?id=${run.id}`,
     })),
     ...reports
-      .filter((report) => qaStatus(report) !== 'skip')
+      .filter((report) => report.status !== 'skip')
       .map(
         (report): ActivityItem => ({
           key: `qa-${report.environment}`,
           at: report.created_at,
           label: report.environment,
           subline: `QA: ${report.checks.filter((check) => check.passed).length} of ${report.checks.length} checks passed`,
-          status: report.passed ? 'done' : 'failed',
+          status: QA_TASK_STATUS[report.status],
           href: `/qa/?env=${encodeURIComponent(report.environment)}`,
         }),
       ),

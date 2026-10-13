@@ -122,15 +122,22 @@ export interface ProviderSandboxes {
   sandboxes: RunningSandbox[];
 }
 
+/** A `deepgym qa` verdict: inconclusive means a check ran but couldn't decide; skip is neutral, never a pass. */
+export type QAStatus = 'pass' | 'fail' | 'inconclusive' | 'skip';
+
 export interface QACheck {
   name: string;
+  status: QAStatus;
+  /** True only when status is "pass". */
   passed: boolean;
   details: string;
 }
 
-/** One environment's `deepgym qa` verdict (src/deepgym/qa/report.py); a lone "skipped" check means not checkable. */
+/** One environment's `deepgym qa` verdict (src/deepgym/qa/report.py); "skip" means it can't be checked. */
 export interface QAReport {
   environment: string;
+  status: QAStatus;
+  /** True only when status is "pass". */
   passed: boolean;
   checks: QACheck[];
   created_at: string;

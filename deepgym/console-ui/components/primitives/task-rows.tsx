@@ -2,7 +2,7 @@
 // Adapted from Beautiful UI "Task Rows" (https://beautifului.dev), MIT. See ./LICENSE.
 // Changes: driven by real statuses instead of a demo timeline, links per row, inline detail sublines, BoardUI tokens.
 
-import { RiCheckLine, RiCloseLine } from '@remixicon/react';
+import { RiCheckLine, RiCloseLine, RiQuestionMark } from '@remixicon/react';
 import Link from 'next/link';
 import type { ReactNode } from 'react';
 import type { TaskStatus } from '@/lib/verdict';
@@ -11,7 +11,7 @@ import { cx } from '@/utils/cx';
 export interface TaskRow {
   key: string;
   label: ReactNode;
-  /** One line under the label, e.g. a metric or a check's details; shown in full when the row failed. */
+  /** One line under the label, e.g. a metric or a check's details; shown in full when the row failed or was inconclusive. */
   subline?: string;
   /** Right-aligned mono value, e.g. a score. */
   meta?: string;
@@ -41,15 +41,22 @@ function Ring({ active }: { active: boolean }) {
   );
 }
 
+const MARK = {
+  done: { Icon: RiCheckLine, className: 'bg-status-lime-text' },
+  failed: { Icon: RiCloseLine, className: 'bg-status-rose-text' },
+  inconclusive: { Icon: RiQuestionMark, className: 'bg-status-yellow-text' },
+};
+
 function StatusMark({ status }: { status: TaskStatus }) {
-  if (status === 'running' || status === 'queued') return <Ring active={status === 'running'} />;
-  const done = status === 'done';
-  const Icon = done ? RiCheckLine : RiCloseLine;
+  if (status === 'running' || status === 'queued' || status === 'skipped') {
+    return <Ring active={status === 'running'} />;
+  }
+  const { Icon, className } = MARK[status];
   return (
     <span
       className={cx(
         'flex size-5 shrink-0 items-center justify-center rounded-full text-text-white',
-        done ? 'bg-status-lime-text' : 'bg-status-rose-text',
+        className,
       )}
     >
       <Icon aria-hidden className="size-3.5" />
@@ -60,8 +67,10 @@ function StatusMark({ status }: { status: TaskStatus }) {
 const PILL: Record<TaskStatus, { text: string; className: string }> = {
   done: { text: 'Passed', className: 'bg-status-lime-background text-status-lime-text' },
   failed: { text: 'Failed', className: 'bg-status-rose-background text-status-rose-text' },
+  inconclusive: { text: 'Inconclusive', className: 'bg-status-yellow-background text-status-yellow-text' },
   running: { text: 'Running', className: 'bg-status-blue-background text-status-blue-text' },
   queued: { text: 'Queued', className: 'bg-background-tertiary-default text-text-secondary' },
+  skipped: { text: 'Skipped', className: 'bg-background-tertiary-default text-text-secondary' },
 };
 
 function RowBody({ row }: { row: TaskRow }) {
@@ -74,9 +83,9 @@ function RowBody({ row }: { row: TaskRow }) {
           <span
             className={cx(
               'text-caption-1-medium',
-              row.status === 'failed'
-                ? 'break-words whitespace-pre-wrap text-text-error-primary'
-                : 'truncate text-text-tertiary',
+              row.status === 'failed' && 'break-words whitespace-pre-wrap text-text-error-primary',
+              row.status === 'inconclusive' && 'break-words whitespace-pre-wrap text-text-secondary',
+              row.status !== 'failed' && row.status !== 'inconclusive' && 'truncate text-text-tertiary',
             )}
           >
             {row.subline}

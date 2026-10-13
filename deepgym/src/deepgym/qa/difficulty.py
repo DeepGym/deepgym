@@ -11,7 +11,7 @@ from deepgym.integrations.verl import extract_code
 from deepgym.integrations.zai import ZaiChatClient
 from deepgym.models import Environment
 from deepgym.qa.checks import solved
-from deepgym.qa.report import QACheck
+from deepgym.qa.report import QACheck, verdict
 
 if TYPE_CHECKING:
     from deepgym.core import DeepGym
@@ -59,4 +59,4 @@ def difficulty_check(env: Environment, dg: DeepGym, client: ZaiChatClient, sampl
         f'{flag}pass@1={count / samples:.2f} pass@{samples}={float(count > 0):.2f} '
         f'({count}/{samples} solved by {client.model})'
     )
-    return QACheck(name='difficulty', passed=not flag, details=details)
+    return QACheck(name='difficulty', status=verdict(not flag), details=details)

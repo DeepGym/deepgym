@@ -694,9 +694,11 @@ Each single-turn environment must pass:
 - `reference_passes`: its `reference_solution.py` scores 1.0.
 - `deterministic`: the reference scores the same on every rerun.
 - `empty_fails`, `stub_fails`: an empty file, and a stub of the reference's
-  functions that return `None`, both score below 1.0.
+  functions that return `None`, both score below 1.0. `stub_fails` is skipped
+  when the reference is a script with no top-level function.
 - `hack_resistant`: none of the heuristic reward-hack attacks behind
-  `deepgym audit` reaches the pass threshold.
+  `deepgym audit` reaches the pass threshold. If none got through but some
+  crashed or couldn't run, the check is inconclusive, not passed.
 - `difficulty` (with `--model`): pass@1 and pass@k over k samples from an
   OpenAI-compatible endpoint. Fails as `too_easy` or `too_hard` when every or no
   sample is solved, because then group-relative RL gets no signal from the task.
@@ -705,15 +707,23 @@ Each single-turn environment must pass:
 `auto` (which can fall back to local) it refuses to start unless you pass
 `--allow-local-exec`. Use a sandboxed mode instead.
 
-Multi-turn and computer-use environments are reported as skipped. The command
-exits 1 if any environment fails and writes one report per environment to
+Each check and each environment gets a `status`: `pass`, `fail`, `inconclusive`
+or `skip`. An environment fails if any check fails, is inconclusive if any check
+is, and passes otherwise; skipped checks don't count either way. Multi-turn,
+computer-use and benchmark-backed environments are skipped: neither passed nor
+failed. The command exits 0 when the checked environments pass (skipped ones
+alongside are fine), 1 if any fails, and 2 if none fails but some are
+inconclusive or none could be checked. It writes one report per environment to
 `~/.deepgym/qa/<env>.json` (set `DEEPGYM_QA_DIR` to change it):
 
 ```json
 {
   "environment": "coin_change",
+  "status": "pass",
   "passed": true,
-  "checks": [{"name": "reference_passes", "passed": true, "details": "score 1.00 (25/25 passed)"}],
+  "checks": [
+    {"name": "reference_passes", "status": "pass", "passed": true, "details": "score 1.00 (25/25 passed)"}
+  ],
   "created_at": "2026-10-12T16:45:34Z"
 }
 ```

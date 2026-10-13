@@ -3,12 +3,16 @@
 from __future__ import annotations
 
 import os
-from collections.abc import Sequence
+from collections.abc import Iterable, Sequence
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field, computed_field
+
+QAStatus = Literal['pass', 'fail', 'inconclusive', 'skip']
+"""A verdict. 'inconclusive': the check ran but couldn't decide (e.g. an attack crashed).
+'skip': the check doesn't apply; it's neutral, never a pass."""
 
 SKIPPED = 'skipped'
 """Name of the single check a report carries when the environment isn't checkable."""
@@ -21,6 +25,18 @@ _COLUMNS = {
     'hack_resistant': 'hack',
     'difficulty': 'diff',
 }
+_CELLS: dict[QAStatus, str] = {'pass': 'ok', 'fail': 'FAIL', 'inconclusive': '?', 'skip': 'skip'}
+
+
+def verdict(ok: bool) -> QAStatus:
+    """Return 'pass' if *ok*, else 'fail'."""
+    return 'pass' if ok else 'fail'
+
+
+def overall(statuses: Iterable[QAStatus]) -> QAStatus:
+    """Combine verdicts: any fail fails, then any inconclusive; skips count only if alone."""
+    found = set(statuses)
+    return next((s for s in ('fail', 'inconclusive', 'pass') if s in found), 'skip')
 
 
 class QACheck(BaseModel):
@@ -29,8 +45,14 @@ class QACheck(BaseModel):
     model_config = ConfigDict(frozen=True)
 
     name: str
-    passed: bool
+    status: QAStatus
     details: str
+
+    @computed_field
+    @property
+    def passed(self) -> bool:
+        """True only when the check passed."""
+        return self.status == 'pass'
 
 
 class QAReport(BaseModel):
@@ -44,16 +66,15 @@ class QAReport(BaseModel):
 
     @computed_field
     @property
-    def passed(self) -> bool:
-        """True when every check passed."""
-        return all(check.passed for check in self.checks)
+    def status(self) -> QAStatus:
+        """The environment's verdict: see :func:`overall`."""
+        return overall(check.status for check in self.checks)
 
+    @computed_field
     @property
-    def status(self) -> Literal['PASS', 'FAIL', 'SKIP']:
-        """PASS, FAIL or SKIP, as shown in the table."""
-        if any(check.name == SKIPPED for check in self.checks):
-            return 'SKIP'
-        return 'PASS' if self.passed else 'FAIL'
+    def passed(self) -> bool:
+        """True only on a pass: not when it failed, was inconclusive or was skipped."""
+        return self.status == 'pass'
 
 
 def report_dir() -> Path:
@@ -76,14 +97,8 @@ def write_report(report: QAReport) -> Path:
     return path
 
 
-def _cell(check: QACheck | None) -> str:
-    if check is None:
-        return '-'
-    return 'ok' if check.passed else 'FAIL'
-
-
 def format_table(reports: Sequence[QAReport]) -> str:
-    """Render one row per environment, then the details of failed and difficulty checks."""
+    """Render one row per environment, then details of undecided, failed and difficulty checks."""
     width = max(len('environment'), *(len(report.environment) for report in reports))
     rows = [['environment'.ljust(width), *_COLUMNS.values(), 'result']]
     notes: list[str] = []
@@ -92,19 +107,19 @@ def format_table(reports: Sequence[QAReport]) -> str:
         rows.append(
             [
                 report.environment.ljust(width),
-                *(_cell(by_name.get(name)) for name in _COLUMNS),
-                report.status,
+                *(_CELLS[by_name[name].status] if name in by_name else '-' for name in _COLUMNS),
+                report.status.upper(),
             ]
         )
         notes.extend(
             f'{report.environment}: {check.name}: {check.details}'
             for check in report.checks
-            if not check.passed or check.name == 'difficulty'
+            if check.status in ('fail', 'inconclusive') or check.name == 'difficulty'
         )
     table = '\n'.join('  '.join(f'{cell:<5}' for cell in row).rstrip() for row in rows)
     statuses = [report.status for report in reports]
     summary = (
-        f'{statuses.count("PASS")} passed, {statuses.count("FAIL")} failed, '
-        f'{statuses.count("SKIP")} skipped'
+        f'{statuses.count("pass")} passed, {statuses.count("fail")} failed, '
+        f'{statuses.count("inconclusive")} inconclusive, {statuses.count("skip")} skipped'
     )
     return '\n\n'.join(section for section in (table, '\n'.join(notes), summary) if section)

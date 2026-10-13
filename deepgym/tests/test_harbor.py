@@ -96,6 +96,14 @@ def test_rejects_an_invalid_task_toml(folder: str, message: str) -> None:
         ('[verifier]\nnetwork_mode = "sometimes"\n', 'no-network'),
         ('[[steps]]\nname = "one"\n', 'multi-step'),
         ('[verifier.env]\nKEY = "${HOST_SECRET}"\n', 'host variables'),
+        # Names env could read as an option or an odd assignment; $ would pass 'A\n'.
+        ('[verifier.env]\n-S = "x"\n', 'names must be'),
+        ('[verifier.env]\n"A B" = "x"\n', 'names must be'),
+        ('[verifier.env]\n"A=B" = "x"\n', 'names must be'),
+        ('[verifier.env]\n"" = "x"\n', 'names must be'),
+        ('[verifier.env]\n"A\\n" = "x"\n', 'names must be'),
+        ('[verifier.env]\n1A = "x"\n', 'names must be'),
+        ('[verifier.env]\nKEY = "x\\u0000y"\n', 'NUL'),
     ],
 )
 def test_rejects_unsupported_settings(tmp_path: Path, toml: str, message: str) -> None:

@@ -417,7 +417,7 @@ class SandboxBackend:
         prefix = self._offline if offline else ''
         variables = ' '.join(shlex.quote(f'{key}={value}') for key, value in env.items())
         return self._sandbox.exec(
-            f'{prefix}/usr/bin/env -i {variables} /bin/bash -c {shlex.quote(command)}',
+            f'{prefix}/usr/bin/env -i -- {variables} /bin/bash -c {shlex.quote(command)}',
             cwd=self._workdir,
             env=self._clear,
             timeout=timeout,
@@ -655,11 +655,12 @@ def trusted(command: str, env: Mapping[str, str] | None = None) -> str:
     """Wrap *command* to run with only *env* and :data:`~deepgym.sandboxes.TRUSTED_PATH`.
 
     Nothing from the image's environment (PATH, PYTHON*, LD_*) reaches it, and
-    ``/usr/bin/env`` and ``/bin/sh`` are named by absolute path.
+    ``/usr/bin/env`` and ``/bin/sh`` are named by absolute path. ``--`` ends env's options,
+    so no variable is read as one (``-S`` would run a new command).
     """
     assignments = {'PATH': TRUSTED_PATH, **(env or {})}
     variables = ' '.join(shlex.quote(f'{key}={value}') for key, value in assignments.items())
-    return f'/usr/bin/env -i {variables} /bin/sh -c {shlex.quote(command)}'
+    return f'/usr/bin/env -i -- {variables} /bin/sh -c {shlex.quote(command)}'
 
 
 def _drop_to(setpriv: str, uid: str, gid: str, *, allow_sudo: bool = False) -> str:

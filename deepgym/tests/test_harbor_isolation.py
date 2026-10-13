@@ -22,7 +22,7 @@ from deepgym.harbor.agent import run_agent
 from deepgym.harbor.grading import grade
 from deepgym.harbor.task import pack_files
 from deepgym.models import Environment
-from deepgym.sandboxes import SandboxTimeoutError, build_image
+from deepgym.sandboxes import TRUSTED_PATH, SandboxTimeoutError, build_image
 from deepgym.sandboxes.docker import DockerContainer
 from deepgym.session import SandboxBackend
 from tests.test_harbor import BUILT, HELLO
@@ -202,7 +202,7 @@ def _env_box(*answers: tuple[str, str], blocked: bool = True, workdir: str = '/a
 
 
 def test_tests_run_with_an_allowlisted_env_and_a_resolved_path() -> None:
-    task = HarborTask.from_dir(HELLO)
+    task = HarborTask.from_dir(HELLO).model_copy(update={'verifier_env': {'MODE': 'strict'}})
     agent = _box(_ENCODED)
     grader = _env_box(
         # The grader's own image env (session capture), then the probe grading reads for the
@@ -218,9 +218,28 @@ def test_tests_run_with_an_allowlisted_env_and_a_resolved_path() -> None:
     grade(grader, task, run.workspace, run.workdir)
 
     tests = shlex.split(grader.commands[_index(grader, _RUN_TESTS)])
-    start = tests.index('/usr/bin/env') + 2  # past `env -i`, after the nsenter prefix
+    start = tests.index('/usr/bin/env') + 3  # past `env -i --`, after any nsenter prefix
     assigned = dict(item.split('=', 1) for item in tests[start : tests.index('/bin/bash')])
-    assert assigned == {'LANG': 'C.UTF-8', 'TERM': 'xterm', 'HOME': '/root', 'PATH': '/usr/bin'}
+    assert assigned == {
+        'LANG': 'C.UTF-8',
+        'TERM': 'xterm',
+        'HOME': '/root',
+        'MODE': 'strict',
+        'PATH': '/usr/bin',
+    }
+
+
+def test_env_ends_its_options_before_any_variable() -> None:
+    box = _box()
+    backend = SandboxBackend(box, '/app')
+
+    backend.exec_root('true', 5, offline=False, env={'HOME': '/root'})
+    backend.exec_trusted('true', 5)
+
+    # `--` comes first, so env reads every NAME=VALUE as a variable, never as an option.
+    root, wrapped = (shlex.split(command) for command in box.commands[-2:])
+    assert root[:4] == ['/usr/bin/env', '-i', '--', 'HOME=/root']
+    assert wrapped[:4] == ['/usr/bin/env', '-i', '--', f'PATH={TRUSTED_PATH}']
 
 
 def test_backend_clears_the_whole_image_env_for_root_commands() -> None:

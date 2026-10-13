@@ -36,6 +36,8 @@ HARNESS_PATHS = ('/logs', '/tests', '/solution', STAGING_DIR)
 
 # Harbor drops leading markdown comments (canary strings) from the instruction.
 _LEADING_COMMENTS = re.compile(r'\A(?:\s*<!--.*?-->)+\s*', re.DOTALL)
+# A [verifier].env name tests/test.sh can get: a shell identifier, matched whole.
+_ENV_NAME = re.compile(r'[A-Za-z_][A-Za-z0-9_]*')
 
 
 def pack_files(files: Mapping[str, bytes]) -> bytes:
@@ -82,11 +84,25 @@ class _VerifierTable(_Table):
 
     @field_validator('env')
     @classmethod
-    def no_host_variables(cls, value: dict[str, str]) -> dict[str, str]:
-        """Refuse ``${VAR}`` values: host variables never go into a sandbox."""
+    def checked_env(cls, value: dict[str, str]) -> dict[str, str]:
+        """Refuse variables tests/test.sh can't get as written.
+
+        A name must be a shell identifier: ``env`` would read ``-S`` as an option, and
+        ``A=B``, a space or an empty name as an odd assignment. ``${VAR}`` values read host
+        variables, which never go into a sandbox, and no argument can hold a NUL.
+        """
+        names = sorted(name for name in value if not _ENV_NAME.fullmatch(name))
+        if names:
+            raise ValueError(
+                '[verifier].env names must be letters, digits and _, not starting with a '
+                f'digit: {names}'
+            )
         templated = sorted(name for name, text in value.items() if '${' in text)
         if templated:
             raise ValueError(f'[verifier].env reads host variables {templated}; not supported')
+        nul = sorted(name for name, text in value.items() if '\0' in text)
+        if nul:
+            raise ValueError(f'[verifier].env values hold a NUL character: {nul}')
         return value
 
 

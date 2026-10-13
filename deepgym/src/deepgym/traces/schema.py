@@ -13,11 +13,11 @@ those fields empty.
 
 from __future__ import annotations
 
-import functools
 import hashlib
 import json
 import os
 import subprocess
+import time
 from collections import Counter
 from collections.abc import Sequence
 from pathlib import Path
@@ -41,6 +41,7 @@ from deepgym.sandboxes import SandboxImage
 TRACE_SCHEMA_VERSION = '1.1'
 
 NOT_RESOLVED = 'not resolved: no sandbox reported which image it booted'
+UNFINISHED = 'trace ended before the episode was closed (process crashed or was killed?)'
 
 SamplingValue = str | int | FiniteFloat | bool | None
 
@@ -72,13 +73,17 @@ def environment_sha256(env: MultiTurnEnvironment) -> str:
     return sha256_text(json.dumps(data, sort_keys=True, separators=(',', ':')))
 
 
-def git_checkout(package: Path) -> tuple[str | None, bool | None]:
+def git_checkout(package: Path, since: float | None = None) -> tuple[str | None, bool | None]:
     """Return the git commit *package* is checked out at, and whether its files differ from it.
 
     The package must be tracked by the repository around it, so an install inside some
     other project's checkout (a virtualenv in it, say) never reports that project's commit.
     ``GIT_*`` variables are dropped, so they can't point git at another repository, and
     git takes no optional locks, so it never blocks a commit running at the same time.
+
+    Args:
+        package: The package folder.
+        since: A time; a tracked file modified after it also counts as a difference.
 
     Returns:
         ``(commit, dirty)``; ``(None, None)`` when *package* isn't tracked in a git
@@ -96,38 +101,39 @@ def git_checkout(package: Path) -> tuple[str | None, bool | None]:
             return None
         return done.stdout if done.returncode == 0 else None
 
-    if git('ls-files', '--error-unmatch', '--', '.') is None:
+    tracked = git('ls-files', '-z', '--', '.')
+    if not tracked:
         return None, None
     head = git('rev-parse', '--verify', 'HEAD')
     status = git('status', '--porcelain', '--', '.')
     if head is None or status is None:
         return None, None
-    return head.strip(), bool(status.strip())
+    names = filter(None, tracked.split('\0'))
+    touched = since is not None and any(_modified_after(package / name, since) for name in names)
+    return head.strip(), bool(status.strip()) or touched
+
+
+def _modified_after(path: Path, since: float) -> bool:
+    try:
+        return path.lstat().st_mtime > since
+    except OSError:
+        return True
 
 
 _PACKAGE = Path(__file__).resolve().parents[1]
-
-
-@functools.cache
-def _first_checkout() -> tuple[str | None, bool | None]:
-    return git_checkout(_PACKAGE)
+_IMPORTED_AT = time.time()
 
 
 def deepgym_checkout() -> tuple[str | None, bool | None]:
     """Return the commit of the deepgym checkout this code runs from, and whether it's dirty.
 
-    The commit is the one the checkout was at the first time this process asked: code
-    imported then keeps running, so a later commit would misname it. The checkout is dirty
-    if deepgym's files differed from that commit then, or have changed since.
+    Dirty means deepgym's files differ from the commit, or changed after deepgym was
+    imported: code loaded before that keeps running, so they may no longer show it.
 
     Returns:
         ``(commit, dirty)``, or ``(None, None)`` when not running from a git checkout.
     """
-    commit, dirty = _first_checkout()
-    if commit is None:
-        return None, None
-    now, dirty_now = git_checkout(_PACKAGE)
-    return commit, bool(dirty or dirty_now or now != commit)
+    return git_checkout(_PACKAGE, since=_IMPORTED_AT)
 
 
 class AgentMeta(BaseModel):
@@ -255,7 +261,8 @@ class Provenance(BaseModel):
     None when it ran from an installed package, and in traces before schema 1.1."""
 
     deepgym_dirty: bool | None = None
-    """Whether deepgym's files in that checkout differed from the commit; None without one."""
+    """Whether deepgym's files in that checkout differed from the commit, or had changed
+    since deepgym was imported; None without a commit."""
 
     started_at: AwareDatetime
 
@@ -294,9 +301,9 @@ class TraceStep(BaseModel):
     messages: tuple[TraceMessage, ...] = ()
     """Model messages new at this step, ending with the assistant reply that produced the
     action: the prompt on the first step, the rendered observations and reply after that.
-    Concatenated over all steps they are the whole conversation. Empty on the second and
-    later actions of one reply, which continue its turn (see :attr:`Trace.turns`), and
-    when not supplied."""
+    Concatenated over all steps they are the whole conversation. Since schema 1.1, empty
+    on the second and later actions of one reply, which continue its turn (see
+    :attr:`Trace.turns`); also empty when not supplied."""
 
     observation: Observation | None = None
     """What the action produced; None if it failed before producing anything."""
@@ -369,12 +376,19 @@ class Trace(BaseModel):
     def turns(self) -> list[list[int]]:
         """Step indexes by model turn: the actions one assistant reply produced, in order.
 
-        A step without messages belongs to the turn before it; one that comes before any
-        model messages is a group of its own, its turn unknown.
+        Since schema 1.1 a step without messages belongs to the turn before it. One before
+        any model messages, and any step of a 1.0 trace (where no messages meant none were
+        recorded), is a group of its own.
         """
         turns: list[list[int]] = []
         for step in self.steps:
-            if turns and not step.messages and self.steps[turns[-1][0] - 1].messages:
+            continues = (
+                self.schema_version != '1.0'
+                and turns
+                and not step.messages
+                and self.steps[turns[-1][0] - 1].messages
+            )
+            if continues:
                 turns[-1].append(step.index)
             else:
                 turns.append([step.index])
@@ -482,16 +496,19 @@ def _progress(trace: Trace) -> tuple[int, int, bool, bool, bool]:
 def _cut_short(copy: Trace, furthest: Trace) -> bool:
     """Whether *copy* is *furthest* recorded earlier, or the same trace.
 
-    A graded copy has every step: a traced episode takes no action after it is scored.
+    A traced episode takes no action once scored, so a graded copy has every step, and it
+    never clears an error, so one the copy records stays (or a later one replaces it).
     """
     if copy.finished_at is not None:
         return copy == furthest
     grades = _grades(copy)
     steps = furthest.steps if grades else furthest.steps[: len(copy.steps)]
+    erred = copy.error not in (None, UNFINISHED)
     return (
         (copy.schema_version, copy.task, copy.provenance)
         == (furthest.schema_version, furthest.task, furthest.provenance)
         and copy.initial_observation in (None, furthest.initial_observation)
         and copy.steps == steps
         and grades == _grades(furthest)[: len(grades)]
+        and not (erred and furthest.error is None)
     )

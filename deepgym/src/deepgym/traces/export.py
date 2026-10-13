@@ -12,8 +12,8 @@ Row shapes (``rows=``):
   are the step verifier's scores (null where none ran). ``steps`` holds every action in
   order with what it produced (text, base64 PNG screenshot, done flag, exit code, or the
   error if nothing), its step reward, and ``message_index``: where in ``messages`` the
-  reply that produced it is, shared by the actions of one turn. A trace whose first
-  action has no model messages has no conversation to train on and is skipped.
+  reply that produced it is, shared by the actions of one turn. A trace with a turn that
+  has no model messages has no whole conversation to train on and is skipped.
 
 Every row carries ``has_verdict``, and its ``score``/``reward`` and ``passed`` are null
 without one, so a failed sandbox or verifier never reads as a scored 0. ``only_valid``
@@ -53,11 +53,11 @@ class ExportReport(BaseModel):
 
 
 def rl_row(trace: Trace) -> Row | None:
-    """Return *trace* as one SFT/RL row, or None if its first action has no model messages.
+    """Return *trace* as one SFT/RL row, or None if a turn has no model messages.
 
-    A later action without messages came from the reply before it (see :attr:`Trace.turns`).
+    Each turn's messages are on its first action (see :attr:`Trace.turns`).
     """
-    if not trace.steps or not trace.steps[0].messages:
+    if not trace.steps or not all(trace.steps[turn[0] - 1].messages for turn in trace.turns):
         return None
     verdict = trace.result if trace.has_verdict else None
     provenance = trace.provenance

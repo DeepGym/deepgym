@@ -31,7 +31,7 @@ from deepgym.traces import (
     export_traces,
     load_trace,
     merge_copies,
-    schema,
+    rl_row,
 )
 from deepgym.traces.capture import UNFINISHED
 from deepgym.traces.schema import (
@@ -215,15 +215,35 @@ class TestSchema:
         failed = graded.result.model_copy(update={'score': 0.0, 'passed': False})
         regraded = graded.model_copy(update={'prior_results': (graded.result,), 'result': failed})
 
-        # A traced episode takes no action once graded, nor a grade once finished.
+        # A traced episode takes no action once graded, nor a grade once finished, and it
+        # never clears an error, though a later one may replace it.
         graded_early = graded.model_copy(update={'steps': graded.steps[:1], **unfinished})
+        erred = snapshot.model_copy(update={'error': 'VerifierError: invalid final output'})
+        erred_again = graded.model_copy(update={'error': 'VerifierError: timed out'})
 
         assert merge_copies([unstarted, graded, snapshot]) == [graded]
         assert merge_copies([snapshot, crashed]) == [crashed]
         assert merge_copies([graded.model_copy(update=unfinished), regraded]) == [regraded]
-        for other in (regraded, graded_early, graded.model_copy(update={'task': 'other'})):
+        assert merge_copies([erred, erred_again]) == [erred_again]
+        for copies in (
+            [graded, regraded],
+            [graded, graded_early],
+            [graded, graded.model_copy(update={'task': 'other'})],
+            [erred, graded],
+        ):
             with pytest.raises(ValueError, match='trace0001'):
-                merge_copies([graded, other])
+                merge_copies(copies)
+
+    def test_only_schema_1_1_continues_a_turn_without_messages(self) -> None:
+        trace = graded_trace()
+        bare = trace.steps[1].model_copy(update={'messages': ()})
+        current = trace.model_copy(update={'steps': (trace.steps[0], bare, trace.steps[2])})
+        # In schema 1.0 a step without messages had none recorded: it joins no turn.
+        legacy = current.model_copy(update={'schema_version': '1.0'})
+
+        assert current.turns == [[1, 2], [3]]
+        assert legacy.turns == [[1], [2], [3]]
+        assert rl_row(current) is not None and rl_row(legacy) is None
 
     def test_to_trajectory_never_moves_a_reward_to_another_step(self) -> None:
         trace = graded_trace()
@@ -334,23 +354,16 @@ class TestProvenance:
         git('commit', '--quiet', '-m', 'first')
         head = git('rev-parse', 'HEAD').strip()
         assert git_checkout(package) == (head, False)
+        # Rewritten after it was loaded: git sees no change, but the loaded code may differ.
+        loaded = (package / '__init__.py').stat().st_mtime
+        assert git_checkout(package, since=loaded) == (head, False)
+        os.utime(package / '__init__.py', (loaded + 5, loaded + 5))
+        assert git_checkout(package, since=loaded) == (head, True)
         (package / 'new.py').write_text('y = 2\n')
         assert git_checkout(package) == (head, True)
         (package / 'new.py').unlink()
         (package / '__init__.py').write_text('x = 2\n')
         assert git_checkout(package) == (head, True)
-
-    def test_deepgym_checkout_flags_changes_since_the_first_look(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        looks = iter([('abc', False), ('def', False), ('abc', True), (None, None)])
-        monkeypatch.setattr(schema, '_first_checkout', lambda: ('abc', False))
-        monkeypatch.setattr(schema, 'git_checkout', lambda package: next(looks))
-
-        # Imported code stays at the first commit, so a later one only makes it dirty.
-        assert [deepgym_checkout() for _ in range(4)] == [('abc', False)] + [('abc', True)] * 3
-        monkeypatch.setattr(schema, '_first_checkout', lambda: (None, None))
-        assert deepgym_checkout() == (None, None)
 
     def test_booted_image_takes_only_the_providers_digest(self) -> None:
         pinned = 'python:3.12-slim@sha256:' + 'cd' * 32

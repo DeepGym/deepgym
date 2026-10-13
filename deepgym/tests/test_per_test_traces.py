@@ -66,6 +66,15 @@ class TestCaseResultModel:
         case = CaseResult(passed=True, score=score)
         assert (case.score, case.passed) == (0.0, False)
 
+    def test_failed_case_without_score_gets_no_credit(self) -> None:
+        """A failed case scores 0 unless the verifier gave it an explicit partial score."""
+        vr = VerifierResult.model_validate_json(
+            '{"score": 0.5, "passed": false, "cases": ['
+            '{"id": "ok", "passed": true}, {"id": "bad", "passed": false},'
+            '{"id": "partial", "passed": false, "score": 0.25}]}'
+        )
+        assert [case.score for case in vr.cases] == [1.0, 0.0, 0.25]
+
     def test_with_error(self) -> None:
         """Create with error message."""
         tc = CaseResult(passed=False, score=0.0, error='IndexError: out of range')

@@ -80,7 +80,11 @@ def test_exported_scripts_are_valid_bash_and_quote_the_judge_environment(
     assert '> /opt/deepgym/verdict.out' in test_sh
 
 
-def test_exported_reward_parser_never_imports_from_the_work_directory(tmp_path: Path) -> None:
+def _run_exported_parser(tmp_path: Path, verdict: str, status: int) -> tuple[int, Path]:
+    """Run the exported reward parser as test.sh does, from a work dir with a decoy json.py.
+
+    Returns its exit code and the folder it writes reward.json to.
+    """
     test_sh = (
         export_environment(load_environment('two_sum'), tmp_path) / 'tests/test.sh'
     ).read_text()
@@ -88,27 +92,55 @@ def test_exported_reward_parser_never_imports_from_the_work_directory(tmp_path: 
     parser = rest.split('\nEOF\n', 1)[0]
     flags = shlex.split(invocation.splitlines()[-1])
     python_flags = flags[flags.index('python3') + 1 : flags.index('-')]
+    assert python_flags == ['-I']
     logs, workdir = tmp_path / 'logs', tmp_path / 'app'
     logs.mkdir()
     workdir.mkdir()
     (workdir / 'json.py').write_text('raise SystemExit("decoy json imported")\n')
-    verdict = tmp_path / 'verdict.out'
-    verdict.write_text('{"score": 1.0, "passed": true}\n')
-
+    (tmp_path / 'verdict.out').write_text(verdict + '\n')
     done = subprocess.run(
-        [sys.executable, *python_flags, '-', str(verdict)],
+        [sys.executable, *python_flags, '-', str(tmp_path / 'verdict.out'), str(status)],
         input=parser.replace('/logs/verifier', str(logs)),
         cwd=workdir,
         capture_output=True,
         text=True,
     )
+    return done.returncode, logs
 
-    assert done.returncode == 0, done.stderr
+
+def test_exported_reward_parser_never_imports_from_the_work_directory(tmp_path: Path) -> None:
+    code, logs = _run_exported_parser(tmp_path, '{"score": 1.0, "passed": true}', 0)
+
+    assert code == 0
     assert json.loads((logs / 'reward.json').read_text()) == {'reward': 1.0}
+    test_sh = (tmp_path / 'two_sum' / 'tests' / 'test.sh').read_text()
     assert test_sh.index('cd / ') < test_sh.index('python3')
     interpreters = [line for line in test_sh.splitlines() if 'python3' in line or 'bash /' in line]
     assert interpreters and all(line.startswith('/usr/bin/env -i ') for line in interpreters)
-    assert python_flags == ['-I']
+
+
+@pytest.mark.parametrize(
+    ('verdict', 'status', 'reward'),
+    [
+        ('{"score": 0.4, "passed": false}', 1, 0.4),
+        ('{"score": 0.0, "passed": false, "error_type": "invalid_patch"}', 2, 0.0),
+        ('{"score": 1.0, "passed": true}', 3, None),
+        ('{"score": 1.0, "passed": true}', 1, None),
+        ('{"score": 0.5, "passed": false}', 2, None),
+        ('{"score": 1.0, "passed": true, "error_type": "sandbox_error"}', 0, None),
+        ('{"score": true, "passed": true}', 0, None),
+        ('no verdict at all', 0, None),
+    ],
+)
+def test_exported_reward_needs_an_exit_code_that_backs_it(
+    tmp_path: Path, verdict: str, status: int, reward: float | None
+) -> None:
+    code, logs = _run_exported_parser(tmp_path, verdict, status)
+
+    if reward is None:
+        assert code != 0 and not (logs / 'reward.json').exists()
+    else:
+        assert code == 0 and json.loads((logs / 'reward.json').read_text()) == {'reward': reward}
 
 
 def test_export_reimports_as_a_runnable_harbor_environment(tmp_path: Path) -> None:

@@ -21,7 +21,7 @@ from deepgym.judge import (
     sandbox_judge_by_name,
     sandbox_uploads,
 )
-from deepgym.models import Environment, MultiTurnEnvironment
+from deepgym.models import MODEL_FAULT_ERRORS, Environment, MultiTurnEnvironment
 from deepgym.sandboxes import TRUSTED_PATH
 from deepgym.sandboxes.cli import DEFAULT_IMAGE
 
@@ -47,16 +47,23 @@ cp -r /tests/deepgym/. {root}/
 cp -P {solution} {root}/solution/solution.py 2>/dev/null
 chmod -R a+rX {root}/runtime {root}/solution
 /usr/bin/env -i PATH={path} {env} {command} > {verdict}
+status=$?
 {kill_solver} 2>/dev/null
 cp {verdict} /logs/verifier/verifier.out
-/usr/bin/env -i PATH={path} python3 -I - {verdict} <<'EOF'
+/usr/bin/env -i PATH={path} python3 -I - {verdict} "$status" <<'EOF'
 import json, sys
 lines = [line.strip() for line in open(sys.argv[1], errors='replace')]
 found = [line for line in lines if line.startswith('{{') and line.endswith('}}')]
-score = json.loads(found[-1]).get('score') if found else None
-if type(score) in (int, float) and 0 <= score <= 1:
-    with open('/logs/verifier/reward.json', 'w') as reward:
-        json.dump({{'reward': float(score)}}, reward)
+data = json.loads(found[-1]) if found else {{}}
+status, score, passed = int(sys.argv[2]), data.get('score'), data.get('passed')
+# The exit code must back the verdict (0 ok, 1 failed, 2 only with score 0), and a
+# reported error other than the model's own fault is no verdict: then no reward.
+backed = status == 0 or (passed is False and (status == 1 or (status == 2 and score == 0)))
+valid = type(score) in (int, float) and 0 <= score <= 1
+if not (backed and valid and data.get('error_type') in {model_faults}):
+    sys.exit(f'no reward: verifier exited {{status}} with {{found[-1] if found else "no verdict"}}')
+with open('/logs/verifier/reward.json', 'w') as reward:
+    json.dump({{'reward': float(score)}}, reward)
 EOF
 """
 
@@ -164,6 +171,7 @@ def _test_files(env: Environment) -> dict[str, str]:
         verdict=shlex.quote(f'{SANDBOX_ROOT}/verdict.out'),
         path=shlex.quote(TRUSTED_PATH),
         kill_solver=shlex.join([*solver, 'sh', '-c', 'kill -9 -1']),
+        model_faults=repr((None, *sorted(MODEL_FAULT_ERRORS))),
     )
     return files
 

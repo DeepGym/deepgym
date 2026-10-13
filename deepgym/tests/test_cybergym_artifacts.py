@@ -89,6 +89,37 @@ def test_reference_that_needs_git_scores_like_itself(tmp_path: Path, sandbox_dg:
     assert sandbox_dg.run(env, patch).score == 1.0
 
 
+@pytest.mark.parametrize(
+    ('text', 'hunk'),
+    [
+        # CRLF to LF (it can fix an unexecutable script) used to look like no change (0).
+        ('#!/bin/sh\r\nexit\r\n', '@@ -1,2 +1,2 @@\n-#!/bin/sh\r\n-exit\r\n+#!/bin/sh\n+exit\n'),
+        # So did adding a missing final newline, or removing one.
+        ('a\nb', '@@ -1,2 +1,2 @@\n a\n-b\n\\ No newline at end of file\n+b\n'),
+        ('a\nb\n', '@@ -1,2 +1,2 @@\n a\n-b\n+b\n\\ No newline at end of file\n'),
+    ],
+)
+def test_line_ending_fix_is_a_change(
+    tmp_path: Path, sandbox_dg: DeepGym, text: str, hunk: str
+) -> None:
+    patch = _HEADER + hunk
+    env = _toy_env(tmp_path, patch, {'hello.txt': text})
+
+    assert sandbox_dg.run(env, patch).score == 1.0
+
+
+def test_edit_to_a_crlf_file_counts_only_its_own_lines(tmp_path: Path, sandbox_dg: DeepGym) -> None:
+    """The applier keeps CRLF endings, so an LF patch doesn't turn every line into a change."""
+    env = _toy_env(tmp_path, _REFERENCE, {'hello.txt': 'bad\r\nkeep\r\nmore\r\n'})
+
+    correct = sandbox_dg.run(env, _HEADER + '@@ -1 +1 @@\n-bad\n+good\n')
+    wrong = sandbox_dg.run(env, _HEADER + '@@ -2 +2 @@\n-keep\n+kept\n')
+
+    assert correct.score == 1.0
+    assert wrong.passed is False
+    assert wrong.reward_components['line_similarity'] == 0.0
+
+
 def test_unrelated_reorder_does_not_match_a_reorder(tmp_path: Path, sandbox_dg: DeepGym) -> None:
     """Order counts: moving c is not the reference's move of a (an order-blind count gave 1.0)."""
     reference = _HEADER + '@@ -1,3 +1,3 @@\n-a\n b\n+a\n c\n'

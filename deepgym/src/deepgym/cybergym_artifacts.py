@@ -322,10 +322,16 @@ def candidate_roots(extract_dir, patch_text):
     return [item[2] for item in sorted(scored, key=lambda item: (-item[0], item[1]))] or roots[:20]
 
 
+def keep_lines(text):
+    # Lines with their endings, split only after \n as git counts them (splitlines also
+    # splits on \r, \f and more, and drops the endings a CRLF fix changes).
+    return [line for line in re.split(r'(?<=\n)', text) if line]
+
+
 def split_file_diffs(patch_text):
     chunks = []
     current = []
-    for line in patch_text.splitlines(keepends=True):
+    for line in keep_lines(patch_text):
         if line.startswith('diff --git ') and current:
             chunks.append(current)
             current = [line]
@@ -416,8 +422,8 @@ def changes(before, after):
     # matches it however it is written.
     files, lines = set(), set()
     for rel in before:
-        old, new = ((data or b'').decode('utf-8', 'replace').splitlines() for data in (before[rel], after[rel]))
-        if old == new:
+        old, new = (keep_lines((data or b'').decode('utf-8', 'replace')) for data in (before[rel], after[rel]))
+        if old == new:  # endings included: a CRLF or final-newline fix is a change
             continue
         files.add(rel)
         # Diff only the changed middle, without autojunk: its heuristic can call unchanged
@@ -474,7 +480,8 @@ def apply_file_diff(root, chunk):
     target = inside(root, target_rel)
     if not target.exists():
         raise ValueError(f'{target_rel}: file not found')
-    original = target.read_text(errors='replace').splitlines(keepends=True)
+    # Bytes in, bytes out: line endings and undecodable bytes survive untouched.
+    original = keep_lines(target.read_bytes().decode('utf-8', 'surrogateescape'))
     output = []
     source_pos = 0
     while index < len(chunk):
@@ -486,9 +493,12 @@ def apply_file_diff(root, chunk):
         output.extend(original[source_pos:hunk_start])
         source_pos = hunk_start
         index += 1
+        previous = None
         while index < len(chunk) and not chunk[index].startswith(('@@', 'diff --git ')):
             hline = chunk[index]
             if hline.startswith('\\ No newline at end of file'):
+                if previous == '+':  # the line just added ends the file without a newline
+                    output[-1] = output[-1].rstrip('\r\n')
                 index += 1
                 continue
             if not hline:
@@ -496,22 +506,24 @@ def apply_file_diff(root, chunk):
                 continue
             marker = hline[0]
             body = line_body(hline)
+            # Endings don't decide a match, so a patch with LF lines applies to a CRLF file.
             if marker == ' ':
-                if source_pos >= len(original) or original[source_pos].rstrip('\n') != body.rstrip('\n'):
+                if source_pos >= len(original) or original[source_pos].rstrip('\r\n') != body.rstrip('\r\n'):
                     raise ValueError(f'{target_rel}: context mismatch near line {source_pos + 1}')
                 output.append(original[source_pos])
                 source_pos += 1
             elif marker == '-':
-                if source_pos >= len(original) or original[source_pos].rstrip('\n') != body.rstrip('\n'):
+                if source_pos >= len(original) or original[source_pos].rstrip('\r\n') != body.rstrip('\r\n'):
                     raise ValueError(f'{target_rel}: removal mismatch near line {source_pos + 1}')
                 source_pos += 1
             elif marker == '+':
                 output.append(body)
             else:
                 raise ValueError(f'{target_rel}: invalid hunk line {hline!r}')
+            previous = marker
             index += 1
     output.extend(original[source_pos:])
-    target.write_text(''.join(output))
+    target.write_bytes(''.join(output).encode('utf-8', 'surrogateescape'))
 
 
 def apply_unified_patch(root, patch_text):
@@ -542,7 +554,8 @@ def apply_with_fallback(repo_dir, git_dir, archive_path, patch_text, timeout):
 
 def main():
     task = json.loads(Path(sys.argv[1]).read_text(encoding='utf-8'))
-    candidate_patch = Path(sys.argv[2]).read_text(encoding='utf-8') if len(sys.argv) > 2 else ''
+    # Bytes, not text mode: a patch to a CRLF file must keep its \r characters.
+    candidate_patch = Path(sys.argv[2]).read_bytes().decode('utf-8') if len(sys.argv) > 2 else ''
     archive_path = Path(sys.argv[3]) if len(sys.argv) > 3 else None
     reference_patch = task.get('reference_patch', '')
 

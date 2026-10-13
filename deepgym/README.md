@@ -403,7 +403,10 @@ result = dg.run(env, '''```diff\n... unified diff ...\n```''')
 
 ### Terminal-Bench 2.0
 
-Runs terminal commands in a task sandbox and checks the expected output or state.
+Terminal-Bench 2.0 is a Harbor dataset, so each run works like the Harbor tasks below:
+the model's shell commands run in the task's image and its tests grade the result. Its
+tests download their tools while grading and its images are amd64-only, so run it on
+Daytona.
 
 ```python
 from deepgym import DeepGym, load_environment
@@ -414,9 +417,56 @@ env = load_environment('terminal_bench_2')
 result = dg.run(
     env,
     model_output='python solve.py --input data.txt > output.txt',
-    task_id='regex-log',
+    task_id='log-summary-date-ranges',
 )
 print(result.score)
+```
+
+### Harbor tasks
+
+[Harbor](https://harborframework.com) tasks are folders with `instruction.md`,
+`task.toml`, `tests/test.sh` and an image or `environment/Dockerfile`. Import a dataset
+from a folder, a git URL or a Hugging Face dataset; `--register` makes the valid tasks
+loadable by name:
+
+```bash
+deepgym harbor import harborframework/terminal-bench-2.0 --limit 5   # list and validate
+deepgym harbor import ./my-tasks --register mine
+deepgym qa mine/hello-world --mode docker   # reference solve.sh passes, no-op fails
+```
+
+Each task is an environment whose model output is a bash script:
+
+```python
+from deepgym import DeepGym
+from deepgym.harbor import HarborEnvironment, load_tasks
+
+env = HarborEnvironment.from_task(load_tasks('./my-tasks')[0])
+result = DeepGym(mode='apple').run(env, 'echo hello > /app/hello.txt')
+```
+
+The script runs as an unprivileged user with no network, in a sandbox from the task's
+image. The grader is a fresh sandbox from the same image that gets only a copy of the
+work directory; `tests/` is uploaded there at grading time and the reward is read from
+its `/logs/verifier/` after `test.sh` exits. Nothing the agent writes can reach the tests
+or the reward file. This holds on every provider.
+
+- Docker and Apple container also build `environment/Dockerfile` tasks; Modal, E2B and
+  Daytona need a prebuilt `docker_image`.
+- Tests get the network unless the task says `no-network`, but Docker, Modal and E2B
+  sandboxes never have one.
+- On Apple container and Daytona the image needs python3 and util-linux to cut the agent
+  off the network.
+- The agent owns the work directory (`[environment].workdir`, else the image's WORKDIR),
+  so it can't be `/`, `/tmp`, `/root` or a system folder.
+- `mode='local'` runs on your machine without isolation, for tasks that use relative
+  paths only.
+
+Export built-in environments as Harbor tasks. The agent writes `/app/solution.py` as a
+non-root user and a separate offline verifier runs the DeepGym verifier on it:
+
+```bash
+deepgym harbor export coin_change two_sum --out ./harbor-tasks
 ```
 
 ### Mix benchmarks behind one reward function
@@ -786,8 +836,9 @@ The server won't start without auth configured. Set `DEEPGYM_API_KEY` for
 production or `DEEPGYM_NO_AUTH=true` for local development.
 `--allow-local-exec` is required when running without Daytona.
 
-Other commands: `run-batch`, `eval`, `create`, `audit`, `qa`, `benchmark-audit`,
-`traces export` and `console`. Run `deepgym <command> --help` for options.
+Other commands: `run-batch`, `eval`, `create`, `audit`, `qa`, `harbor`,
+`benchmark-audit`, `traces export` and `console`. Run `deepgym <command> --help` for
+options.
 
 ## Console
 

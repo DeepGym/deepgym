@@ -199,7 +199,11 @@ class TraceStep(BaseModel):
     observation: Observation | None = None
     """What the action produced; None if it failed before producing anything."""
 
-    reward: float | None = None
+    applied: bool = True
+    """Whether the session recorded the action as taken; False if it was rejected, or
+    failed before the session recorded it."""
+
+    reward: float | None = Field(default=None, ge=0.0, le=1.0)
     """Step verifier score; None when the environment has no step verifier or it failed."""
 
     step_verifier: dict[str, JsonValue] | None = None

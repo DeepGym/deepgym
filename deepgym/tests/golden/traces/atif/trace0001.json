@@ -74,7 +74,8 @@
             "content": "",
             "extra": {
               "exit_code": 0,
-              "done": false
+              "done": false,
+              "applied": true
             }
           }
         ]
@@ -129,6 +130,7 @@
             "source_call_id": "call_2",
             "content": "ActionError: Action 'write_file' not allowed here.",
             "extra": {
+              "applied": false,
               "error": "ActionError: Action 'write_file' not allowed here."
             }
           }
@@ -159,7 +161,8 @@
             "source_call_id": "call_3",
             "content": "",
             "extra": {
-              "done": true
+              "done": true,
+              "applied": true
             }
           }
         ]

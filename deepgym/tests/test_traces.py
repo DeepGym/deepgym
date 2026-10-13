@@ -1,12 +1,13 @@
 """Tests for deepgym.traces: schema, provenance hashing, crash-safe capture, console storage."""
 
+import base64
 import json
 import os
 import sqlite3
 import subprocess
 import sys
 from concurrent.futures import ThreadPoolExecutor
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 
 import pytest
@@ -14,13 +15,17 @@ from pydantic import ValidationError
 
 from deepgym import ComputerUseEnvironment, DeepGym
 from deepgym.console.episode_store import EpisodeStore, record_episode
-from deepgym.exceptions import ActionError, DeepGymError, VerifierError
+from deepgym.exceptions import ActionError, DeepGymError, SandboxError, VerifierError
 from deepgym.models import Action, MultiTurnEnvironment, Trajectory
+from deepgym.session import LocalBackend, Session
 from deepgym.traces import (
     AgentMeta,
     EnvFingerprint,
+    Provenance,
     Trace,
+    TracedSession,
     TraceMessage,
+    TraceStep,
     export_traces,
     load_trace,
 )
@@ -74,6 +79,24 @@ def _reject_constant(name: str) -> None:
     raise AssertionError(f'{name} is not valid JSON')
 
 
+class _OneScreenshot(LocalBackend):
+    """A local backend with a 'desktop' whose screenshots fail after the first."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.shots = 0
+
+    def start_desktop(self) -> None:
+        """Pretend a desktop started."""
+
+    def screenshot(self) -> str:
+        """Return one screenshot, then fail."""
+        self.shots += 1
+        if self.shots > 1:
+            raise SandboxError('screenshot failed')
+        return base64.b64encode(b'png').decode()
+
+
 class TestSchema:
     """The trace schema round-trips and rejects inconsistent data."""
 
@@ -107,6 +130,13 @@ class TestSchema:
     def test_logprobs_must_be_finite(self) -> None:
         with pytest.raises(ValidationError):
             TraceMessage(role='assistant', content='x', logprobs=(float('nan'),))
+
+    @pytest.mark.parametrize('reward', [float('inf'), float('nan'), -0.1, 1.5])
+    def test_step_reward_must_be_a_score(self, reward: float) -> None:
+        step = graded_trace().steps[0].model_dump()
+
+        with pytest.raises(ValidationError):
+            TraceStep.model_validate({**step, 'reward': reward})
 
     @pytest.mark.parametrize('trace_id', ['../escape', 'a/b', '', 'x' * 65])
     def test_trace_id_is_path_safe(self, trace_id: str) -> None:
@@ -407,6 +437,37 @@ class TestCapture:
                 )
 
         assert [step.index for step in load_trace(tr.path).steps] == [1, 2, 3, 4]
+
+    def test_failure_after_scoring_a_step_keeps_the_score(self, tmp_path: Path) -> None:
+        env = WRITE_ENV.model_copy(update={'desktop': True})
+        provenance = Provenance(
+            env=EnvFingerprint.of(env),
+            agent=AGENT,
+            provider='local',
+            deepgym_version='test',
+            started_at=datetime.now(timezone.utc),
+        )
+        tr = TracedSession(Session(env, _OneScreenshot()), env, provenance, tmp_path / 't.jsonl')
+
+        with tr:
+            tr.start()
+            with pytest.raises(SandboxError, match='screenshot failed'):
+                tr.step(Action(action_type='bash', content='echo hello > out.txt'))
+
+        (step,) = load_trace(tr.path).steps
+        assert step.applied and step.observation is None
+        assert (step.reward, step.step_verifier['details']) == (0.5, 'step 1')
+        assert step.error == 'SandboxError: screenshot failed'
+
+    def test_closed_trace_refuses_everything(self, dg: DeepGym) -> None:
+        tr = dg.trace(WRITE_ENV, AGENT)
+        tr.start()
+        tr.close()
+
+        for call in (tr.start, tr.score, lambda: tr.step(Action(action_type='done'))):
+            with pytest.raises(DeepGymError, match='closed'):
+                call()
+        assert load_trace(tr.path).steps == ()
 
     def test_steps_outside_the_episode_are_refused(self, dg: DeepGym) -> None:
         with dg.trace(WRITE_ENV, AGENT) as tr:

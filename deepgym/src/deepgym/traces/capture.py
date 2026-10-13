@@ -19,7 +19,7 @@ from pathlib import Path
 from typing import TextIO, TypeVar
 from uuid import uuid4
 
-from deepgym.exceptions import DeepGymError
+from deepgym.exceptions import DeepGymError, VerifierError
 from deepgym.models import Action, MultiTurnEnvironment, Observation, RunResult
 from deepgym.session import Session, StepResult
 from deepgym.traces.schema import (
@@ -106,10 +106,12 @@ class TracedSession:
         The trace file is created first, so even a failed setup leaves a trace.
 
         Raises:
-            DeepGymError: As :meth:`Session.start`; the error is recorded first.
+            DeepGymError: If the trace is closed, or as :meth:`Session.start` (the error
+                is recorded first).
             FileExistsError: If the trace file already exists.
         """
         with self._lock:
+            self._check_open()
             self._open()
             observation = self._recorded(self._session.start)
             self._initial = observation.model_copy(deep=True)
@@ -131,17 +133,19 @@ class TracedSession:
             The session's step result.
 
         Raises:
-            DeepGymError: If the episode isn't running (not started, ended or already
-                scored: a verdict must match the state the trace ends in). Nothing is
-                recorded then.
+            DeepGymError: If the trace is closed or the episode isn't running (not
+                started, ended or already scored: a verdict must match the state the
+                trace ends in). Nothing is recorded then.
         """
         with self._lock:
+            self._check_open()
             if self._result is not None:
                 raise DeepGymError('The episode was already scored; open a new trace to act')
             if self._initial is None or self._session.done:
                 raise DeepGymError('The episode is not running; call start() or open a new trace')
             trajectory = self._session.trajectory
             applied_before = len(trajectory.steps)
+            scored = bool(self._env.step_verifier_code)
             record = {
                 'index': len(self._steps) + 1,
                 'action': action.model_copy(deep=True),
@@ -153,17 +157,22 @@ class TracedSession:
                 result = self._session.step(action)
             except Exception as exc:
                 applied = len(trajectory.steps) > applied_before
+                # The session records a step once its step verifier scored it, or failed
+                # (VerifierError); a later failure, such as a screenshot, keeps the score.
+                verified = applied and scored and not isinstance(exc, VerifierError)
                 observation = trajectory.final_observation if applied else None
                 self._add_step(
                     TraceStep(
                         **record,
+                        applied=applied,
                         observation=observation and observation.model_copy(deep=True),
+                        reward=trajectory.step_rewards[-1] if verified else None,
+                        step_verifier=self._session.step_verdict if verified else None,
                         error=_describe(exc),
                         duration_ms=_elapsed_ms(start),
                     )
                 )
                 raise
-            scored = bool(self._env.step_verifier_code)
             self._add_step(
                 TraceStep(
                     **record,
@@ -179,9 +188,11 @@ class TracedSession:
         """Run the final verifier and record its result.
 
         Raises:
+            DeepGymError: If the trace is closed.
             VerifierError: As :meth:`Session.score`; the error is recorded first.
         """
         with self._lock:
+            self._check_open()
             result = self._recorded(self._session.score)
             self._result = result.model_copy(deep=True)
             self._write({'event': 'result', 'result': self._result})
@@ -210,6 +221,11 @@ class TracedSession:
         if exc is not None and self._error is None:
             self._error = _describe(exc)
         self.close()
+
+    def _check_open(self) -> None:
+        """Refuse to touch the session once the trace is closed."""
+        if self._finished_at is not None:
+            raise DeepGymError('The trace is closed; open a new one')
 
     def _recorded(self, call: Callable[[], _T]) -> _T:
         """Return ``call()``, remembering its error for the trace before re-raising it."""

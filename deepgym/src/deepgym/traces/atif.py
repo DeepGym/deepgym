@@ -18,8 +18,8 @@ Mapping, one ATIF document per trace:
   last message, when it's the assistant's; '' otherwise), its single tool call is the
   action (``function_name`` = action type, ``arguments`` = the action's non-default
   fields) and its observation is what the action produced, or the error if it produced
-  nothing. Exit code, error and done flag go in the observation result's ``extra``; the
-  step reward and step verifier output in the step's ``extra``.
+  nothing. Exit code, done flag, ``applied`` and error go in the observation result's
+  ``extra``; the step reward and step verifier output in the step's ``extra``.
 * Assistant token ids and logprobs become ``metrics.completion_token_ids`` and
   ``metrics.logprobs``; token data on other roles has no ATIF field and is dropped.
 * Screenshots are PNG files under ``images/<trace_id>/`` next to the document, referenced
@@ -157,6 +157,7 @@ def _turn(
             'observation': _results(observed, call_id, _compact({
                 'exit_code': step.exit_code,
                 'done': None if step.observation is None else step.observation.done,
+                'applied': step.applied,
                 'error': step.error,
             })),
             'metrics': None if reply is None else _metrics(reply),

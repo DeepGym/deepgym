@@ -87,6 +87,7 @@ def graded_trace() -> Trace:
                     TraceMessage(role='tool', content='exit 0'),
                     TraceMessage(role='assistant', content='write notes/extra.txt'),
                 ),
+                applied=False,
                 error="ActionError: Action 'write_file' not allowed here.",
                 timestamp=_at(2),
                 duration_ms=1.0,

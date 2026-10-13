@@ -435,3 +435,26 @@ def test_reports_are_written_whole_or_not_at_all(
     assert [path.name for path in tmp_path.iterdir()] == ['r.json']  # no stray temp file
     with pytest.raises(FileExistsError):
         report_module.write_atomically(target, 'new\n', exclusive=True)
+
+
+def test_rate_limit_backoff_honors_retry_after_else_jitters(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from deepgym.qa import difficulty
+
+    replies = iter([(429, {}), (429, {'retry-after': '7'}), (429, {}), (200, {})])
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        status, headers = next(replies)
+        body = {'choices': [{'message': {'content': _RIGHT}}]} if status == 200 else {}
+        return httpx.Response(status, headers=headers, json=body)
+
+    waits: list[float] = []
+    monkeypatch.setattr(difficulty.time, 'sleep', waits.append)
+    monkeypatch.setattr(difficulty.random, 'uniform', lambda low, high: high)  # the cap
+    client = ZaiChatClient(
+        'k', base_url='https://llm.test/v1', model='m', transport=httpx.MockTransport(handler)
+    )
+
+    assert difficulty._complete(client, 'task') == _RIGHT
+    assert waits == [2.0, 7.0, 8.0]  # jitter up to 2s, then as asked, then up to 8s

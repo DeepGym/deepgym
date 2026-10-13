@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import email.utils
 import os
+import random
 import statistics
 import time
 from concurrent.futures import ThreadPoolExecutor
@@ -28,7 +29,11 @@ _RETRIES = 5
 """Retries for a sample the endpoint rate-limited (429), timed out or failed (5xx)."""
 
 _RETRYABLE = frozenset({408, 409, 429, 500, 502, 503, 504})
+_BASE_WAIT_S = 2.0
 _MAX_WAIT_S = 60.0
+
+_IN_FLIGHT = 4
+"""Requests at once: a shared or rate-limited key answers a burst with 429s."""
 
 
 def client_from_env(model: str) -> ZaiChatClient:
@@ -66,7 +71,7 @@ def difficulty_check(env: Environment, dg: DeepGym, client: ZaiChatClient, sampl
     Raises:
         DeepGymError: If the endpoint refuses a request outright (a bad key or model).
     """
-    with ThreadPoolExecutor(max_workers=samples) as pool:
+    with ThreadPoolExecutor(max_workers=min(samples, _IN_FLIGHT)) as pool:
         completions = list(pool.map(lambda _: _complete(client, env.task), range(samples)))
     if missing := [error for error in completions if isinstance(error, Exception)]:
         details = (
@@ -102,8 +107,10 @@ def difficulty_check(env: Environment, dg: DeepGym, client: ZaiChatClient, sampl
 def _complete(client: ZaiChatClient, prompt: str) -> str | Exception:
     """Return one completion, retrying the endpoint's own failures with backoff.
 
-    Returns the last error instead of raising once the retries run out, so a busy
-    endpoint makes the check inconclusive rather than aborting the run.
+    Waits as long as a Retry-After header asks, else a random time up to 2s, 4s, 8s ...
+    (capped at a minute): full jitter, so samples that hit a limit together don't retry
+    together. Returns the last error instead of raising once the retries run out, so
+    a busy endpoint makes the check inconclusive rather than aborting the run.
 
     Raises:
         DeepGymError: If the endpoint refuses the request outright (4xx but 408/409/429).
@@ -111,7 +118,9 @@ def _complete(client: ZaiChatClient, prompt: str) -> str | Exception:
     error: Exception | None = None
     for attempt in range(_RETRIES + 1):
         if attempt:
-            time.sleep(min(_retry_after(error) or 2.0**attempt, _MAX_WAIT_S))
+            ceiling = min(_MAX_WAIT_S, _BASE_WAIT_S * 2 ** (attempt - 1))
+            asked = _retry_after(error)
+            time.sleep(min(asked, _MAX_WAIT_S) if asked is not None else random.uniform(0, ceiling))
         try:
             return client.complete_prompt(prompt, temperature=1.0, thinking=None)
         except httpx.HTTPStatusError as exc:

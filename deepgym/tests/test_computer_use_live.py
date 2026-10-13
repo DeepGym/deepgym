@@ -72,6 +72,24 @@ def test_a_shell_out_of_the_desktop_is_the_unprivileged_agent(dg: DeepGym) -> No
     assert result.score == 0.0, 'the spy must not forge the untouched desktop to a pass'
 
 
+def test_chromium_is_the_unprivileged_agent(dg: DeepGym) -> None:
+    """--no-sandbox is safe only while every Chromium process is the agent's, with
+    no-new-privs, and nothing hides the flag."""
+    env = load_environment('settings_tabs')
+    env = env.model_copy(update={'allowed_actions': env.allowed_actions | {'bash'}})
+    # The [m] keeps this probe's own command line out of pgrep's matches.
+    probe = (
+        'pids=$(pgrep -f \'/usr/lib/chromium/chromiu[m]\'); [ -n "$pids" ] || echo ESCAPED; '
+        'for p in $pids; do [ "$(stat -c %u /proc/$p)" = "$(id -u)" ] && '
+        "grep -q 'NoNewPrivs:[[:space:]]*1' /proc/$p/status || echo ESCAPED; "
+        "tr '\\0' ' ' < /proc/$p/cmdline | grep -q -e --test-type && echo ESCAPED; done"
+    )
+    with dg.session(env) as session:
+        session.start()
+        out = session.step(Action(action_type='bash', content=probe)).observation.content
+    assert 'ESCAPED' not in out, out
+
+
 # Each makes the image differ from what the lockdown expects, so the desktop must not start.
 _SABOTAGE = {
     # Daytona's daemon would find the real session ahead of the wrapper, and run it as itself.

@@ -4,6 +4,7 @@ Runs each verifier locally against hand-built end states, so no Daytona needed.
 """
 
 import json
+import re
 import subprocess
 import sys
 from pathlib import Path
@@ -194,6 +195,20 @@ def test_setup_needs_no_root(name: str) -> None:
     env = load_environment(name)
     scripts = [env.setup_script, *(t for rel, t in env.files.items() if rel.endswith('.sh'))]
     assert not any('sudo' in script for script in scripts)
+
+
+# Every flag launch_app.sh may start Chromium with. --no-sandbox is the one documented
+# exception (see the script); nothing else that weakens the sandbox or hides it gets in.
+CHROMIUM_FLAGS = {
+    '--no-first-run', '--no-default-browser-check', '--disable-gpu', '--disable-features',
+    '--password-store', '--kiosk', '--no-sandbox', '--remote-debugging-port', '--user-data-dir',
+}  # fmt: skip
+
+
+def test_chromium_flags_stay_on_the_allowlist() -> None:
+    script = load_environment('settings_tabs').files['_shared/launch_app.sh']
+    command = script[script.index('nohup chromium') : script.index('http://')]
+    assert set(re.findall(r'--[a-z-]+', command)) == CHROMIUM_FLAGS
 
 
 def test_computer_use_suite_is_separate() -> None:

@@ -712,6 +712,26 @@ _EDITED_INI = '[pytest]\n# edited\n'
         ),
         # calc.py inside tests/test_calc.py is no mention: a plain fix is graded.
         pytest.param('{pytest} -c ci.ini -p localplugin', {}, 'graded', id='fix-only'),
+        # A basename behind a folder that may be its own still counts: a cwd-relative ./ci.ini,
+        # a spelling that normalizes to sub/ci.ini, or a partial path after a cd.
+        pytest.param(
+            '(cd sub && cat ./ci.ini); {pytest}',
+            {'sub/ci.ini': _EDITED_INI},
+            'masked',
+            id='cwd-relative',
+        ),
+        pytest.param(
+            'cat sub/./ci.ini && {pytest}',
+            {'sub/ci.ini': _EDITED_INI},
+            'masked',
+            id='spelled-folder',
+        ),
+        pytest.param(
+            '(cd deep && cat sub/ci.ini); {pytest}',
+            {'deep/sub/ci.ini': _EDITED_INI},
+            'masked',
+            id='partial-path',
+        ),
         # A basename behind another folder names a different file (NodeBB tests its
         # src/socket.io/posts.js with test/posts.js): the fix is graded.
         pytest.param(

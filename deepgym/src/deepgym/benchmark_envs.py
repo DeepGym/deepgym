@@ -284,6 +284,7 @@ class PatchVerifier:
         """
         return f'_VENDORED_TOML = {_vendored_toml_source()!r}\n\n' + textwrap.dedent(
             """
+            import fnmatch
             import json
             import os
             import posixpath
@@ -590,19 +591,33 @@ class PatchVerifier:
 
 
             def _mentioned(rel: str, text: str) -> bool:
-                # Whether the test command text names *rel*: by its repo-relative path (also as
-                # ./rel or an absolute path), by its bare basename (`-c ci.ini` after a cd) or, for
-                # Python, by module (as `-p plugin` names plugin.py). No shell parsing, just a search
-                # where a match glued to other name characters doesn't count (calc.py inside
-                # test_calc.py), nor a basename or module behind a folder: posts.js in test/posts.js
-                # names a different file than src/socket.io/posts.js.
+                # Whether the test command text may name *rel*. A wrong yes only masks a passing run,
+                # so a word naming rel's basename counts unless it plainly names another folder.
+                # Words are split at whitespace, quotes and shell punctuation (no shell parsing) and
+                # normalized like the patch paths; a glob matches as a glob. A relative word counts if
+                # rel may end with it (./ci.ini, sub/./ci.ini, sub/ci.ini after a cd), as does one
+                # whose folder is unknown (../, ~, $VAR, `cmd`); an absolute one only if it ends in
+                # /rel. So test/posts.js names another file than src/socket.io/posts.js, and
+                # test_calc.py is not calc.py. A Python file is also named by its module (-p plugin),
+                # under the same suffix rule.
                 base = rel.rsplit('/', 1)[-1]
-                names = [(rel, ''), (base, '/')]
-                if base.endswith('.py'):
-                    names.append((rel[:-3].removesuffix('/__init__').replace('/', '.'), '/'))
-                return any(
-                    re.search(rf'(?<![\\w.{behind}-]){re.escape(name)}(?![\\w.-])', text) for name, behind in names
-                )
+                stem = rel[:-3].removesuffix('/__init__') if rel.endswith('.py') else None
+                for word in filter(None, re.split(r'[\\s\\'"=:;,|&()<>]+', text)):
+                    if stem and re.fullmatch(r'[A-Za-z_][\\w.]*', word):
+                        module = word.replace('.', '/')
+                        if stem == module or stem.endswith('/' + module):
+                            return True
+                    norm = posixpath.normpath(word)
+                    if not fnmatch.fnmatchcase(base, norm.rsplit('/', 1)[-1]):
+                        continue
+                    if norm.startswith(('../', '~')) or '$' in norm or '`' in norm:
+                        return True
+                    if norm.startswith('/'):
+                        if re.search(r'[*?\\[]', norm) or norm.endswith('/' + rel):
+                            return True
+                    elif fnmatch.fnmatchcase(rel, norm) or fnmatch.fnmatchcase(rel, '*/' + norm):
+                        return True
+                return False
 
 
             def _read_config(path: Path) -> bytes | None:

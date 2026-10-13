@@ -97,6 +97,55 @@ class RunDetail(RunSummary):
     result: RunResult | None = None
 
 
+class RunTotals(BaseModel):
+    """Counts and means over a set of runs."""
+
+    runs: int
+    finished: int
+    """Runs that completed or failed."""
+
+    passed: int
+    errors: int
+    """Runs with an error_type: they raised, were interrupted, or the verifier reported one."""
+
+    mean_score: float | None = None
+    """Mean score of the finished runs."""
+
+    mean_duration_ms: float | None = None
+
+
+class EnvironmentStats(RunTotals):
+    """Totals of one environment's runs."""
+
+    environment: str
+
+
+class ErrorTypeCount(BaseModel):
+    """How many runs ended with one error_type."""
+
+    error_type: str
+    count: int
+
+
+class RunStats(BaseModel):
+    """Aggregates of the runs started in a time window, for the overview and runs pages."""
+
+    hours: int | None
+    """Window length in hours; None covers every run."""
+
+    current: RunTotals
+    previous: RunTotals | None = None
+    """The window of the same length just before, for deltas; None when hours is None."""
+
+    score_bins: list[int]
+    """Finished runs per score tenth: [0.0, 0.1), [0.1, 0.2), ..., [0.9, 1.0]."""
+
+    error_types: list[ErrorTypeCount]
+    """Most common first."""
+
+    environments: list[EnvironmentStats]
+
+
 class EpisodeCreate(BaseModel):
     """A finished episode to store for replay."""
 

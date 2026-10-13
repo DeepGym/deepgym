@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
-from fastapi import APIRouter, HTTPException, Query, status
+from typing import Annotated
+
+from fastapi import APIRouter, Depends, HTTPException, Query, status
 
 from deepgym.console.deps import RunnerDep, RunStoreDep
 from deepgym.console.environments import reference_solution
@@ -11,6 +13,7 @@ from deepgym.console.schemas import (
     RunCreate,
     RunDetail,
     RunSpec,
+    RunStats,
     RunStatus,
     RunSummary,
 )
@@ -64,23 +67,40 @@ def run_config(runner: RunnerDep) -> RunConfig:
     return RunConfig(local_custom_code=runner.allow_local_exec)
 
 
-@router.get('', response_model=list[RunSummary])
-def list_runs(
-    runs: RunStoreDep,
+def run_filters(
     run_status: RunStatus | None = Query(None, alias='status'),
     environment: str | None = None,
     provider: str | None = None,
     group_id: str | None = None,
-    limit: int = Query(200, ge=1, le=1000),
-) -> list[RunSummary]:
-    """List the newest runs matching every given filter."""
-    filters = {
+) -> dict[str, str | None]:
+    """Collect the query filters shared by the run list and its stats."""
+    return {
         'status': run_status,
         'environment': environment,
         'provider': provider,
         'group_id': group_id,
     }
+
+
+RunFiltersDep = Annotated[dict[str, str | None], Depends(run_filters)]
+
+
+@router.get('', response_model=list[RunSummary])
+def list_runs(
+    runs: RunStoreDep, filters: RunFiltersDep, limit: int = Query(200, ge=1, le=1000)
+) -> list[RunSummary]:
+    """List the newest runs matching every given filter."""
     return runs.list(filters, limit)
+
+
+@router.get('/stats', response_model=RunStats)
+def run_stats(
+    runs: RunStoreDep,
+    filters: RunFiltersDep,
+    hours: int | None = Query(None, ge=1, le=24 * 365),
+) -> RunStats:
+    """Aggregate runs matching every filter, started in the last *hours* (or ever)."""
+    return runs.stats(filters, hours)
 
 
 @router.get('/{run_id}', response_model=RunDetail)

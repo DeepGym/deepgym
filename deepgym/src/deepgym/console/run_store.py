@@ -3,20 +3,41 @@
 from __future__ import annotations
 
 import json
+import sqlite3
 from collections.abc import Sequence
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from uuid import uuid4
 
 from deepgym.console.db import connect, init_db, utc_now
-from deepgym.console.schemas import RunDetail, RunMode, RunSpec, RunSummary
+from deepgym.console.schemas import (
+    EnvironmentStats,
+    ErrorTypeCount,
+    RunDetail,
+    RunMode,
+    RunSpec,
+    RunStats,
+    RunSummary,
+    RunTotals,
+)
 from deepgym.models import RunResult
 
 _SUMMARY_COLUMNS = (
     'id, group_id, environment, mode, provider, reference, status, score, passed, '
     'error_type, duration_ms, created_at, finished_at'
 )
-# Columns list() may filter on; keys are code-defined, values are bound parameters.
+# Columns list() and stats() may filter on; keys are code-defined, values are bound parameters.
 _FILTER_COLUMNS = frozenset({'status', 'environment', 'provider', 'group_id'})
+_FINISHED = "status IN ('completed', 'failed')"
+# Select list of RunTotals; SUM over no rows is NULL, hence the COALESCEs.
+_TOTALS = (
+    'COUNT(*) AS runs, '
+    f'COALESCE(SUM({_FINISHED}), 0) AS finished, '
+    'COALESCE(SUM(passed = 1), 0) AS passed, '
+    'COALESCE(SUM(error_type IS NOT NULL), 0) AS errors, '
+    f'AVG(CASE WHEN {_FINISHED} THEN score END) AS mean_score, '
+    'AVG(duration_ms) AS mean_duration_ms'
+)
 
 
 class RunStore:
@@ -116,18 +137,62 @@ class RunStore:
         Returns:
             Runs, newest first.
         """
-        active = {key: value for key, value in filters.items() if value is not None}
-        unknown = active.keys() - _FILTER_COLUMNS
-        if unknown:
-            raise ValueError(f'Cannot filter runs by {sorted(unknown)}')
-        where = ' AND '.join(f'{key} = ?' for key in active) or '1'
+        where, params = _where(filters)
         with connect(self._path) as conn:
             rows = conn.execute(
                 f'SELECT {_SUMMARY_COLUMNS} FROM runs WHERE {where} '
                 'ORDER BY created_at DESC, rowid DESC LIMIT ?',
-                (*active.values(), limit),
+                (*params, limit),
             ).fetchall()
         return [RunSummary.model_validate(dict(row)) for row in rows]
+
+    def stats(self, filters: dict[str, str | None], hours: int | None) -> RunStats:
+        """Aggregate the runs matching every non-None filter, started in the last *hours*.
+
+        Args:
+            filters: Column -> value, as for :meth:`list`.
+            hours: Window length; the window just before it is totalled too, for deltas.
+                None aggregates every run and has no previous window.
+
+        Returns:
+            Totals, score histogram, error types and per-environment totals of the window.
+        """
+        where, params = _where(filters)
+        previous: tuple[str, list[str]] | None = None
+        if hours is not None:
+            start = datetime.now(timezone.utc) - timedelta(hours=hours)
+            earlier = start - timedelta(hours=hours)
+            previous = (
+                f'{where} AND created_at >= ? AND created_at < ?',
+                [*params, earlier.isoformat(), start.isoformat()],
+            )
+            where, params = f'{where} AND created_at >= ?', [*params, start.isoformat()]
+        with connect(self._path) as conn:
+            environments = conn.execute(
+                f'SELECT environment, {_TOTALS} FROM runs WHERE {where} '
+                'GROUP BY environment ORDER BY environment',
+                params,
+            ).fetchall()
+            error_types = conn.execute(
+                f'SELECT error_type, COUNT(*) AS count FROM runs WHERE {where} '
+                'AND error_type IS NOT NULL GROUP BY error_type ORDER BY count DESC, error_type',
+                params,
+            ).fetchall()
+            bins = [0] * 10
+            for row in conn.execute(
+                'SELECT MIN(CAST(score * 10 AS INTEGER), 9) AS bin, COUNT(*) AS count FROM runs '
+                f'WHERE {where} AND {_FINISHED} AND score IS NOT NULL GROUP BY bin',
+                params,
+            ):
+                bins[row['bin']] = row['count']
+            return RunStats(
+                hours=hours,
+                current=_totals(conn, where, params),
+                previous=_totals(conn, *previous) if previous else None,
+                score_bins=bins,
+                error_types=[ErrorTypeCount.model_validate(dict(row)) for row in error_types],
+                environments=[EnvironmentStats.model_validate(dict(row)) for row in environments],
+            )
 
     def get(self, run_id: str) -> RunDetail | None:
         """Return one run with its solution and verifier result, or None if unknown."""
@@ -138,3 +203,22 @@ class RunStore:
         data = dict(row)
         data['result'] = json.loads(data['result']) if data['result'] else None
         return RunDetail.model_validate(data)
+
+
+def _where(filters: dict[str, str | None]) -> tuple[str, list[str]]:
+    """Build a WHERE clause (and its parameters) matching every non-None filter.
+
+    Raises:
+        ValueError: If a filter names a column runs can't be filtered by.
+    """
+    active = {key: value for key, value in filters.items() if value is not None}
+    unknown = active.keys() - _FILTER_COLUMNS
+    if unknown:
+        raise ValueError(f'Cannot filter runs by {sorted(unknown)}')
+    return ' AND '.join(f'{key} = ?' for key in active) or '1', list(active.values())
+
+
+def _totals(conn: sqlite3.Connection, where: str, params: Sequence[str]) -> RunTotals:
+    """Total the runs matching *where*."""
+    row = conn.execute(f'SELECT {_TOTALS} FROM runs WHERE {where}', params).fetchone()
+    return RunTotals.model_validate(dict(row))

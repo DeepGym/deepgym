@@ -2,14 +2,16 @@
 
 import json
 import time
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import pytest
 from fastapi.testclient import TestClient
 
+from deepgym.console.db import connect
 from deepgym.console.run_store import RunStore
 from deepgym.console.schemas import RunSpec
+from deepgym.models import RunResult
 from deepgym.qa.report import QACheck, QAReport, write_report
 from deepgym.sandboxes.apple import AppleContainer
 from deepgym.sandboxes.docker import DockerContainer
@@ -137,6 +139,87 @@ class TestRuns:
 
         assert detail['status'] == 'failed'
         assert detail['error_type'] == 'interrupted'
+
+
+def _seed_runs(db: Path) -> None:
+    """Five finished runs: three in the last day, one the day before, one four days ago."""
+    store = RunStore(db)
+    # environment, score, error_type, duration_ms, hours ago
+    plan = [
+        ('fizzbuzz', 1.0, None, 100.0, 1),
+        ('fizzbuzz', 0.4, None, 300.0, 2),
+        ('two_sum', None, 'timeout', 50.0, 3),
+        ('fizzbuzz', 1.0, None, 100.0, 30),
+        ('two_sum', 1.0, None, 100.0, 100),
+    ]
+    specs = [RunSpec(environment=env, solution='pass', reference=True) for env, *_ in plan]
+    runs = store.create_group(specs, 'local', 'local')
+    now = datetime.now(timezone.utc)
+    for run, (_, score, error_type, duration_ms, hours_ago) in zip(runs, plan):
+        if error_type:
+            store.fail(run.id, error_type, 'took too long', duration_ms)
+        else:
+            result = RunResult(
+                score=score,
+                passed=score == 1.0,
+                output='',
+                stderr='',
+                exit_code=0,
+                execution_time_ms=duration_ms,
+                sandbox_id='local',
+            )
+            store.complete(run.id, result, duration_ms)
+        with connect(db) as conn:
+            created_at = (now - timedelta(hours=hours_ago)).isoformat()
+            conn.execute('UPDATE runs SET created_at = ? WHERE id = ?', (created_at, run.id))
+
+
+class TestRunStats:
+    @pytest.fixture()
+    def stats_client(self, tmp_path: Path) -> TestClient:
+        _seed_runs(tmp_path / 'console.db')
+        return make_client(tmp_path)
+
+    def test_window_totals_and_previous_window(self, stats_client: TestClient) -> None:
+        stats = stats_client.get('/api/runs/stats?hours=24').json()
+
+        current = stats['current']
+        assert [current[key] for key in ('runs', 'finished', 'passed', 'errors')] == [3, 3, 1, 1]
+        assert current['mean_score'] == pytest.approx((1.0 + 0.4 + 0.0) / 3)
+        assert current['mean_duration_ms'] == pytest.approx(150.0)
+        assert (stats['previous']['runs'], stats['previous']['passed']) == (1, 1)
+        assert stats['hours'] == 24
+
+    def test_window_breakdowns(self, stats_client: TestClient) -> None:
+        stats = stats_client.get('/api/runs/stats?hours=24').json()
+
+        assert stats['score_bins'] == [1, 0, 0, 0, 1, 0, 0, 0, 0, 1]
+        assert stats['error_types'] == [{'error_type': 'timeout', 'count': 1}]
+        by_env = {env['environment']: env for env in stats['environments']}
+        assert by_env.keys() == {'fizzbuzz', 'two_sum'}
+        assert (by_env['fizzbuzz']['runs'], by_env['fizzbuzz']['passed']) == (2, 1)
+        assert by_env['fizzbuzz']['mean_duration_ms'] == pytest.approx(200.0)
+        assert by_env['two_sum']['errors'] == 1
+
+    def test_without_hours_covers_every_run(self, stats_client: TestClient) -> None:
+        stats = stats_client.get('/api/runs/stats').json()
+        assert stats['current']['runs'] == 5
+        assert stats['previous'] is None
+
+    def test_filters_apply(self, stats_client: TestClient) -> None:
+        stats = stats_client.get('/api/runs/stats?hours=24&environment=fizzbuzz').json()
+        assert stats['current']['runs'] == 2
+        assert stats['error_types'] == []
+
+    def test_empty_window(self, tmp_path: Path) -> None:
+        stats = make_client(tmp_path).get('/api/runs/stats?hours=24').json()
+        assert stats['current'] == {'runs': 0, 'finished': 0, 'passed': 0, 'errors': 0,
+                                    'mean_score': None, 'mean_duration_ms': None}  # fmt: skip
+        assert stats['score_bins'] == [0] * 10
+
+    @pytest.mark.parametrize('query', ['hours=0', 'hours=-1', 'status=nope'])
+    def test_rejects_bad_queries(self, stats_client: TestClient, query: str) -> None:
+        assert stats_client.get(f'/api/runs/stats?{query}').status_code == 422
 
 
 class TestLocalExecPolicy:

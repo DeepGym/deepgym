@@ -1,4 +1,8 @@
-"""Persist recorded episodes for replay; screenshots are stored apart as PNG bytes."""
+"""Persist recorded episodes for replay; screenshots are stored apart as PNG bytes.
+
+An episode recorded from a :class:`Trace` also keeps the whole trace, for
+``deepgym traces export``.
+"""
 
 from __future__ import annotations
 
@@ -10,6 +14,7 @@ from uuid import uuid4
 from deepgym.console.db import DEFAULT_DB_PATH, connect, init_db, utc_now
 from deepgym.console.schemas import EpisodeCreate, EpisodeDetail, EpisodeSummary, Frame
 from deepgym.models import RunResult, Trajectory
+from deepgym.traces import Trace
 
 _SUMMARY_COLUMNS = 'id, environment, steps, total_reward, score, passed, created_at'
 
@@ -21,8 +26,10 @@ class EpisodeStore:
         self._path = path
         init_db(path)
 
-    def add(self, episode: EpisodeCreate) -> EpisodeSummary:
-        """Store an episode; its screenshots are decoded and kept per frame.
+    def add(self, episode: EpisodeCreate, trace: Trace | None = None) -> EpisodeSummary:
+        """Store an episode, and the *trace* it came from if any.
+
+        Its screenshots are decoded and kept per frame.
 
         Raises:
             binascii.Error: If an observation's screenshot isn't valid base64.
@@ -41,11 +48,12 @@ class EpisodeStore:
         with connect(self._path) as conn:
             conn.execute(
                 'INSERT INTO episodes (id, environment, steps, total_reward, score, passed, '
-                'frames, result, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)',
+                'frames, result, created_at, trace) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
                 (summary.id, summary.environment, summary.steps, summary.total_reward,
                  summary.score, summary.passed,
                  json.dumps([frame.model_dump(mode='json') for frame in frames]),
-                 None if result is None else result.model_dump_json(), summary.created_at),
+                 None if result is None else result.model_dump_json(), summary.created_at,
+                 None if trace is None else trace.model_dump_json()),
             )  # fmt: skip
             conn.executemany(
                 'INSERT INTO screenshots (episode_id, frame, png) VALUES (?, ?, ?)',
@@ -64,10 +72,20 @@ class EpisodeStore:
             ).fetchall()
         return [EpisodeSummary.model_validate(dict(row)) for row in rows]
 
+    def traces(self) -> tuple[list[Trace], int]:
+        """Return the stored traces, and how many episodes were recorded without one."""
+        with connect(self._path) as conn:
+            rows = conn.execute('SELECT trace FROM episodes ORDER BY rowid').fetchall()
+        traces = [Trace.model_validate_json(row['trace']) for row in rows if row['trace']]
+        return traces, len(rows) - len(traces)
+
     def get(self, episode_id: str) -> EpisodeDetail | None:
         """Return one episode with its frames and result, or None if unknown."""
         with connect(self._path) as conn:
-            row = conn.execute('SELECT * FROM episodes WHERE id = ?', (episode_id,)).fetchone()
+            row = conn.execute(
+                f'SELECT {_SUMMARY_COLUMNS}, frames, result FROM episodes WHERE id = ?',
+                (episode_id,),
+            ).fetchone()
         if row is None:
             return None
         data = dict(row)
@@ -118,26 +136,41 @@ def split_frames(trajectory: Trajectory) -> tuple[list[Frame], dict[int, bytes]]
 
 
 def record_episode(
-    trajectory: Trajectory,
+    trajectory: Trajectory | Trace,
     result: RunResult | None = None,
     *,
     environment: str = '',
     db_path: Path | None = None,
 ) -> str:
-    """Store a finished episode so ``deepgym console`` can replay it.
+    """Store an episode so ``deepgym console`` can replay it.
 
     Args:
-        trajectory: The episode's steps, e.g. from ``dg.run_episode()``.
-        result: The final verifier result, if the episode was scored.
-        environment: Environment name shown in the console.
+        trajectory: The episode's steps, e.g. from ``dg.run_episode()``, or a whole
+            :class:`Trace` (e.g. ``tr.trace``), which is also kept for export.
+        result: The final verifier result, if the episode was scored. A trace
+            carries its own.
+        environment: Environment name shown in the console; defaults to the trace's.
         db_path: Console database; defaults to ``~/.deepgym/console.db``.
 
     Returns:
         The new episode's id.
 
+    Raises:
+        ValueError: If *result* is given with a trace.
+
     Example:
         >>> trajectory, result = dg.run_episode(load_environment('todo_list'), agent)
         >>> record_episode(trajectory, result, environment='todo_list')
     """
-    episode = EpisodeCreate(environment=environment, trajectory=trajectory, result=result)
-    return EpisodeStore(db_path or DEFAULT_DB_PATH).add(episode).id
+    store = EpisodeStore(db_path or DEFAULT_DB_PATH)
+    if not isinstance(trajectory, Trace):
+        episode = EpisodeCreate(environment=environment, trajectory=trajectory, result=result)
+        return store.add(episode).id
+    if result is not None:
+        raise ValueError('A trace carries its own result; pass the trace alone')
+    episode = EpisodeCreate(
+        environment=environment or trajectory.provenance.env.name or '',
+        trajectory=trajectory.to_trajectory(),
+        result=trajectory.result,
+    )
+    return store.add(episode, trajectory).id

@@ -430,6 +430,7 @@ class Session:
         self._obs: Observation | None = None
         self._step = 0
         self._done = False
+        self._step_verdict: dict[str, object] | None = None
         # One sandbox, one actor at a time: concurrent step/score/close calls queue up.
         self._lock = threading.Lock()
 
@@ -442,6 +443,11 @@ class Session:
     def trajectory(self) -> Trajectory:
         """Everything that happened so far."""
         return self._trajectory
+
+    @property
+    def step_verdict(self) -> dict[str, object] | None:
+        """The last step verifier output that scored (score, passed, details, ...), if any."""
+        return self._step_verdict
 
     @property
     def sandbox_id(self) -> str:
@@ -628,6 +634,7 @@ class Session:
             ) from exc
         score = checked_score(value)
         check_exit(exit_code, score, data.get('passed'))
+        self._step_verdict = data
         return score
 
 

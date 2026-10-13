@@ -14,6 +14,7 @@ src/deepgym/
 ├── judge.py             # Judge/solution layout and isolation (sandbox user, sandbox-exec, bwrap)
 ├── solution_runtime.py  # Shipped as deepgym_solution: load_solution/run_solution proxy + server
 ├── session.py           # Live multi-turn sessions (Local, or SandboxBackend on any provider; Daytona adds a desktop)
+├── traces/              # Graded episode traces: schema + provenance, crash-safe capture (dg.trace), JSONL/Parquet/ATIF/RL export
 ├── computer_use.py      # ComputerUseEnvironment (desktop, GUI-only actions)
 ├── verifier.py          # Verifier model + protocol validation
 ├── verifier_template.py # Detect verifier shape (AST) and wrap it to print the JSON protocol

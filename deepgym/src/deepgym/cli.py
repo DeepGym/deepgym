@@ -162,6 +162,36 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     bench_p.add_argument('--json', action='store_true', help='Print machine-readable JSON only')
 
+    # ── traces ────────────────────────────────────────────────────────
+    traces_p = sub.add_parser('traces', help='Export recorded agent traces as training data')
+    traces_sub = traces_p.add_subparsers(dest='traces_command', required=True)
+    export_p = traces_sub.add_parser(
+        'export',
+        help='Write traces as JSONL, Parquet or ATIF',
+        description='Reads the console database and the traces directory unless --db or '
+        '--traces names the sources. Traces without a verdict are exported flagged '
+        'has_verdict=false, or left out with --only-valid.',
+    )
+    export_p.add_argument('--format', required=True, choices=['jsonl', 'parquet', 'atif'])
+    export_p.add_argument('--out', required=True, help='Output file (a directory for atif)')
+    export_p.add_argument(
+        '--rows',
+        default='trace',
+        choices=['trace', 'rl'],
+        help="'trace': whole traces (default); 'rl': one SFT/RL conversation per trace",
+    )
+    export_p.add_argument(
+        '--only-valid', action='store_true', help='Leave out traces without a verdict'
+    )
+    export_p.add_argument('--db', default=None, help='Console database (~/.deepgym/console.db)')
+    export_p.add_argument(
+        '--traces',
+        nargs='+',
+        default=None,
+        metavar='PATH',
+        help='Trace files or directories (~/.deepgym/traces or $DEEPGYM_TRACES_DIR)',
+    )
+
     # ── serve ─────────────────────────────────────────────────────────
     serve_p = sub.add_parser('serve', help='Start the DeepGym API server')
     serve_p.add_argument('--host', default='127.0.0.1', help='Bind address')
@@ -430,6 +460,48 @@ def _cmd_benchmark_audit(args: argparse.Namespace) -> None:
     _print_benchmark_audit(report)
 
 
+def _cmd_traces(args: argparse.Namespace) -> None:
+    from deepgym.console.db import DEFAULT_DB_PATH
+    from deepgym.console.episode_store import EpisodeStore
+    from deepgym.traces import Trace, export_traces, load_trace, traces_dir
+
+    if args.db is None and args.traces is None:
+        db = DEFAULT_DB_PATH if DEFAULT_DB_PATH.exists() else None
+        paths = [path for path in [traces_dir()] if path.exists()]
+    else:
+        db = Path(args.db) if args.db else None
+        paths = [Path(path) for path in args.traces or []]
+        missing = [str(path) for path in [db, *paths] if path and not path.exists()]
+        if missing:
+            print(f'Error: not found: {", ".join(missing)}', file=sys.stderr)
+            sys.exit(1)
+
+    traces, untraced = EpisodeStore(db).traces() if db else ([], 0)
+    for path in paths:
+        files = sorted(path.glob('*.jsonl')) if path.is_dir() else [path]
+        traces += [load_trace(file) for file in files]
+    # A trace can be both on disk and in the console: keep the copy that got furthest.
+    unique: dict[str, Trace] = {}
+    for trace in sorted(traces, key=lambda t: (t.result is not None, len(t.steps))):
+        unique[trace.trace_id] = trace
+    if not unique:
+        print('Error: no traces found', file=sys.stderr)
+        sys.exit(1)
+
+    report = export_traces(
+        sorted(unique.values(), key=lambda trace: trace.provenance.started_at),
+        args.format,
+        Path(args.out),
+        rows=args.rows,
+        only_valid=args.only_valid,
+    )
+    print(f'Wrote {report.written} of {len(unique)} traces to {args.out}')
+    for reason, count in report.skipped.items():
+        print(f'  skipped {count}: {reason}')
+    if untraced:
+        print(f'  {untraced} console episodes were recorded without a trace and not read')
+
+
 def _cmd_console(args: argparse.Namespace) -> None:
     try:
         import uvicorn
@@ -608,6 +680,7 @@ _COMMANDS = {
     'serve': _cmd_serve,
     'console': _cmd_console,
     'web': _cmd_console,
+    'traces': _cmd_traces,
 }
 
 

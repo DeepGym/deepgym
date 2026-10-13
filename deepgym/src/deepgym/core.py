@@ -7,8 +7,10 @@ import os
 import time
 from collections.abc import Callable, Sequence
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from datetime import datetime, timezone
 from typing import Literal
 
+from deepgym import __version__
 from deepgym.benchmark_envs import build_run_requests, route_single_run
 from deepgym.exceptions import (
     DeepGymError,
@@ -32,6 +34,7 @@ from deepgym.sandbox import LocalExecutor, build_run_result, run_judge_in_sandbo
 from deepgym.sandboxes import PROVIDERS, Provider, Sandbox, check_provider, open_sandbox
 from deepgym.sandboxes.daytona import DaytonaDesktop, DaytonaSandbox
 from deepgym.session import LocalBackend, SandboxBackend, Session, run_episode
+from deepgym.traces import AgentMeta, EnvFingerprint, Provenance, TracedSession
 
 logger = logging.getLogger(__name__)
 
@@ -193,6 +196,50 @@ class DeepGym:
             Tuple of (trajectory, final_result).
         """
         return run_episode(self.session(env), agent)
+
+    def trace(
+        self,
+        env: MultiTurnEnvironment,
+        agent: AgentMeta,
+        *,
+        variant: int | None = None,
+        seed: int | None = None,
+        reference: str | None = None,
+    ) -> TracedSession:
+        """Open a session for one episode of *env* that records its trace as it runs.
+
+        The trace is written to ``~/.deepgym/traces/<trace_id>.jsonl`` (or
+        ``$DEEPGYM_TRACES_DIR``) event by event, so a crash keeps everything up to it.
+
+        Args:
+            env: The multi-turn or computer-use environment.
+            agent: The agent, model and sampling config acting in the episode.
+            variant: Registry variant *env* was loaded with, for provenance.
+            seed: Episode seed, for provenance.
+            reference: Reference solution source; its hash goes in the provenance.
+
+        Returns:
+            An unstarted TracedSession: start(), step() until done, then score().
+
+        Raises:
+            SandboxError: If the sandbox cannot be created.
+
+        Example:
+            >>> with dg.trace(env, AgentMeta(name='react', model='Qwen/Qwen3-8B')) as tr:
+            ...     obs = tr.start()
+            ...     while not tr.done:
+            ...         action, messages = policy(obs)
+            ...         obs = tr.step(action, messages).observation
+            ...     tr.score()
+        """
+        provenance = Provenance(
+            env=EnvFingerprint.of(env, variant=variant, seed=seed, reference=reference),
+            agent=agent,
+            provider=self.backend,
+            deepgym_version=__version__,
+            started_at=datetime.now(timezone.utc),
+        )
+        return TracedSession(self.session(env), env, provenance)
 
     # ------------------------------------------------------------------
     # Batch run

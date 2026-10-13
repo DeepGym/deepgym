@@ -552,6 +552,47 @@ DELETE /v1/sessions/{id}
 `environment` can also be an inline `MultiTurnEnvironment` spec. Idle sessions
 are closed after 30 minutes; at most 100 run at once.
 
+### Traces
+
+`dg.trace()` records an episode while it runs, as training data. A trace holds its
+provenance (environment name, variant and seed; hashes of the environment, task,
+verifiers and reference; the image digest when the image pins one; deepgym version;
+provider; and the agent, model and sampling config you pass), every step (the action,
+the model messages behind it with optional token ids and logprobs, what came back, the
+step reward with the step verifier's output, exit code, error) and the final result
+with `has_verdict`.
+
+```python
+from deepgym.traces import AgentMeta
+
+agent = AgentMeta(name='react-shell', model='Qwen/Qwen3-8B', sampling={'temperature': 0.7})
+with dg.trace(env, agent, variant=3) as tr:
+    obs = tr.start()
+    while not tr.done:
+        action, messages = my_agent(obs)   # messages: this turn's new TraceMessages
+        obs = tr.step(action, messages).observation
+    tr.score()
+```
+
+Each event is appended to `~/.deepgym/traces/<trace_id>.jsonl` (or
+`$DEEPGYM_TRACES_DIR`) as it happens, so a crash keeps the steps taken so far, and a
+trace that was never scored is `incomplete`. `record_episode(tr.trace)` also stores it
+in the console.
+
+```bash
+deepgym traces export --format jsonl --out traces.jsonl             # whole traces
+deepgym traces export --format parquet --rows rl --out rl.parquet   # verl / TRL rows
+deepgym traces export --format atif --out atif/ --only-valid        # ATIF documents
+```
+
+Export reads the console database and the traces directory, or the sources named
+with `--db` and `--traces`. A trace without a verdict is exported with
+`has_verdict: false` and a null reward, or left out with `--only-valid`. `--rows rl`
+writes one conversation per trace (`messages`, `reward`, `step_rewards`) and skips
+traces whose steps have no model messages. Parquet needs
+`pip install "deepgym[traces]"`. The ATIF mapping is documented in
+`deepgym/traces/atif.py`.
+
 ## Environments
 
 ### Built-in (31, ship with the package)
@@ -745,8 +786,8 @@ The server won't start without auth configured. Set `DEEPGYM_API_KEY` for
 production or `DEEPGYM_NO_AUTH=true` for local development.
 `--allow-local-exec` is required when running without Daytona.
 
-Other commands: `run-batch`, `eval`, `create`, `audit`, `qa`, `benchmark-audit`
-and `console`. Run `deepgym <command> --help` for options.
+Other commands: `run-batch`, `eval`, `create`, `audit`, `qa`, `benchmark-audit`,
+`traces export` and `console`. Run `deepgym <command> --help` for options.
 
 ## Console
 
@@ -771,6 +812,9 @@ deepgym console --port 8080 --allow-local-exec   # http://127.0.0.1:8080
   trajectory, result = dg.run_episode(env, agent)
   record_episode(trajectory, result, environment='todo_list')
   ```
+
+  `record_episode(tr.trace)` stores a [trace](#traces) the same way, and keeps it for
+  `deepgym traces export`.
 
 - **Sandboxes:** live `deepgym-*` containers from Docker and Apple `container`,
   with kill. Cloud sandboxes are not listed.

@@ -21,21 +21,29 @@ from deepgym.harbor.agent import run_agent
 from deepgym.harbor.grading import grade
 from deepgym.harbor.task import pack_files
 from deepgym.models import Environment
-from deepgym.sandboxes import SandboxTimeoutError, build_image
+from deepgym.sandboxes import TRUSTED_PATH, SandboxTimeoutError, build_image
 from deepgym.sandboxes.docker import DockerContainer
 from deepgym.session import SandboxBackend
 from tests.test_harbor import BUILT, HELLO
 from tests.test_sandboxes import FakeSandbox
 
-_USERS = ('useradd', '997 997 996 996')
+_IDS = '997 997 996 996 0 /usr/bin/setpriv /usr/bin/nsenter -'
 _WORKSPACE = pack_files({'hello.txt': b'hello\n'})
 _ENCODED = ('base64 /opt', base64.b64encode(_WORKSPACE).decode())
 _PASS = ('for name in reward.json', 'reward.txt\n1\n')
-_AS_AGENT = 'setpriv --reuid=997 --regid=997'
+_AS_AGENT = '/usr/bin/setpriv --reuid=997 --regid=997'
+_RUN_TESTS = '/bin/bash -c /tests/test.sh'
 
 
-def _box(*answers: tuple[str, str]) -> FakeSandbox:
-    return FakeSandbox(network_blocked=True, answers=[_USERS, *answers])
+def _box(*answers: tuple[str, str], workdir: str = '/app', blocked: bool = True) -> FakeSandbox:
+    """A fake sandbox whose setup reports the session users and *workdir* as its realpath."""
+    users = ('useradd', f'{_IDS}\n{workdir}')
+    return FakeSandbox(network_blocked=blocked, answers=[users, *answers])
+
+
+def _inner(command: str) -> str:
+    """The command a :func:`deepgym.session.trusted` wrapper runs, else *command* itself."""
+    return shlex.split(command)[-1] if command.startswith('/usr/bin/env -i ') else command
 
 
 def _index(box: FakeSandbox, needle: str) -> int:
@@ -57,10 +65,9 @@ def test_agent_runs_unprivileged_and_hands_over_only_its_work_directory() -> Non
     assert box.commands[script].startswith(_AS_AGENT)
     packed = _index(box, '-czf')
     assert packed > script
-    assert (
-        box.commands[packed].startswith(f'{_AS_AGENT}')
-        and "sh -c 'kill -9 -1'" in box.commands[packed]
-    )
+    assert box.commands[packed].startswith('/usr/bin/env -i ')
+    assert _inner(box.commands[packed]).startswith(_AS_AGENT)
+    assert "--no-new-privs -- sh -c 'kill -9 -1'" in _inner(box.commands[packed])
     assert box.uploads == ['/opt/deepgym-harbor/agent.sh']
     assert not [command for command in box.commands if '/tests' in command or '/logs' in command]
     assert box.deleted
@@ -68,7 +75,8 @@ def test_agent_runs_unprivileged_and_hands_over_only_its_work_directory() -> Non
 
 def test_agent_workdir_defaults_to_the_image_workdir_and_refuses_root() -> None:
     task = HarborTask.from_dir(BUILT)
-    assert run_agent(_box(('pwd', '/srv/app'), _ENCODED), task, '').workdir == '/srv/app'
+    box = _box(('pwd', '/srv/app'), _ENCODED, workdir='/srv/app')
+    assert run_agent(box, task, '').workdir == '/srv/app'
 
     for workdir in ('/', '/root', '/tmp'):
         box = _box(('pwd', workdir))
@@ -126,7 +134,7 @@ def test_grader_restores_then_uploads_tests_then_reads_the_reward_separately() -
     assert 'tar -xzpf - -C /app < ' in box.commands[restored]
     assert box.commands[restored].index('chown -hR 0:0 /app') > box.commands[restored].index('tar')
     staged = _index(box, 'rm -rf /tests /logs/verifier')
-    tests = _index(box, '/tests/test.sh')
+    tests = _index(box, _RUN_TESTS)
     reward = _index(box, 'for name in reward.json')
     assert restored < staged < tests < reward
     assert 'test.sh' not in box.commands[reward]
@@ -143,28 +151,75 @@ def test_grader_without_a_reward_is_a_verifier_error_and_still_cleans_up() -> No
 
 
 def test_offline_tasks_run_their_tests_in_the_offline_namespace(tmp_path: Path) -> None:
-    online = FakeSandbox(network_blocked=False, answers=[_USERS, _PASS])
+    online = _box(_PASS, blocked=False)
     grade(online, HarborTask.from_dir(HELLO), _WORKSPACE, '/app')
-    assert online.commands[_index(online, '/tests/test.sh')].startswith('nsenter --net=')
+    assert online.commands[_index(online, _RUN_TESTS)].startswith('/usr/bin/nsenter --net=')
 
     public = HarborTask.from_dir(HELLO).model_copy(update={'verifier_network': 'public'})
-    box = FakeSandbox(network_blocked=False, answers=[_USERS, _PASS])
+    box = _box(_PASS, blocked=False)
     grade(box, public, _WORKSPACE, '/app')
-    assert box.commands[_index(box, '/tests/test.sh')].startswith('bash -c')
+    assert box.commands[_index(box, _RUN_TESTS)].startswith('/bin/bash -c')
 
 
 def test_shell_syntax_in_the_workdir_is_always_quoted(tmp_path: Path) -> None:
     workdir = '/app/$(touch pwned) `id`'
     task = HarborTask.from_dir(HELLO).model_copy(update={'workdir': workdir})
-    agent, grader = _box(_ENCODED), _box(_PASS)
+    agent, grader = _box(_ENCODED, workdir=workdir), _box(_PASS, workdir=workdir)
 
     run = run_agent(agent, task, 'true')
     grade(grader, task, run.workspace, run.workdir)
 
     quoted = shlex.quote(workdir)
-    mentions = [c for c in agent.commands + grader.commands if 'touch pwned' in c]
+    mentions = [_inner(c) for c in agent.commands + grader.commands if 'touch pwned' in c]
     assert mentions and all(quoted in command for command in mentions)
     assert all(command.count('touch pwned') == command.count(quoted) for command in mentions)
+
+
+class _EnvBox(FakeSandbox):
+    """A fake sandbox that also records the environment each command gets."""
+
+    def __init__(self, *args: object, **kwargs: object) -> None:
+        super().__init__(*args, **kwargs)
+        self.envs: list[dict[str, str] | None] = []
+
+    def exec(self, command: str, *, env: dict[str, str] | None = None, **kwargs: object) -> object:
+        self.envs.append(dict(env) if env else None)
+        return super().exec(command, env=env, **kwargs)
+
+
+def test_root_never_resolves_a_command_through_the_image_path() -> None:
+    task = HarborTask.from_dir(HELLO)
+    agent = _box(_ENCODED, blocked=False)
+    grader = _EnvBox(
+        network_blocked=False,
+        answers=[('useradd', f'{_IDS}\n/app'), ('printf %s', '/app/bin:/usr/bin:.'), _PASS],
+    )
+
+    run = run_agent(agent, task, 'true')
+    grade(grader, task, run.workspace, run.workdir)
+
+    # Provider builtins aside, each command names its first program by absolute path, and
+    # every harness command runs with an empty environment and the trusted PATH.
+    for command in agent.commands + grader.commands:
+        if command in ('pwd', 'printf %s "$PATH"'):
+            continue
+        assert command.startswith('/'), command
+        if command.startswith('/usr/bin/env -i '):
+            assert shlex.split(command)[2] == f'PATH={TRUSTED_PATH}', command
+    tests = _index(grader, _RUN_TESTS)
+    assert grader.envs[tests] == {'PATH': '/usr/bin'}
+
+
+def test_backend_owns_where_the_workdir_really_leads() -> None:
+    linked = _box(workdir='/usr/bin')
+    with pytest.raises(SandboxError, match="'/app' leads to '/usr/bin'"):
+        SandboxBackend(linked, '/app')
+    assert linked.deleted and not [c for c in linked.commands if 'chown' in c]
+
+    spelled = _box()
+    with pytest.raises(SandboxError, match='overlaps /usr'):
+        SandboxBackend(spelled, '//usr/bin')
+    assert spelled.deleted and not spelled.commands
 
 
 # ---------------------------------------------------------------------------
@@ -183,7 +238,7 @@ class _FakeClient:
 
     def open_sandbox(self, env: Environment) -> FakeSandbox:
         self.images.append(env.image)
-        box = _box(_ENCODED, _PASS, ('pwd', '/app'))
+        box = _box(_ENCODED, _PASS, ('pwd', '/app'))  # every task here works in /app
         box.id = f'fake-{len(self.boxes)}'
         self.boxes.append(box)
         return box
@@ -276,7 +331,17 @@ def test_build_reuses_an_identical_image_and_builds_a_changed_one(
     assert [argv[1] for argv in calls] == ['image', 'build', 'image']
     assert calls[1] == ['docker', 'build', '--tag', tag, str(context)]
     (context / 'Dockerfile').write_text('FROM python:3.11-slim\n', encoding='utf-8')
-    assert DockerContainer.build(context) != tag
+    changed = DockerContainer.build(context)
+    assert changed != tag
+
+    (context / 'Dockerfile').chmod(0o600)
+    moded = DockerContainer.build(context)
+    assert moded != changed
+    (context / 'link').symlink_to('Dockerfile')
+    linked = DockerContainer.build(context)
+    (context / 'link').unlink()
+    (context / 'link').symlink_to('elsewhere')
+    assert DockerContainer.build(context) not in (moded, linked)
 
 
 def test_only_container_clis_build_images(tmp_path: Path) -> None:
@@ -286,9 +351,9 @@ def test_only_container_clis_build_images(tmp_path: Path) -> None:
 
 
 def test_backend_takes_over_a_given_workdir_and_refuses_its_own_paths() -> None:
-    box = _box()
+    box = _box(workdir='/srv/my app')
     SandboxBackend(box, '/srv/my app').exec('ls', timeout=5)
-    assert "chown -R dgagent: '/srv/my app'" in box.commands[0]
+    assert _inner(box.commands[1]) == "chown -R dgagent: '/srv/my app'"
 
     for workdir in ('/', '/opt', '/usr/local/bin', '/root'):
         refused = _box()

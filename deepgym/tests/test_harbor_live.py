@@ -119,6 +119,51 @@ def test_exported_environment_round_trips_through_a_built_image(
     assert dg.run(env, '').score == 0.0
 
 
+# Decoy programs the agent leaves in its work directory: each just fails. If any root
+# step of the harness ran one, the run would error instead of scoring.
+_DECOYS = 'bash sh cat tar chmod chown mkdir rm base64 wc env timeout python3 realpath'
+_LEAVE_DECOYS = (
+    'mkdir -p /app/bin && for name in ' + _DECOYS + '; do '
+    "printf '#!/bin/sh\\nexit 3\\n' > /app/bin/$name && chmod +x /app/bin/$name; done\n"
+)
+
+
+def test_exported_reward_parser_ignores_modules_in_the_work_directory(
+    dg: DeepGym, tmp_path: Path
+) -> None:
+    if dg.backend not in ('apple', 'docker'):
+        pytest.skip('only the container CLIs build Dockerfiles')
+    env = HarborEnvironment.from_dir(export_environment(load_environment('coin_change'), tmp_path))
+    decoy = "printf 'raise SystemExit(3)\\n' > /app/json.py\n"
+
+    assert dg.run(env, env.reference_solution + decoy).score == 1.0
+
+
+def test_harness_ignores_programs_on_an_image_path_in_the_work_directory(
+    dg: DeepGym, tmp_path: Path
+) -> None:
+    if dg.backend not in ('apple', 'docker'):
+        pytest.skip('only the container CLIs build Dockerfiles')
+    task = tmp_path / 'path-in-workdir'
+    shutil.copytree(HELLO, task)
+    (task / 'task.toml').write_text('[environment]\nworkdir = "/app"\n', encoding='utf-8')
+    (task / 'environment').mkdir()
+    (task / 'environment' / 'Dockerfile').write_text(
+        'FROM python:3.12-slim\nENV PATH=/app/bin:$PATH\nWORKDIR /app\n', encoding='utf-8'
+    )
+    (task / 'tests' / 'test.sh').write_text(
+        '#!/bin/bash\n'
+        'case "$(command -v cat)" in /app/*) echo 0; exit 0;; esac > /logs/verifier/reward.txt\n'
+        'if [ "$(cat /app/hello.txt)" = hello ]; then echo 1; else echo 0; fi'
+        ' > /logs/verifier/reward.txt\n',
+        encoding='utf-8',
+    )
+
+    env = HarborEnvironment.from_dir(task)
+
+    assert dg.run(env, 'echo hello > /app/hello.txt\n' + _LEAVE_DECOYS).score == 1.0
+
+
 def test_qa_gates_a_registered_harbor_task(
     dg: DeepGym, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -127,4 +172,7 @@ def test_qa_gates_a_registered_harbor_task(
 
     report = run_qa('fixtures/hello', dg, reruns=0)
 
-    assert report.passed, report.checks
+    checks = {check.name: check.status for check in report.checks}
+    assert report.status == 'pass', report.checks
+    assert checks['reference_passes'] == 'pass' and checks['empty_fails'] == 'pass'
+    assert checks['hack_resistant'] == 'skip'

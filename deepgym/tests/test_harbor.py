@@ -91,6 +91,7 @@ def test_rejects_an_invalid_task_toml(folder: str, message: str) -> None:
         ('[environment]\nworkdir = "/logs/verifier"\n', 'overlaps /logs'),
         ('[environment]\nworkdir = "/"\n', 'would hold /tmp'),
         ('[environment]\nworkdir = "/root"\n', 'overlaps /root'),
+        ('[environment]\nworkdir = "//usr/bin"\n', 'overlaps /usr'),
         ('[environment]\nos = "windows"\n', 'linux'),
         ('[verifier]\nnetwork_mode = "sometimes"\n', 'no-network'),
         ('[[steps]]\nname = "one"\n', 'multi-step'),
@@ -124,6 +125,25 @@ def test_rejects_a_link_out_of_the_task_folder(tmp_path: Path) -> None:
         HarborTask.from_dir(task)
 
 
+def test_rejects_a_build_context_that_links_out_of_the_task(tmp_path: Path) -> None:
+    secret = tmp_path / 'secret.txt'
+    secret.write_text('host file', encoding='utf-8')
+    linked = _task_copy(tmp_path / 'a', BUILT)
+    shutil.rmtree(linked / 'environment')
+    (linked / 'environment').symlink_to('..', target_is_directory=True)
+    with pytest.raises(ValueError, match='environment/ is a link'):
+        HarborTask.from_dir(linked)
+
+    inner = _task_copy(tmp_path / 'b', BUILT)
+    (inner / 'environment' / 'data.txt').symlink_to(secret)
+    with pytest.raises(ValueError, match='links outside environment/'):
+        HarborTask.from_dir(inner)
+
+    inside = _task_copy(tmp_path / 'c', BUILT)
+    (inside / 'environment' / 'Dockerfile.link').symlink_to('Dockerfile')
+    assert HarborTask.from_dir(inside).build_context == (inside / 'environment').resolve()
+
+
 def test_verifier_network_falls_back_from_verifier_to_environment(tmp_path: Path) -> None:
     task = _task_copy(tmp_path)
     toml = task / 'task.toml'
@@ -151,12 +171,21 @@ def test_check_workdir_accepts_ordinary_folders(path: str) -> None:
     [
         'app', '/', '/app/../logs', '/tests', '/logs', '/logs/x', '/solution',
         '/opt/deepgym-harbor', '/opt/deepgym/judge', '/opt', '/tmp', '/root', '/root/work',
-        '/usr/local', '/etc/x', '/var/lib/dpkg',
+        '/usr/local', '/etc/x', '/var/lib/dpkg', '//usr/bin', '///etc', '/./usr/bin',
+        '/srv/../root', '//', '/app/../../usr',
     ],
 )  # fmt: skip
 def test_check_workdir_rejects_paths_root_trusts_or_the_harness_writes(path: str) -> None:
     with pytest.raises(ValueError):
         check_workdir(path, HARNESS_PATHS)
+
+
+@pytest.mark.parametrize(
+    ('path', 'normal'),
+    [('//app', '/app'), ('/app/./src/', '/app/src'), ('/srv/x/../app', '/srv/app')],
+)
+def test_check_workdir_returns_the_normalized_path(path: str, normal: str) -> None:
+    assert check_workdir(path, HARNESS_PATHS) == normal
 
 
 # ---------------------------------------------------------------------------
@@ -307,16 +336,22 @@ def test_qa_checks_a_harbor_task_against_its_solve_sh(
 
     def single_turn_checks(env: HarborEnvironment, reference: str | None, *args: object) -> list:
         seen.append(reference)
-        return [QACheck(name='reference_passes', passed=True, details='')]
+        return [QACheck(name='reference_passes', status='pass', details='')]
+
+    def hack_resistant(env: HarborEnvironment, dg: DeepGym) -> QACheck:
+        raise AssertionError('Python attack payloads ran against a bash runner')
 
     monkeypatch.setattr('deepgym.qa.gate.single_turn_checks', single_turn_checks)
-    passing = QACheck(name='hack_resistant', passed=True, details='')
-    monkeypatch.setattr('deepgym.qa.gate.hack_resistant', lambda env, dg: passing)
+    monkeypatch.setattr('deepgym.qa.gate.hack_resistant', hack_resistant)
     dg = DeepGym(mode='local')
 
-    assert run_qa('fx/hello', dg).status == 'PASS'
+    report = run_qa('fx/hello', dg)
+
+    checks = {check.name: check for check in report.checks}
+    assert report.status == 'pass'
+    assert checks['hack_resistant'].status == 'skip' and not checks['hack_resistant'].passed
     assert seen == [HarborEnvironment.from_dir(HELLO).reference_solution]
-    assert run_qa('fx/hello-built', dg).status == 'SKIP'
+    assert run_qa('fx/hello-built', dg).status == 'skip'
 
 
 # ---------------------------------------------------------------------------

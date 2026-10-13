@@ -1,22 +1,23 @@
 """Verifier for the API Request task.
 
-Serve seeded, randomized slideshow documents from a local HTTP server, run the
-solution once per document with its URL, and check that it prints that document's
-``slideshow.title``. Titles, paths, extra fields and key order vary, so only a
-solution that fetches and parses the response gets credit: hardcoded output and
-keywords in the source score 0.
+Serve randomized slideshow documents from a local HTTP server, run the solution
+once per document with its URL, and check that it prints that document's
+``slideshow.title``. Titles, paths, extra fields and key order vary, and every run
+draws new ones from a fresh seed (reported as ``seed`` for reproducing a run), so
+only a solution that fetches and parses the response gets credit: hardcoded output,
+keywords in the source and answers remembered from earlier runs score 0.
 """
 
 import http.server
 import json
 import random
+import secrets
 import subprocess
 import sys
 import threading
 
 from deepgym_solution import run_solution
 
-SEED = 42
 DOCUMENTS = 5
 WORDS = (
     'quarterly roadmap widget launch review pipeline summit pricing '
@@ -60,7 +61,8 @@ class _Handler(http.server.BaseHTTPRequestHandler):
 
 def verify(solution_path, test_cases_path=None):
     """Score the fraction of served documents whose title the solution prints exactly."""
-    rng = random.Random(SEED)
+    seed = secrets.randbits(64)  # fresh every run, so earlier runs reveal nothing
+    rng = random.Random(seed)
     expected = {}
     routes = {}
     for _ in range(DOCUMENTS):
@@ -101,7 +103,7 @@ def verify(solution_path, test_cases_path=None):
         'passed': passed == len(cases),
         'details': f'{passed}/{len(cases)} documents: printed slideshow.title exactly',
         'cases': cases,
-        'seed': SEED,
+        'seed': seed,
     }
 
 

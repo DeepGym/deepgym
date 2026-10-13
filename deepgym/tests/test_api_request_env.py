@@ -52,6 +52,21 @@ def test_solutions_that_fetch_and_extract_score_full(dg: DeepGym, solution: str)
     assert result.score == 1.0, result.output
 
 
+def test_documents_change_every_run_so_a_lookup_table_fails(dg: DeepGym) -> None:
+    """Paths and titles seen in one run tell a solution nothing about the next."""
+    first, second = (dg.run(ENV, REFERENCE) for _ in range(2))
+    table = {case.input_summary: case.expected_summary for case in first.cases}
+    lookup = (
+        'import sys, urllib.parse\n'
+        f'TABLE = {table!r}\n'
+        "print(TABLE.get(urllib.parse.urlsplit(sys.argv[1]).path, ''))\n"
+    )
+
+    assert dg.run(ENV, lookup).score == 0.0
+    assert (first.score, second.score) == (1.0, 1.0)
+    assert first.seed != second.seed
+
+
 @pytest.mark.parametrize(
     'solution',
     [HARDCODED, KEYWORDS, FIRST_TITLE_IN_BODY, FIRST_SLIDE_TITLE],

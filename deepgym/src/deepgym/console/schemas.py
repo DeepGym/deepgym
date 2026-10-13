@@ -109,7 +109,7 @@ class RunTotals(BaseModel):
     """Runs with an error_type: they raised, were interrupted, or the verifier reported one."""
 
     mean_score: float | None = None
-    """Mean score of the finished runs."""
+    """Mean score of the finished runs that got a verdict; the rest count in errors."""
 
     mean_duration_ms: float | None = None
 

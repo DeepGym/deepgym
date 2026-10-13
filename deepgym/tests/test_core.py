@@ -1,9 +1,13 @@
 """Tests for deepgym.core — DeepGym client orchestration."""
 
+import asyncio
 from pathlib import Path
 
+import pytest
+
+from deepgym.async_core import AsyncDeepGym
 from deepgym.core import DeepGym
-from deepgym.models import BatchResult, Environment, RunResult
+from deepgym.models import BatchResult, Environment, EvalResult, RunResult
 
 ENVS_DIR = Path(__file__).resolve().parent.parent / 'src' / 'deepgym' / 'envs'
 
@@ -80,3 +84,59 @@ class TestDeepGymRunBatch:
         scores = [r.score for r in batch.results]
         assert max(scores) == 1.0
         assert min(scores) < 1.0
+
+
+def _eval(client: str, outputs: dict[str, str]) -> EvalResult:
+    """Evaluate the patched suite with the sync or async local client."""
+    if client == 'sync':
+        return DeepGym(mode='local').eval('suite', outputs)
+    return asyncio.run(AsyncDeepGym(mode='local').eval('suite', outputs))
+
+
+class TestEval:
+    """eval() keeps suite order, names each result's environment, and classifies failures."""
+
+    @pytest.fixture()
+    def outputs(self, sorting_env: Environment, monkeypatch: pytest.MonkeyPatch) -> dict[str, str]:
+        """Answers for a suite of a sandbox failure, an unanswered env and an inline env."""
+        suite = [
+            # Keyed python_sorting by its verifier file; the env var name fails the sandbox.
+            sorting_env.model_copy(update={'env_vars': {'BAD NAME': 'x'}}),
+            Environment(name='unanswered', task='t', verifier_code='return 1.0'),
+            # Named but without a verifier file, like a repo-patch environment.
+            Environment(name='inline', task='t', verifier_code='return 1.0'),
+        ]
+        monkeypatch.setattr('deepgym.registry.load_suite', lambda name: suite)
+        return {'python_sorting': '', 'inline': ''}
+
+    @pytest.mark.parametrize('client', ['sync', 'async'])
+    def test_results_follow_the_suite(self, outputs: dict[str, str], client: str) -> None:
+        result = _eval(client, outputs)
+        assert result.env_names == ['python_sorting', 'unanswered', 'inline']
+        assert [r.sandbox_id for r in result.results] == ['error', 'skipped', 'local']
+
+    @pytest.mark.parametrize('client', ['sync', 'async'])
+    def test_sandbox_failure_has_no_verdict(self, outputs: dict[str, str], client: str) -> None:
+        failed = _eval(client, outputs).results[0]
+        assert (failed.error_type, failed.has_verdict) == ('sandbox_error', False)
+
+    def test_named_env_without_a_verifier_file_runs(self, outputs: dict[str, str]) -> None:
+        assert _eval('sync', outputs).results[2].score == 1.0
+
+
+class TestAsyncParallelism:
+    """A concurrency limit below 1 is refused instead of hanging forever."""
+
+    @pytest.mark.parametrize('call', ['run_batch', 'eval'])
+    def test_zero_is_rejected(
+        self, sorting_env: Environment, monkeypatch: pytest.MonkeyPatch, call: str
+    ) -> None:
+        monkeypatch.setattr('deepgym.registry.load_suite', lambda name: [sorting_env])
+        client = AsyncDeepGym(mode='local')
+        work = (
+            client.run_batch(sorting_env, ['x'], max_parallel=0)
+            if call == 'run_batch'
+            else client.eval('suite', {'python_sorting': 'x'}, max_parallel=0)
+        )
+        with pytest.raises(ValueError, match='max_parallel'):
+            asyncio.run(asyncio.wait_for(work, timeout=5))

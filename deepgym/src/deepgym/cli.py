@@ -648,10 +648,29 @@ def _cmd_serve(args: argparse.Namespace) -> None:
 # ---------------------------------------------------------------------------
 
 
+def _verdict(result) -> str:
+    """PASS or FAIL, or ERROR and the error type when the run got no verdict."""
+    if not result.has_verdict:
+        return f'ERROR ({result.error_type or "verifier_error"})'
+    return 'PASS' if result.passed else 'FAIL'
+
+
+def _judged_totals(results) -> tuple[int, int, int, str]:
+    """Return (passed, failed, errors, mean score); errors had no verdict, so count in neither."""
+    judged = [r for r in results if r.has_verdict]
+    passed = sum(r.passed for r in judged)
+    mean = f'{sum(r.score for r in judged) / len(judged):.4f}' if judged else '-'
+    return passed, len(judged) - passed, len(results) - len(judged), mean
+
+
+def _cause(result) -> str:
+    """First line of why a run without a verdict failed."""
+    return result.output.strip().partition('\n')[0]
+
+
 def _print_run_result(result, elapsed: float) -> None:
-    status = 'PASS' if result.passed else 'FAIL'
     print(f'\n{"=" * 50}')
-    print(f'  Result:  {status}')
+    print(f'  Result:  {_verdict(result)}')
     print(f'  Score:   {result.score:.4f}')
     print(f'  Time:    {elapsed:.2f}s')
     print(f'{"=" * 50}')
@@ -662,31 +681,39 @@ def _print_run_result(result, elapsed: float) -> None:
 
 
 def _print_batch_result(batch, solution_files, elapsed: float) -> None:
+    passed, failed, errors, mean = _judged_totals(batch.results)
     print(f'\n{"=" * 50}')
     print('  Batch Results')
     print(f'  Total:   {batch.total}')
-    print(f'  Passed:  {batch.passed}')
-    print(f'  Failed:  {batch.failed}')
-    print(f'  Avg:     {batch.avg_score:.4f}')
+    print(f'  Passed:  {passed}')
+    print(f'  Failed:  {failed}')
+    print(f'  Errors:  {errors}')
+    print(f'  Avg:     {mean}')
     print(f'  Time:    {elapsed:.2f}s')
     print(f'{"=" * 50}')
 
     for i, result in enumerate(batch.results):
         name = solution_files[i].name if i < len(solution_files) else f'solution-{i}'
-        status = 'PASS' if result.passed else 'FAIL'
-        print(f'  [{status}] {name:30s}  score={result.score:.4f}')
+        detail = f'score={result.score:.4f}' if result.has_verdict else _cause(result)
+        print(f'  [{_verdict(result)}] {name:30s}  {detail}')
 
 
 def _print_eval_result(result, elapsed: float) -> None:
+    passed, failed, errors, mean = _judged_totals(result.results)
+    pass_rate = f'{passed / (passed + failed):.2%}' if passed + failed else '-'
     print(f'\n{"=" * 50}')
     print(f'  Eval Suite:  {result.suite}')
     print(f'  Model:       {result.model_name}')
-    print(f'  Pass Rate:   {result.pass_rate:.2%}')
+    print(f'  Pass Rate:   {pass_rate}')
     print(f'  Total:       {result.total}')
-    print(f'  Passed:      {result.passed}')
-    print(f'  Avg Score:   {result.avg_score:.4f}')
+    print(f'  Passed:      {passed}')
+    print(f'  Errors:      {errors}')
+    print(f'  Avg Score:   {mean}')
     print(f'  Time:        {elapsed:.2f}s')
     print(f'{"=" * 50}')
+    for name, run in zip(result.env_names or [], result.results):
+        if not run.has_verdict:
+            print(f'  [{_verdict(run)}] {name}: {_cause(run)}')
 
 
 def _print_verifier_audit(report) -> None:

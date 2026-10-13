@@ -185,7 +185,7 @@ class TestRunStats:
 
         current = stats['current']
         assert [current[key] for key in ('runs', 'finished', 'passed', 'errors')] == [3, 3, 1, 1]
-        assert current['mean_score'] == pytest.approx((1.0 + 0.4 + 0.0) / 3)
+        assert current['mean_score'] == pytest.approx((1.0 + 0.4) / 2)  # the timeout: no score
         assert current['mean_duration_ms'] == pytest.approx(150.0)
         assert (stats['previous']['runs'], stats['previous']['passed']) == (1, 1)
         assert stats['hours'] == 24
@@ -193,7 +193,7 @@ class TestRunStats:
     def test_window_breakdowns(self, stats_client: TestClient) -> None:
         stats = stats_client.get('/api/runs/stats?hours=24').json()
 
-        assert stats['score_bins'] == [1, 0, 0, 0, 1, 0, 0, 0, 0, 1]
+        assert stats['score_bins'] == [0, 0, 0, 0, 1, 0, 0, 0, 0, 1]
         assert stats['error_types'] == [{'error_type': 'timeout', 'count': 1}]
         by_env = {env['environment']: env for env in stats['environments']}
         assert by_env.keys() == {'fizzbuzz', 'two_sum'}
@@ -216,6 +216,25 @@ class TestRunStats:
         assert stats['current'] == {'runs': 0, 'finished': 0, 'passed': 0, 'errors': 0,
                                     'mean_score': None, 'mean_duration_ms': None}  # fmt: skip
         assert stats['score_bins'] == [0] * 10
+
+    def test_completed_run_without_a_verdict_has_no_score(self, tmp_path: Path) -> None:
+        store = RunStore(tmp_path / 'console.db')
+        specs = [RunSpec(environment='fizzbuzz', solution='pass', reference=True)] * 3
+        judged, crashed, silent = store.create_group(specs, 'local', 'local')
+        result = RunResult(score=1.0, passed=True, output='', stderr='', exit_code=0,
+                           execution_time_ms=1.0, sandbox_id='local')  # fmt: skip
+        unjudged = {'score': 0.0, 'passed': False, 'exit_code': 2}
+        store.complete(judged.id, result, 1.0)
+        store.complete(
+            crashed.id, result.model_copy(update={**unjudged, 'error_type': 'boom'}), 1.0
+        )
+        store.complete(silent.id, result.model_copy(update=unjudged), 1.0)
+
+        stats = store.stats({}, hours=None)
+
+        assert (stats.current.mean_score, stats.current.errors) == (1.0, 2)
+        assert {count.error_type for count in stats.error_types} == {'boom', 'verifier_error'}
+        assert (store.get(crashed.id).score, store.get(crashed.id).passed) == (None, None)
 
     @pytest.mark.parametrize('query', ['hours=0', 'hours=-1', 'status=nope'])
     def test_rejects_bad_queries(self, stats_client: TestClient, query: str) -> None:

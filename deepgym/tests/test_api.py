@@ -1,9 +1,11 @@
 """Tests for the DeepGym FastAPI application."""
 
+import asyncio
 import os
 import threading
 from unittest.mock import patch
 
+import httpx
 import pytest
 from fastapi.testclient import TestClient
 
@@ -11,7 +13,9 @@ from deepgym.api import routes
 from deepgym.api.app import app
 from deepgym.api.deps import get_deepgym
 from deepgym.api.routes import _environments, _sessions
+from deepgym.async_core import AsyncDeepGym
 from deepgym.core import DeepGym
+from deepgym.models import Environment
 
 # A standalone verifier that works in subprocess (uses sys.exit, not os._exit).
 STANDALONE_PASSING_VERIFIER = (
@@ -126,6 +130,22 @@ class TestRunEndpoint:
         data = resp.json()
         assert data['score'] == 1.0
         assert data['passed'] is True
+
+    def test_async_client_sends_a_file_backed_verifier_inline(
+        self,
+        client: TestClient,
+        sorting_env: Environment,
+        sorting_solution: str,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        real_client = httpx.AsyncClient
+        transport = httpx.ASGITransport(app=app)
+        monkeypatch.setattr(httpx, 'AsyncClient', lambda: real_client(transport=transport))
+
+        remote = AsyncDeepGym(api_url='http://testserver')
+        result = asyncio.run(remote.run(sorting_env, sorting_solution))
+
+        assert (result.score, result.passed) == (1.0, True)
 
 
 class TestAuditEndpoints:

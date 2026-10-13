@@ -12,14 +12,14 @@ from typing import TYPE_CHECKING, Any, Literal
 
 import httpx
 
-from deepgym.benchmark_envs import ResolvedRun, build_run_requests, route_single_run
-from deepgym.exceptions import (
-    DeepGymError,
-    SandboxError,
-    TimeoutError,
-    VerifierError,
-    error_type_for,
+from deepgym.benchmark_envs import (
+    ResolvedRun,
+    _infer_environment_name,
+    build_run_requests,
+    route_single_run,
 )
+from deepgym.core import build_eval_result
+from deepgym.exceptions import DeepGymError, SandboxError, TimeoutError
 from deepgym.judge import DEADLINE_GRACE_S, SANDBOX_SETUP, JudgeJob, sandbox_judge, sandbox_uploads
 from deepgym.models import (
     BatchResult,
@@ -33,7 +33,9 @@ from deepgym.sandbox import (
     ExecutionResult,
     _validate_env_vars,
     build_run_result,
-    parse_verifier_output,
+    error_result,
+    parse_wrapped_output,
+    wrap_stderr,
 )
 from deepgym.sandboxes import PROVIDERS, Provider
 from deepgym.sandboxes.daytona import create_params, is_timeout
@@ -163,6 +165,7 @@ class AsyncDeepGym:
                 exec_result.verifier_result,
                 (time.perf_counter() - start) * 1000.0,
                 str(getattr(sandbox, 'id', 'unknown')),
+                stderr=exec_result.stderr,
                 exit_code=exec_result.exit_code,
             )
 
@@ -194,7 +197,12 @@ class AsyncDeepGym:
 
         Returns:
             Aggregated BatchResult.
+
+        Raises:
+            ValueError: If *max_parallel* is below 1 (no run could ever start).
         """
+        if max_parallel < 1:
+            raise ValueError(f'max_parallel must be at least 1, got {max_parallel}')
         if not outputs:
             return BatchResult(
                 results=[], total=0, passed=0, failed=0, avg_score=0.0, execution_time_ms=0.0
@@ -213,54 +221,10 @@ class AsyncDeepGym:
 
         results: list[RunResult] = []
         for i, item in enumerate(settled):
-            if isinstance(item, VerifierError | TimeoutError):
-                # Model's code caused verifier failure or timeout.
-                error_type = error_type_for(item)
-                logger.warning('Async run %d failed (%s): %s', i, error_type, item)
-                results.append(
-                    RunResult(
-                        score=0.0,
-                        passed=False,
-                        output=str(item),
-                        stderr='',
-                        exit_code=1,
-                        execution_time_ms=0.0,
-                        sandbox_id='error',
-                        error_type=error_type,
-                    )
-                )
-            elif isinstance(item, SandboxError):
-                # Sandbox infrastructure failure.
-                logger.error('Async run %d failed (sandbox_error): %s', i, item)
-                results.append(
-                    RunResult(
-                        score=0.0,
-                        passed=False,
-                        output=str(item),
-                        stderr='',
-                        exit_code=1,
-                        execution_time_ms=0.0,
-                        sandbox_id='error',
-                        error_type='sandbox_error',
-                    )
-                )
-            elif isinstance(item, BaseException):
-                # Unknown failure.
-                logger.error('Async run %d failed (unknown_error): %s', i, item)
-                results.append(
-                    RunResult(
-                        score=0.0,
-                        passed=False,
-                        output=str(item),
-                        stderr='',
-                        exit_code=1,
-                        execution_time_ms=0.0,
-                        sandbox_id='error',
-                        error_type='unknown_error',
-                    )
-                )
-            else:
-                results.append(item)
+            if isinstance(item, BaseException):
+                logger.warning('Async run %d failed: %s', i, item)
+                item = error_result(item)
+            results.append(item)
 
         elapsed_ms = (time.perf_counter() - start) * 1000.0
         passed = sum(1 for r in results if r.passed)
@@ -297,16 +261,19 @@ class AsyncDeepGym:
             max_parallel: Maximum number of concurrent evaluations.
 
         Returns:
-            An EvalResult with per-task results and aggregate statistics.
+            An EvalResult with aggregate statistics; ``results`` follow the suite's
+            order, named in ``env_names``.
 
         Raises:
             ValueError: If neither or both of *model_outputs* and *model*
-                are provided.
+                are provided, or if *max_parallel* is below 1.
         """
         if model_outputs is None and model is None:
             raise ValueError('Provide either model_outputs or model')
         if model_outputs is not None and model is not None:
             raise ValueError('Provide either model_outputs or model, not both')
+        if max_parallel < 1:
+            raise ValueError(f'max_parallel must be at least 1, got {max_parallel}')
 
         environments = self._load_suite(suite)
         semaphore = asyncio.Semaphore(max_parallel)
@@ -340,11 +307,11 @@ class AsyncDeepGym:
                 output = await model(env.task)
                 return await self.run(env, output)
 
-        tasks = [asyncio.ensure_future(_eval_one(e)) for e in environments]
-        settled = await asyncio.gather(*tasks, return_exceptions=True)
-
-        results = self._collect_eval_results(settled)
-        return self._build_eval_result(suite, results, getattr(model, '__name__', 'unknown'))
+        settled = await asyncio.gather(
+            *(_eval_one(env) for env in environments), return_exceptions=True
+        )
+        names = [_infer_environment_name(env) for env in environments]
+        return build_eval_result(suite, getattr(model, '__name__', 'unknown'), names, settled)
 
     async def _eval_with_outputs(
         self,
@@ -365,128 +332,18 @@ class AsyncDeepGym:
             Aggregated EvalResult.
         """
 
-        async def _eval_one(env: Environment, solution: str) -> RunResult:
+        async def _eval_one(env: Environment, name: str) -> RunResult | None:
+            if name not in model_outputs:
+                return None
             async with semaphore:
-                return await self.run(env, solution)
+                return await self.run(env, model_outputs[name])
 
-        tasks: list[asyncio.Task[RunResult]] = []
-        skipped: list[RunResult] = []
-
-        for env in environments:
-            env_name = env.verifier_path.parent.name if env.verifier_path else ''
-            solution = model_outputs.get(env_name)
-            if solution is None:
-                logger.warning('No model output for environment %r, skipping', env_name)
-                skipped.append(
-                    RunResult(
-                        score=0.0,
-                        passed=False,
-                        output=f'No model output provided for {env_name}',
-                        stderr='',
-                        exit_code=1,
-                        execution_time_ms=0.0,
-                        sandbox_id='skipped',
-                    )
-                )
-                continue
-            tasks.append(asyncio.ensure_future(_eval_one(env, solution)))
-
-        settled = await asyncio.gather(*tasks, return_exceptions=True)
-        results = skipped + self._collect_eval_results(settled)
-        return self._build_eval_result(suite, results, 'unknown')
-
-    @staticmethod
-    def _collect_eval_results(
-        settled: list[RunResult | BaseException],
-    ) -> list[RunResult]:
-        """Convert gather results into a list of RunResult, logging errors.
-
-        Args:
-            settled: Raw results from asyncio.gather with return_exceptions=True.
-
-        Returns:
-            List of RunResult (failures converted to zero-score results).
-        """
-        results: list[RunResult] = []
-        for i, item in enumerate(settled):
-            if isinstance(item, VerifierError | TimeoutError):
-                # Model's code caused verifier failure or timeout.
-                error_type = error_type_for(item)
-                logger.warning('Eval task %d failed (%s): %s', i, error_type, item)
-                results.append(
-                    RunResult(
-                        score=0.0,
-                        passed=False,
-                        output=str(item),
-                        stderr='',
-                        exit_code=1,
-                        execution_time_ms=0.0,
-                        sandbox_id='error',
-                        error_type=error_type,
-                    )
-                )
-            elif isinstance(item, SandboxError):
-                # Sandbox infrastructure failure.
-                logger.error('Eval task %d failed (sandbox_error): %s', i, item)
-                results.append(
-                    RunResult(
-                        score=0.0,
-                        passed=False,
-                        output=str(item),
-                        stderr='',
-                        exit_code=1,
-                        execution_time_ms=0.0,
-                        sandbox_id='error',
-                        error_type='sandbox_error',
-                    )
-                )
-            elif isinstance(item, BaseException):
-                # Unknown failure.
-                logger.error('Eval task %d failed (unknown_error): %s', i, item)
-                results.append(
-                    RunResult(
-                        score=0.0,
-                        passed=False,
-                        output=str(item),
-                        stderr='',
-                        exit_code=1,
-                        execution_time_ms=0.0,
-                        sandbox_id='error',
-                        error_type='unknown_error',
-                    )
-                )
-            else:
-                results.append(item)
-        return results
-
-    @staticmethod
-    def _build_eval_result(
-        suite: str,
-        results: list[RunResult],
-        model_name: str,
-    ) -> EvalResult:
-        """Build an EvalResult from collected run results.
-
-        Args:
-            suite: Suite name.
-            results: List of per-environment RunResult objects.
-            model_name: Name to include in the result metadata.
-
-        Returns:
-            Aggregated EvalResult.
-        """
-        passed = sum(1 for r in results if r.passed)
-        total = len(results)
-
-        return EvalResult(
-            suite=suite,
-            model_name=model_name,
-            pass_rate=passed / max(total, 1),
-            results=results,
-            total=total,
-            passed=passed,
-            avg_score=sum(r.score for r in results) / max(total, 1),
+        names = [_infer_environment_name(env) for env in environments]
+        settled = await asyncio.gather(
+            *(_eval_one(env, name) for env, name in zip(environments, names)),
+            return_exceptions=True,
         )
+        return build_eval_result(suite, 'unknown', names, settled)
 
     # ------------------------------------------------------------------
     # Private helpers
@@ -548,9 +405,10 @@ class AsyncDeepGym:
         """Async twin of :func:`deepgym.sandbox.run_judge_in_sandbox`.
 
         Raises:
-            SandboxError: If setting up users or uploading files fails.
+            SandboxError: If setting up users or uploading files fails, or if Daytona
+                fails to run the verifier.
             TimeoutError: If the verifier outruns its time budget.
-            VerifierError: If the verifier fails to run or prints no protocol JSON.
+            VerifierError: If the verifier prints no protocol JSON.
         """
         _validate_env_vars(job.env_vars)
         try:
@@ -565,18 +423,16 @@ class AsyncDeepGym:
             raise SandboxError(f'Failed to set up the judge: {exc}') from exc
         # Daytona doesn't block the network itself, so refuse to judge online.
         command, env = sandbox_judge(job, setup.result, require_offline=True)
+        command, marker = wrap_stderr(command)
         try:
             response = await sandbox.process.exec(
-                command, env=env, timeout=job.timeout + DEADLINE_GRACE_S
+                f'sh -c {shlex.quote(command)}', env=env, timeout=job.timeout + DEADLINE_GRACE_S
             )
         except Exception as exc:
             if is_timeout(exc):
                 raise TimeoutError(f'Verifier exceeded {job.timeout}s') from exc
-            raise VerifierError(f'Verifier execution failed: {exc}') from exc
-        return ExecutionResult(
-            parse_verifier_output(response.result.strip(), f'exit_code={response.exit_code}'),
-            exit_code=response.exit_code,
-        )
+            raise SandboxError(f'Verifier execution failed: {exc}') from exc
+        return parse_wrapped_output(response.result, marker, response.exit_code)
 
     async def _cleanup_sandbox(self, sandbox: Sandbox) -> None:
         """Safely destroy a sandbox, swallowing errors."""
@@ -595,7 +451,11 @@ class AsyncDeepGym:
             resp = await client.post(
                 f'{self._api_url}/v1/run',
                 json={
-                    'environment': env.model_dump(mode='json'),
+                    # The API takes no file paths, so a file-backed verifier goes inline.
+                    'environment': {
+                        **env.model_dump(mode='json', exclude={'verifier_path'}),
+                        'verifier_code': env.verifier_source,
+                    },
                     'model_output': model_output,
                 },
                 headers=({'X-API-Key': self._api_key} if self._api_key else {}),

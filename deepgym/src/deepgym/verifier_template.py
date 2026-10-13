@@ -11,6 +11,8 @@ or detected by parsing the source (never by text search):
   Its return value is normalized; ``from __future__`` imports are hoisted.
 
 Normalized output: one JSON object on stdout; exit 0 passed, 1 failed, 2 verifier error.
+A return value that isn't a float, bool or dict, or a dict whose ``passed`` or
+``truncated`` isn't a real bool, is a verifier error.
 """
 
 from __future__ import annotations
@@ -56,24 +58,28 @@ _REPORT = textwrap.dedent('''\
             elif isinstance(result, dict):
                 output = {
                     "score": float(result.get("score", 0.0)),
-                    "passed": bool(result.get("passed", False)),
+                    "passed": result.get("passed", False),
                     "details": result.get("details", None),
+                    "truncated": result.get("truncated", False),
                 }
+                # bool("false") is True, so only a real bool may claim a pass or a cut-off.
+                for flag in ("passed", "truncated"):
+                    if not isinstance(output[flag], bool):
+                        raise TypeError(f"{flag} must be True or False, not {output[flag]!r}")
                 for key in ("reward_components", "metrics", "seed", "cases", "error_type"):
                     if key in result:
                         output[key] = result[key]
             else:
-                output = {
-                    "score": 0.0,
-                    "passed": False,
-                    "details": f"Unexpected return type: {type(result).__name__}",
-                }
+                raise TypeError(
+                    f"the verifier returned {type(result).__name__}; "
+                    "expected a float, bool or dict"
+                )
             output["schema_version"] = "1.0"
             # Clamp only float noise. NaN fails this check too; never turn it into reward.
             if not -1e-6 <= output["score"] <= 1 + 1e-6:
                 raise _DgInvalidScore(f"invalid score {output['score']!r}; must be in [0, 1]")
             output["score"] = max(0.0, min(1.0, output["score"]))
-            output["truncated"] = False
+            output.setdefault("truncated", False)
             print(_dg_json.dumps(output))
             exit_code = 0 if output["passed"] else 1
         except Exception as e:

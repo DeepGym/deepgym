@@ -93,20 +93,26 @@ class RunStore:
             conn.execute("UPDATE runs SET status = 'running' WHERE id = ?", (run_id,))
 
     def complete(self, run_id: str, result: RunResult, duration_ms: float) -> None:
-        """Record the verifier result of a run that finished."""
+        """Record the verifier result of a run that finished.
+
+        A result without a verdict (``RunResult.has_verdict`` False) keeps no score or
+        pass, so score metrics leave it out; its error type counts it as an error.
+        """
+        judged = result.has_verdict
         with connect(self._path) as conn:
             conn.execute(
                 "UPDATE runs SET status = 'completed', score = ?, passed = ?, error_type = ?, "
                 'result = ?, duration_ms = ?, finished_at = ? WHERE id = ?',
-                (result.score, result.passed, result.error_type, result.model_dump_json(),
-                 duration_ms, utc_now(), run_id),
+                (result.score if judged else None, result.passed if judged else None,
+                 result.error_type or (None if judged else 'verifier_error'),
+                 result.model_dump_json(), duration_ms, utc_now(), run_id),
             )  # fmt: skip
 
     def fail(self, run_id: str, error_type: str, error: str, duration_ms: float) -> None:
-        """Record a run that raised instead of producing a verifier result."""
+        """Record a run that raised instead of producing a verifier result; it has no score."""
         with connect(self._path) as conn:
             conn.execute(
-                "UPDATE runs SET status = 'failed', score = 0, passed = 0, error_type = ?, "
+                "UPDATE runs SET status = 'failed', error_type = ?, "
                 'error = ?, duration_ms = ?, finished_at = ? WHERE id = ?',
                 (error_type, error, duration_ms, utc_now(), run_id),
             )

@@ -47,6 +47,11 @@ class GymInfo(BaseModel):
     reward_components: dict[str, float] | None = None
     cases: list[CaseResult] | None = None
     """Per-test-case breakdown for fine-grained reward shaping."""
+    error_type: str | None = None
+    """Why the run failed, if it did (see ``RunResult.error_type``)."""
+    has_verdict: bool = True
+    """False when the verifier or sandbox failed instead of judging the action. The
+    step's reward is then a placeholder 0.0: mask that sample, don't train on it."""
 
 
 def _result_to_info(result: RunResult) -> GymInfo:
@@ -56,7 +61,7 @@ def _result_to_info(result: RunResult) -> GymInfo:
         result: The run result from the DeepGym client.
 
     Returns:
-        A GymInfo with score, pass/fail, timing, and details.
+        A GymInfo with score, pass/fail, timing, details, and whether it was judged.
     """
     return GymInfo(
         score=result.score,
@@ -65,6 +70,8 @@ def _result_to_info(result: RunResult) -> GymInfo:
         details=result.output,
         reward_components=result.reward_components,
         cases=result.cases,
+        error_type=result.error_type,
+        has_verdict=result.has_verdict,
     )
 
 
@@ -117,6 +124,7 @@ class DeepGymEnv:
         obs = env.reset()
         results = env.step_batch(['solution1', 'solution2', ...])
         rewards = [r[1] for r in results]  # list of floats
+        judged = [r[3].has_verdict for r in results]  # mask the rest: their 0.0 means nothing
 
     Args:
         environment: The DeepGym environment spec.

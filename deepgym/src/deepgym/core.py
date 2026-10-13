@@ -11,14 +11,8 @@ from datetime import datetime, timezone
 from typing import Literal
 
 from deepgym import __version__
-from deepgym.benchmark_envs import build_run_requests, route_single_run
-from deepgym.exceptions import (
-    DeepGymError,
-    SandboxError,
-    TimeoutError,
-    VerifierError,
-    error_type_for,
-)
+from deepgym.benchmark_envs import _infer_environment_name, build_run_requests, route_single_run
+from deepgym.exceptions import DeepGymError, SandboxError
 from deepgym.judge import JudgeJob
 from deepgym.models import (
     Action,
@@ -30,7 +24,7 @@ from deepgym.models import (
     RunResult,
     Trajectory,
 )
-from deepgym.sandbox import LocalExecutor, build_run_result, run_judge_in_sandbox
+from deepgym.sandbox import LocalExecutor, build_run_result, error_result, run_judge_in_sandbox
 from deepgym.sandboxes import PROVIDERS, Provider, Sandbox, check_provider, open_sandbox
 from deepgym.sandboxes.daytona import DaytonaDesktop, DaytonaSandbox
 from deepgym.session import LocalBackend, SandboxBackend, Session, run_episode
@@ -167,6 +161,7 @@ class DeepGym:
                 exec_result.verifier_result,
                 (time.perf_counter() - start) * 1000,
                 sandbox.id,
+                stderr=exec_result.stderr,
                 exit_code=exec_result.exit_code,
             )
         finally:
@@ -297,46 +292,9 @@ class DeepGym:
                 idx = futures[future]
                 try:
                     results[idx] = future.result()
-                except (VerifierError, TimeoutError) as exc:
-                    # Model's code caused verifier failure or timeout.
-                    error_type = error_type_for(exc)
-                    logger.warning('Run %d failed (%s): %s', idx, error_type, exc)
-                    results[idx] = RunResult(
-                        score=0.0,
-                        passed=False,
-                        output=str(exc),
-                        stderr='',
-                        exit_code=1,
-                        execution_time_ms=0,
-                        sandbox_id='error',
-                        error_type=error_type,
-                    )
-                except SandboxError as exc:
-                    # Sandbox infrastructure failure.
-                    logger.error('Run %d failed (sandbox_error): %s', idx, exc)
-                    results[idx] = RunResult(
-                        score=0.0,
-                        passed=False,
-                        output=str(exc),
-                        stderr='',
-                        exit_code=1,
-                        execution_time_ms=0,
-                        sandbox_id='error',
-                        error_type='sandbox_error',
-                    )
                 except Exception as exc:
-                    # Unknown failure.
-                    logger.error('Run %d failed (unknown_error): %s', idx, exc)
-                    results[idx] = RunResult(
-                        score=0.0,
-                        passed=False,
-                        output=str(exc),
-                        stderr='',
-                        exit_code=1,
-                        execution_time_ms=0,
-                        sandbox_id='error',
-                        error_type='unknown_error',
-                    )
+                    logger.warning('Run %d failed: %s', idx, exc)
+                    results[idx] = error_result(exc)
 
         # Every slot must be filled — assert rather than silently drop.
         assert all(r is not None for r in results), 'Not all batch slots were filled'
@@ -376,65 +334,74 @@ class DeepGym:
             max_parallel: Maximum concurrent sandbox executions.
 
         Returns:
-            Aggregated EvalResult with per-environment breakdown.
+            Aggregated EvalResult; ``results`` follow the suite's order, named in ``env_names``.
         """
         from deepgym.registry import load_suite
 
         envs = load_suite(suite)
         if any(isinstance(env, MultiTurnEnvironment) for env in envs):
             raise DeepGymError(f'Suite {suite!r} needs an agent: use dg.run_episode() per env')
-        results: list[RunResult] = []
-
-        # Build a lookup from environment directory name to solution.
+        names = [_infer_environment_name(env) for env in envs]
         with ThreadPoolExecutor(max_workers=max_parallel) as pool:
-            futures = {}
-            for env in envs:
-                # Match by verifier_path parent directory name.
-                env_name = env.verifier_path.parent.name if env.verifier_path else ''
-                solution = model_outputs.get(env_name)
-                if solution is None:
-                    logger.warning('No model output for environment %r, skipping', env_name)
-                    results.append(
-                        RunResult(
-                            score=0.0,
-                            passed=False,
-                            output=f'No model output provided for {env_name}',
-                            stderr='',
-                            exit_code=1,
-                            execution_time_ms=0.0,
-                            sandbox_id='skipped',
-                        )
-                    )
-                    continue
-                futures[pool.submit(self.run, env, solution)] = env_name
+            futures = [
+                pool.submit(self.run, env, model_outputs[name]) if name in model_outputs else None
+                for env, name in zip(envs, names)
+            ]
+            outcomes = [
+                None if future is None else future.exception() or future.result()
+                for future in futures
+            ]
+        return build_eval_result(suite, 'unknown', names, outcomes)
 
-            for future in as_completed(futures):
-                env_name = futures[future]
-                try:
-                    results.append(future.result())
-                except DeepGymError as exc:
-                    logger.warning('Eval run for %r failed: %s', env_name, exc)
-                    results.append(
-                        RunResult(
-                            score=0.0,
-                            passed=False,
-                            output='',
-                            stderr=str(exc),
-                            exit_code=1,
-                            execution_time_ms=0.0,
-                            sandbox_id='error',
-                        )
-                    )
 
-        passed = sum(1 for r in results if r.passed)
-        total = len(results)
+def build_eval_result(
+    suite: str,
+    model_name: str,
+    names: Sequence[str],
+    outcomes: Sequence[RunResult | BaseException | None],
+) -> EvalResult:
+    """Aggregate one outcome per suite environment into an EvalResult, keeping their order.
 
-        return EvalResult(
-            suite=suite,
-            model_name='unknown',
-            pass_rate=passed / max(total, 1),
-            results=results,
-            total=total,
-            passed=passed,
-            avg_score=sum(r.score for r in results) / max(total, 1),
+    Args:
+        suite: Suite name.
+        model_name: Identifier of the evaluated model.
+        names: The environments' names, in suite order.
+        outcomes: Per environment, its RunResult; the exception its run raised, which
+            becomes a no-verdict result (see :func:`~deepgym.sandbox.error_result`); or
+            None if the model gave no output for it, a plain 0.
+
+    Returns:
+        EvalResult whose ``results`` and ``env_names`` follow *names*.
+    """
+    results = [_suite_entry(name, outcome) for name, outcome in zip(names, outcomes, strict=True)]
+    passed = sum(1 for r in results if r.passed)
+    total = len(results)
+    return EvalResult(
+        suite=suite,
+        model_name=model_name,
+        pass_rate=passed / max(total, 1),
+        results=results,
+        total=total,
+        passed=passed,
+        avg_score=sum(r.score for r in results) / max(total, 1),
+        env_names=list(names),
+    )
+
+
+def _suite_entry(name: str, outcome: RunResult | BaseException | None) -> RunResult:
+    """Return suite environment *name*'s result from its outcome (see build_eval_result)."""
+    if outcome is None:
+        logger.warning('No model output for environment %r, skipping', name)
+        return RunResult(
+            score=0.0,
+            passed=False,
+            output=f'No model output provided for {name}',
+            stderr='',
+            exit_code=1,
+            execution_time_ms=0.0,
+            sandbox_id='skipped',
         )
+    if isinstance(outcome, BaseException):
+        logger.warning('Eval run for %r failed: %s', name, outcome)
+        return error_result(outcome)
+    return outcome

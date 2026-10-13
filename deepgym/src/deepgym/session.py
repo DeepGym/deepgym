@@ -49,11 +49,13 @@ from deepgym.models import (
     RunResult,
     Trajectory,
     checked_score,
+    is_verdict,
 )
 from deepgym.sandbox import (
     _extract_json_line,
     build_run_result,
     check_exit,
+    error_result,
     parse_verifier_output,
 )
 from deepgym.sandboxes import TRUSTED_PATH, ExecResult, Sandbox
@@ -696,6 +698,7 @@ class Session:
         self._step = 0
         self._done = False
         self._step_verdict: dict[str, object] | None = None
+        self._step_error: VerifierError | None = None
         # One sandbox, one actor at a time: concurrent step/score/close calls queue up.
         self._lock = threading.Lock()
 
@@ -758,7 +761,8 @@ class Session:
         Raises:
             DeepGymError: If the session is not running.
             ActionError: If the action is not allowed here or the desktop rejects it.
-            VerifierError: If the step verifier fails; the episode is then over.
+            VerifierError: If the step verifier fails or gives no verdict. The episode is
+                then over: the step gets no reward and :meth:`score` reports no verdict.
         """
         with self._lock:
             if self._obs is None or self._done:
@@ -773,36 +777,47 @@ class Session:
             output, exit_code = self._apply(action)
             try:
                 reward = self._step_reward(output) if self._env.step_verifier_code else 0.0
-            except VerifierError:
-                self._record(action, output, exit_code, reward=0.0, done=True)
+            except VerifierError as exc:
+                self._step_error = exc
+                try:
+                    self._record(action, output, exit_code, reward=None, done=True)
+                except Exception as late:
+                    # The verifier's failure decides the episode, not the screenshot after it.
+                    raise exc from late
                 raise
             done = (
                 action.action_type == 'done'
                 or _signals_done(output)
                 or self._step >= self._env.max_steps
             )
-            return self._record(action, output, exit_code, reward=reward, done=done)
+            observation = self._record(action, output, exit_code, reward=reward, done=done)
+            return StepResult(observation, reward, done)
 
     def score(self) -> RunResult:
         """Run the final verifier against the current state.
+
+        An episode whose step verifier failed has no verdict: the final verifier doesn't
+        run, and the result carries that failure as its ``error_type``.
 
         Raises:
             VerifierError: If the verifier output is not valid protocol JSON, or the
                 verifier crashed or was killed after printing it.
             TimeoutError: If the verifier exceeds the per-step timeout.
         """
-        if not self._env.final_verifier_code:
-            return RunResult(
-                score=0.0,
-                passed=False,
-                output='No final verifier provided',
-                stderr='',
-                exit_code=0,
-                execution_time_ms=0.0,
-                sandbox_id=self.sandbox_id,
-                error_type='no_verifier',
-            )
         with self._lock:
+            if self._step_error is not None:
+                return error_result(self._step_error, self.sandbox_id)
+            if not self._env.final_verifier_code:
+                return RunResult(
+                    score=0.0,
+                    passed=False,
+                    output='No final verifier provided',
+                    stderr='',
+                    exit_code=0,
+                    execution_time_ms=0.0,
+                    sandbox_id=self.sandbox_id,
+                    error_type='no_verifier',
+                )
             start = time.perf_counter()
             exit_code, stdout = self._backend.verify(
                 _guarded(self._env.final_verifier_code), self._env.timeout_per_step
@@ -853,17 +868,27 @@ class Session:
         )
 
     def _record(
-        self, action: Action, output: str, exit_code: int | None, *, reward: float, done: bool
-    ) -> StepResult:
-        """Append the step to the trajectory and advance the current observation."""
+        self,
+        action: Action,
+        output: str,
+        exit_code: int | None,
+        *,
+        reward: float | None,
+        done: bool,
+    ) -> Observation:
+        """Append the step to the trajectory and return the new current observation.
+
+        A step without a verdict (*reward* None) adds no step reward, never a 0.
+        """
         self._trajectory.steps.append((self._obs, action))
-        self._trajectory.step_rewards.append(reward)
-        self._trajectory.total_reward += reward
+        if reward is not None:
+            self._trajectory.step_rewards.append(reward)
+            self._trajectory.total_reward += reward
         self._done = done
         self._obs = self._observe(output, done=done, exit_code=exit_code)
         if done:
             self._trajectory.final_observation = self._obs
-        return StepResult(self._obs, reward, done)
+        return self._obs
 
     def _observe(self, output: str, *, done: bool, exit_code: int | None = None) -> Observation:
         return Observation(
@@ -882,7 +907,9 @@ class Session:
         Raises:
             InvalidScoreError: If the score is NaN, infinite, or outside [0, 1].
             VerifierError: If the step verifier times out, prints neither a float nor
-                JSON with a score, or doesn't exit cleanly (see :func:`check_exit`).
+                JSON with a score, doesn't exit cleanly (see :func:`check_exit`), or
+                reports its own failure (exit 2, or an ``error_type`` that isn't the
+                model's fault; see :func:`~deepgym.models.is_verdict`).
         """
         self._step_verdict = None
         self._backend.write_file(_STEP_OUTPUT, output.encode('utf-8'))
@@ -906,6 +933,12 @@ class Session:
             ) from exc
         score = checked_score(value)
         check_exit(exit_code, score, data.get('passed'))
+        error_type = data.get('error_type')
+        if not isinstance(error_type, str | None) or not is_verdict(exit_code, error_type):
+            raise VerifierError(
+                f'Step verifier gave no verdict at step {self._step}: exit code {exit_code}, '
+                f'error_type {error_type!r}, details {data.get("details")!r}'
+            )
         self._step_verdict = {**data, 'exit_code': exit_code}
         return score
 

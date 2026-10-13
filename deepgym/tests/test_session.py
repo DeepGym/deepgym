@@ -236,7 +236,42 @@ class TestLocalEpisodes:
             with pytest.raises(VerifierError):
                 session.step(Action(content='print(1)'))
             assert session.done
-            assert len(session.trajectory.steps) == len(session.trajectory.step_rewards) == 1
+            assert len(session.trajectory.steps) == 1
+            assert session.trajectory.step_rewards == []  # no verdict, so no 0 to train on
+
+    @pytest.mark.parametrize(
+        'step_verifier',
+        [
+            # Prints a failed verdict, then crashes: the guard exits 2.
+            'print(\'{"score": 0.0, "passed": false}\', flush=True)\nraise RuntimeError("bug")\n',
+            # Reports its own infrastructure failure with a normal "failed" exit.
+            'import sys\nprint(\'{"score": 0.0, "passed": false, "error_type": "sandbox_error"}\')'
+            '\nsys.exit(1)\n',
+            'print(\'{"score": 0.5, "error_type": []}\')\n',
+        ],
+    )
+    def test_step_verifier_without_a_verdict_ends_the_episode(
+        self, dg: DeepGym, step_verifier: str
+    ) -> None:
+        env = MultiTurnEnvironment(
+            task='t',
+            max_steps=3,
+            step_verifier_code=step_verifier,
+            final_verifier_code=PASS_VERIFIER,
+        )
+        with dg.session(env) as session:
+            session.start()
+            with pytest.raises(VerifierError, match='no verdict'):
+                session.step(Action(content='print(1)'))
+            result = session.score()
+        assert session.done and session.trajectory.step_rewards == []
+        assert (result.has_verdict, result.error_type) == (False, 'verifier_error')
+
+    def test_step_verifier_model_fault_is_a_reward(self, dg: DeepGym) -> None:
+        model_fault = 'print(\'{"score": 0.0, "passed": false, "error_type": "invalid_patch"}\')\n'
+        env = MultiTurnEnvironment(task='t', max_steps=1, step_verifier_code=model_fault)
+        trajectory, _ = dg.run_episode(env, lambda obs: Action(content='print(1)'))
+        assert trajectory.step_rewards == [0.0]
 
     def test_setup_has_its_own_timeout(self, dg: DeepGym) -> None:
         env = MultiTurnEnvironment(

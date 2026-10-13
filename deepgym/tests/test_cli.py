@@ -9,9 +9,20 @@ import httpx
 import pytest
 
 import deepgym.qa
-from deepgym.cli import _build_parser, _read_file_or_string, main
+from deepgym.cli import (
+    _build_parser,
+    _print_batch_result,
+    _print_eval_result,
+    _print_run_result,
+    _read_file_or_string,
+    main,
+)
+from deepgym.core import build_eval_result
+from deepgym.exceptions import SandboxError
 from deepgym.integrations.zai import ZaiChatClient
+from deepgym.models import BatchResult, RunResult
 from deepgym.qa import QACheck, QAReport
+from deepgym.sandbox import error_result
 
 ENVS_DIR = Path(__file__).resolve().parent.parent / 'src' / 'deepgym' / 'envs'
 
@@ -418,3 +429,39 @@ class TestCLIQALocalExecGuard:
         captured = capsys.readouterr()
         assert 'difficulty: too_easy: pass@1=1.00 pass@2=1.00' in captured.out
         assert ('WARNING: no sandbox-exec or bwrap' in captured.err) is (isolation == 'none')
+
+
+_OK = RunResult(
+    score=1.0, passed=True, output='', stderr='', exit_code=0, execution_time_ms=1.0,
+    sandbox_id='local',
+)  # fmt: skip
+_FAILED = _OK.model_copy(update={'score': 0.5, 'passed': False, 'exit_code': 1})
+
+
+class TestResultOutput:
+    """Runs without a verdict print as errors with their cause, outside the model metrics."""
+
+    def test_run_without_a_verdict_is_an_error(self, capsys: pytest.CaptureFixture) -> None:
+        _print_run_result(error_result(SandboxError('sandbox unreachable')), 1.0)
+        assert 'Result:  ERROR (sandbox_error)' in capsys.readouterr().out
+
+    def test_batch_counts_errors_apart(self, capsys: pytest.CaptureFixture) -> None:
+        outage = error_result(SandboxError('sandbox unreachable'))
+        batch = BatchResult(results=[_OK, _FAILED, outage], total=3, passed=1, failed=2,
+                            avg_score=0.5, execution_time_ms=1.0)  # fmt: skip
+
+        _print_batch_result(batch, [Path('a.py'), Path('b.py'), Path('c.py')], 1.0)
+
+        out = capsys.readouterr().out
+        assert 'Failed:  1' in out and 'Errors:  1' in out and 'Avg:     0.7500' in out
+        assert '[ERROR (sandbox_error)] c.py' in out and 'sandbox unreachable' in out
+
+    def test_eval_lists_errored_environments(self, capsys: pytest.CaptureFixture) -> None:
+        outcomes = [_OK, _FAILED, SandboxError('sandbox down')]
+        result = build_eval_result('suite', 'model', ['a', 'b', 'c'], outcomes)
+
+        _print_eval_result(result, 1.0)
+
+        out = capsys.readouterr().out
+        assert 'Pass Rate:   50.00%' in out and 'Errors:      1' in out
+        assert '[ERROR (sandbox_error)] c: sandbox down' in out

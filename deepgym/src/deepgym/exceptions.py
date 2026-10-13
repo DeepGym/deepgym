@@ -25,7 +25,7 @@ class ActionError(DeepGymError):
     """Raise when the environment rejects an agent's action (not allowed, unknown key)."""
 
 
-def error_type_for(exc: Exception) -> str:
+def error_type_for(exc: BaseException) -> str:
     """Name the failure for a zero-score result."""
     if isinstance(exc, TimeoutError):
         return 'timeout'

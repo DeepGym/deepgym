@@ -89,13 +89,24 @@ class TestWrapVerifierReturnTypes:
         assert output['metrics'] == {'time_ms': 42}
         assert output['seed'] == 7
 
-    def test_invalid_return_type(self) -> None:
-        body = 'return "not a valid type"\n'
+    @pytest.mark.parametrize('body', ['return "not a valid type"\n', 'pass\n'])
+    def test_unsupported_return_is_a_verifier_error(self, body: str) -> None:
         output, code = _run_wrapped(body, '# empty\n')
-        assert output['score'] == 0.0
-        assert output['passed'] is False
-        assert 'Unexpected return type' in output['details']
-        assert code == 1
+        assert (output['score'], output['passed'], code) == (0.0, False, 2)
+        assert output['error_type'] == 'runtime_error'
+        assert 'expected a float, bool or dict' in output['details']
+
+    @pytest.mark.parametrize('flag', ['passed', 'truncated'])
+    def test_non_bool_flag_is_a_verifier_error(self, flag: str) -> None:
+        body = f'return {{"score": 1.0, "passed": True, "{flag}": "false"}}\n'
+        output, code = _run_wrapped(body, '# empty\n')
+        assert (output['passed'], output['error_type'], code) == (False, 'runtime_error', 2)
+        assert f"{flag} must be True or False, not 'false'" in output['details']
+
+    def test_truncated_is_kept(self) -> None:
+        body = 'return {"score": 0.5, "passed": False, "truncated": True}\n'
+        output, code = _run_wrapped(body, '# empty\n')
+        assert (output['truncated'], code) == (True, 1)
 
     def test_exception_in_user_code(self) -> None:
         body = 'raise ValueError("intentional")\n'

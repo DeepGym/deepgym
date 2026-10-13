@@ -3,13 +3,18 @@
 Live runs on real providers are in test_sandboxes_live.py.
 """
 
+import asyncio
+import base64
 import contextlib
 import importlib
+import os
+import re
 import shlex
 import subprocess
 import sys
 import types
 from collections.abc import Mapping
+from pathlib import Path
 
 import pytest
 
@@ -413,6 +418,120 @@ def test_judge_killed_after_printing_a_pass_is_an_error() -> None:
     executed = run_judge_in_sandbox(box, _JOB)
     with pytest.raises(VerifierError, match='137'):
         build_run_result(executed.verifier_result, 1.0, box.id, exit_code=executed.exit_code)
+
+
+# The judge's setup output: root judge, solver uid/gid, python, and whether netns works.
+_JUDGE_SETUP = ('useradd', '0 999 987 /usr/bin/python3 0')
+_PASS = '{"score": 1.0, "passed": true}'
+_FAIL = '{"score": 0.0, "passed": false}'
+
+
+def _run_as_provider(argv: list[str], bin_dir: Path, stdout: str, stderr: str) -> tuple[int, str]:
+    """Run a judge command in a real shell and return (exit code, stdout + stderr).
+
+    Providers hand back one stream like this. A stub ``bash`` in *bin_dir* plays the
+    verifier: it prints *stdout* and *stderr*, with ``{marker}`` replaced by the
+    command's stderr marker, if it has one.
+    """
+    found = re.search(r'deepgym-stderr-\w+', argv[-1])
+    for name, text in (('out', stdout), ('err', stderr)):
+        (bin_dir / name).write_text(text.replace('{marker}', found[0] if found else ''))
+    out, err = (shlex.quote(str(bin_dir / name)) for name in ('out', 'err'))
+    stub = bin_dir / 'bash'
+    stub.write_text(f'#!/bin/sh\ncat {out}; cat {err} >&2\n')
+    stub.chmod(0o755)
+    path = f'{bin_dir}{os.pathsep}{os.environ["PATH"]}'
+    done = subprocess.run(argv, capture_output=True, text=True, env={**os.environ, 'PATH': path})
+    return done.returncode, done.stdout + done.stderr
+
+
+class ShellSandbox(FakeSandbox):
+    """Runs the judge in a real shell (see :func:`_run_as_provider`), as docker/e2b/modal do."""
+
+    def __init__(self, bin_dir: Path, stdout: str, stderr: str) -> None:
+        super().__init__(network_blocked=True, answers=[_JUDGE_SETUP])
+        self.streams = (bin_dir, stdout, stderr)
+
+    def exec(self, command: str, **kwargs: object) -> ExecResult:
+        if 'useradd' in command:
+            return super().exec(command, **kwargs)
+        return ExecResult(*_run_as_provider(['sh', '-c', command], *self.streams))
+
+
+def test_judge_parses_stdout_only_and_keeps_stderr(tmp_path: Path) -> None:
+    executed = run_judge_in_sandbox(ShellSandbox(tmp_path, _PASS, _FAIL), _JOB)
+
+    assert (executed.verifier_result.score, executed.verifier_result.passed) == (1.0, True)
+    assert executed.stderr == _FAIL
+
+
+def test_judge_marker_cannot_be_forged(tmp_path: Path) -> None:
+    forged = f'{{marker}} {base64.b64encode(_PASS.encode()).decode()}'
+    # A pass and a forged marker line echoed earlier on stdout, more on stderr; the
+    # verifier's own verdict comes last on stdout.
+    stdout = f'{_PASS}\n{forged}\n{_FAIL}\n'
+    stderr = f'{_PASS}\n{{marker}}\n'
+
+    executed = run_judge_in_sandbox(ShellSandbox(tmp_path, stdout, stderr), _JOB)
+
+    assert executed.verifier_result.score == 0.0
+    assert executed.stderr.startswith(_PASS) and 'deepgym-stderr-' in executed.stderr
+
+
+def _async_daytona_box(process: object) -> types.SimpleNamespace:
+    """A stand-in for an async Daytona sandbox that can make an offline netns."""
+
+    class Files:
+        async def upload_file(self, content: bytes, path: str) -> None:
+            pass
+
+    return types.SimpleNamespace(process=process, fs=Files())
+
+
+def test_async_daytona_judge_parses_stdout_only(tmp_path: Path) -> None:
+    from deepgym.async_core import AsyncDeepGym
+
+    class Process:
+        async def exec(self, command: str, **kwargs: object) -> object:
+            if 'useradd' in command:
+                return types.SimpleNamespace(exit_code=0, result='0 999 987 /usr/bin/python3 1')
+            # Daytona runs no shell of its own and returns one stream.
+            code, output = _run_as_provider(shlex.split(command), tmp_path, _PASS, _FAIL)
+            return types.SimpleNamespace(exit_code=code, result=output)
+
+    client = AsyncDeepGym(mode='local')
+    executed = asyncio.run(client._run_judge(_async_daytona_box(Process()), _JOB))
+
+    assert (executed.verifier_result.score, executed.stderr) == (1.0, _FAIL)
+
+
+@pytest.mark.parametrize('error', [SandboxError('E2B sandbox is gone'), ConnectionError('reset')])
+def test_judge_provider_failure_is_a_sandbox_error(error: Exception) -> None:
+    box = FakeSandbox(network_blocked=True, answers=[_JUDGE_SETUP])
+    answer = box.exec
+
+    def exec_(command: str, **kwargs: object) -> ExecResult:
+        if 'DEEPGYM_DEADLINE' in command:
+            raise error
+        return answer(command, **kwargs)
+
+    box.exec = exec_  # type: ignore[method-assign]
+    with pytest.raises(SandboxError):
+        run_judge_in_sandbox(box, _JOB)
+
+
+def test_async_daytona_judge_provider_failure_is_a_sandbox_error() -> None:
+    from deepgym.async_core import AsyncDeepGym
+
+    class Process:
+        async def exec(self, command: str, **kwargs: object) -> object:
+            if 'DEEPGYM_DEADLINE' in command:
+                raise ConnectionError('Daytona API unreachable')
+            return types.SimpleNamespace(exit_code=0, result='0 999 987 /usr/bin/python3 1')
+
+    client = AsyncDeepGym(mode='local')
+    with pytest.raises(SandboxError, match='unreachable'):
+        asyncio.run(client._run_judge(_async_daytona_box(Process()), _JOB))
 
 
 # ---------------------------------------------------------------------------

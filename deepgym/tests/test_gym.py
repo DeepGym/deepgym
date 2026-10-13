@@ -232,6 +232,28 @@ class TestDeepGymEnv:
         assert results[1][2] is True
 
 
+class TestUnjudgedRewards:
+    """GymInfo says when a 0.0 reward judged nothing, so trainers can mask it."""
+
+    def test_verifier_crash_is_flagged(self, local_dg: DeepGym) -> None:
+        crashing = Environment(task='t', verifier_code='raise RuntimeError("verifier bug")')
+        _, reward, _, info = DeepGymEnv(crashing, dg=local_dg).step('x = 1\n')
+        assert (reward, info.has_verdict, info.error_type) == (0.0, False, 'runtime_error')
+
+    def test_batch_sandbox_failure_is_flagged(
+        self, simple_env: Environment, local_dg: DeepGym, correct_solution: str
+    ) -> None:
+        broken = simple_env.model_copy(update={'env_vars': {'BAD NAME': 'x'}})
+        ((_, reward, _, info),) = DeepGymEnv(broken, dg=local_dg).step_batch([correct_solution])
+        assert (reward, info.has_verdict, info.error_type) == (0.0, False, 'sandbox_error')
+
+    def test_judged_failure_has_a_verdict(
+        self, simple_env: Environment, local_dg: DeepGym, wrong_solution: str
+    ) -> None:
+        _, _, _, info = DeepGymEnv(simple_env, dg=local_dg).step(wrong_solution)
+        assert (info.has_verdict, info.error_type) == (True, None)
+
+
 # ---------------------------------------------------------------------------
 # AsyncDeepGymEnv tests
 # ---------------------------------------------------------------------------

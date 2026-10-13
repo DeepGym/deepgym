@@ -8,13 +8,21 @@ judge in both cases.
 from __future__ import annotations
 
 import asyncio
+import base64
 import json
 import logging
 import re
 import shlex
 import subprocess
+from uuid import uuid4
 
-from deepgym.exceptions import InvalidScoreError, SandboxError, TimeoutError, VerifierError
+from deepgym.exceptions import (
+    InvalidScoreError,
+    SandboxError,
+    TimeoutError,
+    VerifierError,
+    error_type_for,
+)
 from deepgym.judge import (
     DEADLINE_GRACE_S,
     SANDBOX_SETUP,
@@ -134,6 +142,66 @@ def build_run_result(
     )
 
 
+def error_result(exc: BaseException, sandbox_id: str = 'error') -> RunResult:
+    """Return the zero-score result of a run that raised *exc* instead of being judged.
+
+    Its ``error_type`` names the failure (see :func:`~deepgym.exceptions.error_type_for`),
+    so ``has_verdict`` is False and trainers can mask it instead of learning from the 0.
+    """
+    return RunResult(
+        score=0.0,
+        passed=False,
+        output=str(exc),
+        stderr='',
+        exit_code=1,
+        execution_time_ms=0.0,
+        sandbox_id=sandbox_id,
+        error_type=error_type_for(exc),
+    )
+
+
+def wrap_stderr(command: str) -> tuple[str, str]:
+    """Wrap *command* so its stderr comes back after its stdout, never mixed into it.
+
+    Providers return a command's stdout and stderr as one stream, where a JSON line on
+    stderr could pass for the verdict. The wrapper sends stderr to a private temp file
+    and prints it last, as one base64 line behind a per-run marker. Base64 can't hold
+    the marker or a newline, so that line is always the wrapper's own.
+
+    Returns:
+        The wrapped command and its marker, for :func:`parse_wrapped_output`.
+    """
+    marker = f'deepgym-stderr-{uuid4().hex}'
+    wrapped = (
+        f'err=$(mktemp) && {{ {command} 2>"$err"; rc=$?; printf "\\n%s " {marker}; '
+        f'base64 < "$err" | tr -d "\\n"; rm -f "$err"; exit $rc; }}'
+    )
+    return wrapped, marker
+
+
+def parse_wrapped_output(output: str, marker: str, exit_code: int) -> ExecutionResult:
+    """Parse the verdict from the stdout of a command wrapped by :func:`wrap_stderr`.
+
+    Only the last line can carry the marker; an earlier copy is just verifier stdout.
+    Without it (the wrapper didn't finish) the whole output counts as stdout.
+
+    Raises:
+        InvalidScoreError: If the score is NaN, infinite, or outside [0, 1].
+        VerifierError: If stdout has no protocol JSON.
+    """
+    stdout, _, last = output.rstrip('\n').rpartition('\n')
+    tag, _, encoded = last.partition(' ')
+    if tag == marker:
+        stderr = base64.b64decode(encoded).decode('utf-8', 'replace').strip()
+    else:
+        stdout, stderr = output, ''
+    return ExecutionResult(
+        parse_verifier_output(stdout.strip(), f'exit_code={exit_code} stderr: {stderr!r}'),
+        stderr=stderr,
+        exit_code=exit_code,
+    )
+
+
 def run_judge_in_sandbox(sandbox: Sandbox, job: JudgeJob) -> ExecutionResult:
     """Run *job*'s verifier in *sandbox*.
 
@@ -142,10 +210,10 @@ def run_judge_in_sandbox(sandbox: Sandbox, job: JudgeJob) -> ExecutionResult:
     namespace.
 
     Raises:
-        SandboxError: If setting up users or uploading files fails, or if the
-            solution can't be cut off the network.
+        SandboxError: If setting up users or uploading files fails, if the solution
+            can't be cut off the network, or if the provider fails to run the verifier.
         TimeoutError: If the verifier outruns its time budget.
-        VerifierError: If the verifier fails to run or prints no protocol JSON.
+        VerifierError: If the verifier prints no protocol JSON.
     """
     _validate_env_vars(job.env_vars)
     try:
@@ -159,17 +227,18 @@ def run_judge_in_sandbox(sandbox: Sandbox, job: JudgeJob) -> ExecutionResult:
     except Exception as exc:
         raise SandboxError(f'Failed to set up the judge: {exc}') from exc
     command, env = sandbox_judge(job, setup.output, require_offline=not sandbox.network_blocked)
+    command, marker = wrap_stderr(command)
     try:
         response = sandbox.exec(command, env=env, timeout=job.timeout + DEADLINE_GRACE_S)
     except SandboxTimeoutError as exc:
         raise TimeoutError(f'Verifier exceeded {job.timeout}s') from exc
+    except SandboxError:
+        raise
     except Exception as exc:
-        raise VerifierError(f'Verifier execution failed: {exc}') from exc
+        # The provider couldn't run the command or report back: an outage, not a verdict.
+        raise SandboxError(f'Verifier execution failed: {exc}') from exc
     # Exit codes 0 (passed) and 1 (failed) are normal verifier outcomes, so parse regardless.
-    return ExecutionResult(
-        parse_verifier_output(response.output.strip(), f'exit_code={response.exit_code}'),
-        exit_code=response.exit_code,
-    )
+    return parse_wrapped_output(response.output, marker, response.exit_code)
 
 
 # ---------------------------------------------------------------------------

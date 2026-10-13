@@ -421,7 +421,8 @@ class Trajectory(BaseModel):
     """Cumulative reward for the episode."""
 
     step_rewards: list[float] = Field(default_factory=list)
-    """Per-step reward values."""
+    """Per-step reward values. A step whose verifier gave no verdict ends the episode
+    without one, so a failed episode has one reward fewer than steps."""
 
 
 class MultiTurnEnvironment(BaseModel):
@@ -521,6 +522,9 @@ class EvalResult(BaseModel):
     total: int
     passed: int
     avg_score: float
+
+    env_names: list[str] | None = None
+    """Environment of each entry in ``results``, in the same (suite) order."""
 
 
 # ---------------------------------------------------------------------------

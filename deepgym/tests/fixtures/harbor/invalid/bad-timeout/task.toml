@@ -1,0 +1,5 @@
+[verifier]
+timeout_sec = -5
+
+[environment]
+docker_image = "python:3.12-slim"

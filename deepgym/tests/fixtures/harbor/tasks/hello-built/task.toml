@@ -1,0 +1,7 @@
+version = "1.0"
+
+[verifier]
+timeout_sec = 120.0
+
+[verifier.environment]
+network_mode = "no-network"

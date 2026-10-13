@@ -14,6 +14,7 @@ from deepgym.benchmark_envs import (
     TerminalBenchEnvironment,
     _split_batch_kwargs,
 )
+from deepgym.exceptions import SandboxError
 from deepgym.integrations.trl import make_trl_reward_fn
 from deepgym.models import Environment
 from deepgym.registry import load_environment
@@ -138,16 +139,65 @@ class TestPatchVerifier:
         extracted = PatchVerifier.extract_patch(f'```diff\n{patch_text}\n```')
         assert extracted.startswith('diff --git')
 
-    def test_scores_local_patch_repo(
+    @pytest.mark.parametrize('wrap', ['{}', '```diff\n{}```', 'Fix:\n```\n{}\n\n```\n'])
+    def test_extract_keeps_a_trailing_blank_context_line(self, wrap: str) -> None:
+        patch = 'diff --git a/a.txt b/a.txt\n--- a/a.txt\n+++ b/a.txt\n@@ -1,2 +1,2 @@\n-a\n+b\n \n'
+
+        assert PatchVerifier.extract_patch(wrap.format(patch)) == patch
+
+    def test_extract_ignores_prose(self) -> None:
+        assert PatchVerifier.extract_patch('I could not find the bug.') == ''
+
+    def test_scores_patch_repo_in_sandbox(
+        self,
+        sandbox_dg,
+        swebench_repo: dict[str, object],
+    ) -> None:
+        env = SWEBenchProEnvironment()
+        result = sandbox_dg.run(env, swebench_repo['patch_text'], task=swebench_repo['row'])
+        assert result.score == pytest.approx(1.0)
+        assert result.passed is True
+        assert result.reward_components == {'apply': 0.3, 'tests': 0.7}
+
+    def test_unsupported_language_is_not_scored(self, sandbox_dg, tmp_path: Path) -> None:
+        # A Go repo whose bug the patch leaves in place. There's no Go runner, so the
+        # verdict is "unsupported", never a stand-in command that exits 0.
+        repo = tmp_path / 'go-fixture'
+        repo.mkdir()
+        (repo / 'calc.go').write_text('package calc\n\nfunc Add(a, b int) int { return a - b }\n')
+        _git(repo, 'init', '-q')
+        _git(repo, 'add', '-A')
+        _git(repo, '-c', 'user.name=t', '-c', 'user.email=t@example.com', 'commit', '-qm', 'base')
+        (repo / 'README.md').write_text('still broken\n')
+        _git(repo, 'add', '-A')
+        patch = _git(repo, 'diff', '--cached')
+        _git(repo, 'reset', '--hard', '-q')
+        row = {
+            'instance_id': 'go-1',
+            'repo': 'fixture/go',
+            'repo_source': str(repo),
+            'base_commit': _git(repo, 'rev-parse', 'HEAD'),
+            'repo_language': 'go',
+            'selected_test_files_to_run': ['calc_test.go'],
+        }
+        env = SWEBenchProEnvironment()
+
+        result = sandbox_dg.run(env, patch, task=row)
+
+        assert env._build_test_commands(env._task_from_row(row)) == []
+        assert result.score == 0.0
+        assert result.passed is False
+        assert result.error_type == 'unsupported_runner'
+
+    def test_local_mode_refuses_to_run_model_patches(
         self,
         local_dg,
         swebench_repo: dict[str, object],
     ) -> None:
-        env = SWEBenchProEnvironment()
-        result = local_dg.run(env, swebench_repo['patch_text'], task=swebench_repo['row'])
-        assert result.score == pytest.approx(1.0)
-        assert result.passed is True
-        assert result.reward_components == {'apply': 0.3, 'tests': 0.7}
+        with pytest.raises(SandboxError, match="mode='docker'"):
+            local_dg.run(
+                SWEBenchProEnvironment(), swebench_repo['patch_text'], task=swebench_repo['row']
+            )
 
 
 class TestSWEBenchEnvironment:
@@ -159,11 +209,11 @@ class TestSWEBenchEnvironment:
 
     def test_trl_reward_fn_uses_raw_dataset_columns(
         self,
-        local_dg,
+        sandbox_dg,
         swebench_repo: dict[str, object],
     ) -> None:
         env = SWEBenchProEnvironment()
-        reward_fn = make_trl_reward_fn(env=env, dg=local_dg)
+        reward_fn = make_trl_reward_fn(env=env, dg=sandbox_dg)
         row = swebench_repo['row']
         scores = reward_fn(
             completions=[f'```diff\n{swebench_repo["patch_text"]}\n```'],
@@ -186,13 +236,13 @@ class TestTerminalBenchEnvironment:
         env = load_environment('terminal_bench_2')
         assert isinstance(env, TerminalBenchEnvironment)
 
-    def test_runs_local_terminal_task(
+    def test_runs_terminal_task_in_sandbox(
         self,
-        local_dg,
+        sandbox_dg,
         terminal_task_root: Path,
     ) -> None:
         env = TerminalBenchEnvironment(task_root=terminal_task_root, default_task_id='echo-task')
-        result = local_dg.run(env, 'printf done > output.txt\n', task_id='echo-task')
+        result = sandbox_dg.run(env, 'printf done > output.txt\n', task_id='echo-task')
         assert result.score == pytest.approx(1.0)
         assert result.passed is True
 
@@ -246,24 +296,24 @@ class TestMixedEnvironment:
 
     def test_trl_reward_routes_to_matching_child_env(
         self,
-        local_dg,
-        sorting_env: Environment,
-        sorting_solution: str,
+        sandbox_dg,
+        swebench_repo: dict[str, object],
         terminal_task_root: Path,
     ) -> None:
-        named_sorting = sorting_env.model_copy(update={'name': 'python_sorting'})
         terminal_env = TerminalBenchEnvironment(
             task_root=terminal_task_root,
             default_task_id='echo-task',
         )
-        mixed = MixedEnvironment(environments=[(named_sorting, 0.5), (terminal_env, 0.5)], seed=11)
-        reward_fn = make_trl_reward_fn(env=mixed, dg=local_dg)
+        mixed = MixedEnvironment(
+            environments=[(SWEBenchProEnvironment(), 0.5), (terminal_env, 0.5)], seed=11
+        )
+        reward_fn = make_trl_reward_fn(env=mixed, dg=sandbox_dg)
 
         scores = reward_fn(
-            completions=[sorting_solution, 'printf done > output.txt\n'],
-            environment_name=['python_sorting', 'terminal_bench_2'],
+            completions=[swebench_repo['patch_text'], 'printf done > output.txt\n'],
+            environment_name=['swebench_pro', 'terminal_bench_2'],
+            task=[swebench_repo['row'], None],
             task_id=[None, 'echo-task'],
         )
 
-        assert scores[0] >= 0.9
-        assert scores[1] == pytest.approx(1.0)
+        assert scores == pytest.approx([1.0, 1.0])

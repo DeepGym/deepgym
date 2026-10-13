@@ -25,8 +25,8 @@ def run_qa(
     """Quality-gate one registered environment.
 
     Multi-turn and computer-use envs (they need an agent) and benchmark-backed
-    envs such as swebench_pro (they score per dataset instance) get a single
-    passing 'skipped' check. An environment that fails to load gets a failed
+    envs such as swebench_pro or mimo_code (they score through their own runner)
+    get a single passing 'skipped' check. An environment that fails to load gets a failed
     'load' check.
 
     Args:
@@ -50,9 +50,9 @@ def run_qa(
         return QAReport(environment=name, checks=[check])
     if isinstance(env, MultiTurnEnvironment):
         return _skipped(name, 'multi-turn/computer-use env needs an agent')
-    # Same test core.run_batch uses to route a run to a dataset instance.
-    if hasattr(env, 'prepare_batch_requests'):
-        return _skipped(name, 'benchmark-backed env needs a dataset instance per run')
+    # The tests core.run_batch and core.run use to route a run to a benchmark runner.
+    if hasattr(env, 'prepare_batch_requests') or hasattr(env, 'run_with_deepgym'):
+        return _skipped(name, 'benchmark-backed env scores through its own runner')
 
     checks = single_turn_checks(env, _read_reference(env), dg, reruns)
     checks.append(hack_resistant(env, dg))

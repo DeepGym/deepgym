@@ -132,7 +132,7 @@ def main() -> int:
     parser.add_argument('--count', type=int, default=100)
     parser.add_argument('--start-index', type=int, default=0)
     parser.add_argument('--level', default='level3')
-    parser.add_argument('--mode', choices=['local', 'auto', 'daytona'], default='daytona')
+    parser.add_argument('--mode', choices=['auto', 'daytona'], default='daytona')
     parser.add_argument('--max-parallel', type=int, default=8)
     parser.add_argument('--timeout', type=int, default=300)
     parser.add_argument('--answer-source', choices=['reference', 'glm'], default='reference')

@@ -1,11 +1,18 @@
 """Shared fixtures for the DeepGym test suite."""
 
+import shlex
+import shutil
+import subprocess
+import sys
+import tempfile
+from collections.abc import Mapping
 from pathlib import Path
 
 import pytest
 
 from deepgym.core import DeepGym
 from deepgym.models import Environment
+from deepgym.sandboxes import ExecResult
 
 # ---------------------------------------------------------------------------
 # Paths
@@ -101,3 +108,57 @@ def sample_verifier_code() -> str:
 def sample_solution_code() -> str:
     """Return a trivial solution that defines solve(x) -> x*2."""
     return 'def solve(x):\n    return x * 2\n'
+
+
+# ---------------------------------------------------------------------------
+# Fake sandbox for benchmark runners
+# ---------------------------------------------------------------------------
+
+
+class RunnerSandbox:
+    """Fake provider for benchmark runners (SWE-bench Pro, Terminal-Bench, CyberGym, MiMo).
+
+    Those runners refuse local mode, so tests reach them through the sandbox code
+    path. Uploads land in a temp dir and the runner runs from there; only the tests'
+    own fixture repos and patches ever run this way.
+    """
+
+    network_blocked = True
+
+    def __init__(self) -> None:
+        self.root = Path(tempfile.mkdtemp(prefix='deepgym_fake_sandbox_'))
+        self.id = f'fake-{self.root.name}'
+
+    def _path(self, sandbox_path: str) -> Path:
+        return self.root / sandbox_path.lstrip('/')
+
+    def upload(self, content: bytes, path: str) -> None:
+        self._path(path).parent.mkdir(parents=True, exist_ok=True)
+        self._path(path).write_bytes(content)
+
+    def exec(
+        self,
+        command: str,
+        *,
+        cwd: str | None = None,
+        env: Mapping[str, str] | None = None,
+        timeout: int | None = None,
+    ) -> ExecResult:
+        python, *paths = shlex.split(command)  # python3 <runner> <task> [patch] [archive]
+        assert python == 'python3'
+        argv = [sys.executable, *(str(self._path(path)) for path in paths)]
+        proc = subprocess.run(argv, capture_output=True, text=True, timeout=timeout)
+        return ExecResult(proc.returncode, proc.stdout + proc.stderr)
+
+    def delete(self) -> None:
+        shutil.rmtree(self.root, ignore_errors=True)
+
+
+@pytest.fixture()
+def sandbox_dg(monkeypatch: pytest.MonkeyPatch) -> DeepGym:
+    """A sandbox-mode client whose benchmark runners run in a RunnerSandbox."""
+    monkeypatch.setattr('deepgym.core.check_provider', lambda provider: None)
+    monkeypatch.setattr(
+        'deepgym.benchmark_envs.open_sandbox', lambda provider, image: RunnerSandbox()
+    )
+    return DeepGym(mode='docker')

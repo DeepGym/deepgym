@@ -20,7 +20,9 @@ def test_extract_patch_preserves_trailing_context_space() -> None:
     assert extract_patch(patch) == patch
 
 
-def test_cybergym_patch_environment_scores_reference_patch(tmp_path: Path) -> None:
+def test_cybergym_patch_environment_scores_reference_patch(
+    tmp_path: Path, sandbox_dg: DeepGym
+) -> None:
     repo = tmp_path / 'repo' / 'src-vul' / 'toy'
     repo.mkdir(parents=True)
     (repo / 'hello.txt').write_text('bad\nkeep\n', encoding='utf-8')
@@ -46,14 +48,14 @@ def test_cybergym_patch_environment_scores_reference_patch(tmp_path: Path) -> No
     }
     env = CyberGymPatchEnvironment.from_row(row, artifacts=artifacts, timeout=30)
 
-    result = DeepGym(mode='local').run(env, patch.read_text(encoding='utf-8'))
+    result = sandbox_dg.run(env, patch.read_text(encoding='utf-8'))
 
     assert result.passed is True
     assert result.score == 1.0
     assert result.metrics['root'] == 'src-vul/toy'
 
 
-def test_cybergym_patch_environment_rejects_non_patch(tmp_path: Path) -> None:
+def test_cybergym_patch_environment_rejects_non_patch(tmp_path: Path, sandbox_dg: DeepGym) -> None:
     repo = tmp_path / 'repo' / 'src-vul' / 'toy'
     repo.mkdir(parents=True)
     (repo / 'hello.txt').write_text('bad\n', encoding='utf-8')
@@ -62,7 +64,7 @@ def test_cybergym_patch_environment_rejects_non_patch(tmp_path: Path) -> None:
     artifacts = CyberGymArtifacts(task_id='toy:2', repo_vul=archive)
     env = CyberGymPatchEnvironment.from_row({'task_id': 'toy:2'}, artifacts=artifacts, timeout=30)
 
-    result = DeepGym(mode='local').run(env, 'not a patch')
+    result = sandbox_dg.run(env, 'not a patch')
 
     assert result.passed is False
     assert result.error_type == 'invalid_patch'

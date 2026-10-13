@@ -199,7 +199,9 @@ def _grade(dg: DeepGym, env: Environment, code: str, deadline: float) -> RunResu
     outcome: RunResult | str
     try:
         outcome = dg.run(env, code)
-    except Exception as exc:
+    # A provider SDK that runs its own event loop can raise asyncio's CancelledError, which
+    # isn't an Exception. Caught here, no error reaches the request or its asyncio futures.
+    except (Exception, asyncio.CancelledError) as exc:
         if is_infrastructure_failure(exc):
             logger.warning('OpenRLHF: the provider or network failed a run: %s', exc)
             outcome = error_type_for(exc)

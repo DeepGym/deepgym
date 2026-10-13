@@ -649,13 +649,18 @@ class TestOpenRLHFIntegration:
             SandboxError('Sandbox 7f3a is not running'),
             DeepGymTimeout('Command exceeded 30s timeout'),
             VerifierError('Verifier did not produce valid JSON'),
+            asyncio.CancelledError(),
         ],
-        ids=['sandbox_killed', 'hung', 'verifier_failed'],
+        ids=['sandbox_killed', 'hung', 'verifier_failed', 'sdk_cancelled'],
     )
     def test_a_failure_the_model_may_have_caused_is_never_graded_again(
-        self, monkeypatch: pytest.MonkeyPatch, failure: Exception
+        self, monkeypatch: pytest.MonkeyPatch, failure: BaseException
     ) -> None:
-        """It scores 0, even with NaN asked for: a second grading could hand it a pass."""
+        """It scores 0, even with NaN asked for: a second grading could hand it a pass.
+
+        So does asyncio's CancelledError, which a provider SDK running its own event loop can
+        raise and which isn't an Exception: it never fails the request.
+        """
         monkeypatch.setattr(openrlhf, '_RETRY_DELAY_S', 0.0)
         dg = _ScriptedDeepGym({'right': [failure]})
 

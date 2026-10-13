@@ -133,6 +133,20 @@ def test_cybergym_patch_environment_rejects_non_patch(tmp_path: Path, sandbox_dg
     assert result.error_type == 'invalid_patch'
 
 
+def test_prompt_names_the_patch_format_the_runner_checks(
+    tmp_path: Path, sandbox_dg: DeepGym
+) -> None:
+    """The runner needs `diff --git` headers; a prompt asking for "a unified diff" got
+    plain `---`/`+++` diffs from GLM, all scored 0 as non-patches."""
+    env = _toy_env(tmp_path)
+    plain = '--- a/hello.txt\n+++ b/hello.txt\n@@ -1 +1 @@\n-bad\n+good\n'
+
+    result = sandbox_dg.run(env, plain)
+
+    assert 'diff --git a/<path> b/<path>' in env.task
+    assert result.error_type == 'invalid_patch'
+
+
 def test_documented_eval_modes_are_accepted() -> None:
     """docs/cyberbench.md once showed a --mode the eval script rejects."""
     docs = (_ROOT / 'docs' / 'cyberbench.md').read_text(encoding='utf-8')

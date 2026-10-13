@@ -12,7 +12,7 @@ scripts_dir = Path(__file__).resolve().parent.parent / 'scripts'
 if str(scripts_dir) not in sys.path:
     sys.path.insert(0, str(scripts_dir))
 
-from import_mbpp import generate_verifier  # noqa: E402
+from import_mbpp import generate_verifier, task_prompt  # noqa: E402
 
 # MBPP task 2 (google-research-datasets/mbpp).
 _SIMILAR_TESTS = [
@@ -87,3 +87,15 @@ def test_tests_resolve_names_from_trusted_code(
 
     assert result.score == score, result.output
     assert result.has_verdict is True
+
+
+def test_prompt_names_the_functions_the_tests_call() -> None:
+    """MBPP's text names no function, so GLM's five answers all failed as "missing function"."""
+    text = 'Write a function to remove characters from the first string present in the second.'
+
+    prompt = task_prompt(text, _DIRTY_REF, '\n'.join(_DIRTY_TESTS))
+
+    assert prompt.startswith(text)
+    assert '`def remove_dirty_chars(string, second_string)`' in prompt
+    assert 'str_to_list' not in prompt  # a reference helper the tests never call
+    assert 'bacuve' not in prompt  # and no expected output

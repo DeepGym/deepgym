@@ -51,6 +51,26 @@ def trusted_names(reference_code: str, test_code: str) -> tuple[str, list[str]]:
     return imports, sorted(defined & loaded)
 
 
+def task_prompt(text: str, reference_code: str, test_code: str) -> str:
+    """Return the problem text plus the signatures the tests call, which MBPP's text omits.
+
+    Only names and parameters are shown, never a test or an expected output.
+    """
+    _, required = trusted_names(reference_code, test_code)
+    defs = {
+        node.name: node
+        for node in ast.parse(reference_code).body
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef))
+    }
+    shown = [
+        f'class {name}' if isinstance(defs.get(name), ast.ClassDef)
+        else f'def {name}({ast.unparse(defs[name].args)})' if name in defs
+        else name
+        for name in required
+    ]
+    return f'{text}\n\nYour code must define: ' + ', '.join(f'`{item}`' for item in shown) + '\n'
+
+
 def generate_verifier(
     task_id: str,
     test_list: list[str],
@@ -169,8 +189,9 @@ def main():
         env_dir = output_dir / dir_name
         env_dir.mkdir(exist_ok=True)
 
-        # task.md -- the problem description
-        (env_dir / 'task.md').write_text(text + '\n', encoding='utf-8')
+        # task.md -- the problem description and the signatures the tests call
+        tests = '\n'.join([*test_list, *challenge_test_list, test_setup_code])
+        (env_dir / 'task.md').write_text(task_prompt(text, code, tests), encoding='utf-8')
 
         # reference_solution.py -- the canonical code
         (env_dir / 'reference_solution.py').write_text(code, encoding='utf-8')

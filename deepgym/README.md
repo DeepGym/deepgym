@@ -1176,11 +1176,6 @@ If DeepGym is useful to you, a star helps other people find it.
 [PolyForm Noncommercial License 1.0.0](https://github.com/DeepGym/deepgym/blob/main/LICENSE).
 Commercial use needs a license: email [contact@deepgym.io](mailto:contact@deepgym.io).
 
-We changed the license after 0.4.0 to protect the new work going into DeepGym.
-Releases up to 0.4.0 stay under MIT. The vendored UI kits in
-`console-ui/components/base` and `console-ui/components/primitives` keep their own
-MIT licenses.
-
 ---
 
 Need custom environments, a private deployment or help with RL training?

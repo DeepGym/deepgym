@@ -75,6 +75,31 @@ def test_reference_patch_scores_like_itself(
     assert sandbox_dg.run(env, patch).score == 1.0
 
 
+_NEW_FILE = (
+    'diff --git a/new.txt b/new.txt\nnew file mode 100644\n--- /dev/null\n+++ b/new.txt\n'
+    '@@ -0,0 +1 @@\n+hello\n'
+)
+
+
+def test_reference_that_needs_git_scores_like_itself(tmp_path: Path, sandbox_dg: DeepGym) -> None:
+    """Adding a file needs git apply; the reference used to keep its text's lines (0.8)."""
+    patch = _HEADER + '@@ -1,2 +1,2 @@\n-a\n b\n+a\n' + _NEW_FILE
+    env = _toy_env(tmp_path, patch, {'hello.txt': 'a\nb\n'})
+
+    assert sandbox_dg.run(env, patch).score == 1.0
+
+
+def test_unrelated_reorder_does_not_match_a_reorder(tmp_path: Path, sandbox_dg: DeepGym) -> None:
+    """Order counts: moving c is not the reference's move of a (an order-blind count gave 1.0)."""
+    reference = _HEADER + '@@ -1,3 +1,3 @@\n-a\n b\n+a\n c\n'
+    env = _toy_env(tmp_path, reference, {'hello.txt': 'a\nb\nc\n'})
+
+    result = sandbox_dg.run(env, _HEADER + '@@ -1,3 +1,3 @@\n a\n-b\n c\n+b\n')
+
+    assert result.passed is False
+    assert result.score < 1.0
+
+
 def test_git_quoted_file_name_gets_full_credit(tmp_path: Path, sandbox_dg: DeepGym) -> None:
     """git C-quotes non-ASCII names; the quoted form used to be looked up literally (0)."""
     quoted = '"a/caf\\303\\251.txt" "b/caf\\303\\251.txt"'

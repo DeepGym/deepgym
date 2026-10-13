@@ -225,6 +225,7 @@ def extract_patch(model_output: str) -> str:
 def build_cybergym_patch_runner_script() -> str:
     """Return self-contained runner for CyberGym patch artifacts."""
     return r"""
+import difflib
 import json
 import re
 import shutil
@@ -233,7 +234,6 @@ import sys
 import tarfile
 import tempfile
 import warnings
-from collections import Counter
 from pathlib import Path
 
 
@@ -411,17 +411,28 @@ def snapshot(root, paths):
 
 
 def changes(before, after):
-    # The files whose lines changed, and the lines each lost or gained (as -line / +line).
-    # A multiset difference, not a diff: two patches with the same effect count the same,
-    # however a diff tool would align them.
+    # The files whose lines changed, and their removed/added lines (as -line / +line), from
+    # an order-sensitive diff. The reference goes through the same diff, so a correct patch
+    # matches it however it is written.
     files, lines = set(), set()
     for rel in before:
         old, new = ((data or b'').decode('utf-8', 'replace').splitlines() for data in (before[rel], after[rel]))
         if old == new:
             continue
         files.add(rel)
-        lines.update(('-' + line).strip() for line in Counter(old) - Counter(new))
-        lines.update(('+' + line).strip() for line in Counter(new) - Counter(old))
+        # Diff only the changed middle, without autojunk: its heuristic can call unchanged
+        # repeated lines changed.
+        start = 0
+        while start < min(len(old), len(new)) and old[start] == new[start]:
+            start += 1
+        end = 0
+        while end < min(len(old), len(new)) - start and old[-1 - end] == new[-1 - end]:
+            end += 1
+        old, new = old[start:len(old) - end], new[start:len(new) - end]
+        for tag, i1, i2, j1, j2 in difflib.SequenceMatcher(None, old, new, autojunk=False).get_opcodes():
+            if tag != 'equal':
+                lines.update(('-' + line).strip() for line in old[i1:i2])
+                lines.update(('+' + line).strip() for line in new[j1:j2])
     return files, lines
 
 
@@ -508,6 +519,27 @@ def apply_unified_patch(root, patch_text):
         apply_file_diff(root, chunk)
 
 
+def apply_with_fallback(repo_dir, git_dir, archive_path, patch_text, timeout):
+    # The Python applier on repo_dir, else git apply on a fresh extraction at git_dir.
+    # Returns (directory used, root, before, after, error); root is None if neither applies.
+    paths = target_paths(patch_text)
+    root, before, after, error = apply_patch(candidate_roots(repo_dir, patch_text), paths, lambda root: apply_unified_patch(root, patch_text))
+    if root is not None:
+        return repo_dir, root, before, after, ''
+    patch_path = git_dir.with_suffix('.diff')
+    patch_path.write_text(patch_text, encoding='utf-8')
+    try:
+        git_dir.mkdir()
+        safe_extract(archive_path, git_dir)
+        git_ok, git_error = ensure_git(timeout)
+        if not git_ok:
+            raise ValueError(git_error)
+        root, before, after, git_error = apply_patch(candidate_roots(git_dir, patch_text), paths, lambda root: git_apply(root, patch_path, timeout))
+        return git_dir, root, before, after, git_error or error
+    except Exception as exc:
+        return git_dir, None, None, None, str(exc)
+
+
 def main():
     task = json.loads(Path(sys.argv[1]).read_text(encoding='utf-8'))
     candidate_patch = Path(sys.argv[2]).read_text(encoding='utf-8') if len(sys.argv) > 2 else ''
@@ -519,7 +551,7 @@ def main():
     if not candidate_patch.strip() or 'diff --git ' not in candidate_patch:
         return emit({'schema_version': '1.0', 'score': 0.0, 'passed': False, 'details': 'candidate did not contain unified diff', 'error_type': 'invalid_patch', 'reward_components': {'apply': 0.0, 'file_overlap': 0.0, 'line_similarity': 0.0, 'safety': 0.0}, 'cases': []}, 1)
     try:
-        paths = target_paths(candidate_patch)
+        target_paths(candidate_patch)
     except ValueError as exc:
         return emit({'schema_version': '1.0', 'score': 0.0, 'passed': False, 'details': f'malformed patch: {exc}', 'error_type': 'invalid_patch', 'reward_components': {'apply': 0.0, 'file_overlap': 0.0, 'line_similarity': 0.0, 'safety': 0.0}, 'cases': []}, 1)
 
@@ -535,37 +567,21 @@ def main():
         except Exception as exc:
             return emit({'schema_version': '1.0', 'score': 0.0, 'passed': False, 'details': f'archive extract failed: {exc}', 'error_type': 'extract_failed', 'cases': []}, 1)
 
-        # Measure the reference like the candidate: by what it does to the pristine repo,
-        # undone right after. A reference the runner can't apply keeps its text's lines.
+        timeout = int(task.get('timeout', 300))
+        # Measure the reference exactly like the candidate, by its effect on a pristine copy
+        # (undone after). One the runner can't parse or apply keeps its text's lines.
         reference_files, reference_lines = set(patch_files(reference_patch)), changed_lines(reference_patch)
         if reference_patch.strip():
             try:
-                ref_root, before, after, _ = apply_patch(candidate_roots(extract_dir, reference_patch), target_paths(reference_patch), lambda root: apply_unified_patch(root, reference_patch))
-                if ref_root is not None:
-                    revert(ref_root, before)
-                    reference_files, reference_lines = changes(before, after)
+                used, ref_root, before, after, _ = apply_with_fallback(extract_dir, tmp / 'reference_git', archive_path, reference_patch, timeout)
             except ValueError:
-                pass
+                ref_root = None
+            if ref_root is not None:
+                if used == extract_dir:
+                    revert(ref_root, before)
+                reference_files, reference_lines = changes(before, after)
 
-        patch_path = tmp / 'candidate.diff'
-        patch_path.write_text(candidate_patch, encoding='utf-8')
-        timeout = int(task.get('timeout', 300))
-        root, before, after, apply_error = apply_patch(candidate_roots(extract_dir, candidate_patch), paths, lambda root: apply_unified_patch(root, candidate_patch))
-        if root is None:
-            git_extract_dir = tmp / 'repo_git'
-            git_extract_dir.mkdir()
-            try:
-                safe_extract(archive_path, git_extract_dir)
-                git_ok, git_error = ensure_git(timeout)
-                if not git_ok:
-                    raise ValueError(git_error)
-                root, before, after, git_error = apply_patch(candidate_roots(git_extract_dir, candidate_patch), paths, lambda root: git_apply(root, patch_path, timeout))
-                if root is not None:
-                    extract_dir = git_extract_dir
-                else:
-                    apply_error = git_error or apply_error
-            except Exception as exc:
-                apply_error = str(exc)
+        used, root, before, after, apply_error = apply_with_fallback(extract_dir, tmp / 'repo_git', archive_path, candidate_patch, timeout)
         apply_ok = root is not None
         if root is None:
             return emit({'schema_version': '1.0', 'score': 0.0, 'passed': False, 'details': f'patch does not apply: {tail(apply_error)}', 'error_type': 'patch_apply_failed', 'reward_components': {'apply': 0.0, 'file_overlap': 0.0, 'line_similarity': 0.0, 'safety': 0.1 if safety_ok else 0.0}, 'cases': [{'id': 'apply', 'passed': False, 'score': 0.0, 'error': tail(apply_error)}]}, 1)
@@ -597,7 +613,7 @@ def main():
                 'minimality': round(0.10 * minimality, 6),
                 'safety': 0.10 * float(safety_ok),
             },
-            'metrics': {'candidate_files': sorted(candidate_files), 'reference_files': sorted(reference_files), 'root': str(root.relative_to(extract_dir)) if root != extract_dir else '.'},
+            'metrics': {'candidate_files': sorted(candidate_files), 'reference_files': sorted(reference_files), 'root': str(root.relative_to(used)) if root != used else '.'},
             'cases': [
                 {'id': 'apply', 'passed': apply_ok, 'score': 1.0 if apply_ok else 0.0, 'error': None},
                 {'id': 'file_overlap', 'passed': file_overlap > 0.0, 'score': file_overlap},

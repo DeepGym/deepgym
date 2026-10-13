@@ -241,37 +241,41 @@ reward:
 ```
 
 It runs the last fenced code block of each response and logs `score`, `passed`
-and `error` (1.0 when the sandbox or verifier failed and the score is a forced 0).
-For one fixed environment in your own module, use `make_verl_compute_score(env)`.
+and `error`. For one fixed environment in your own module, use
+`make_verl_compute_score(env)`.
 
-A verl reward function or reward manager can't drop a sample, so a failed run
-trains as a 0. To keep those samples out of training, let DeepGym's single-turn agent
-loop score the rows instead; verl skips its own reward step because the score is
-already set. With verl's v1 trainer (`trainer.use_v1`, the default since verl 0.9) a
-sample whose `error` is 1.0 is dropped: verl records its prompt group as failed and
-computes the group's GRPO mean and std from the other samples (the async trainers
-replace the whole group). With the legacy trainer its response mask is zeroed instead,
-so it gets no gradient and adds no tokens to the loss, but its 0 still counts toward
-its group's mean and std.
+A verl reward function can't mark a sample as unscored, so when the sandbox or
+verifier fails, DeepGym's raises `NoVerdictError` instead of returning a 0. verl's v1
+trainer (`trainer.use_v1`, the default since verl 0.9) scores inside the sample's
+agent-loop session, so the raise drops the sample: verl records its prompt group as
+failed and computes the group's GRPO mean and std from the other samples (the async
+trainers replace the whole group). The legacy trainer can't drop a sample, so it stops.
+To keep training there, let DeepGym's single-turn agent loop score the rows: it calls
+the reward function above (`reward.custom_reward_function`, as verl would), verl skips
+its own reward step because the score is already set, and under the legacy trainer it
+zeroes a failed sample's response mask and logs `error` 1.0. That sample gets no
+gradient and adds no tokens to the loss, but its 0 still counts toward its group's mean
+and std. Under v1 the loop drops the sample like the reward function does.
 
 ```yaml
 # actor_rollout_ref.rollout.agent.agent_loop_config_path
 - name: deepgym_single_turn
   _target_: deepgym.integrations.verl_mask.DeepGymSingleTurnAgentLoop
-  mode: daytona   # or auto, local, modal, e2b, docker, apple
+  mode: daytona   # used without reward.custom_reward_function: auto, local, modal, ...
 ```
 
 Then set `actor_rollout_ref.rollout.agent.default_agent_loop=deepgym_single_turn`.
 The rows are the same `verl_rows`. A policy that learns to trigger failures escapes
-their penalty either way, so keep watching `error`.
+their penalty either way, so keep watching `error` and the failed samples.
 
 For multi-turn agent RL, use DeepGym's agent loop and session tool. verl's stock
 `ToolAgentLoop` creates and releases a tool around every call, so the
 `deepgym_agent` loop keeps one sandbox per rollout, sets `reward_score` from the
 final verifier, and deletes the sandbox. Screenshots come back as images. A rollout
-whose sandbox fails to start, or whose step or final verifier fails, gets no verdict and
-is kept out of training the same way (`error` 1.0); one where the model never calls the
-tool scores 0.
+whose sandbox fails to start, whose action fails for any reason other than the action
+itself (a provider outage; an invalid or disallowed action comes back to the model as
+text), or whose step or final verifier fails, gets no verdict and is kept out of
+training the same way (`error` 1.0); one where the model never calls the tool scores 0.
 
 ```yaml
 # agent_loop_config_path
@@ -322,6 +326,11 @@ config_yaml = generate_dapo_verl_config(
 )
 ```
 
+The config scores through the `deepgym_single_turn` agent loop above, listed in a file
+that ships with deepgym, so a sample without a verdict is dropped or masked rather than
+trained on as a 0. verl's reward manager, and with it DAPO's overlong penalty, doesn't
+run on samples the loop scored.
+
 ### Axolotl
 
 Axolotl trains GRPO with TRL, so `make_axolotl_reward_fn(env)` is the TRL reward
@@ -357,6 +366,11 @@ app.include_router(create_openrlhf_router(env, dg))
 OpenRLHF sends one request per rollout, all at once. They run in FastAPI's thread pool,
 so a slow verification doesn't hold up the others.
 
+OpenRLHF can't skip a sample: it trains on whatever `rewards` holds. So a request with
+a sample that got no verdict fails with 503 (422 if a query doesn't contain its prompt)
+instead of sending a 0. OpenRLHF retries it five times; if the failure lasts, the
+rollout has no reward and training stops rather than learn from a fake failure.
+
 ### lm-evaluation-harness
 
 ```python
@@ -391,6 +405,9 @@ A round trip gives back the environment that was pushed: verifier source, suppor
 files, test cases, timeouts, verifier mode, image. Pass `revision` (the commit a push
 returns); without it you get whatever `main` holds now. Only a plain `Environment`
 round-trips; subclasses (repo-patch, benchmark and mixed environments) are refused.
+Every environment needs an `env_name` of its own: a push refuses a blank one, and
+loading by name or loading all refuses a dataset with a blank or repeated name rather
+than drop an environment.
 
 A Hub dataset is untrusted, so pushes and loads run the same checks and a row can't
 change how its environment runs: fields must be known and of the right type, the

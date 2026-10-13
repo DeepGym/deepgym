@@ -68,6 +68,35 @@ def test_score_counts_only_tests_that_passed(
     assert result.passed is passed
 
 
+_SUBTESTS = """
+import unittest
+
+
+class TestCases(unittest.TestCase):
+    def test_small(self):
+        for n in range(5):
+            with self.subTest(n=n):
+                self.assertEqual(task_func(n), n * n)
+
+    def test_minus_two(self):
+        self.assertEqual(task_func(-2), 4)
+
+    def test_minus_three(self):
+        self.assertEqual(task_func(-3), 9)
+"""
+
+
+def test_skipped_subtests_count_once_per_test(dg: DeepGym) -> None:
+    """Five skipped subtests of one method used to give 3 - 5 = -2 passing tests."""
+    env = Environment(task='t', verifier_code=generate_verifier('t', 'task_func', _SUBTESTS, []))
+    solution = _SKIP + '    if x >= 0:\n        raise unittest.SkipTest("no")\n    return x * x\n'
+
+    result = dg.run(env, solution)
+
+    assert result.score == pytest.approx(2 / 3)
+    assert result.passed is False
+
+
 def test_suite_that_ran_nothing_has_no_verdict(env: Environment, dg: DeepGym) -> None:
     """Every test skipped used to score 1.0; nothing was checked, so there is no verdict."""
     result = dg.run(env, _SKIP + '    raise unittest.SkipTest("no")\n')

@@ -55,12 +55,16 @@ def main():
         if suite.countTestCases() == 0:
             return report(1.0, True, "Direct assertion tests passed")
         result = unittest.TextTestRunner(stream=io.StringIO(), verbosity=0).run(suite)
-        skipped = len(result.skipped)
-        if skipped == result.testsRun:
-            return report(0.0, False, f"all {skipped} tests were skipped", error_type="no_tests_run")
+        # Count test methods, like testsRun: outcomes are recorded once per subTest.
+        def method(test):
+            return getattr(test, "test_case", test).id()
+        failed = {method(test) for test, _ in result.failures + result.errors}
+        skipped = {method(test) for test, _ in result.skipped} - failed
+        ok = result.testsRun - len(failed) - len(skipped)
+        if not ok and not failed:
+            return report(0.0, False, f"all {len(skipped)} tests were skipped", error_type="no_tests_run")
         # A skipped test proved nothing, so it counts against the score like a failure.
-        ok = result.testsRun - len(result.failures) - len(result.errors) - skipped
-        report(ok / result.testsRun, ok == result.testsRun, f"{ok}/{result.testsRun} tests passed, {skipped} skipped")
+        report(ok / result.testsRun, ok == result.testsRun, f"{ok}/{result.testsRun} tests passed, {len(skipped)} skipped")
     except AssertionError as e:
         report(0.0, False, f"Assertion failed: {e}")
     except Exception as e:

@@ -1,0 +1,107 @@
+"""Exporting DeepGym environments as Harbor tasks, and reading them back."""
+
+import subprocess
+import sys
+from pathlib import Path
+
+import pytest
+
+from deepgym.benchmark_envs import TerminalBenchEnvironment
+from deepgym.computer_use import ComputerUseEnvironment
+from deepgym.exceptions import DeepGymError
+from deepgym.harbor import HarborEnvironment, HarborTask, export_environment
+from deepgym.harbor.export import SOLUTION_PATH
+from deepgym.judge import RUNTIME_SOURCE, JudgeJob
+from deepgym.models import Environment
+from deepgym.registry import load_environment
+from tests.test_harbor import HELLO
+
+if sys.version_info >= (3, 11):
+    import tomllib
+else:
+    import tomli as tomllib
+
+
+def test_export_round_trips_a_builtin_environment(tmp_path: Path) -> None:
+    env = load_environment('coin_change')
+    assert isinstance(env, Environment)
+
+    task = HarborTask.from_dir(export_environment(env, tmp_path))
+
+    assert task.name == 'coin_change'
+    assert task.instruction.startswith(env.task.rstrip())
+    assert task.instruction.endswith(f'`{SOLUTION_PATH}`.\n')
+    assert task.docker_image is None
+    assert task.dockerfile is not None
+    assert task.dockerfile.read_text().startswith('FROM python:3.12-slim\n')
+    assert (task.workdir, task.verifier_network) == ('/app', 'no-network')
+    assert task.verifier_timeout_sec == env.timeout + 60
+    judge = JudgeJob.for_environment(env, '').judge_files()
+    exported = {
+        rel.removeprefix('deepgym/judge/'): data.decode() for rel, data in task.tests.items()
+    }
+    assert {rel: exported[rel] for rel in judge} == judge
+    assert task.tests['deepgym/runtime/deepgym_solution.py'].decode() == RUNTIME_SOURCE
+    assert env.reference_solution.rstrip('\n') in task.solution['solve.sh'].decode()
+
+
+def test_exported_task_toml_asks_for_a_separate_offline_verifier_and_a_nonroot_agent(
+    tmp_path: Path,
+) -> None:
+    folder = export_environment(load_environment('two_sum'), tmp_path)
+
+    config = tomllib.loads((folder / 'task.toml').read_text())
+
+    assert config['artifacts'] == [SOLUTION_PATH]
+    assert config['task']['name'] == 'deepgym/two_sum'
+    assert config['agent'] == {'user': 'agent', 'network_mode': 'no-network'}
+    assert config['verifier']['environment_mode'] == 'separate'
+    assert config['verifier']['environment'] == {'network_mode': 'no-network'}
+    assert 'useradd --create-home agent' in (folder / 'environment' / 'Dockerfile').read_text()
+
+
+def test_exported_scripts_are_valid_bash_and_quote_the_judge_environment(
+    tmp_path: Path,
+) -> None:
+    env = load_environment('two_sum').model_copy(
+        update={'env_vars': {'SEED': "1'; touch /tmp/pwned; echo '$(id)"}}
+    )
+    folder = export_environment(env, tmp_path)
+
+    for script in ('tests/test.sh', 'tests/judge_setup.sh', 'solution/solve.sh'):
+        assert subprocess.run(['bash', '-n', str(folder / script)]).returncode == 0
+    test_sh = (folder / 'tests' / 'test.sh').read_text()
+    assert "'SEED=1'\"'\"'; touch /tmp/pwned; echo '\"'\"'$(id)'" in test_sh
+    assert 'setpriv' in test_sh and '--reuid=dgsolver' in test_sh
+    assert test_sh.index('rm -f /logs/verifier/reward.json') < test_sh.index('verifier.py')
+    assert test_sh.index("sh -c 'kill -9 -1'") < test_sh.index('python3 - ')
+    assert '> /opt/deepgym/verdict.out' in test_sh
+
+
+def test_export_reimports_as_a_runnable_harbor_environment(tmp_path: Path) -> None:
+    env = HarborEnvironment.from_dir(export_environment(load_environment('two_sum'), tmp_path))
+
+    assert env.reference_solution is not None
+    assert env.harbor_task.verifier_network == 'no-network'
+
+
+@pytest.mark.parametrize(
+    'env',
+    [
+        ComputerUseEnvironment(task='t', name='desk'),
+        TerminalBenchEnvironment(),
+        HarborEnvironment.from_dir(HELLO),
+        Environment(task='t', verifier_code='return 1.0'),
+        Environment(name='../up', task='t', verifier_code='return 1.0'),
+    ],
+)
+def test_export_refuses_envs_it_cannot_express(tmp_path: Path, env: Environment) -> None:
+    with pytest.raises(DeepGymError):
+        export_environment(env, tmp_path)
+
+
+def test_export_never_overwrites(tmp_path: Path) -> None:
+    env = load_environment('two_sum')
+    export_environment(env, tmp_path)
+    with pytest.raises(DeepGymError, match='already exists'):
+        export_environment(env, tmp_path)

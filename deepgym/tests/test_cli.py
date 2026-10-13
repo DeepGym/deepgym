@@ -33,6 +33,8 @@ class TestCLIHelp:
             ['deepgym', 'create', '--help'],
             ['deepgym', 'run-batch', '--help'],
             ['deepgym', 'qa', '--help'],
+            ['deepgym', 'harbor', 'import', '--help'],
+            ['deepgym', 'harbor', 'export', '--help'],
         ],
     )
     def test_help_exits_zero(self, args: list[str], capsys: pytest.CaptureFixture) -> None:

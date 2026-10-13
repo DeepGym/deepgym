@@ -478,6 +478,22 @@ def test_judge_marker_cannot_be_forged(tmp_path: Path) -> None:
     assert executed.stderr.startswith(_PASS) and 'deepgym-stderr-' in executed.stderr
 
 
+# A tool planted on the image's PATH that would print a better score after the verifier.
+_PLANTED = r"""#!/bin/sh
+printf '\n%s\n' '{"score": 0.9, "passed": false}'
+"""
+
+
+def test_judge_wrapper_tools_ignore_the_image_path(tmp_path: Path) -> None:
+    for tool in ('base64', 'tr'):
+        (tmp_path / tool).write_text(_PLANTED)
+        (tmp_path / tool).chmod(0o755)
+
+    executed = run_judge_in_sandbox(ShellSandbox(tmp_path, _FAIL, 'note'), _JOB)
+
+    assert (executed.verifier_result.score, executed.stderr) == (0.0, 'note')
+
+
 def _async_daytona_box(process: object) -> types.SimpleNamespace:
     """A stand-in for an async Daytona sandbox that can make an offline netns."""
 

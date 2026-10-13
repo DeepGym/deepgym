@@ -32,7 +32,7 @@ from deepgym.judge import (
     sandbox_uploads,
 )
 from deepgym.models import RunResult, VerifierResult, checked_score
-from deepgym.sandboxes import Sandbox, SandboxTimeoutError
+from deepgym.sandboxes import TRUSTED_PATH, Sandbox, SandboxTimeoutError
 
 logger = logging.getLogger(__name__)
 
@@ -166,15 +166,18 @@ def wrap_stderr(command: str) -> tuple[str, str]:
     Providers return a command's stdout and stderr as one stream, where a JSON line on
     stderr could pass for the verdict. The wrapper sends stderr to a private temp file
     and prints it last, as one base64 line behind a per-run marker. Base64 can't hold
-    the marker or a newline, so that line is always the wrapper's own.
+    the marker or a newline, so that line is always the wrapper's own. The wrapper's own
+    tools come from :data:`~deepgym.sandboxes.TRUSTED_PATH`, so nothing the solution
+    plants on the image's PATH runs as root after it; *command* keeps the image's PATH.
 
     Returns:
         The wrapped command and its marker, for :func:`parse_wrapped_output`.
     """
     marker = f'deepgym-stderr-{uuid4().hex}'
+    path = f'PATH={TRUSTED_PATH}'
     wrapped = (
-        f'err=$(mktemp) && {{ {command} 2>"$err"; rc=$?; printf "\\n%s " {marker}; '
-        f'base64 < "$err" | tr -d "\\n"; rm -f "$err"; exit $rc; }}'
+        f'err=$({path}; mktemp) && {{ {command} 2>"$err"; rc=$?; printf "\\n%s " {marker}; '
+        f'({path}; base64 < "$err" | tr -d "\\n"; rm -f "$err"); exit $rc; }}'
     )
     return wrapped, marker
 

@@ -37,14 +37,18 @@ test('zoom steps through the levels and stops at either end', () => {
   expect(stepZoom(0.25, -1)).toBe(0.25);
 });
 
-test('steps are coloured by exit code, then reward sign; the final frame by the verdict', () => {
-  expect(stepTone(frame(0.5, click), null)).toBe('good');
-  expect(stepTone(frame(-1, click), true)).toBe('bad');
-  expect(stepTone(frame(0, click), true)).toBe('neutral');
-  expect(stepTone(frame(null), false)).toBe('bad');
-  expect(stepTone(frame(null), null)).toBe('neutral');
-  expect(stepTone({ ...frame(0.5, click), metadata: { exit_code: 1 } }, true)).toBe('bad');
-  expect(stepTone({ ...frame(0, click), metadata: { exit_code: 0 } }, true)).toBe('neutral');
+test("steps are coloured by their action's exit code, then reward sign; the final frame by the verdict", () => {
+  const one = (item: Frame) => stepTone([item], 0, null);
+  expect(one(frame(0.5, click))).toBe('good');
+  expect(one(frame(-1, click))).toBe('bad');
+  expect(one(frame(0, click))).toBe('neutral');
+  expect(stepTone([frame(null)], 0, false)).toBe('bad');
+  expect(one(frame(null))).toBe('neutral');
+  // The exit code on frame 1 is the result of frame 0's action.
+  const failed = [frame(0.5, click), { ...frame(0, click), metadata: { exit_code: 1 } }, frame(null)];
+  expect(failed.map((_, index) => stepTone(failed, index, true))).toEqual(['bad', 'neutral', 'good']);
+  const ok = [frame(0, click), { ...frame(0, click), metadata: { exit_code: 0 } }];
+  expect(stepTone(ok, 0, true)).toBe('neutral');
 });
 
 test('scrolls only as far as needed to show the item', () => {

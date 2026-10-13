@@ -76,7 +76,7 @@ export function StepTimeline({ frames, passed, index, onSelect, follow }: StepTi
         aria-valuetext={`Step ${index} of ${last}: ${describeAction(frames[index]?.action ?? null)}`}
         onKeyDown={onKeyDown}
         onClick={onClick}
-        className="scrollbar-thin min-w-0 flex-1 cursor-pointer overflow-x-auto rounded-lg py-1 outline-none focus-visible:ring-2 focus-visible:ring-border-focus-ring"
+        className="scrollbar-thin min-w-0 flex-1 cursor-pointer overflow-x-auto rounded-lg py-2 outline-none focus-visible:ring-2 focus-visible:ring-border-focus-ring"
       >
         <div className="relative flex h-7" style={{ width: layout.width, gap: GAP_PX }}>
           {frames.map((frame, step) => (
@@ -86,19 +86,23 @@ export function StepTimeline({ frames, passed, index, onSelect, follow }: StepTi
               title={`Step ${step}: ${describeAction(frame.action)}${frame.reward === null ? '' : `, reward ${formatScore(frame.reward)}`}`}
               className={cx(
                 'flex h-full shrink-0 items-center justify-center rounded-sm font-mono text-caption-2-medium tabular-nums transition-colors hover:brightness-125',
-                TONE[stepTone(frame, passed)],
-                step === index && 'text-text-primary',
+                TONE[stepTone(frames, step, passed)],
+                step === index && 'text-text-primary ring-2 ring-accent-400 ring-inset',
               )}
               style={{ width: layout.block }}
             >
               {layout.labels && step}
             </span>
           ))}
+          {/* Playhead: ticks above and below the current block, so its number stays readable. */}
           <span
             aria-hidden
-            className="pointer-events-none absolute -inset-y-1 left-0 w-0.5 rounded-full bg-accent-400 shadow-[0_0_0_2px_color-mix(in_srgb,var(--color-accent-400)_25%,transparent)] transition-transform duration-150"
+            className="pointer-events-none absolute inset-y-0 left-0 w-0.5 transition-transform duration-150"
             style={{ transform: `translateX(${index * layout.stride + layout.block / 2 - 1}px)` }}
-          />
+          >
+            <span className="absolute -top-2 h-1.5 w-0.5 rounded-full bg-accent-400" />
+            <span className="absolute -bottom-2 h-1.5 w-0.5 rounded-full bg-accent-400" />
+          </span>
         </div>
       </div>
       <Button

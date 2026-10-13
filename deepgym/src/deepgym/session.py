@@ -530,6 +530,7 @@ class Session:
                 exit_code=0,
                 execution_time_ms=0.0,
                 sandbox_id=self.sandbox_id,
+                error_type='no_verifier',
             )
         with self._lock:
             start = time.perf_counter()

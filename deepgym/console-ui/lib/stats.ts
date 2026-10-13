@@ -1,6 +1,7 @@
-/** Pure helpers for the stats views: time ranges, pass rates, deltas and environment health. */
+/** Pure helpers for the stats views: time ranges, pass rates, deltas, environment health and ETAs. */
 
-import type { RunTotals } from './types';
+import { formatDuration } from './format';
+import type { RunSummary, RunTotals } from './types';
 
 /** Time ranges the stats can cover, in hours. */
 export const RANGES = { '24h': 24, '7d': 168, '30d': 720 } as const;
@@ -57,6 +58,25 @@ export function delta(
   if (change === null) return { change: 'no change', tone: 'neutral' };
   if (better === 'neither') return { change, tone: 'neutral' };
   return { change, tone: current > previous === (better === 'higher') ? 'good' : 'bad' };
+}
+
+/** Median duration of the finished runs given, or null when none has one. */
+export function medianDuration(runs: RunSummary[]): number | null {
+  const durations = runs
+    .flatMap((run) => (run.duration_ms === null ? [] : [run.duration_ms]))
+    .toSorted((a, b) => a - b);
+  if (!durations.length) return null;
+  const middle = durations.length >> 1;
+  return durations.length % 2 ? durations[middle] : (durations[middle - 1] + durations[middle]) / 2;
+}
+
+/** What to expect for a run `elapsedMs` in, given how long earlier runs of it took (null with no history). */
+export function etaNote(elapsedMs: number, typicalMs: number | null): string {
+  if (typicalMs === null) return 'No earlier runs of this environment to estimate from';
+  const left = typicalMs - elapsedMs;
+  return left > 0
+    ? `About ${formatDuration(left)} left`
+    : `Taking longer than usual (typically ${formatDuration(typicalMs)})`;
 }
 
 /** Environments needing attention first: lowest pass rate, those with no finished run last; then most runs. */

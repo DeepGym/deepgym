@@ -15,6 +15,7 @@ import { formatScore, timeAgo } from '@/lib/format';
 import type { RunDetail, RunSummary } from '@/lib/types';
 import { useQueryParam } from '@/lib/use-query-param';
 import { failuresFirst, isActive, runTaskStatus, verdictLine } from '@/lib/verdict';
+import { RunProgress } from './run-progress';
 import { RunSource } from './run-source';
 import { RunSummary as RunSummaryStrip } from './run-summary';
 import { ScoreBreakdown } from './score-breakdown';
@@ -111,6 +112,7 @@ export function RunDetailPage() {
         }
       />
       <RunSummaryStrip run={run} />
+      {isActive(run) && <RunProgress run={run} />}
       {run.error && (
         <pre className="mt-4 overflow-x-auto rounded-2xl bg-background-tertiary-error px-4 py-3 font-mono text-body-2-regular whitespace-pre-wrap text-text-error-primary">
           {run.error}

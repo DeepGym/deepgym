@@ -12,8 +12,10 @@ import { Select, SelectItem } from '@/components/base/select/select';
 import { Textarea } from '@/components/base/textarea/textarea';
 import { Modal } from '@/components/ui/overlay';
 import { api, errorText, useApi } from '@/lib/api';
+import { formatDuration } from '@/lib/format';
 import { type EnvironmentSummary, RUN_MODES, type RunMode, type RunSummary } from '@/lib/types';
 import { EnvPicker } from './env-picker';
+import { KEEPS_GOING, useTypicalDuration } from './run-progress';
 
 interface NewRunDialogProps {
   open: boolean;
@@ -32,6 +34,7 @@ function NewRunForm({ initialEnv, onClose, onCreated }: Omit<NewRunDialogProps, 
   const [solution, setSolution] = useState('');
   const [error, setError] = useState<string>();
   const [submitting, setSubmitting] = useState(false);
+  const typical = useTypicalDuration(selected.size === 1 ? [...selected][0] : null);
 
   // Custom code may only run on this machine when the console was started with --allow-local-exec.
   const localBlocked = source === 'custom' && config?.local_custom_code === false;
@@ -115,7 +118,11 @@ function NewRunForm({ initialEnv, onClose, onCreated }: Omit<NewRunDialogProps, 
           {error}
         </p>
       )}
-      <div className="flex justify-end gap-2 border-t border-separator-border pt-4">
+      <div className="flex flex-wrap items-center justify-end gap-2 border-t border-separator-border pt-4">
+        <p className="me-auto min-w-0 flex-1 basis-60 text-caption-1-medium text-text-tertiary">
+          {KEEPS_GOING}
+          {typical !== null && ` ${[...selected][0]} usually takes about ${formatDuration(typical)}.`}
+        </p>
         <Button variant="secondary" onClick={onClose}>
           Cancel
         </Button>

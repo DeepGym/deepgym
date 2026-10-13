@@ -1,6 +1,6 @@
 import { expect, test } from 'bun:test';
-import { delta, parseRange, passRate, worstFirst } from './stats';
-import type { RunTotals } from './types';
+import { delta, etaNote, medianDuration, parseRange, passRate, worstFirst } from './stats';
+import type { RunSummary, RunTotals } from './types';
 
 const totals = (runs: number, finished: number, passed: number): RunTotals => ({
   runs,
@@ -55,4 +55,18 @@ test('worst pass rate first, unfinished last, ties by most runs', () => {
     'healthy',
     'pending',
   ]);
+});
+
+test('median duration of earlier runs ignores missing durations', () => {
+  const runs = (durations: (number | null)[]) =>
+    durations.map((duration_ms) => ({ duration_ms }) as RunSummary);
+  expect(medianDuration(runs([300, 100, null, 200]))).toBe(200);
+  expect(medianDuration(runs([100, 400]))).toBe(250);
+  expect(medianDuration(runs([null]))).toBeNull();
+});
+
+test('eta note counts down, then admits it is slow', () => {
+  expect(etaNote(2000, 8000)).toBe('About 6.0s left');
+  expect(etaNote(9000, 8000)).toBe('Taking longer than usual (typically 8.0s)');
+  expect(etaNote(1000, null)).toBe('No earlier runs of this environment to estimate from');
 });

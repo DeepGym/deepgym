@@ -109,6 +109,19 @@ def test_daytona_errors_are_told_apart() -> None:
     assert not is_infrastructure_failure(daytona.DaytonaNotFoundError('gone', status_code=404))
 
 
+def test_e2b_errors_are_told_apart() -> None:
+    """e2b reports an unreachable sandbox, a busy service or a 503 as its own; not a dead one."""
+    e2b = pytest.importorskip('e2b.exceptions')
+
+    assert is_infrastructure_failure(e2b.SandboxUnreachableException('connection lost'))
+    assert is_infrastructure_failure(e2b.ServiceBusyException('no capacity'))
+    assert is_infrastructure_failure(e2b.RateLimitException('slow down'))
+    assert is_infrastructure_failure(e2b.SandboxException('503: unavailable'))
+    assert not is_infrastructure_failure(e2b.SandboxNotRunningException('was not found'))
+    assert not is_infrastructure_failure(e2b.SandboxException('400: bad request'))
+    assert not is_infrastructure_failure(e2b.SandboxException('disk full'))
+
+
 def test_modal_errors_are_told_apart() -> None:
     """Modal's server errors and quotas are its own; a sandbox it reports dead isn't."""
     modal = pytest.importorskip('modal')

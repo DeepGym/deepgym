@@ -1,7 +1,11 @@
 """DeepGym exception hierarchy."""
 
 import builtins
+import re
 import sys
+
+_E2B_STATUS = re.compile(r'(\d{3}): ')
+"""How e2b's envd client words an HTTP status it has no exception class for."""
 
 _TRANSPORT_ERRORS = (
     ('httpx', ('TransportError',)),
@@ -12,6 +16,10 @@ _TRANSPORT_ERRORS = (
     ('requests.exceptions', ('ConnectionError', 'Timeout')),
     ('aiohttp', ('ClientConnectionError',)),
     ('daytona', ('DaytonaConnectionError', 'DaytonaSpotEvictedError', 'DaytonaQueueTimeoutError')),
+    (
+        'e2b.exceptions',
+        ('SandboxUnreachableException', 'ServiceBusyException', 'RateLimitException'),
+    ),
     (
         'modal.exception',
         (
@@ -113,10 +121,17 @@ def is_infrastructure_failure(exc: BaseException) -> bool:
 
 
 def _status_code(exc: BaseException) -> int | None:
-    """Return the HTTP status *exc* carries, as provider SDK, httpx and aiohttp errors do."""
+    """Return the HTTP status *exc* carries, as provider SDK, httpx and aiohttp errors do.
+
+    e2b gives an envd status it has no class for (a 503, say) only in the message.
+    """
     response = getattr(exc, 'response', None)
     for status in (getattr(exc, 'status_code', None), getattr(response, 'status_code', None)):
         if isinstance(status, int):
             return status
     status = getattr(exc, 'status', None)  # aiohttp
-    return status if isinstance(status, int) else None
+    if isinstance(status, int):
+        return status
+    if type(exc).__module__.startswith('e2b') and (match := _E2B_STATUS.match(str(exc))):
+        return int(match.group(1))
+    return None

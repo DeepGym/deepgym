@@ -674,19 +674,23 @@ class TestOpenRLHFIntegration:
     ) -> None:
         """Answering at the deadline never frees a slot the run still holds.
 
-        The next request's run can't start, so it gets the infrastructure score too.
+        The run still going scores 0, as the model's code may be what slows it. The next
+        request's run can't start at all, so it gets the infrastructure score (NaN here).
         """
         monkeypatch.setattr(openrlhf, '_REQUEST_BUDGET_S', 0.3)
         dg = _ScriptedDeepGym({'right': [1.0]})
         app = FastAPI()
-        app.include_router(create_openrlhf_router(MIXED, dg, max_parallel=1))
+        app.include_router(
+            create_openrlhf_router(MIXED, dg, infra_failure_score='nan', max_parallel=1)
+        )
         client = TestClient(app)
 
         first = client.post('/reward/score', json={'prompts': ['p'], 'outputs': ['right']})
         second = client.post('/reward/score', json={'prompts': ['p'], 'outputs': ['wrong']})
 
-        expected = {'rewards': [0.0], 'error_types': ['deadline_exceeded']}
-        assert first.json() == second.json() == expected
+        assert first.json() == {'rewards': [0.0], 'error_types': ['deadline_exceeded']}
+        assert math.isnan(second.json()['rewards'][0])
+        assert second.json()['error_types'] == ['deadline_exceeded']
         assert dg.calls == ['right']
         assert dg.most_running == 1
 

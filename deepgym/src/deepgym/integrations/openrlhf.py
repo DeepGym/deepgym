@@ -34,9 +34,10 @@ timed out, the sandbox broke) scores 0 in either mode, with a warning, and is ne
 again. A run the sandbox provider or the network failed (see
 :func:`~deepgym.exceptions.is_infrastructure_failure`) is graded once more after a short
 pause. Every run, first or repeated, takes one of the router's ``max_parallel`` slots,
-and no request waits past 150 s, inside the 180 s OpenRLHF gives it. If the second
-grading fails too, can't start in time or is still going then, or the first one is, or a
-query doesn't contain its prompt, the sample is rewarded the router's
+and no request waits past 150 s, inside the 180 s OpenRLHF gives it; a first run still
+going then scores 0, since the model's code may be what slows it. If the second grading
+fails too, can't start in time or is still going then, or the first one never started,
+or a query doesn't contain its prompt, the sample is rewarded the router's
 ``infra_failure_score``, never a score from a run that didn't finish:
 
 - ``'zero'`` (the default): 0.0, logged as a warning with its error type and counted
@@ -86,8 +87,9 @@ PROMPT_MISMATCH = 'prompt_mismatch'
 text, such as a fenced example in the prompt, it gets the router's infra_failure_score."""
 
 DEADLINE_EXCEEDED = 'deadline_exceeded'
-"""error_type of a sample still being scored when its request had to answer; it gets the
-router's infra_failure_score (a run the model hangs ends at its own timeout, well before)."""
+"""error_type of a sample not graded when its request had to answer. If its run never
+started, it gets the router's infra_failure_score; if it was still going, it scores 0,
+since the model's code may be what slowed it."""
 
 _RETRY_DELAY_S = 1.0
 """Pause before the one re-run of a provider or network failure."""
@@ -178,18 +180,21 @@ class OpenRLHFRewardResponse(BaseModel):
 def _wait(run: concurrent.futures.Future[RunResult], deadline: float) -> RunResult | str:
     """Return *run*'s result, or why the provider, the network or the clock stopped it.
 
-    A run that raised for a reason the model may have caused comes back as a result
-    without a verdict, scored 0. A run the provider or the network failed (see
-    :func:`~deepgym.exceptions.is_infrastructure_failure`), or one not done by *deadline*
-    (``time.monotonic``), comes back as its error_type: there is no score to give. A run
-    still waiting for a slot then never starts; one already going keeps its slot until it
-    ends, so it still counts against the router's limit.
+    A run the provider or the network failed (see
+    :func:`~deepgym.exceptions.is_infrastructure_failure`), or one still waiting for a slot
+    at *deadline* (``time.monotonic``), which then never starts, comes back as its
+    error_type: there is no score to give. Anything else the model may have caused, so it
+    comes back as a result without a verdict, scored 0: a run that raised for any other
+    reason, or one still going at the deadline (it keeps its slot until it ends, and may
+    be slow because of the model's code).
     """
     try:
         return run.result(timeout=max(0.0, deadline - time.monotonic()))
     except concurrent.futures.TimeoutError:
-        run.cancel()
-        return DEADLINE_EXCEEDED
+        if run.cancel():
+            return DEADLINE_EXCEEDED
+        unfinished = error_result(TimeoutError('still running at the request deadline'))
+        return unfinished.model_copy(update={'error_type': DEADLINE_EXCEEDED})
     except Exception as exc:
         if is_infrastructure_failure(exc):
             logger.warning('OpenRLHF: the provider or network failed a run: %s', exc)

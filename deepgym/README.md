@@ -371,8 +371,8 @@ app.include_router(create_openrlhf_router(env, dg, infra_failure_score='nan'))
 # Train with: --remote_rm_url http://localhost:8000/reward/score --algo.dynamic_filtering_enable
 ```
 
-OpenRLHF sends one request per rollout, all at once. They run in FastAPI's thread pool,
-so a slow verification doesn't hold up the others.
+OpenRLHF sends one request per rollout, all at once. A request waits for its runs
+without holding a thread, so a slow verification doesn't hold up the others.
 
 OpenRLHF can't skip a sample: it trains on whatever `rewards` holds, and a failed
 request would stop its training step, so the endpoint never fails one. A failure the

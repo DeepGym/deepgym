@@ -300,14 +300,14 @@ def load_trace(path: Path) -> Trace:
         events = [json.loads(line) for line in lines]
     except ValueError as exc:  # JSONDecodeError or UnicodeDecodeError
         raise DeepGymError(f'{path}: corrupt trace record: {exc}') from exc
-    if not events or events[0].get('event') != 'start':
+    if not events or not _is_start(events[0]):
         raise DeepGymError(f'{path} is not a deepgym trace file')
     head, *rest = events
     fields = {key: head[key] for key in ('schema_version', 'trace_id', 'task', 'provenance')}
     fields['error'] = UNFINISHED
     steps = []
     for event in rest:
-        match event.get('event'):
+        match event.get('event') if isinstance(event, dict) else None:
             case 'reset':
                 fields['initial_observation'] = event['observation']
             case 'step':
@@ -320,6 +320,20 @@ def load_trace(path: Path) -> Trace:
             case other:
                 raise DeepGymError(f'{path}: unknown trace event {other!r}')
     return Trace.model_validate({**fields, 'steps': steps})
+
+
+def is_trace_file(path: Path) -> bool:
+    """Whether *path* begins with a trace's ``start`` event, as no export or other JSONL does."""
+    with path.open('rb') as file:
+        first = file.readline()
+    try:
+        return _is_start(json.loads(first))
+    except ValueError:
+        return False
+
+
+def _is_start(event: object) -> bool:
+    return isinstance(event, dict) and event.get('event') == 'start'
 
 
 def _describe(exc: BaseException) -> str:

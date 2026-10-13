@@ -216,20 +216,24 @@ class TestCli:
             self._run(monkeypatch, '--format', 'jsonl', '--rows', 'rl', '--out', str(source),
                       '--traces', str(source))  # fmt: skip
 
-        assert 'is an input' in capsys.readouterr().err
+        assert 'is one of the inputs' in capsys.readouterr().err
         assert source.read_text() == _event_log(graded_trace())
 
-    def test_refuses_to_write_into_an_input_directory(
+    def test_exports_in_a_traces_directory_are_not_read_back(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture
     ) -> None:
-        (tmp_path / 'trace.jsonl').write_text(_event_log(graded_trace()))
+        traces = tmp_path / 'traces'
+        traces.mkdir()
+        (traces / 'trace.jsonl').write_text(_event_log(graded_trace()))
+        first = traces / 'export.jsonl'
+        self._run(monkeypatch, '--format', 'jsonl', '--out', str(first), '--traces',
+                  str(traces / 'trace.jsonl'))  # fmt: skip
 
-        with pytest.raises(SystemExit):
-            self._run(monkeypatch, '--format', 'jsonl', '--out', str(tmp_path / 'export.jsonl'),
-                      '--traces', str(tmp_path))  # fmt: skip
+        self._run(monkeypatch, '--format', 'jsonl', '--out', str(tmp_path / 'again.jsonl'),
+                  '--traces', str(traces))  # fmt: skip
 
-        assert 'inside an input directory' in capsys.readouterr().err
-        assert not (tmp_path / 'export.jsonl').exists()
+        assert _jsonl(tmp_path / 'again.jsonl') == _jsonl(first)
+        assert '1 .jsonl files in the traces directories are not traces' in capsys.readouterr().out
 
 
 def _event_log(trace: Trace) -> str:

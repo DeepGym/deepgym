@@ -463,7 +463,7 @@ def _cmd_benchmark_audit(args: argparse.Namespace) -> None:
 def _cmd_traces(args: argparse.Namespace) -> None:
     from deepgym.console.db import DEFAULT_DB_PATH
     from deepgym.console.episode_store import EpisodeStore
-    from deepgym.traces import Trace, export_traces, load_trace, traces_dir
+    from deepgym.traces import Trace, export_traces, is_trace_file, load_trace, traces_dir
 
     if args.db is None and args.traces is None:
         db = DEFAULT_DB_PATH if DEFAULT_DB_PATH.exists() else None
@@ -476,19 +476,14 @@ def _cmd_traces(args: argparse.Namespace) -> None:
             print(f'Error: not found: {", ".join(missing)}', file=sys.stderr)
             sys.exit(1)
 
-    files = [
-        file
-        for path in paths
-        for file in (sorted(path.glob('*.jsonl')) if path.is_dir() else [path])
-    ]
+    # In a directory, read only trace files: an export written there must not break the next.
+    found = [sorted(path.glob('*.jsonl')) if path.is_dir() else [path] for path in paths]
+    files = [file for path, group in zip(paths, found) for file in group
+             if not path.is_dir() or is_trace_file(file)]  # fmt: skip
+    others = sum(map(len, found)) - len(files)
     out = Path(args.out)
-    # An export inside a traces directory would be read back as a trace file next time.
-    inside = any(out.resolve().is_relative_to(path.resolve()) for path in paths if path.is_dir())
-    if inside or out.exists() and any(out.samefile(source) for source in [db, *files] if source):
-        print(
-            f'Error: {out} is an input or inside an input directory; write the export elsewhere',
-            file=sys.stderr,
-        )
+    if out.exists() and any(out.samefile(source) for source in [db, *files] if source):
+        print(f'Error: {out} is one of the inputs; write the export elsewhere', file=sys.stderr)
         sys.exit(1)
 
     traces, untraced = EpisodeStore(db).traces() if db else ([], 0)
@@ -513,6 +508,8 @@ def _cmd_traces(args: argparse.Namespace) -> None:
         print(f'  skipped {count}: {reason}')
     if untraced:
         print(f'  {untraced} console episodes were recorded without a trace and not read')
+    if others:
+        print(f'  {others} .jsonl files in the traces directories are not traces and were not read')
 
 
 def _cmd_console(args: argparse.Namespace) -> None:

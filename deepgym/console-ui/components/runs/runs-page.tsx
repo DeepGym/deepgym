@@ -20,7 +20,7 @@ import { useHotkey } from '@/lib/use-hotkey';
 import { useQueryParam } from '@/lib/use-query-param';
 import { isActive } from '@/lib/verdict';
 import { NewRunDialog } from './new-run-dialog';
-import { KpiTiles, ScoreDistribution } from './run-stats';
+import { FailureModes, KpiTiles, ScoreDistribution } from './run-stats';
 import { RunsTable } from './runs-table';
 
 const STATUSES = ['all', 'queued', 'running', 'completed', 'failed'] as const;
@@ -87,8 +87,9 @@ export function RunsPage() {
       <KpiTiles stats={stats} range={group ? null : range}>
         <Stat label="In flight" value={String(runs.filter(isActive).length)} hint="queued or running" />
       </KpiTiles>
-      <div className="mt-3">
+      <div className="mt-3 grid grid-cols-1 gap-3 lg:grid-cols-2">
         <ScoreDistribution bins={stats?.score_bins} />
+        <FailureModes errorTypes={stats?.error_types} />
       </div>
       <Card flush className="mt-4">
         <div className="flex flex-wrap items-center gap-2 p-3">

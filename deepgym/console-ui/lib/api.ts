@@ -53,41 +53,54 @@ interface ApiState<T> {
   reload: () => Promise<void>;
 }
 
+/** The newest response applied, and the path it answers. */
+interface Answer<T> {
+  path: string;
+  data?: T;
+  error?: string;
+}
+
 /**
  * Fetch `path` (skipped while null) and refetch every `intervalMs` if given,
- * for as long as `keepPolling(data)` holds. Responses for a path the
- * component has since moved off are dropped.
+ * for as long as `keepPolling(data)` holds. Data and errors belong to the path
+ * they answer, so a new path starts empty. Responses for a path the component
+ * has since moved off, or older than one already applied (an overtaken poll),
+ * are dropped.
  */
 export function useApi<T>(
   path: string | null,
   intervalMs?: number,
   keepPolling?: (data: T) => boolean,
 ): ApiState<T> {
-  const [data, setData] = useState<T>();
-  const [error, setError] = useState<string>();
-  const [loading, setLoading] = useState(path !== null);
+  const [answer, setAnswer] = useState<Answer<T>>();
+  const own = answer?.path === path ? answer : undefined;
   const current = useRef(path);
   current.current = path;
-  const latest = useRef({ data, keepPolling });
-  latest.current = { data, keepPolling };
+  // Requests are numbered in the order sent; `applied` is the newest one shown.
+  const sent = useRef(0);
+  const applied = useRef(0);
+  const latest = useRef({ data: own?.data, keepPolling });
+  latest.current = { data: own?.data, keepPolling };
 
   const reload = useCallback(async () => {
     if (path === null) return;
+    const request = ++sent.current;
+    let update: (previous: Answer<T> | undefined) => Answer<T>;
     try {
-      const next = await api<T>(path);
-      if (current.current !== path) return;
-      setData(next);
-      setError(undefined);
+      const data = await api<T>(path);
+      update = () => ({ path, data });
     } catch (caught) {
-      if (current.current === path) setError(errorText(caught));
-    } finally {
-      if (current.current === path) setLoading(false);
+      const error = errorText(caught);
+      // A failed refresh keeps the path's last data next to the error.
+      update = (previous) => ({ path, data: previous?.path === path ? previous.data : undefined, error });
     }
+    if (current.current !== path || request < applied.current) return;
+    applied.current = request;
+    setAnswer(update);
   }, [path]);
 
   useEffect(() => {
     if (path === null) return;
-    setLoading(true);
     void reload();
     if (!intervalMs) return;
     const timer = setInterval(() => {
@@ -97,5 +110,5 @@ export function useApi<T>(
     return () => clearInterval(timer);
   }, [path, intervalMs, reload]);
 
-  return { data, error, loading, reload };
+  return { data: own?.data, error: own?.error, loading: path !== null && own === undefined, reload };
 }

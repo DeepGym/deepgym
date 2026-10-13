@@ -563,6 +563,19 @@ class TestOpenRLHFIntegration:
         assert data == {'rewards': [1.0, 0.0], 'error_types': [None, None]}
         assert dg.calls == [['right # outage', 'wrong'], ['right # outage']]
 
+    def test_no_rerun_that_could_outlast_openrlhfs_timeout(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """OpenRLHF gives each attempt 180 s; a re-run that might take 150 s doesn't start."""
+        monkeypatch.setattr(openrlhf, '_RETRY_DELAYS_S', (0.0, 0.0))
+        dg = _FlakyDeepGym(failing_calls=99)
+        slow = MIXED.model_copy(update={'timeout': 150})
+
+        data = _post(slow, dg, {'prompts': ['p'], 'outputs': ['right # outage']})
+
+        assert data == {'rewards': [0.0], 'error_types': ['sandbox_error']}
+        assert len(dg.calls) == 1
+
     @pytest.mark.parametrize('infra_failure_score', ['zero', 'nan'])
     def test_a_lasting_provider_failure_gets_the_configured_reward(
         self,

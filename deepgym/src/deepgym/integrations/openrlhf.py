@@ -84,8 +84,12 @@ _RETRYABLE = frozenset({'sandbox_error', 'unknown_error'})
 """error_type of a run the sandbox provider or the network failed (see error_type_for)."""
 _RETRY_DELAYS_S = (1.0, 2.0)
 """Pause before each re-run of such runs."""
-_RETRY_BUDGET_S = 60.0
-"""No re-run starts after this long, so a request ends well inside OpenRLHF's 180 s timeout."""
+_REQUEST_BUDGET_S = 150.0
+"""Most time one request may take, inside the 180 s OpenRLHF gives each attempt."""
+_RUN_OVERHEAD_S = 30.0
+"""Time a run may take beyond its environment's timeout, mostly starting its sandbox."""
+_MAX_PARALLEL = 32
+"""Most runs one request has going at once."""
 
 MAX_TEXT_CHARS = 2_000_000
 """Longest query, prompt or output accepted (about 500k tokens); longer ones get a 422."""
@@ -172,14 +176,16 @@ def _score(dg: DeepGym, env: Environment, solutions: list[str]) -> list[RunResul
     """Score *solutions*, one result each."""
     if not solutions:
         return []
-    return list(dg.run_batch(env, solutions, max_parallel=min(len(solutions), 32)).results)
+    batch = dg.run_batch(env, solutions, max_parallel=min(len(solutions), _MAX_PARALLEL))
+    return list(batch.results)
 
 
 def _score_retrying(dg: DeepGym, env: Environment, solutions: list[str]) -> list[RunResult]:
     """Score *solutions*, running again those the provider or the network left unjudged.
 
-    Each re-run waits its ``_RETRY_DELAYS_S`` pause, and none starts after
-    ``_RETRY_BUDGET_S``.
+    Each re-run waits its ``_RETRY_DELAYS_S`` pause, and starts only if it would end inside
+    ``_REQUEST_BUDGET_S`` even at its slowest (the environment's timeout plus
+    ``_RUN_OVERHEAD_S`` for each wave of runs), so retrying can't time the request out.
     """
     start = time.monotonic()
     results = _score(dg, env, solutions)
@@ -187,7 +193,8 @@ def _score_retrying(dg: DeepGym, env: Environment, solutions: list[str]) -> list
         retry = [
             i for i, r in enumerate(results) if not r.has_verdict and r.error_type in _RETRYABLE
         ]
-        if not retry or time.monotonic() - start + delay > _RETRY_BUDGET_S:
+        slowest = -(-len(retry) // _MAX_PARALLEL) * (env.timeout + _RUN_OVERHEAD_S)
+        if not retry or time.monotonic() - start + delay + slowest > _REQUEST_BUDGET_S:
             break
         time.sleep(delay)
         for i, result in zip(retry, _score(dg, env, [solutions[i] for i in retry]), strict=True):

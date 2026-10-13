@@ -5,6 +5,7 @@ import os
 import sqlite3
 import subprocess
 import sys
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
 from pathlib import Path
 
@@ -356,6 +357,53 @@ class TestCapture:
         trace = load_trace(tr.path)
 
         assert len(trace.steps) == 1 and trace.error == UNFINISHED
+
+    def test_record_cut_inside_a_character_is_dropped(self, dg: DeepGym) -> None:
+        with dg.trace(WRITE_ENV, AGENT) as tr:
+            tr.start()
+        cut = '{"event": "step", "note": "é"'.encode()[:-2]  # ends mid UTF-8 sequence
+        tr.path.write_bytes(tr.path.read_bytes() + cut)
+
+        assert load_trace(tr.path).trace_id == tr.trace_id
+
+    def test_trace_keeps_its_own_copies(self, dg: DeepGym) -> None:
+        action = Action(action_type='bash', content='echo hello > out.txt')
+        with dg.trace(WRITE_ENV, AGENT) as tr:
+            tr.start()
+            observation = tr.step(action).observation
+            result = tr.score()
+            action.content = 'rm -rf /'
+            observation.content = 'forged'
+            result.score = 0.25
+            tr.trace.steps[0].observation.content = 'forged too'
+
+        assert tr.trace == load_trace(tr.path)
+        assert tr.trace.steps[0].action.content == 'echo hello > out.txt'
+        assert tr.trace.result.score == 1.0
+
+    def test_concurrent_steps_run_one_at_a_time(self, dg: DeepGym) -> None:
+        env = WRITE_ENV.model_copy(update={'step_verifier_code': '', 'max_steps': 10})
+        with dg.trace(env, AGENT) as tr:
+            tr.start()
+            with ThreadPoolExecutor(4) as pool:
+                list(
+                    pool.map(
+                        lambda n: tr.step(Action(action_type='bash', content=f'echo {n}')), range(4)
+                    )
+                )
+
+        assert [step.index for step in load_trace(tr.path).steps] == [1, 2, 3, 4]
+
+    def test_steps_outside_the_episode_are_refused(self, dg: DeepGym) -> None:
+        with dg.trace(WRITE_ENV, AGENT) as tr:
+            with pytest.raises(DeepGymError, match='not running'):
+                tr.step(Action(action_type='done'))
+            tr.start()
+            tr.step(Action(action_type='done'))
+            with pytest.raises(DeepGymError, match='not running'):
+                tr.step(Action(action_type='done'))
+
+        assert len(load_trace(tr.path).steps) == 1
 
     def test_corrupt_record_raises(self, dg: DeepGym) -> None:
         with dg.trace(WRITE_ENV, AGENT) as tr:

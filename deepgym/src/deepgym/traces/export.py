@@ -114,11 +114,14 @@ def export_traces(
         How many records were written and why the others were skipped.
 
     Raises:
-        ValueError: If ATIF is asked for RL rows.
+        ValueError: If ATIF is asked for RL rows, or two traces share an id.
         DeepGymError: If Parquet is asked for without pyarrow installed.
     """
     if fmt == 'atif' and rows == 'rl':
         raise ValueError("ATIF documents hold whole traces; use rows='trace'")
+    repeated = [key for key, count in Counter(t.trace_id for t in traces).items() if count > 1]
+    if repeated:
+        raise ValueError(f'Traces share ids {repeated}; keep one copy of each')
     skipped: Counter[str] = Counter()
     kept: list[Trace] = []
     for trace in traces:

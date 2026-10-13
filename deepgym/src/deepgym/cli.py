@@ -476,10 +476,18 @@ def _cmd_traces(args: argparse.Namespace) -> None:
             print(f'Error: not found: {", ".join(missing)}', file=sys.stderr)
             sys.exit(1)
 
+    files = [
+        file
+        for path in paths
+        for file in (sorted(path.glob('*.jsonl')) if path.is_dir() else [path])
+    ]
+    out = Path(args.out)
+    if out.exists() and any(out.samefile(source) for source in [db, *files] if source):
+        print(f'Error: {out} is one of the inputs; write the export elsewhere', file=sys.stderr)
+        sys.exit(1)
+
     traces, untraced = EpisodeStore(db).traces() if db else ([], 0)
-    for path in paths:
-        files = sorted(path.glob('*.jsonl')) if path.is_dir() else [path]
-        traces += [load_trace(file) for file in files]
+    traces += [load_trace(file) for file in files]
     # A trace can be both on disk and in the console: keep the copy that got furthest.
     unique: dict[str, Trace] = {}
     for trace in sorted(traces, key=lambda t: (t.result is not None, len(t.steps))):
@@ -491,7 +499,7 @@ def _cmd_traces(args: argparse.Namespace) -> None:
     report = export_traces(
         sorted(unique.values(), key=lambda trace: trace.provenance.started_at),
         args.format,
-        Path(args.out),
+        out,
         rows=args.rows,
         only_valid=args.only_valid,
     )

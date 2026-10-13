@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import json
 import os
+import threading
 import time
 from collections.abc import Callable, Sequence
 from datetime import datetime, timezone
@@ -54,7 +55,9 @@ class TracedSession:
         tr.trace.has_verdict
 
     Leaving the block closes the session. An exception, or leaving before ``score()``,
-    keeps everything recorded so far and marks the trace incomplete.
+    keeps everything recorded so far and marks the trace incomplete. The trace keeps
+    its own copies of actions, observations and results, so changing the objects
+    passed in or returned never changes it. Concurrent calls run one at a time.
     """
 
     def __init__(
@@ -68,13 +71,14 @@ class TracedSession:
         self.path = path or traces_dir() / f'{self.trace_id}.jsonl'
         self._session = session
         self._env = env
-        self._provenance = provenance
+        self._provenance = provenance.model_copy(deep=True)
         self._initial: Observation | None = None
         self._steps: list[TraceStep] = []
         self._result: RunResult | None = None
         self._error: str | None = None
         self._finished_at: datetime | None = None
         self._file: TextIO | None = None
+        self._lock = threading.Lock()
 
     @property
     def done(self) -> bool:
@@ -83,17 +87,18 @@ class TracedSession:
 
     @property
     def trace(self) -> Trace:
-        """Everything recorded so far."""
-        return Trace(
-            trace_id=self.trace_id,
-            task=self._env.task,
-            provenance=self._provenance,
-            initial_observation=self._initial,
-            steps=tuple(self._steps),
-            result=self._result,
-            error=self._error,
-            finished_at=self._finished_at,
-        )
+        """A copy of everything recorded so far."""
+        with self._lock:
+            return Trace(
+                trace_id=self.trace_id,
+                task=self._env.task,
+                provenance=self._provenance,
+                initial_observation=self._initial,
+                steps=tuple(self._steps),
+                result=self._result,
+                error=self._error,
+                finished_at=self._finished_at,
+            ).model_copy(deep=True)
 
     def start(self) -> Observation:
         """Start the session and record its first observation.
@@ -104,10 +109,12 @@ class TracedSession:
             DeepGymError: As :meth:`Session.start`; the error is recorded first.
             FileExistsError: If the trace file already exists.
         """
-        self._open()
-        self._initial = self._recorded(self._session.start)
-        self._write({'event': 'reset', 'observation': self._initial})
-        return self._initial
+        with self._lock:
+            self._open()
+            observation = self._recorded(self._session.start)
+            self._initial = observation.model_copy(deep=True)
+            self._write({'event': 'reset', 'observation': self._initial})
+            return observation
 
     def step(self, action: Action, messages: Sequence[TraceMessage] = ()) -> StepResult:
         """Apply *action* and record it with the model *messages* that produced it.
@@ -124,44 +131,49 @@ class TracedSession:
             The session's step result.
 
         Raises:
-            DeepGymError: If the episode was already scored: its verdict would no longer
-                match the state the trace ends in.
+            DeepGymError: If the episode isn't running (not started, ended or already
+                scored: a verdict must match the state the trace ends in). Nothing is
+                recorded then.
         """
-        if self._result is not None:
-            raise DeepGymError('The episode was already scored; open a new trace to act again')
-        trajectory = self._session.trajectory
-        applied_before = len(trajectory.steps)
-        record = {
-            'index': len(self._steps) + 1,
-            'action': action,
-            'messages': tuple(messages),
-            'timestamp': datetime.now(timezone.utc),
-        }
-        start = time.perf_counter()
-        try:
-            result = self._session.step(action)
-        except Exception as exc:
-            applied = len(trajectory.steps) > applied_before
+        with self._lock:
+            if self._result is not None:
+                raise DeepGymError('The episode was already scored; open a new trace to act')
+            if self._initial is None or self._session.done:
+                raise DeepGymError('The episode is not running; call start() or open a new trace')
+            trajectory = self._session.trajectory
+            applied_before = len(trajectory.steps)
+            record = {
+                'index': len(self._steps) + 1,
+                'action': action.model_copy(deep=True),
+                'messages': tuple(messages),
+                'timestamp': datetime.now(timezone.utc),
+            }
+            start = time.perf_counter()
+            try:
+                result = self._session.step(action)
+            except Exception as exc:
+                applied = len(trajectory.steps) > applied_before
+                observation = trajectory.final_observation if applied else None
+                self._add_step(
+                    TraceStep(
+                        **record,
+                        observation=observation and observation.model_copy(deep=True),
+                        error=_describe(exc),
+                        duration_ms=_elapsed_ms(start),
+                    )
+                )
+                raise
+            scored = bool(self._env.step_verifier_code)
             self._add_step(
                 TraceStep(
                     **record,
-                    observation=trajectory.final_observation if applied else None,
-                    error=_describe(exc),
+                    observation=result.observation.model_copy(deep=True),
+                    reward=result.reward if scored else None,
+                    step_verifier=self._session.step_verdict if scored else None,
                     duration_ms=_elapsed_ms(start),
                 )
             )
-            raise
-        scored = bool(self._env.step_verifier_code)
-        self._add_step(
-            TraceStep(
-                **record,
-                observation=result.observation,
-                reward=result.reward if scored else None,
-                step_verifier=self._session.step_verdict if scored else None,
-                duration_ms=_elapsed_ms(start),
-            )
-        )
-        return result
+            return result
 
     def score(self) -> RunResult:
         """Run the final verifier and record its result.
@@ -169,22 +181,25 @@ class TracedSession:
         Raises:
             VerifierError: As :meth:`Session.score`; the error is recorded first.
         """
-        self._result = self._recorded(self._session.score)
-        self._write({'event': 'result', 'result': self._result})
-        return self._result
+        with self._lock:
+            result = self._recorded(self._session.score)
+            self._result = result.model_copy(deep=True)
+            self._write({'event': 'result', 'result': self._result})
+            return result
 
     def close(self) -> None:
         """Finish the trace file, if there is one, then close the session. Safe to call twice."""
-        if self._finished_at is not None:
-            return
-        self._finished_at = datetime.now(timezone.utc)
-        try:
-            if self._file is not None:
-                with self._file:
-                    finished = self._finished_at.isoformat()
-                    self._write({'event': 'end', 'error': self._error, 'finished_at': finished})
-        finally:
-            self._session.close()
+        with self._lock:
+            if self._finished_at is not None:
+                return
+            self._finished_at = datetime.now(timezone.utc)
+            try:
+                if self._file is not None:
+                    with self._file:
+                        finished = self._finished_at.isoformat()
+                        self._write({'event': 'end', 'error': self._error, 'finished_at': finished})
+            finally:
+                self._session.close()
 
     def __enter__(self) -> TracedSession:
         return self
@@ -236,7 +251,7 @@ class TracedSession:
 def load_trace(path: Path) -> Trace:
     """Rebuild a trace from its event file.
 
-    A record cut short by a crash (a last line without a newline) is dropped; a trace
+    A record cut short by a crash (bytes after the last newline) is dropped; a trace
     that never reached ``end`` gets an error saying so.
 
     Args:
@@ -249,10 +264,11 @@ def load_trace(path: Path) -> Trace:
         DeepGymError: If the file isn't a trace or a complete record is corrupt.
         pydantic.ValidationError: If a record doesn't match the trace schema.
     """
-    *lines, _partial = path.read_text(encoding='utf-8').split('\n')
+    # Split bytes, not text: a crash can cut the last record inside a UTF-8 character.
+    *lines, _partial = path.read_bytes().split(b'\n')
     try:
         events = [json.loads(line) for line in lines]
-    except json.JSONDecodeError as exc:
+    except ValueError as exc:  # JSONDecodeError or UnicodeDecodeError
         raise DeepGymError(f'{path}: corrupt trace record: {exc}') from exc
     if not events or events[0].get('event') != 'start':
         raise DeepGymError(f'{path} is not a deepgym trace file')

@@ -123,6 +123,10 @@ class TestExporters:
         with pytest.raises(ValueError, match='whole traces'):
             export_traces(_samples(), 'atif', tmp_path, rows='rl')
 
+    def test_duplicate_trace_ids_are_refused(self, tmp_path: Path) -> None:
+        with pytest.raises(ValueError, match='share ids'):
+            export_traces([graded_trace(), graded_trace()], 'atif', tmp_path / 'atif')
+
     def test_atif_refuses_a_populated_directory(self, tmp_path: Path) -> None:
         export_traces(_samples(), 'atif', tmp_path / 'atif')
 
@@ -184,6 +188,19 @@ class TestCli:
 
         assert exit_info.value.code == 1
         assert 'not found' in capsys.readouterr().err
+
+    def test_refuses_to_overwrite_an_input(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture
+    ) -> None:
+        source = tmp_path / 'trace.jsonl'
+        source.write_text(_event_log(graded_trace()))
+
+        with pytest.raises(SystemExit):
+            self._run(monkeypatch, '--format', 'jsonl', '--rows', 'rl', '--out', str(source),
+                      '--traces', str(source))  # fmt: skip
+
+        assert 'is one of the inputs' in capsys.readouterr().err
+        assert source.read_text() == _event_log(graded_trace())
 
 
 def _event_log(trace: Trace) -> str:

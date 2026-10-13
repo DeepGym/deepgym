@@ -10,12 +10,17 @@ the reward.
 Modules:
     task: HarborTask, one validated task folder.
     loader: load_tasks from a folder, a git repository or a Hugging Face dataset.
+    agent: the agent phase in its own sandbox.
+    grading: grading in a fresh sandbox, and reading the reward.
+    environment: HarborEnvironment, which ties them together.
 """
 
+from deepgym.harbor.environment import HarborEnvironment
 from deepgym.harbor.loader import dataset_root, load_tasks, task_dirs
 from deepgym.harbor.task import HarborTask
 
 __all__ = [
+    'HarborEnvironment',
     'HarborTask',
     'dataset_root',
     'load_tasks',

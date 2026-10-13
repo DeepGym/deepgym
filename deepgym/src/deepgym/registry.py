@@ -321,7 +321,8 @@ def _load_env_from_dir(
     """Build an Environment from an environment directory.
 
     Args:
-        env_dir: Path to the environment directory containing task.md and verifier.py.
+        env_dir: Path to the environment directory: task.md and verifier.py, or a Harbor
+            task folder (task.toml).
         metadata: Optional registry metadata dict to populate difficulty/domain/tags.
 
     Returns:
@@ -330,6 +331,12 @@ def _load_env_from_dir(
     Raises:
         ValueError: If required files are missing.
     """
+    if (env_dir / 'task.toml').is_file():
+        if variant:
+            raise ValueError(f'{env_dir.name} is a Harbor task; it has no variants')
+        from deepgym.harbor import HarborEnvironment
+
+        return HarborEnvironment.from_dir(env_dir)
     task_path = env_dir / 'task.md'
     verifier_path = env_dir / 'verifier.py'
     metadata_path = env_dir / 'metadata.json'

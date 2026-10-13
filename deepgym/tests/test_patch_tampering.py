@@ -17,7 +17,8 @@ _CALC = 'def add(a, b):\n    return a - b\n'
 _FIX = {'calc.py': 'def add(a, b):\n    return a + b\n'}
 _BASE_TEST = 'from calc import add\n\n\ndef test_zero():\n    assert add(0, 0) == 0\n'
 _HIDDEN_TEST = _BASE_TEST + '\n\ndef test_add():\n    assert add(1, 2) == 3\n'
-_PYPROJECT = '[project]\nname = "calc"\nversion = "1.0"\n\n[tool.pytest.ini_options]\n'
+_PYPROJECT_PLAIN = '[project]\nname = "calc"\nversion = "1.0"\n'
+_PYPROJECT = _PYPROJECT_PLAIN + '\n[tool.pytest.ini_options]\n'
 _PYPROJECT_QUOTED_PLUGIN = _PYPROJECT.replace(
     '[tool.pytest.ini_options]', '[tool."pytest".ini_options]\naddopts = "-p dg_exit"'
 )
@@ -149,6 +150,13 @@ _CARGO_WS_EDIT = _CARGO_WS.replace('["core"]', '["decoy"]')
             id='pyproject-quoted-section',
         ),
         pytest.param(
+            # A top-level dotted key reads as pytest config to a real parser; refused.
+            {'pyproject.toml': _PYPROJECT_PLAIN},
+            {'pyproject.toml': 'tool.pytest.ini_options.addopts = "-p dg"\n' + _PYPROJECT_PLAIN},
+            True,
+            id='pyproject-dotted-key',
+        ),
+        pytest.param(
             {'package.json': _PACKAGE},
             {'package.json': _PACKAGE.replace('1.0.0', '1.1.0')},
             False,
@@ -269,13 +277,34 @@ def test_data_fixture_in_test_dir_is_allowed(tmp_path: Path, sandbox_dg: DeepGym
     assert result.score == 1.0
 
 
+def test_vendored_toml_parser_matches_the_tools() -> None:
+    # The inlined parser (what a pre-3.11 image uses) must read dotted keys and reject
+    # duplicates exactly like tomllib, or a dotted-key pytest config would slip past.
+    from deepgym.benchmark_envs import _vendored_toml_source
+
+    namespace: dict = {}
+    exec(compile(_vendored_toml_source(), 'vendored', 'exec'), namespace)
+    loads, decode_error = namespace['loads'], namespace['TOMLDecodeError']
+
+    parsed = loads('tool.pytest.ini_options.addopts = "-p evil"\n')
+    assert parsed['tool']['pytest']['ini_options']['addopts'] == '-p evil'
+    inline = loads('[tool]\npytest = {ini_options = {addopts = "x"}}')
+    assert inline['tool']['pytest']['ini_options']['addopts'] == 'x'
+    with pytest.raises(decode_error):
+        loads('[a]\nx = 1\nx = 2\n')
+    with pytest.raises(decode_error):
+        loads('[a]\n[a]\n')
+
+
 def test_config_comparison_needs_no_tomllib(tmp_path: Path, sandbox_dg: DeepGym) -> None:
     # The runner executes in the task image's Python, where tomllib (3.11+) may be absent.
-    # The TOML comparison must be pure-stdlib so a 3.10 image does not wrongly refuse a
-    # legitimate pyproject edit. Guard against a regression that reintroduces the import.
+    # The TOML comparison must carry a vendored parser so a 3.10 image does not wrongly
+    # refuse a legitimate pyproject edit. Guard against losing the vendored fallback.
     from deepgym.benchmark_envs import PatchVerifier
 
-    assert 'import tomllib' not in PatchVerifier.build_runner_script()
+    script = PatchVerifier.build_runner_script()
+    assert '_VENDORED_TOML' in script
+    assert 'def loads' in script  # the inlined parser's entry point
 
     env = _env(tmp_path, {'pyproject.toml': _PYPROJECT})
     # A version bump outside the pytest section is allowed even with no TOML library present.

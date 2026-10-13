@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import inspect
 import json
 import random
 import re
@@ -245,6 +246,38 @@ def _execute_runner(
     return build_run_result(result, elapsed_ms, sandbox_id, exit_code=exit_code)
 
 
+def _vendored_toml_source() -> str:
+    """Return a self-contained TOML parser to inline in the runner.
+
+    The runner executes in the task image's interpreter, where ``tomllib`` (Python 3.11+)
+    may be absent, so a config comparison that imported it would fail closed on every
+    older image. CPython's ``tomllib`` is the ``tomli`` package verbatim, pure Python in
+    four small modules with only intra-package imports; this concatenates them into one
+    module so the runner parses ``pyproject.toml``/``Cargo.toml`` exactly as the tools
+    that consume them do -- dotted keys, inline tables, duplicate-key and table-redefinition
+    rejection -- independent of the image's Python.
+
+    Returns:
+        Python source defining ``loads`` and ``TOMLDecodeError`` at module scope.
+
+    Raises:
+        ModuleNotFoundError: If neither ``tomllib`` nor ``tomli`` is importable here.
+    """
+    try:
+        from tomllib import _parser, _re, _types  # type: ignore[attr-defined]
+    except ModuleNotFoundError:
+        from tomli import _parser, _re, _types  # type: ignore[no-redef]
+
+    parts = ['from __future__ import annotations']
+    for module in (_types, _re, _parser):
+        src = inspect.getsource(module)
+        src = re.sub(r'(?ms)^from \.\w+ import \([^)]*\)[ \t]*\n', '', src)
+        src = re.sub(r'(?m)^from \.\w+ import .*\n', '', src)
+        src = re.sub(r'(?m)^from __future__ import .*\n', '', src)
+        parts.append(src)
+    return '\n'.join(parts)
+
+
 class PatchVerifier:
     """Reusable repo-level patch verifier."""
 
@@ -255,8 +288,14 @@ class PatchVerifier:
 
     @staticmethod
     def build_runner_script() -> str:
-        """Return the self-contained patch runner script."""
-        return textwrap.dedent(
+        """Return the self-contained patch runner script.
+
+        A vendored TOML parser is inlined as ``_VENDORED_TOML`` so the config comparison
+        matches the tools on any image Python; see :func:`_vendored_toml_source`. It is a
+        string exec'd lazily, not live code, so an interpreter too old to compile it fails
+        only the config comparison (closed), never the whole run.
+        """
+        return f'_VENDORED_TOML = {_vendored_toml_source()!r}\n\n' + textwrap.dedent(
             """
             import json
             import os
@@ -400,47 +439,27 @@ class PatchVerifier:
                 return None
 
 
-            def _toml_header_path(header: str) -> tuple[str, ...]:
-                # The normalized dotted path of a TOML table header, with quotes stripped, so
-                # [tool."pytest".ini_options] and [tool.pytest.ini_options] compare equal.
-                segments, current, quote = [], '', ''
-                for char in header:
-                    if quote:
-                        if char == quote:
-                            quote = ''
-                        else:
-                            current += char
-                    elif char in '"\\'':
-                        quote = char
-                    elif char == '.':
-                        segments.append(current.strip())
-                        current = ''
-                    else:
-                        current += char
-                segments.append(current.strip())
-                return tuple(seg for seg in segments if seg)
+            def _toml_table(value) -> dict:
+                # A parsed TOML value as a dict, or {} when it is some other shape.
+                return value if isinstance(value, dict) else {}
 
 
-            def _toml_section_lines(text: str, prefixes: tuple[tuple[str, ...], ...]) -> list:
-                # The content lines grouped under any table whose normalized path starts with a
-                # prefix. A pure-text TOML reader, so it needs no tomllib (absent before Python
-                # 3.11, and the runner runs in the image's interpreter). Package-level keys
-                # (prefix of length 1 matching the table exactly) keep only auto*/build lines.
-                out, table = [], ()
-                for raw in text.splitlines():
-                    line = raw.strip()
-                    if not line or line.startswith('#'):
-                        continue
-                    if line.startswith('[['):
-                        table = _toml_header_path(line[2 : line.find(']]')])
-                    elif line.startswith('['):
-                        table = _toml_header_path(line[1 : line.find(']')])
-                    elif any(table[: len(prefix)] == prefix for prefix in prefixes):
-                        key = line.split('=', 1)[0].strip().strip('"\\'')
-                        if table == ('package',) and not key.startswith(('auto', 'build')):
-                            continue
-                        out.append((table, line))
-                return sorted(out)
+            _TOML_LOADS = []
+
+
+            def _toml_loads(text: str) -> dict:
+                # Parse TOML with the image's stdlib tomllib if present, else the inlined copy.
+                # Raises on a too-old interpreter or malformed TOML, which fails the check closed.
+                if not _TOML_LOADS:
+                    try:
+                        import tomllib
+
+                        _TOML_LOADS.append(tomllib.loads)
+                    except ModuleNotFoundError:
+                        namespace: dict = {}
+                        exec(compile(_VENDORED_TOML, 'vendored_toml', 'exec'), namespace)
+                        _TOML_LOADS.append(namespace['loads'])
+                return _TOML_LOADS[0](text)
 
 
             def _test_part_changed(name: str, old_text: str, new_text: str) -> bool:
@@ -469,17 +488,24 @@ class PatchVerifier:
                         return {key: dict(cfg[key]) for key in cfg.sections() if key in keys}
 
                     return view(before) != view(after)
+                # cargo.toml / pyproject.toml: _toml_loads parses exactly like the tools (dotted
+                # keys and inline tables normalize into these tables) and raises on a duplicate
+                # key, a redefined table or any syntax error, which fails closed above.
+                before, after = _toml_loads(old_text), _toml_loads(new_text)
                 if name == 'cargo.toml':
-                    # Target tables and workspace selection decide which tests cargo runs, and
-                    # [package] auto-discovery/build toggles do too.
-                    prefixes = (('lib',), ('bin',), ('test',), ('bench',), ('workspace',), ('package',))
-                else:
-                    # pyproject.toml: the pytest/coverage/tox/nose tool tables and the build system.
-                    prefixes = (
-                        ('tool', 'pytest'), ('tool', 'coverage'), ('tool', 'tox'),
-                        ('tool', 'nose'), ('build-system',),
-                    )
-                return _toml_section_lines(old_text, prefixes) != _toml_section_lines(new_text, prefixes)
+                    keys = ('lib', 'bin', 'test', 'bench', 'features', 'dependencies',
+                            'dev-dependencies', 'build-dependencies', 'workspace')
+                    if any(before.get(key) != after.get(key) for key in keys):
+                        return True
+                    # Package-level auto-discovery and build script decide which tests cargo runs.
+                    auto = ('autotests', 'autobenches', 'autobins', 'autoexamples', 'autolib', 'build')
+                    pkg_before, pkg_after = _toml_table(before.get('package')), _toml_table(after.get('package'))
+                    return any(pkg_before.get(key) != pkg_after.get(key) for key in auto)
+                tool_keys = ('pytest', 'coverage', 'tox', 'nose')
+                before_tool, after_tool = _toml_table(before.get('tool')), _toml_table(after.get('tool'))
+                return any(before_tool.get(key) != after_tool.get(key) for key in tool_keys) or (
+                    before.get('build-system') != after.get('build-system')
+                )
 
 
             def _config_tampered(name: str, old: bytes | None, new: bytes | None) -> bool:

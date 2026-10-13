@@ -6,7 +6,11 @@ Make an HTTP GET request and extract data from the JSON response.
 
 Write a Python script that:
 
-1. Make a GET request to `https://httpbin.org/json`.
-2. Parse the JSON response.
-3. Extract the `slideshow.title` field.
-4. Print the title to stdout.
+1. Takes the API URL as its first command-line argument (`sys.argv[1]`).
+2. Makes a GET request to that URL.
+3. Parses the JSON response, a document shaped like
+   `{"slideshow": {"title": "...", "author": "...", "slides": [{"title": "...", ...}]}, ...}`.
+4. Prints the `slideshow.title` field to stdout, and nothing else.
+
+The script is run against several documents whose fields, values and key order
+vary. Use only the Python standard library.

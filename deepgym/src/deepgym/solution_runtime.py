@@ -10,6 +10,9 @@ themselves::
 
     proc = run_solution(solution_path, cwd=work_dir, env={'OUT': work_dir})  # as a script
 
+    # As a client of a server the judge runs on 127.0.0.1:port; no other network.
+    proc = run_solution(solution_path, [f'http://127.0.0.1:{port}/'], loopback_port=port)
+
 The solution process can't read the judge's files or memory, so it can't see
 expected answers, patch the verifier, or print a fake score. Only plain data
 crosses the boundary (None, bool, int, float, str, bytes, list, tuple, set,
@@ -20,7 +23,8 @@ Each call is bounded by DEEPGYM_CASE_TIMEOUT and by the run's overall
 DEEPGYM_DEADLINE, so a slow case fails on its own instead of sinking the run.
 
 Stdlib only: this file is copied next to the verifier as ``deepgym_solution.py``
-and also runs as the solution-side server (``python -I deepgym_solution.py --serve``).
+and also runs as the solution-side server (``python -I deepgym_solution.py --serve``)
+and loopback forwarder (``--forward``).
 """
 
 from __future__ import annotations
@@ -36,12 +40,13 @@ import os
 import queue
 import shlex
 import signal
+import socket
 import subprocess
 import sys
 import tempfile
 import threading
 import time
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Iterator, Sequence
 from typing import Any
 
 _PATH = '/usr/local/bin:/opt/homebrew/bin:/usr/bin:/bin'
@@ -147,20 +152,33 @@ def _python() -> str:
     return os.environ.get('DEEPGYM_PYTHON', sys.executable)
 
 
-def _macos_profile(spec: dict, writable: Sequence[str], allow_fork: bool) -> str:
+def _runtime() -> str:
+    """Path of this file as the isolated solution can read it."""
+    return os.environ.get('DEEPGYM_RUNTIME', os.path.abspath(__file__))
+
+
+def _macos_profile(
+    spec: dict, writable: Sequence[str], allow_fork: bool, loopback_port: int | None
+) -> str:
     def paths(items: Sequence[str]) -> str:
         return ' '.join(f'(subpath {json.dumps(os.path.realpath(p))})' for p in items) or (
             '(literal "/nonexistent")'
         )
 
     hide, expose, rehide = spec['hide'], spec.get('expose', []), spec.get('rehide', [])
+    loopback = (
+        f'(allow network-outbound (remote ip "localhost:{int(loopback_port)}"))'
+        if loopback_port is not None
+        else ''
+    )
 
     # Later rules win: hide whole trees, then re-expose this run's own directories.
     # Hiding denies reading contents and listings, not stat, so tools that resolve
     # their working path (git) still work. No Mach IPC or AppleEvents: they let a
     # process ask launchd or another app to start something outside the sandbox.
     return (
-        '(version 1)(allow default)(deny network*)(deny mach-lookup)(deny appleevent-send)'
+        f'(version 1)(allow default)(deny network*){loopback}(deny mach-lookup)'
+        '(deny appleevent-send)'
         f'(deny file-read-data {paths(hide)})'
         f'(allow file-read-data {paths([*expose, *writable])})'
         f'(deny file-read-data {paths(rehide)})'
@@ -203,8 +221,13 @@ def _launch_argv(
     workdir: str,
     extra_env: dict[str, str] | None = None,
     allow_fork: bool = False,
+    loopback_port: int | None = None,
 ) -> list[str]:
-    """Wrap *command* to run as the isolated solution: empty env, writes only in *workdir*."""
+    """Wrap *command* to run as the isolated solution: empty env, writes only in *workdir*.
+
+    *loopback_port* only matters on macOS, where the solution shares the judge's
+    network stack; elsewhere :func:`_loopback` forwards the port.
+    """
     spec = _isolation()
     writable = [workdir]
     clean = ['env', '-i', f'PATH={_PATH}', f'HOME={workdir}', f'TMPDIR={workdir}']
@@ -214,7 +237,7 @@ def _launch_argv(
         _share_with_solution(workdir)
         return [*spec['prefix'], *clean, *command]
     if kind == 'macos':
-        profile = _macos_profile(spec, writable, allow_fork)
+        profile = _macos_profile(spec, writable, allow_fork, loopback_port)
         return ['sandbox-exec', '-p', profile, *clean, *command]
     if kind == 'bwrap':
         argv = ['bwrap', '--ro-bind', '/', '/', '--dev', '/dev', '--proc', '/proc']
@@ -229,6 +252,59 @@ def _launch_argv(
         argv += ['--unshare-all', '--die-with-parent', '--new-session', '--chdir', workdir]
         return [*argv, *clean, *command]
     return [*clean, *command]
+
+
+def _relay(listener: socket.socket, connect: Callable[[], socket.socket]) -> None:
+    """In the background, pipe each connection accepted on *listener* to a fresh connect().
+
+    Stops accepting once *listener* is closed.
+    """
+
+    def pipe(source: socket.socket, sink: socket.socket) -> None:
+        with contextlib.suppress(OSError):
+            while data := source.recv(65536):
+                sink.sendall(data)
+        with contextlib.suppress(OSError):
+            sink.shutdown(socket.SHUT_WR)
+
+    def splice(client: socket.socket) -> None:
+        with contextlib.suppress(OSError), client, connect() as upstream:
+            back = threading.Thread(target=pipe, args=(upstream, client), daemon=True)
+            back.start()
+            pipe(client, upstream)
+            back.join()
+
+    def accept() -> None:
+        with contextlib.suppress(OSError):
+            while True:
+                client, _ = listener.accept()
+                threading.Thread(target=splice, args=(client,), daemon=True).start()
+
+    threading.Thread(target=accept, daemon=True).start()
+
+
+@contextlib.contextmanager
+def _loopback(workdir: str, port: int | None) -> Iterator[list[str]]:
+    """Yield a command prefix that gives the solution the judge's 127.0.0.1:*port*.
+
+    Where the solution has its own network namespace (bwrap, or a sandbox user
+    with an offline namespace), the judge's loopback isn't the solution's. The
+    prefix starts a forwarder there that listens on 127.0.0.1:*port* and pipes
+    each connection through a Unix socket in *workdir* to the judge's port.
+    Elsewhere the port is reachable as it is (macOS allows it in the profile), so
+    the prefix is empty.
+    """
+    spec = _isolation()
+    if port is None or not (spec['kind'] == 'bwrap' or spec.get('own_network')):
+        yield []
+        return
+    path = os.path.join(tempfile.mkdtemp(dir=workdir), 'loopback.sock')
+    with socket.socket(socket.AF_UNIX) as listener:
+        listener.bind(path)
+        os.chmod(path, 0o777)  # the solution may run as another user
+        listener.listen()
+        _relay(listener, lambda: socket.create_connection(('127.0.0.1', port)))
+        yield [_python(), '-I', '-B', _runtime(), '--forward', str(port), path]
 
 
 def _scratch_dir() -> str:
@@ -274,6 +350,7 @@ def run_solution(
     input: str | None = None,
     timeout: float | None = None,
     allow_subprocess: bool = False,
+    loopback_port: int | None = None,
 ) -> subprocess.CompletedProcess:
     """Run the solution as a script in the isolated domain.
 
@@ -282,7 +359,9 @@ def run_solution(
     :func:`read_output`. *env* adds variables to an otherwise empty environment.
     Anything the script leaves running is killed when it exits. On macOS the
     script can't start subprocesses unless *allow_subprocess* is set (a child
-    that detaches could outlive it there).
+    that detaches could outlive it there). *loopback_port* lets it connect to a
+    server the judge runs on 127.0.0.1 at that port; the rest of the network stays
+    unreachable.
 
     Raises:
         subprocess.TimeoutExpired: If it runs past *timeout* (default: the case timeout).
@@ -293,9 +372,13 @@ def run_solution(
     limit = _call_timeout() if timeout is None else min(timeout, _remaining())
     # Output goes to files, not pipes: a forked child holding a pipe open would
     # keep us waiting (and alive to tamper) after the script itself exits.
-    with tempfile.TemporaryFile() as out, tempfile.TemporaryFile() as err:
+    with (
+        tempfile.TemporaryFile() as out,
+        tempfile.TemporaryFile() as err,
+        _loopback(workdir, loopback_port) as forwarder,
+    ):
         proc = subprocess.Popen(
-            _launch_argv(command, workdir, env, allow_fork=allow_subprocess),
+            _launch_argv([*forwarder, *command], workdir, env, allow_subprocess, loopback_port),
             stdin=subprocess.PIPE if input is not None else subprocess.DEVNULL,
             stdout=out,
             stderr=err,
@@ -396,8 +479,7 @@ class _Runner:
 
     def _start(self) -> None:
         workdir = _scratch_dir()
-        runtime = os.environ.get('DEEPGYM_RUNTIME', os.path.abspath(__file__))
-        command = [_python(), '-I', '-B', runtime, '--serve', self._path]
+        command = [_python(), '-I', '-B', _runtime(), '--serve', self._path]
         self._proc = subprocess.Popen(
             _launch_argv(command, workdir),
             stdin=subprocess.PIPE,
@@ -613,8 +695,23 @@ def _serve(solution_path: str) -> None:
         replies.flush()
 
 
+def _forward(port: int, judge_socket: str, command: list[str]) -> int:
+    """Serve 127.0.0.1:*port* by piping to *judge_socket*, run *command*, return its exit code."""
+
+    def connect() -> socket.socket:
+        upstream = socket.socket(socket.AF_UNIX)
+        upstream.connect(judge_socket)
+        return upstream
+
+    _relay(socket.create_server(('127.0.0.1', port)), connect)
+    return subprocess.call(command)
+
+
 if __name__ == '__main__' and sys.argv[1:2] == ['--serve']:
     _serve(sys.argv[2])
+elif __name__ == '__main__' and sys.argv[1:2] == ['--forward']:
+    sys.exit(_forward(int(sys.argv[2]), sys.argv[3], sys.argv[4:]))
 elif __name__ == '__main__':
-    print(f'usage: {shlex.quote(sys.argv[0])} --serve <solution.py>', file=sys.stderr)
+    usage = '--serve <solution.py> | --forward <port> <socket> <command...>'
+    print(f'usage: {shlex.quote(sys.argv[0])} {usage}', file=sys.stderr)
     sys.exit(2)

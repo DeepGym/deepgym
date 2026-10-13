@@ -617,7 +617,8 @@ Never import or run the solution yourself. Use the helpers in `deepgym_solution`
   proxy: `sol.add(2, 3)` runs there and returns plain data.
 - `run_solution(path, cwd=..., env=...)` runs it as a script, writing only inside
   `cwd`. Pass `allow_subprocess=True` if the script needs to start other programs
-  (macOS blocks forking otherwise).
+  (macOS blocks forking otherwise), and `loopback_port=port` to let it reach a
+  server the verifier runs on `127.0.0.1:port` (nothing else on the network).
 - `read_output(path, cwd)` reads its files back and refuses symlinks.
 - `solution_source(path, name=None)` reads the source for static checks without running it.
 

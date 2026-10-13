@@ -21,12 +21,14 @@ from tests.test_isolation import _env
 
 # Every live isolation test, rerun here on each provider via this module's `dg`.
 from tests.test_isolation_live import (  # noqa: F401
+    test_api_request_scores_what_the_solution_fetches,
     test_hacks_fail,
     test_judge_temp_files_are_private,
     test_reference_passes_and_wrong_fails,
     test_script_env_and_support_files,
     test_setsid_daemon_dies_with_its_script,
     test_slow_case_fails_alone,
+    test_solution_reaches_the_judges_loopback_port_but_not_the_internet,
     test_solution_user_cannot_touch_judge,
 )
 

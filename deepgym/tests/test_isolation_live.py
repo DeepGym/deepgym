@@ -6,7 +6,7 @@ import pytest
 
 from deepgym import DeepGym, load_environment
 from deepgym.models import Environment
-from tests.test_isolation import WRONG, _env
+from tests.test_isolation import LOOPBACK_PROBE, LOOPBACK_PROBE_VERIFIER, WRONG, _env
 from tests.test_session import ALWAYS_EQUAL, FIXED, debug_fix_score
 
 pytestmark = pytest.mark.skipif(
@@ -151,3 +151,18 @@ return {'score': 0.0 if leaked else 1.0, 'passed': not leaked, 'details': str(le
     )
     result = dg.run(env, solution)
     assert result.passed, result.output
+
+
+def test_solution_reaches_the_judges_loopback_port_but_not_the_internet(dg: DeepGym) -> None:
+    env = Environment(task='t', verifier_code=LOOPBACK_PROBE_VERIFIER)
+    # Where the provider blocks the network itself, the solution shares the judge's
+    # loopback, so the judge's other port is reachable too; elsewhere it isn't.
+    probed = dg.run(env, LOOPBACK_PROBE).output.split()
+    assert probed[::2] == ['open', 'closed'], probed
+
+
+def test_api_request_scores_what_the_solution_fetches(dg: DeepGym) -> None:
+    env = load_environment('api_request')
+    reference = env.verifier_path.with_name('reference_solution.py').read_text()
+    assert dg.run(env, reference).score == 1.0
+    assert dg.run(env, "print('Sample Slide Show')\n").score == 0.0

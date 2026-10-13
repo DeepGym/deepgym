@@ -598,6 +598,37 @@ except Exception:
         assert dg.run(Environment(task='t', verifier_code=verifier), solution).passed
 
 
+LOOPBACK_PROBE_VERIFIER = """
+import socket
+from deepgym_solution import run_solution
+
+def verify(solution_path):
+    allowed, other = socket.create_server(('127.0.0.1', 0)), socket.create_server(('127.0.0.1', 0))
+    ports = [str(server.getsockname()[1]) for server in (allowed, other)]
+    out = ' '.join(run_solution(solution_path, ports, loopback_port=int(ports[0])).stdout.split())
+    return {'score': float(out == 'open closed closed'), 'passed': True, 'details': out}
+"""
+
+LOOPBACK_PROBE = """
+import socket, sys
+
+for host, port in [('127.0.0.1', sys.argv[1]), ('127.0.0.1', sys.argv[2]), ('1.1.1.1', 80)]:
+    try:
+        socket.create_connection((host, int(port)), timeout=3).close()
+        print('open')
+    except OSError:
+        print('closed')
+"""
+
+
+@needs_sandbox
+def test_solution_reaches_only_the_judges_loopback_port(dg: DeepGym) -> None:
+    """loopback_port opens that one judge port; other ports and egress stay shut."""
+    env = Environment(task='t', verifier_code=LOOPBACK_PROBE_VERIFIER)
+
+    assert dg.run(env, LOOPBACK_PROBE).output == 'open closed closed'
+
+
 def test_sharing_a_workdir_never_follows_symlinks(tmp_path) -> None:
     from deepgym.solution_runtime import _share_with_solution
 

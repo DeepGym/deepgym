@@ -1,144 +1,107 @@
 """Verifier for the API Request task.
 
-Verify that the solution script contains correct logic for fetching JSON from
-an HTTP endpoint and extracting a nested field, without requiring live internet.
-The verifier checks code structure and runs the script with a mocked HTTP
-response.
+Serve seeded, randomized slideshow documents from a local HTTP server, run the
+solution once per document with its URL, and check that it prints that document's
+``slideshow.title``. Titles, paths, extra fields and key order vary, so only a
+solution that fetches and parses the response gets credit: hardcoded output and
+keywords in the source score 0.
 """
 
+import http.server
 import json
-import shutil
+import random
 import subprocess
 import sys
-import tempfile
-import textwrap
-from pathlib import Path
+import threading
 
 from deepgym_solution import run_solution
 
+SEED = 42
+DOCUMENTS = 5
+WORDS = (
+    'quarterly roadmap widget launch review pipeline summit pricing '
+    'hiring design security metrics migration onboarding release budget'
+).split()
+
+
+def _phrase(rng):
+    return ' '.join(rng.choice(WORDS).capitalize() for _ in range(rng.randint(2, 4)))
+
+
+def _document(rng):
+    """Return (title, document) with distractor titles and a shuffled key order."""
+    title = _phrase(rng)
+    slides = [{'title': _phrase(rng), 'type': rng.choice(['all', 'intro'])} for _ in range(3)]
+    show = [('author', _phrase(rng)), ('date', f'2026-{rng.randint(1, 12):02d}-01')]
+    show += [('slides', slides), ('title', title)]
+    rng.shuffle(show)
+    top = [('slideshow', dict(show)), ('title', f'API v{rng.randint(1, 9)}')]
+    rng.shuffle(top)
+    return title, dict(top)
+
+
+class _Handler(http.server.BaseHTTPRequestHandler):
+    """Serve ``server.routes`` (path -> JSON bytes); anything else is a 404."""
+
+    def do_GET(self):
+        body = self.server.routes.get(self.path)
+        if body is None:
+            self.send_error(404)
+            return
+        self.send_response(200)
+        self.send_header('Content-Type', 'application/json')
+        self.send_header('Content-Length', str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+    def log_message(self, *args):
+        pass
+
 
 def verify(solution_path, test_cases_path=None):
-    """Verify the solution fetches JSON and extracts the slideshow title."""
-    source = Path(solution_path).read_text(encoding='utf-8')
+    """Score the fraction of served documents whose title the solution prints exactly."""
+    rng = random.Random(SEED)
+    expected = {}
+    routes = {}
+    for _ in range(DOCUMENTS):
+        path = f'/api/v{rng.randint(1, 3)}/slideshows/{rng.randrange(10**6)}'
+        expected[path], document = _document(rng)
+        routes[path] = json.dumps(document).encode('utf-8')
 
-    checks = {}
-
-    # Check that the solution uses an HTTP library.
-    checks['uses_http'] = (
-        'urllib.request' in source
-        or 'requests' in source
-        or 'httpx' in source
-        or 'urlopen' in source
-        or 'http.client' in source
-    )
-
-    # Check that the solution parses JSON.
-    checks['parses_json'] = 'json' in source or '.json()' in source
-
-    # Check that the solution extracts the slideshow title field.
-    checks['extracts_title'] = 'slideshow' in source and 'title' in source
-
-    # Run the solution with a mocked HTTP response to verify end-to-end.
-    # We create a wrapper that patches urllib/requests to return the expected JSON.
-    expected_json = json.dumps(
-        {
-            'slideshow': {
-                'author': 'Yours Truly',
-                'date': 'date of publication',
-                'slides': [
-                    {'title': 'Wake up to WonderWidgets!', 'type': 'all'},
-                    {
-                        'title': 'Overview',
-                        'type': 'all',
-                        'items': [
-                            'Why <em>WonderWidgets</em> are great',
-                            'Who <em>buys</em> WonderWidgets',
-                        ],
-                    },
-                ],
-                'title': 'Sample Slide Show',
-            }
-        }
-    )
-
-    wrapper = textwrap.dedent(f"""\
-        import sys
-        import types
-        import json
-
-        # Mock urllib.request.urlopen
-        _mock_data = {expected_json!r}.encode("utf-8")
-
-        class _MockResponse:
-            def read(self):
-                return _mock_data
-            def __enter__(self):
-                return self
-            def __exit__(self, *args):
-                pass
-
-        _has = hasattr(__builtins__, "__import__")
-        _orig_import = __builtins__.__import__ if _has else __import__
-
-        import urllib.request
-        urllib.request._original_urlopen = urllib.request.urlopen
-        urllib.request.urlopen = lambda *a, **kw: _MockResponse()
-
-        # Also mock requests.get if requests is used
-        _fake_requests = types.ModuleType("requests")
-        class _FakeResp:
-            status_code = 200
-            text = {expected_json!r}
-            def json(self):
-                return json.loads(self.text)
-        _fake_requests.get = lambda *a, **kw: _FakeResp()
-        sys.modules["requests"] = _fake_requests
-
-        # Now exec the solution
-        exec(open({solution_path!r}).read())
-    """)
-
-    work_dir = tempfile.mkdtemp(prefix='deepgym_api_request_')
-    wrapper_path = Path(work_dir, 'run_with_mocks.py')
-    wrapper_path.write_text(wrapper, encoding='utf-8')
-    try:
-        proc = run_solution(str(wrapper_path), cwd=work_dir, timeout=15)
-        checks['correct_output'] = 'Sample Slide Show' in proc.stdout
-    except subprocess.TimeoutExpired:
-        checks['correct_output'] = False
-    finally:
-        shutil.rmtree(work_dir, ignore_errors=True)
-
-    passed_count = sum(checks.values())
-    total = len(checks)
-    score = passed_count / total
-
-    details_parts = [f'{k}={v}' for k, v in checks.items()]
+    server = http.server.ThreadingHTTPServer(('127.0.0.1', 0), _Handler)
+    server.routes = routes
+    port = server.server_address[1]
+    threading.Thread(target=server.serve_forever, daemon=True).start()
 
     cases = []
-    for idx, (check_name, check_passed) in enumerate(checks.items()):
-        cases.append(
-            {
-                'id': f'check_{idx}',
-                'input_summary': check_name,
-                'passed': bool(check_passed),
-                'schema_version': '1.0',
-                'score': 1.0 if check_passed else 0.0,
-                'cases': [],
-                'expected_summary': 'True',
-                'actual_summary': str(check_passed),
-            }
-        )
+    try:
+        for i, (path, title) in enumerate(expected.items()):
+            url = f'http://127.0.0.1:{port}{path}'
+            case = {'id': f'document_{i}', 'input_summary': path, 'expected_summary': title}
+            try:
+                proc = run_solution(solution_path, [url], loopback_port=port)
+                printed = proc.stdout.strip()
+                case['actual_summary'] = printed[:200]
+                if proc.returncode != 0:
+                    case['error'] = proc.stderr.strip()[-500:]
+            except subprocess.TimeoutExpired:
+                printed = None
+                case['error'] = 'timed out'
+            case['passed'] = printed == title
+            case['score'] = 1.0 if case['passed'] else 0.0
+            cases.append(case)
+    finally:
+        server.shutdown()
+        server.server_close()
 
+    passed = sum(case['passed'] for case in cases)
     return {
         'schema_version': '1.0',
-        'score': score,
-        # Threshold < 1.0: API tasks check structural code patterns (uses_http,
-        # parses_json, extracts_title) that may not all match for solutions using
-        # alternative but valid libraries.
-        'passed': score >= 0.75,
-        'details': f'{passed_count}/{total} checks passed. ' + ', '.join(details_parts),
+        'score': passed / len(cases),
+        'passed': passed == len(cases),
+        'details': f'{passed}/{len(cases)} documents: printed slideshow.title exactly',
         'cases': cases,
+        'seed': SEED,
     }
 
 

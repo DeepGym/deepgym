@@ -1,15 +1,14 @@
-"""Fetch JSON from httpbin.org and extract the slideshow title."""
+"""Fetch the slideshow document at the URL given as argv[1] and print its title."""
 
 import json
+import sys
 import urllib.request
 
 
 def main():
-    url = 'https://httpbin.org/json'
-    response = urllib.request.urlopen(url)
-    data = json.loads(response.read().decode('utf-8'))
-    title = data['slideshow']['title']
-    print(title)
+    with urllib.request.urlopen(sys.argv[1], timeout=10) as response:
+        data = json.load(response)
+    print(data['slideshow']['title'])
 
 
 if __name__ == '__main__':

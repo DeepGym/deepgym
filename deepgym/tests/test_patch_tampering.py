@@ -933,7 +933,6 @@ _PYTEST = f'PYTHONPATH=. "{sys.executable}" -m pytest -q'
         pytest.param(f'"{sys.executable}" -m no_such_test_module', id='module-not-importable'),
         pytest.param('/opt/no-such-dir/runner', id='absolute-path-missing'),
         pytest.param('/dev/null', id='absolute-path-not-executable'),
-        pytest.param('pytest (', id='unparseable'),
     ],
 )
 def test_environment_that_cannot_run_the_tests_has_no_verdict(

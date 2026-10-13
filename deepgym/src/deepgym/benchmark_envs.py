@@ -427,19 +427,17 @@ class PatchVerifier:
 
             def _preflight(command: str, cwd: Path, repo_root: Path) -> str | None:
                 # Why this environment cannot run test *command*, checked before the patch, or None.
-                # The shell must parse it, the program starting each simple command must be
-                # installed (on PATH, or an executable outside the repo), and the module a
-                # `python -m` names importable. A path in the repo is the repo's own (the hidden
-                # tests may add it), and nothing after a PATH change, a here-document or a `case` is
-                # looked up. Best effort: what a wrapper script runs is not seen, so its failure
-                # after the patch is scored like any other.
-                if subprocess.run(['/bin/sh', '-n', '-c', command], capture_output=True).returncode:
-                    return 'the shell cannot parse it'
+                # The program starting each simple command must be installed (on PATH, or an
+                # executable outside the repo), and the module a `python -m` names importable. It
+                # only looks up names, never runs the command (dash 0.5.10's `sh -n -c` runs it). A
+                # path in the repo is the repo's own (the hidden tests may add it), and nothing after
+                # a PATH change, a here-document or a `case` is looked up. Best effort: what a
+                # wrapper script runs is not seen, so its failure after the patch is scored.
                 lexer = shlex.shlex(command, posix=True, punctuation_chars='();<>|&\\n')
                 lexer.whitespace, lexer.whitespace_split = ' \\t\\r', True
                 try:
                     tokens = iter(list(lexer))
-                except ValueError:  # shlex is stricter than sh, which parsed it
+                except ValueError:  # shlex is stricter than sh; let the shell have its say
                     return None
                 segments, words = [], []
                 for token in tokens:

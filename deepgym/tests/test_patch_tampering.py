@@ -625,26 +625,33 @@ def test_validation_faults_have_no_verdict(
     assert not is_verdict(exit_code, result.error_type)
 
 
-def test_named_config_paths_reads_the_command_line(tmp_path: Path) -> None:
+def test_command_flags_are_classified(tmp_path: Path) -> None:
+    # (named, unsure, unparsed): what a pytest run names is test config, what an unrecognized
+    # program names may be, and an unparsable command leaves nothing certain.
     repo = tmp_path.resolve()
-    named = _runner()['_named_config_paths']
+    flags = _runner()['_command_flags']
     command = (
         f'cd {repo}/sub && pytest -c ci.ini --config-file={repo}/top.ini -c /dev/null '
         '-p no:cacheprovider -p pkg.plug tests'
     )
-
-    assert named([command], repo, repo) == {
-        'sub/ci.ini',
-        'top.ini',
-        'sub/pkg/plug.py',
-        'sub/pkg/plug/__init__.py',
-    }
-    assert named(["pytest -c 'unbalanced"], repo, repo) == set()
-    # pytest however it is started; another program's -c or -p names no test config.
-    started = ['PYTHONPATH=. python3 -B -m pytest -c a.ini', 'py.test -p plug']
-    assert named(started, repo, repo) == {'a.ini', 'plug.py', 'plug/__init__.py'}
-    others = ['gcc -c src/calc.c -o calc.o && ./check', 'cargo test -p calc', 'sh -c "pytest -c x"']
-    assert named(others, repo, repo) == set()
+    named = {'sub/ci.ini', 'top.ini', 'sub/pkg/plug.py', 'sub/pkg/plug/__init__.py'}
+    assert flags([command], repo, repo) == (named, set(), False)
+    # pytest however it is started, inside a sh -c string or an if block too.
+    started = [
+        'PYTHONPATH=. python3 -B -m pytest -c a.ini',
+        'py.test -p plug',
+        'bash -lc "cd sub && pytest -c b.ini"',
+        'if true; then pytest -c c.ini; fi',
+    ]
+    named = {'a.ini', 'plug.py', 'plug/__init__.py', 'sub/b.ini', 'c.ini'}
+    assert flags(started, repo, repo) == (named, set(), False)
+    # A program known not to load test config: its -c or -p names nothing.
+    plain = ['gcc -c src/calc.c -o calc.o && ./check', 'cargo test -p calc', 'mkdir -p build']
+    assert flags(plain, repo, repo) == (set(), set(), False)
+    # Any other program might run the tests with what its flags name.
+    assert flags(['uv run pytest -c ci.ini'], repo, repo) == (set(), {'ci.ini'}, False)
+    assert flags(["pytest -c 'unbalanced"], repo, repo) == (set(), set(), True)
+    assert flags(['pytest -c $CFG'], repo, repo) == (set(), set(), True)
 
 
 def test_another_programs_flags_name_no_test_config(tmp_path: Path, sandbox_dg: DeepGym) -> None:
@@ -658,6 +665,54 @@ def test_another_programs_flags_name_no_test_config(tmp_path: Path, sandbox_dg: 
 
     assert result.error_type is None
     assert result.score == 1.0
+
+
+@pytest.mark.parametrize(
+    ('prefix', 'suffix', 'edit', 'error_type'),
+    [
+        # env (like uv run or timeout) might run pytest with the config its -c names: a patch
+        # that edits it is neither clearly tampering nor clearly safe.
+        pytest.param(
+            'env ',
+            ' -c ci.ini',
+            {'ci.ini': '[pytest]\n# edited\n'},
+            'validation_uncertain',
+            id='unrecognized-program',
+        ),
+        pytest.param('env ', ' -c ci.ini', {}, None, id='unrecognized-program-file-untouched'),
+        pytest.param('', ' -k "unbalanced', {}, 'validation_uncertain', id='unparsable-command'),
+    ],
+)
+def test_unclassifiable_test_command_has_no_verdict(
+    tmp_path: Path,
+    sandbox_dg: DeepGym,
+    prefix: str,
+    suffix: str,
+    edit: dict[str, str],
+    error_type: str | None,
+) -> None:
+    env = _env(tmp_path, {'ci.ini': '[pytest]\n'})
+    run_tests = f'"{sys.executable}" -m pytest -q tests/test_calc.py'
+    command = f'cd "{env.repo_dir}" && {prefix}PYTHONPATH=. {run_tests}{suffix}'
+    env = env.model_copy(update={'test_command': command})
+
+    result = sandbox_dg.run(env, _diff(Path(env.repo_dir), {**_FIX, **edit}))
+
+    assert result.error_type == error_type
+    assert result.has_verdict == (error_type is None)
+    assert result.score == (1.0 if error_type is None else 0.0)
+
+
+def test_unlisted_workspace_package_key_has_no_verdict(tmp_path: Path, sandbox_dg: DeepGym) -> None:
+    # Only known metadata in [workspace.package] is a plain release bump; edition (or any key
+    # off that list) could change how members build, so it gets no verdict either way.
+    env = _env(tmp_path, {'Cargo.toml': _CARGO_WS_PACKAGE})
+    edit = {'Cargo.toml': _CARGO_WS_PACKAGE.replace('2021', '2024'), **_FIX}
+
+    result = sandbox_dg.run(env, _diff(Path(env.repo_dir), edit))
+
+    assert result.error_type == 'validation_uncertain'
+    assert not result.has_verdict
 
 
 @pytest.mark.parametrize(

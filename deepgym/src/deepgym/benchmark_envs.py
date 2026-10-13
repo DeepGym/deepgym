@@ -308,6 +308,35 @@ class PatchVerifier:
                 return text[-limit:]
 
 
+            def _path_verdict(error_type: str, summary: str, flagged: dict) -> int:
+                # Score 0 without running the tests: one case per flagged path, with its reason.
+                return _emit(
+                    {
+                        'schema_version': '1.0',
+                        'score': 0.0,
+                        'passed': False,
+                        'details': summary + _tail(', '.join(flagged)),
+                        'reward_components': {'apply': 0.0, 'tests': 0.0},
+                        'metrics': {'pass_fraction': 0.0, 'tests_run': 0},
+                        'truncated': False,
+                        'error_type': error_type,
+                        'cases': [
+                            {
+                                'id': rel,
+                                'passed': False,
+                                'score': 0.0,
+                                'input_summary': 'patched path',
+                                'actual_summary': reason,
+                                'error': f'{rel}: {reason}',
+                                'execution_time_ms': 0.0,
+                            }
+                            for rel, reason in flagged.items()
+                        ],
+                    },
+                    1,
+                )
+
+
             def _run(command: str, *, cwd: Path | None = None, timeout: int = 300) -> subprocess.CompletedProcess[str]:
                 return subprocess.run(
                     command,
@@ -383,6 +412,22 @@ class PatchVerifier:
             # here); the per-test report gate supersedes this comparison.
             _CONFIG_FILES = {'pyproject.toml', 'setup.cfg', 'package.json', 'cargo.toml', 'go.mod'}
             _SYMLINK = b'\\0deepgym-symlink'
+            # What the guard can't classify with certainty gets no verdict ('validation_uncertain',
+            # masked: never rewarded, never punished) rather than a guess either way.
+            # [workspace.package] keys known to be plain metadata members inherit; a change to any
+            # other key there is uncertain.
+            _WORKSPACE_METADATA = {
+                'version', 'description', 'authors', 'license', 'repository', 'homepage',
+                'documentation', 'readme', 'keywords', 'categories', 'rust-version',
+            }
+            # Programs whose -c, -p or --config-file never name a test config (gcc -c src/calc.c,
+            # wc -c, mkdir -p, git -c key=value, cargo -p crate, go test -p N). What any other
+            # program but pytest names with them may be one (`uv run pytest -c x`, `jest -c x`).
+            _PLAIN_PROGRAMS = {
+                'gcc', 'g++', 'cc', 'c++', 'clang', 'clang++', 'wc', 'head', 'tail', 'cut', 'grep',
+                'uniq', 'mkdir', 'cp', 'git', 'cargo', 'go',
+            }
+            _SHELLS = {'sh', 'bash', 'dash', 'zsh'}
 
 
             def _components(rel: str) -> list[str]:
@@ -468,9 +513,10 @@ class PatchVerifier:
                 return _TOML_LOADS[0](text)
 
 
-            def _test_part_changed(name: str, old_text: str, new_text: str) -> bool:
-                # Whether the test-relevant part of a config file changed. Raises on anything it
-                # cannot parse or compare; the caller turns that into tampering (fails closed).
+            def _test_part_changed(name: str, old_text: str, new_text: str) -> bool | None:
+                # Whether the test-relevant part of a config file changed, or None for a change it
+                # can't classify. Raises on anything it cannot parse or compare; the caller turns
+                # that into tampering (fails closed).
                 if name == 'package.json':
                     before = json.loads(old_text or '{}')
                     after = json.loads(new_text or '{}')
@@ -506,15 +552,20 @@ class PatchVerifier:
                     if any(before.get(key) != after.get(key) for key in keys):
                         return True
                     # [workspace] picks the crates that build and test (members, default-members,
-                    # exclude) and their shared dependencies. Its [workspace.package] is only the
-                    # metadata members inherit (version.workspace = true), allowed like [package]'s.
-                    workspaces = [dict(_toml_table(doc.get('workspace')), package=None) for doc in (before, after)]
-                    if workspaces[0] != workspaces[1]:
+                    # exclude) and their shared dependencies; [workspace.package] is checked last.
+                    ws_before, ws_after = _toml_table(before.get('workspace')), _toml_table(after.get('workspace'))
+                    if dict(ws_before, package=None) != dict(ws_after, package=None):
                         return True
                     # Package-level auto-discovery and build script decide which tests cargo runs.
                     auto = ('autotests', 'autobenches', 'autobins', 'autoexamples', 'autolib', 'build')
                     pkg_before, pkg_after = _toml_table(before.get('package')), _toml_table(after.get('package'))
-                    return any(pkg_before.get(key) != pkg_after.get(key) for key in auto)
+                    if any(pkg_before.get(key) != pkg_after.get(key) for key in auto):
+                        return True
+                    # [workspace.package] is what members inherit (version.workspace = true): a listed
+                    # metadata key is a release bump; a change to any other key is uncertain.
+                    meta_before, meta_after = _toml_table(ws_before.get('package')), _toml_table(ws_after.get('package'))
+                    changed = {key for key in meta_before.keys() | meta_after.keys() if meta_before.get(key) != meta_after.get(key)}
+                    return None if changed - _WORKSPACE_METADATA else False
                 # [tool.tox] is compared whole, so its [testenv] commands count whether they sit
                 # in a legacy_tox_ini string or in env_run_base/env tables.
                 tool_keys = ('pytest', 'coverage', 'tox', 'nose')
@@ -524,11 +575,11 @@ class PatchVerifier:
                 )
 
 
-            def _config_tampered(rel: str, old: bytes | None, new: bytes | None) -> bool:
+            def _config_tampered(rel: str, old: bytes | None, new: bytes | None) -> bool | None:
                 # Whether turning *old* into *new* changes the test-relevant part of config file
-                # *rel*. Fails closed: a symlink, or anything that cannot be parsed and shown
-                # unchanged, counts as tampering, so a parse error becomes a trained zero, never
-                # a masked run.
+                # *rel*, or None for a change it can't classify. Fails closed: a symlink, or anything
+                # that cannot be parsed and shown unchanged, counts as tampering, so a parse error
+                # becomes a trained zero, never a masked run.
                 parts = _components(rel)
                 name = parts[-1]
                 if _SYMLINK in (old, new):
@@ -547,53 +598,63 @@ class PatchVerifier:
                     return True
 
 
-            def _pytest_args(words: list[str]) -> list[str] | None:
-                # The arguments of a pytest run (pytest, py.test or python -m pytest, after any
-                # NAME=value prefixes), or None for any other program: its -c or -p (gcc -c, cargo
-                # -p) names no test config.
-                while words and re.match(r'[A-Za-z_][A-Za-z0-9_]*=', words[0]):
-                    words = words[1:]
-                program = words[0].rsplit('/', 1)[-1] if words else ''
+            def _pytest_args(program: str, args: list[str]) -> list[str] | None:
+                # A pytest run's own arguments (pytest, py.test or python -m pytest), else None.
                 if program in ('pytest', 'py.test'):
-                    return words[1:]
-                rest = words[1:]
-                while rest and rest[0].startswith('-') and rest[0] != '-m':
-                    rest = rest[1:]  # interpreter flags such as -B
-                return rest[2:] if program.startswith('python') and rest[:2] == ['-m', 'pytest'] else None
+                    return args
+                while args and args[0].startswith('-') and args[0] != '-m':
+                    args = args[1:]  # interpreter flags such as -B
+                return args[2:] if program.startswith('python') and args[:2] == ['-m', 'pytest'] else None
 
 
-            def _named_config_paths(commands: list[str], repo_dir: Path, repo_root: Path) -> set[str]:
-                # Repo-relative files a pytest run in the test commands names as its config (-c,
-                # --config-file) or as a plugin module (-p). Only the command line is read, split
-                # into simple commands at shell operators, not a script it runs or a quoted
-                # `bash -c` string.
+            def _command_flags(commands: list[str], repo_dir: Path, repo_root: Path) -> tuple[set[str], set[str], bool]:
+                # The repo-relative files the test commands name with -c, --config-file or -p, as
+                # (named, unsure, unparsed): a pytest run's config and plugin modules are test
+                # config; another program's may be, unless it is in _PLAIN_PROGRAMS; and a command
+                # shlex can't split, or a path holding $VAR, `cmd` or ~, leaves nothing certain.
+                # A `sh -c` string is split as well; a script a command runs is not read.
                 root = os.path.realpath(repo_root)
-                named = set()
-                for command in commands:
+                named, unsure, unparsed = set(), set(), False
+                pending = [(command, repo_dir) for command in commands]
+                while pending:
+                    command, cwd = pending.pop()
                     lexer = shlex.shlex(command, posix=True, punctuation_chars=True)
                     lexer.whitespace_split = True
                     try:
                         tokens = list(lexer)
                     except ValueError:
+                        unparsed = True
                         continue
-                    cwd = repo_dir
+                    # Shell operators separate simple commands; reserved words and NAME=value
+                    # prefixes come before the program.
                     for _, group in itertools.groupby(tokens, lambda token: bool(token) and set(token) <= set('();<>|&')):
                         words = list(group)
-                        if words[:1] == ['cd'] and len(words) > 1:
-                            cwd = cwd / words[1]
-                        args = _pytest_args(words) or []
+                        while words and (words[0] in ('if', 'then', 'else', 'elif', 'do', 'while', 'until', '!', '{') or re.match(r'[A-Za-z_][A-Za-z0-9_]*=', words[0])):
+                            words = words[1:]
+                        program, args = (words[0].rsplit('/', 1)[-1], words[1:]) if words else ('', [])
+                        if program == 'cd' and args:
+                            cwd = cwd / args[0]
+                        if program in _SHELLS:
+                            pending += [(value, cwd) for flag, value in zip(args, args[1:]) if re.fullmatch(r'-[a-z]*c[a-z]*', flag)]
+                        if program == 'cd' or program in _SHELLS or program in _PLAIN_PROGRAMS:
+                            continue
+                        pytest_args = _pytest_args(program, args)
+                        found, args = (unsure, args) if pytest_args is None else (named, pytest_args)
                         for flag, value in zip(args, [*args[1:], '']):
                             if flag.startswith('--config-file='):
                                 flag, value = flag.split('=', 1)
                             if not value or flag not in ('-c', '--config-file', '-p') or value.startswith('no:'):
                                 continue
                             module = value.replace('.', '/')
-                            files = [module + '.py', module + '/__init__.py'] if flag == '-p' else [value]
-                            for file in files:
-                                rel = os.path.relpath(os.path.realpath(cwd / file), root)
+                            for file in [module + '.py', module + '/__init__.py'] if flag == '-p' else [value]:
+                                path = str(cwd / file)
+                                if '$' in path or '`' in path or '/~' in path:
+                                    unparsed = True
+                                    continue
+                                rel = os.path.relpath(os.path.realpath(path), root)
                                 if rel != '..' and not rel.startswith('../'):
-                                    named.add(rel)
-                return named
+                                    found.add(rel)
+                return named, unsure, unparsed
 
 
             def _read_config(path: Path) -> bytes | None:
@@ -934,11 +995,21 @@ class PatchVerifier:
                     hidden_set = set(hidden)
                     exposed = [rel for rel in model_paths if rel not in hidden_set]
                     tampered = {rel: _infra_reason(repo_root, rel) for rel in exposed}
-                    # A config file or plugin a pytest run in the test command names is refused
-                    # outright, unless it is one whose test part is compared below (`-c pyproject.toml`).
-                    for rel in _named_config_paths(test_commands, repo_dir, repo_root).intersection(exposed):
-                        if _components(rel)[-1] not in _CONFIG_FILES:
+                    # Refuse what a pytest run in the test command names as config or plugin; what an
+                    # unrecognized program's flags name, or any path when the command can't be fully
+                    # parsed, is uncertain. Config files whose test part is compared below are
+                    # judged there instead (`-c pyproject.toml`).
+                    named, unsure, unparsed = _command_flags(test_commands, repo_dir, repo_root)
+                    uncertain = {}
+                    for rel in exposed:
+                        if (_components(rel) or [''])[-1] in _CONFIG_FILES:
+                            continue
+                        if rel in named:
                             tampered[rel] = tampered[rel] or 'test configuration named by the test command'
+                        elif rel in unsure:
+                            uncertain[rel] = 'named by a test command flag of an unrecognized program'
+                        elif unparsed:
+                            uncertain[rel] = 'the test command could not be fully parsed'
                     for flagged in _mode_change_paths(patch_text):
                         tampered[flagged] = 'changes a file mode or creates a symlink'
                     configs = {
@@ -970,35 +1041,25 @@ class PatchVerifier:
                         )
 
                     for rel, old in configs.items():
-                        if _config_tampered(rel, old, _read_config(repo_root / rel)):
+                        verdict = _config_tampered(rel, old, _read_config(repo_root / rel))
+                        if verdict:
                             tampered[rel] = tampered[rel] or 'changes test configuration'
+                        elif verdict is None:
+                            uncertain[rel] = 'changes a config key that may affect the tests'
                     tampered = {rel: reason for rel, reason in sorted(tampered.items()) if reason}
                     if tampered:
-                        return _emit(
-                            {
-                                'schema_version': '1.0',
-                                'score': 0.0,
-                                'passed': False,
-                                'details': 'Patch changes test infrastructure, so it was not tested: '
-                                + _tail(', '.join(tampered)),
-                                'reward_components': {'apply': 0.0, 'tests': 0.0},
-                                'metrics': {'pass_fraction': 0.0, 'tests_run': 0},
-                                'truncated': False,
-                                'error_type': 'test_infra_tampering',
-                                'cases': [
-                                    {
-                                        'id': rel,
-                                        'passed': False,
-                                        'score': 0.0,
-                                        'input_summary': 'patched path',
-                                        'actual_summary': reason,
-                                        'error': f'{rel}: {reason}',
-                                        'execution_time_ms': 0.0,
-                                    }
-                                    for rel, reason in tampered.items()
-                                ],
-                            },
-                            1,
+                        return _path_verdict(
+                            'test_infra_tampering',
+                            'Patch changes test infrastructure, so it was not tested: ',
+                            tampered,
+                        )
+                    # Not clearly tampering, not clearly safe: no verdict, so trainers mask the
+                    # sample -- never rewarded, never punished.
+                    if uncertain:
+                        return _path_verdict(
+                            'validation_uncertain',
+                            'Patch touches paths the guard cannot classify, so it was not scored: ',
+                            dict(sorted(uncertain.items())),
                         )
 
                     blocked = _restore(repo_dir, saved)

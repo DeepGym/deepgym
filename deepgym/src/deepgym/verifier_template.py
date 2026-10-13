@@ -12,8 +12,9 @@ or detected by parsing the source (never by text search):
 
 Normalized output: one JSON object on stdout; exit 0 passed, 1 failed, 2 verifier error.
 A return value that isn't a float, bool or dict, or a dict whose ``passed`` or
-``truncated`` isn't a real bool, is a verifier error. In every shape, an uncaught
-exception overrides whatever was printed before it (see :func:`guard_crashes`).
+``truncated`` isn't a real bool, is a verifier error, or the solution's judged 0
+(``solution_error``) once its output is in play. In every shape, an uncaught exception
+overrides whatever was printed before it (see :func:`guard_crashes`).
 """
 
 from __future__ import annotations
@@ -88,27 +89,19 @@ _REPORT = textwrap.dedent('''\
             print("\\n" + _dg_json.dumps(output))
             exit_code = 0 if output["passed"] else 1
         except Exception as e:
-            print(
-                "\\n"
-                + _dg_json.dumps(
-                    {
-                        "schema_version": "1.0",
-                        "score": 0.0,
-                        "passed": False,
-                        "details": f"Verifier error: {e}"
-                        if isinstance(e, _DgInvalidScore)
-                        else (
-                            f"Verifier error: {type(e).__name__}: {e}"
-                            f"\\n{_dg_traceback.format_exc()}"
-                        ),
-                        "truncated": False,
-                        "error_type": "invalid_score"
-                        if isinstance(e, _DgInvalidScore)
-                        else "runtime_error",
-                    }
+            if _dg_consulted():  # the solution's output made the result invalid: its fault
+                report = {"details": f"Invalid result from the solution: {e}"}
+                report, exit_code = {**report, "error_type": "solution_error"}, 1
+            elif isinstance(e, _DgInvalidScore):
+                report = {"details": f"Verifier error: {e}", "error_type": "invalid_score"}
+                exit_code = 2
+            else:
+                details = (
+                    f"Verifier error: {type(e).__name__}: {e}\\n{_dg_traceback.format_exc()}"
                 )
-            )
-            exit_code = 2
+                report, exit_code = {"details": details, "error_type": "runtime_error"}, 2
+            output = {"schema_version": "1.0", "score": 0.0, "passed": False, "truncated": False}
+            print("\\n" + _dg_json.dumps({**output, **report}))
         # os._exit skips buffer flushing.
         _dg_sys.stdout.flush()
         _dg_os._exit(exit_code)
@@ -146,34 +139,77 @@ if __name__ == "__main__":
 
 # Python exits 1 on an uncaught exception, which is also the protocol's "failed" code, so a
 # verifier that printed a score and then crashed would keep that score. This hook never
-# trusts what was printed. Once a solution process has started, the crash came from handling
-# the solution, so it is the solution's failure: a judged 0 (exit 1; error_type
-# solution_timeout when the solution ran out of time), or a solution could dodge its score
-# by breaking the verifier. Before that, it is the verifier's own failure, or the machine's
-# (a LaunchError: sandbox_error): no verdict (exit 2). Either way the hook prints the last
-# protocol line. SystemExit raised from an
-# excepthook still runs atexit handlers; a deliberate sys.exit() never reaches it.
+# trusts what was printed. Once the policy's output is in play (a solution process started,
+# or the verifier opened one of the policy's files, see DEEPGYM_POLICY_DIR), the crash came
+# from handling it, so it is the policy's failure: a judged 0 (exit 1; error_type
+# solution_timeout when the solution ran out of time, else solution_error), or a solution
+# could dodge its score by breaking the verifier. Before that, it is the verifier's own
+# failure, or the machine's (a LaunchError: sandbox_error): no verdict (exit 2). Either way
+# the hook prints the last protocol line. SystemExit raised from an excepthook still runs
+# atexit handlers; a deliberate sys.exit() never reaches it.
 _CRASH_GUARD = '''\
 import json as _dg_json
 import os as _dg_os
 import sys as _dg_sys
 import traceback as _dg_traceback
 
+# Where the policy's output lives (the solution, a session's work directory): opening a
+# file there counts as consulting it, as starting the solution through deepgym_solution does.
+_dg_policy = tuple(
+    _dg_os.path.join(path, "")
+    for entry in _dg_os.environ.get("DEEPGYM_POLICY_DIR", "").split(_dg_os.pathsep)
+    if entry
+    for path in {entry, _dg_os.path.realpath(entry)}
+)
+_dg_touched = False
+
+
+def _dg_announce():
+    """Tell the host on stdout that the policy's output is in play (DEEPGYM_CONSULTED)."""
+    mark = _dg_os.environ.get("DEEPGYM_CONSULTED")
+    if mark:
+        print("\\n" + mark, flush=True)
+
+
+def _dg_audit(event, args):
+    """Count opening one of the policy's files as consulting it."""
+    global _dg_touched
+    if _dg_touched or event != "open" or not _dg_policy:
+        return
+    try:
+        path = _dg_os.path.join(_dg_os.path.abspath(_dg_os.fsdecode(args[0])), "")
+    except (TypeError, ValueError):
+        return  # a file descriptor, say
+    if path.startswith(_dg_policy):
+        _dg_touched = True
+        _dg_announce()
+
+
+_dg_sys.addaudithook(_dg_audit)
+
+
+def _dg_consulted():
+    """Whether the policy's output is in play: the verifier opened it or started it."""
+    runtime = _dg_sys.modules.get("deepgym_solution")
+    return _dg_touched or (runtime is not None and runtime.consulted())
+
 
 def _dg_crashed(kind, value, tb):
-    """Report an uncaught exception: a judged 0 once the solution ran, else a verifier error."""
+    """Report an uncaught exception: a judged 0 once the policy's output is in play, else a
+    verifier error."""
     trace = "".join(_dg_traceback.format_exception(kind, value, tb))
     runtime = _dg_sys.modules.get("deepgym_solution")
-    if runtime is not None and runtime.consulted():
+    launch = runtime is not None and issubclass(kind, runtime.LaunchError)
+    if _dg_consulted() and not launch:
         details = f"The verifier crashed handling the solution: {kind.__name__}: {value}"
-        report, code = {"details": details}, 1
-        if isinstance(value, runtime.SolutionTimeoutError):
-            report["error_type"] = "solution_timeout"  # a model fault: still a verdict
+        timeout = runtime is not None and isinstance(value, runtime.SolutionTimeoutError)
+        error_type = "solution_timeout" if timeout else "solution_error"  # still a verdict
+        report, code = {"details": details, "error_type": error_type}, 1
     else:
         error_type = (
             "import_error" if issubclass(kind, ImportError)
             else "timeout" if issubclass(kind, TimeoutError)
-            else "sandbox_error" if runtime is not None and issubclass(kind, runtime.LaunchError)
+            else "sandbox_error" if launch
             else "runtime_error"
         )
         report = {"details": f"Verifier error: {kind.__name__}: {value}\\n{trace}"}

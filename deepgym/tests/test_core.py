@@ -160,11 +160,13 @@ def _judged_result(score: float) -> RunResult:
 # Scores 1.0 for "ok", 0.0 otherwise, and crashes (no verdict) on "CRASH".
 _FLAKY_VERIFIER = Environment(
     task='t',
+    # The bug strikes before the verifier reads the output: a crash after reading it would
+    # be the output's 0.
     verifier_code=(
-        'content = open(solution_path).read()\n'
-        'if "CRASH" in content:\n'
+        'import os\n'
+        'if os.path.getsize(solution_path) == len("CRASH = 1\\n"):\n'
         '    raise RuntimeError("verifier bug")\n'
-        'return 1.0 if "ok" in content else 0.0\n'
+        'return 1.0 if "ok" in open(solution_path).read() else 0.0\n'
     ),
 )
 

@@ -372,6 +372,23 @@ class TestLocalEpisodes:
         assert (result.score, result.has_verdict) == (0.0, True)
         assert result.error_type == 'policy_sandbox_failure'
 
+    def test_malformed_agent_output_is_the_agents_zero(self, dg: DeepGym) -> None:
+        parse = 'import json\njson.loads(open("answer.json").read())\nprint(1.0)\n'
+        env = MultiTurnEnvironment(
+            task='t', max_steps=2, step_verifier_code=parse, final_verifier_code=parse
+        )
+        with dg.session(env) as session:
+            session.start()
+            step = session.step(Action(action_type='bash', content='echo oops > answer.json'))
+            result = session.score()
+
+        assert (step.reward, session.step_verdict['error_type']) == (0.0, 'solution_error')
+        assert (result.has_verdict, result.score, result.error_type) == (
+            True,
+            0.0,
+            'solution_error',
+        )
+
     def test_run_episode_returns_the_result_a_failed_step_fixed(self, dg: DeepGym) -> None:
         env = MultiTurnEnvironment(
             task='t',

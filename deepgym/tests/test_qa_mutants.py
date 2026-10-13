@@ -170,13 +170,13 @@ def test_a_strong_verifier_kills_every_mutant(tmp_path: Path, local_dg: DeepGym)
 @needs_sandbox
 @pytest.mark.usefixtures('mutants_run_here')
 def test_mutants_the_verifier_errors_on_are_inconclusive(local_dg: DeepGym) -> None:
-    # It crashes before running a mutant; a crash after running one would score it 0.
+    # It reports its own error on each mutant; crashing after running one would score it 0.
     verifier = (
-        'from deepgym_solution import load_solution, solution_source\n\n'
+        'from deepgym_solution import load_solution\n\n'
         'def verify(solution_path, test_cases_path=None):\n'
-        "    if 'x + 1' not in solution_source(solution_path):\n"
-        "        raise ValueError('a verifier that crashes instead of scoring')\n"
-        '    return float(load_solution(solution_path).f(1) == 2)\n'
+        '    if load_solution(solution_path).f(1) != 2:\n'
+        "        return {'score': 0.0, 'passed': False, 'error_type': 'runtime_error'}\n"
+        '    return 1.0\n'
     )
     env = Environment(task='t', verifier_code=verifier)
 
@@ -285,7 +285,12 @@ def test_a_confined_judge_contains_a_verifier_that_runs_code_in_process(tmp_path
     confined = DeepGym(mode='local', confine_local_judge=True).run(env, _writes(marker))
 
     assert not marker.exists()
-    assert not confined.has_verdict  # the write was refused, so the verifier errored
+    # The write was refused, so the solution's code, which the verifier ran, raised: its 0.
+    assert (confined.has_verdict, confined.score, confined.error_type) == (
+        True,
+        0.0,
+        'solution_error',
+    )
 
 
 @needs_sandbox

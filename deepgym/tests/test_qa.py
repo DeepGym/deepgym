@@ -137,8 +137,10 @@ def test_single_turn_checks_fail_without_a_reference(local_dg: DeepGym) -> None:
 def test_a_verifier_error_on_empty_or_stub_is_inconclusive_not_a_pass(local_dg: DeepGym) -> None:
     # The verifier raises on the empty solution before running it: no verdict on it.
     strict = (
-        'from deepgym_solution import load_solution, solution_source\n'
-        'solution_source(solution_path).splitlines()[0]  # a bug when the file is empty\n'
+        'import os\n'
+        'from deepgym_solution import load_solution\n'
+        'if not os.path.getsize(solution_path):  # a bug when the file is empty\n'
+        "    raise IndexError('no first line')\n"
         'sol = load_solution(solution_path)\n'
         'return 1.0 if sol.add(2, 3) == 5 else 0.0\n'
     )
@@ -337,11 +339,13 @@ def test_difficulty_is_reported_never_gated(
 
 
 def test_difficulty_is_inconclusive_when_a_sample_gets_no_verdict(local_dg: DeepGym) -> None:
+    # The bug strikes before the verifier reads the answer: a crash after reading it would
+    # be the answer's 0.
     body = (
-        'source = open(solution_path).read()\n'
-        "if 'BOOM' in source:\n"
+        'import os\n'
+        'if os.path.getsize(solution_path) < 16:  # short answers, such as BOOM\n'
         "    raise RuntimeError('a verifier bug')\n"
-        "return 1.0 if 'a + b' in source else 0.0\n"
+        "return 1.0 if 'a + b' in open(solution_path).read() else 0.0\n"
     )
     boom = 'Here:\n```python\nBOOM = 1\n```'
 

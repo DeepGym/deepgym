@@ -94,7 +94,8 @@ class E2BSandbox:
             raise SandboxTimeoutError(f'command exceeded {timeout}s') from exc
         if timeout and result.exit_code in TIMEOUT_EXIT_CODES:
             if time.monotonic() - start >= timeout:
-                raise SandboxTimeoutError(f'command exceeded {timeout}s')
+                printed = result.stdout + result.stderr
+                raise SandboxTimeoutError(f'command exceeded {timeout}s', printed)
         return ExecResult(result.exit_code, result.stdout + result.stderr)
 
     def upload(self, content: bytes, path: str) -> None:

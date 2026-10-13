@@ -1,5 +1,6 @@
 """Tests for deepgym.verifier_template — wrap_verifier and JSON protocol."""
 
+import contextlib
 import json
 import subprocess
 import sys
@@ -9,6 +10,7 @@ from pathlib import Path
 import pytest
 
 from deepgym import AsyncDeepGym, DeepGym
+from deepgym.exceptions import InvalidScoreError
 from deepgym.integrations.reward import AsyncRewardFunction, RewardFunction
 from deepgym.models import Environment
 from deepgym.verifier_template import wrap_verifier
@@ -220,6 +222,69 @@ class TestCrashGuard:
         async_rewards = await AsyncRewardFunction(env, AsyncDeepGym(mode='local'))(['x'])
 
         assert rewards == async_rewards == [None]
+
+    @pytest.mark.parametrize('mode', ['body', 'verify_function'])
+    @pytest.mark.parametrize('result', ['float("nan")', '"four"'], ids=['nan', 'not_a_number'])
+    @pytest.mark.parametrize('consulted', [False, True], ids=['own_result', 'after_the_solution'])
+    def test_an_invalid_result_is_the_solutions_once_it_ran(
+        self, mode: str, result: str, consulted: bool
+    ) -> None:
+        load = '    load_solution(solution_path)\n' if consulted else ''
+        body = f'    from deepgym_solution import load_solution\n{load}    return {result}\n'
+        if mode == 'verify_function':
+            body = f'def verify(solution_path, test_cases_path=None):\n{body}'
+        else:
+            body = body.replace('\n    ', '\n').removeprefix('    ')
+        env = Environment(task='t', verifier_code=body, verifier_mode=mode)
+
+        if not consulted:  # the verifier's own result: no reward (an invalid score is refused)
+            with contextlib.suppress(InvalidScoreError):
+                assert not DeepGym(mode='local').run(env, 'x = 1\n').has_verdict
+            return
+        run = DeepGym(mode='local').run(env, 'x = 1\n')
+        assert (run.has_verdict, run.score, run.error_type) == (True, 0.0, 'solution_error')
+
+    @pytest.mark.parametrize(
+        ('shape', 'mode'),
+        [
+            ('script', 'script'),
+            ('verify_function', 'verify_function'),
+            ('body', 'body'),
+            ('body', 'auto'),
+        ],
+    )
+    def test_running_the_solution_itself_counts_as_consulting_it(
+        self, shape: str, mode: str
+    ) -> None:
+        runs_it = {
+            'script': (
+                'import json, sys\n\n'
+                'if __name__ == "__main__":\n'
+                '    exec(open(sys.argv[1]).read())\n'
+                '    print(json.dumps({"score": 1.0, "passed": True}))\n'
+            ),
+            'verify_function': (
+                'def verify(solution_path, test_cases_path=None):\n'
+                '    exec(open(solution_path).read())\n'
+                '    return 1.0\n'
+            ),
+            'body': 'exec(open(solution_path).read())\nreturn 1.0\n',
+        }
+        env = Environment(task='t', verifier_code=runs_it[shape], verifier_mode=mode)
+
+        run = DeepGym(mode='local').run(env, 'raise ValueError("the solution\'s bug")\n')
+
+        assert (run.has_verdict, run.score, run.error_type) == (True, 0.0, 'solution_error')
+
+    def test_a_solution_failure_is_a_model_fault(self) -> None:
+        verifier = (
+            'from deepgym_solution import load_solution\nreturn load_solution(solution_path).f()\n'
+        )
+        env = Environment(task='t', verifier_code=verifier, verifier_mode='body')
+
+        run = DeepGym(mode='local').run(env, 'def f():\n    raise ValueError("bug")\n')
+
+        assert (run.has_verdict, run.score, run.error_type) == (True, 0.0, 'solution_error')
 
     def test_a_broken_stderr_never_keeps_a_printed_score(self) -> None:
         verifier = (

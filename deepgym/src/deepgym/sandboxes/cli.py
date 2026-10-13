@@ -148,14 +148,17 @@ class CliContainer:
         try:
             done = self._cli(*argv, timeout=(timeout or 3600) + 15)
         except subprocess.TimeoutExpired as exc:
-            raise SandboxTimeoutError(f'command exceeded {timeout}s') from exc
+            printed = (exc.stdout or b'') + (exc.stderr or b'')
+            raise SandboxTimeoutError(
+                f'command exceeded {timeout}s', printed.decode('utf-8', 'replace')
+            ) from exc
+        output = done.stdout.decode('utf-8', 'replace') + done.stderr.decode('utf-8', 'replace')
         if timeout and done.returncode in TIMEOUT_EXIT_CODES:
             if time.monotonic() - start >= timeout:
-                raise SandboxTimeoutError(f'command exceeded {timeout}s')
-        output = done.stdout.decode('utf-8', 'replace') + done.stderr.decode('utf-8', 'replace')
+                raise SandboxTimeoutError(f'command exceeded {timeout}s', output)
         # A failed exec may mean the container itself is gone; only the listing can tell.
         if done.returncode != 0 and self._gone():
-            raise SandboxDiedError(f'Container {self.id} stopped: {output[-500:]}')
+            raise SandboxDiedError(f'Container {self.id} stopped: {output[-500:]}', output)
         return ExecResult(done.returncode, output)
 
     def _gone(self) -> bool:

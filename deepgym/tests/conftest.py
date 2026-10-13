@@ -38,6 +38,7 @@ def fresh_solution_runtime(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(solution_runtime, '_consulted', False)
     monkeypatch.setattr(solution_runtime, '_preflight_passed', False)
     monkeypatch.setattr(solution_runtime, '_watcher', None)
+    monkeypatch.setattr(solution_runtime, '_announced', False)
 
 
 @pytest.fixture()

@@ -26,13 +26,15 @@ MODEL_FAULT_ERRORS = frozenset(
         'test_infra_tampering',
         'policy_sandbox_failure',
         'solution_timeout',
+        'solution_error',
     }
 )
 """error_type values that are the model's own fault (a patch that is malformed, doesn't
 apply, or touches test infrastructure; code it wrote that killed the grading harness once
 its tests ran, or a sandbox it broke, hung or exhausted, see
 :func:`~deepgym.exceptions.is_infrastructure_failure`; a solution that ran past its time
-limit): a real 0 to learn from, not a missing verdict. A timeout on DeepGym's side is
+limit, or failed or broke the verifier any other way once its output was in play): a real 0
+to learn from, not a missing verdict. A timeout on DeepGym's side is
 ``timeout``, which has no verdict."""
 
 

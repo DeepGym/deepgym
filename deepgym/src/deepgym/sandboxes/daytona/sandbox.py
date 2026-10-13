@@ -28,7 +28,6 @@ from deepgym.sandboxes.protocol import (
 
 if TYPE_CHECKING:
     from daytona import (
-        AsyncSandbox,
         CreateSandboxFromImageParams,
         CreateSandboxFromSnapshotParams,
         Daytona,
@@ -146,18 +145,6 @@ def is_timeout(exc: Exception) -> bool:
     except ImportError:
         return False
     return isinstance(exc, DaytonaProcessExecutionTimeoutError)
-
-
-def has_stopped(exc: Exception, sandbox: Sandbox | AsyncSandbox) -> bool:
-    """Return True if a call that failed with *exc* means the sandbox itself stopped: the
-    freshly read *sandbox* isn't ``started``, and Daytona didn't evict it or time it out in
-    its queue (its own doing), as the error or the sandbox's record says."""
-    from daytona import DaytonaQueueTimeoutError, DaytonaSpotEvictedError
-
-    if isinstance(exc, DaytonaSpotEvictedError | DaytonaQueueTimeoutError):
-        return False
-    evicted = sandbox.spot_evicted_at or sandbox.queue_timed_out_at
-    return sandbox.state != 'started' and not evicted
 
 
 class DaytonaSandbox:
@@ -286,7 +273,8 @@ class DaytonaSandbox:
         if self._sandbox.queue_timed_out_at:
             message = f'Daytona timed out sandbox {self.id} in its queue: {exc}'
             raise DaytonaQueueTimeoutError(message) from exc
-        if has_stopped(exc, self._sandbox):
+        provider_did_it = isinstance(exc, DaytonaSpotEvictedError | DaytonaQueueTimeoutError)
+        if self._sandbox.state != 'started' and not provider_did_it:
             raise SandboxDiedError(f'Daytona sandbox {self.id} stopped: {exc}') from exc
 
     def upload(self, content: bytes, path: str) -> None:

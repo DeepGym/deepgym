@@ -471,6 +471,19 @@ _MIN_FREE_BYTES = 16 << 20
 _MIN_FREE_INODES = 256
 
 
+_announced = False
+
+
+def _announce() -> None:
+    """Print DEEPGYM_CONSULTED once, when solution code may start: a timeout or a sandbox
+    death the host sees after it is the solution's doing (see JudgeJob.consulted_mark)."""
+    global _announced
+    mark = os.environ.get('DEEPGYM_CONSULTED')
+    if mark and not _announced:
+        _announced = True
+        print(f'\n{mark}', flush=True)
+
+
 def consulted() -> bool:
     """Whether solution code has started in this verifier; from then on a verifier crash
     is the solution's failure (see deepgym.verifier_template.guard_crashes)."""
@@ -668,6 +681,7 @@ def run_solution(
             try:
                 _watch_group(proc.pid)
                 release()
+                _announce()
             except BaseException:
                 _kill(proc)  # held until released, so no solution code ran
                 raise
@@ -945,6 +959,7 @@ class _Runner:
                 raise _marked(TimeoutError, SolutionTimeoutError)('the run is out of time')
             raise _launch_failure('the solution process did not start')
         _consulted = True
+        _announce()
         self.exports = self._send({'op': 'load'}, min(_LOAD_TIMEOUT_S, _remaining()))
 
     @staticmethod

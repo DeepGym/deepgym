@@ -195,6 +195,30 @@ async def test_cancelled_async_run_kills_and_reaps_the_verifier(tmp_path: Path) 
                 os.kill(pid, signal.SIGKILL)
 
 
+@pytest.mark.parametrize('use_async', [False, True], ids=['sync', 'async'])
+@pytest.mark.parametrize('reads_it', [False, True], ids=['before_the_solution', 'after_reading_it'])
+async def test_an_outer_timeout_is_the_solutions_once_its_output_is_in_play(
+    use_async: bool, reads_it: bool
+) -> None:
+    """A verifier stuck on what the solution gave it (a regex it made backtrack, say)."""
+    read = 'open(sys.argv[1]).read()\n    ' if reads_it else ''
+    verifier = f'import sys\n\nif __name__ == "__main__":\n    {read}while True:\n        pass\n'
+    env = Environment(task='t', verifier_code=verifier, verifier_mode='script', timeout=1)
+    job = JudgeJob.for_environment(env, 'x = 1\n')
+    if use_async:
+        run = AsyncLocalExecutor().run(job)
+    else:
+        run = asyncio.to_thread(LocalExecutor().run, job)
+
+    if not reads_it:
+        with pytest.raises(TimeoutError):
+            await run
+        return
+    executed = await run
+    verdict = executed.verifier_result
+    assert (verdict.score, verdict.error_type, executed.exit_code) == (0.0, 'solution_timeout', 1)
+
+
 def test_a_timed_out_run_kills_and_reaps_the_verifier_and_its_children(tmp_path: Path) -> None:
     pid_file = tmp_path / 'pids'
     verifier = (

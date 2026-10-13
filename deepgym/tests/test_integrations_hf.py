@@ -93,7 +93,10 @@ class TestRoundTrip:
     def test_the_judge_gets_the_same_job(self, full_env: Environment) -> None:
         loaded = environment_from_dict(environment_to_dict(full_env), trust_image=True)
 
-        assert JudgeJob.for_environment(loaded, ADD) == JudgeJob.for_environment(full_env, ADD)
+        def job(env: Environment) -> JudgeJob:  # each run gets its own consulted mark
+            return JudgeJob.for_environment(env, ADD).model_copy(update={'consulted_mark': ''})
+
+        assert job(loaded) == job(full_env)
 
     def test_the_loaded_environment_scores_the_same(
         self, full_env: Environment, local_dg: DeepGym

@@ -62,7 +62,16 @@ class SandboxError(DeepGymError):
 
 class SandboxDiedError(SandboxError):
     """Raise when the sandbox itself stopped during a command (terminated, killed, out of
-    memory), as opposed to the provider failing to answer. Code running in it may be why."""
+    memory), as opposed to the provider failing to answer. Code running in it may be why.
+
+    Args:
+        message: What happened.
+        output: What the command printed first, where the provider returns it, else ''.
+    """
+
+    def __init__(self, message: str, output: str = '') -> None:
+        super().__init__(message)
+        self.output = output
 
 
 class TimeoutError(DeepGymError):

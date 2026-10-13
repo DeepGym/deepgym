@@ -274,6 +274,7 @@ class LocalBackend:
             'DEEPGYM_RUNTIME': str(self._runtime),
             'DEEPGYM_PYTHON': sys.executable,
             'DEEPGYM_DEADLINE': str(time.time() + timeout),
+            'DEEPGYM_POLICY_DIR': str(self._dir),
         }
         command = _inline_python(self.python, code)
         return self._run(command, timeout + DEADLINE_GRACE_S, {**runtime, **(env or {})})
@@ -672,7 +673,13 @@ class SandboxBackend:
         done = self._sandbox.exec(
             trusted(
                 f'{deadline}; {command}; status=$?; rm -f {script}; exit $status',
-                {'HOME': _VERIFIER_DIR, **self._verifier_base, **self._runtime_env, **(env or {})},
+                {
+                    'HOME': _VERIFIER_DIR,
+                    'DEEPGYM_POLICY_DIR': f'{self._workdir}{os.pathsep}{_AGENT_HOME}',
+                    **self._verifier_base,
+                    **self._runtime_env,
+                    **(env or {}),
+                },
             ),
             cwd=self._workdir,
             env=self._clear,

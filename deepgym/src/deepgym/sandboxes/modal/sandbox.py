@@ -85,10 +85,11 @@ class ModalSandbox:
                 raise SandboxDiedError(f'Modal sandbox {self.id} was terminated: {exc}') from exc
             raise
         if exit_code != 0 and self._stopped():
-            raise SandboxDiedError(f'Modal sandbox {self.id} was terminated: {output[-500:]}')
+            message = f'Modal sandbox {self.id} was terminated: {output[-500:]}'
+            raise SandboxDiedError(message, output)
         # Modal kills an exec at its timeout and reports only a failed exit.
         if timeout and exit_code != 0 and time.monotonic() - start >= timeout:
-            raise SandboxTimeoutError(f'command exceeded {timeout}s')
+            raise SandboxTimeoutError(f'command exceeded {timeout}s', output)
         return ExecResult(exit_code, output)
 
     def _stopped(self) -> bool:

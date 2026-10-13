@@ -232,6 +232,8 @@ class DeepGym:
             ...         obs = tr.step(action, messages).observation
             ...     tr.score()
         """
+        # Run the environment that was fingerprinted, even if the caller changes theirs.
+        env = env.model_copy(deep=True)
         provenance = Provenance(
             env=EnvFingerprint.of(env, variant=variant, seed=seed, reference=reference),
             agent=agent,

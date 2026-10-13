@@ -15,7 +15,7 @@ from deepgym.cli import main
 from deepgym.console.episode_store import record_episode
 from deepgym.exceptions import DeepGymError
 from deepgym.models import Trajectory
-from deepgym.traces import Trace, export_traces, to_atif
+from deepgym.traces import Trace, export_traces, to_atif, write_atif
 from tests.trace_samples import PNG, crashed_trace, graded_trace, unjudged_trace
 
 GOLDEN = Path(__file__).resolve().parent / 'golden' / 'traces'
@@ -126,6 +126,8 @@ class TestExporters:
     def test_duplicate_trace_ids_are_refused(self, tmp_path: Path) -> None:
         with pytest.raises(ValueError, match='share ids'):
             export_traces([graded_trace(), graded_trace()], 'atif', tmp_path / 'atif')
+        with pytest.raises(ValueError, match='share ids'):
+            write_atif([graded_trace(), graded_trace()], tmp_path / 'direct')
 
     def test_atif_refuses_a_populated_directory(self, tmp_path: Path) -> None:
         export_traces(_samples(), 'atif', tmp_path / 'atif')

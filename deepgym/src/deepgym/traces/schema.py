@@ -11,6 +11,8 @@ from __future__ import annotations
 
 import hashlib
 import json
+from collections import Counter
+from collections.abc import Sequence
 from typing import Literal
 
 from pydantic import (
@@ -273,3 +275,14 @@ class Trace(BaseModel):
             total_reward=sum(rewards),
             step_rewards=rewards,
         )
+
+
+def check_unique_ids(traces: Sequence[Trace]) -> None:
+    """Refuse traces that share an id: an export would keep one and silently drop the rest.
+
+    Raises:
+        ValueError: If two traces have the same ``trace_id``.
+    """
+    repeated = [key for key, count in Counter(t.trace_id for t in traces).items() if count > 1]
+    if repeated:
+        raise ValueError(f'Traces share ids {repeated}; keep one copy of each')

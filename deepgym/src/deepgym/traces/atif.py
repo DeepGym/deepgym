@@ -38,7 +38,7 @@ from pydantic import JsonValue
 
 from deepgym.exceptions import DeepGymError
 from deepgym.models import Observation
-from deepgym.traces.schema import Trace, TraceMessage, TraceStep, json_text
+from deepgym.traces.schema import Trace, TraceMessage, TraceStep, check_unique_ids, json_text
 
 ATIF_VERSION = 'ATIF-v1.7'
 
@@ -107,9 +107,11 @@ def write_atif(traces: Sequence[Trace], out: Path) -> int:
         The number of documents written.
 
     Raises:
+        ValueError: If two traces share an id (one document would replace the other).
         DeepGymError: If *out* already has files: documents left from an earlier export
             would be read as part of this one.
     """
+    check_unique_ids(traces)
     out.mkdir(parents=True, exist_ok=True)
     if any(out.iterdir()):
         raise DeepGymError(f'{out} is not empty; export ATIF into a new directory')

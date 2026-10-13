@@ -28,7 +28,7 @@ from pydantic import BaseModel, ConfigDict, JsonValue
 
 from deepgym.exceptions import DeepGymError
 from deepgym.traces.atif import write_atif
-from deepgym.traces.schema import Trace, json_text
+from deepgym.traces.schema import Trace, check_unique_ids, json_text
 
 if TYPE_CHECKING:
     import pyarrow as pa
@@ -119,9 +119,7 @@ def export_traces(
     """
     if fmt == 'atif' and rows == 'rl':
         raise ValueError("ATIF documents hold whole traces; use rows='trace'")
-    repeated = [key for key, count in Counter(t.trace_id for t in traces).items() if count > 1]
-    if repeated:
-        raise ValueError(f'Traces share ids {repeated}; keep one copy of each')
+    check_unique_ids(traces)
     skipped: Counter[str] = Counter()
     kept: list[Trace] = []
     for trace in traces:

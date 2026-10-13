@@ -381,6 +381,20 @@ class TestCapture:
         assert tr.trace.steps[0].action.content == 'echo hello > out.txt'
         assert tr.trace.result.score == 1.0
 
+    def test_environment_is_snapshotted(self, dg: DeepGym) -> None:
+        env = WRITE_ENV.model_copy(deep=True)
+        tr = dg.trace(env, AGENT)
+        env.final_verifier_code = 'print(1.0)'
+        env.task = 'changed'
+
+        with tr:
+            tr.start()
+            tr.step(Action(action_type='bash', content='echo nope > out.txt'))
+            result = tr.score()
+
+        assert result.score == 0.0  # the fingerprinted verifier ran, not the edited one
+        assert load_trace(tr.path).task == WRITE_ENV.task == tr.trace.task
+
     def test_concurrent_steps_run_one_at_a_time(self, dg: DeepGym) -> None:
         env = WRITE_ENV.model_copy(update={'step_verifier_code': '', 'max_steps': 10})
         with dg.trace(env, AGENT) as tr:

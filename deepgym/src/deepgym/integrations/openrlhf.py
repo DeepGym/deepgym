@@ -31,6 +31,8 @@ Sources:
 
 from __future__ import annotations
 
+import logging
+
 try:
     from fastapi import APIRouter
 except ImportError as _exc:
@@ -38,11 +40,40 @@ except ImportError as _exc:
         'FastAPI is required for the OpenRLHF integration. '
         'Install with: pip install "deepgym[server]"'
     ) from _exc
-from pydantic import BaseModel, model_validator
+from pydantic import BaseModel, Field, model_validator
 
 from deepgym.core import DeepGym
 from deepgym.integrations.verl import extract_code
 from deepgym.models import Environment
+
+logger = logging.getLogger(__name__)
+
+PROMPT_MISMATCH = 'prompt_mismatch'
+"""error_type of a query whose prompt couldn't be found: it scores 0 instead of risking
+scoring prompt text, such as a fenced example in the prompt."""
+
+_PROBE = 64
+"""Leading query characters that must match the prompt's tail when the prompt was cut."""
+
+
+def _response(query: str, prompt: str) -> str | None:
+    """Return the response part of *query*, or None if its prompt can't be located.
+
+    The query is the prompt and the response decoded together. When the prompt is too
+    long, OpenRLHF drops tokens from its front, so the query starts with the prompt's
+    tail instead, and the response starts after the longest tail of *prompt* that the
+    query starts with (at least ``_PROBE`` characters of it).
+    """
+    if query.startswith(prompt):
+        return query[len(prompt) :]
+    query = query.lstrip('\ufffd')  # leftover bytes of a character the cut split
+    probe = query[:_PROBE]
+    start = prompt.find(probe)
+    while start != -1:
+        if query.startswith(prompt[start:]):
+            return query[len(prompt) - start :]
+        start = prompt.find(probe, start + 1)
+    return None
 
 
 class OpenRLHFRewardRequest(BaseModel):
@@ -50,8 +81,7 @@ class OpenRLHFRewardRequest(BaseModel):
 
     OpenRLHF's agent client sends ``query`` (each prompt and its response decoded
     together, special tokens included), ``prompts`` and ``labels`` (unused here).
-    Older clients send ``outputs``, the responses alone. A query that doesn't start
-    with its prompt (a tokenizer that doesn't round-trip it) is scored whole.
+    Older clients send ``outputs``, the responses alone.
     """
 
     prompts: list[str]
@@ -68,17 +98,25 @@ class OpenRLHFRewardRequest(BaseModel):
         return self
 
     @property
-    def responses(self) -> list[str]:
-        """Each sample's response: ``outputs``, or each query with its prompt removed."""
+    def responses(self) -> list[str | None]:
+        """Each sample's response: ``outputs``, or each query after its prompt.
+
+        None where a query's prompt can't be found (see :func:`_response`).
+        """
         if self.outputs is not None:
-            return self.outputs
-        return [query.removeprefix(prompt) for query, prompt in zip(self.query, self.prompts)]
+            return list(self.outputs)
+        return [_response(query, prompt) for query, prompt in zip(self.query, self.prompts)]
 
 
 class OpenRLHFRewardResponse(BaseModel):
-    """Response format compatible with OpenRLHF's reward API."""
+    """Response format compatible with OpenRLHF's reward API.
+
+    OpenRLHF reads ``rewards``; ``error_types`` says, per sample, why there was no
+    verdict (None when there was one), so a caller can tell a real 0 from a failure.
+    """
 
     rewards: list[float]
+    error_types: list[str | None] = Field(default_factory=list)
 
 
 def create_openrlhf_router(env: Environment, dg: DeepGym) -> APIRouter:
@@ -88,10 +126,27 @@ def create_openrlhf_router(env: Environment, dg: DeepGym) -> APIRouter:
     @router.post('/score')
     async def score(request: OpenRLHFRewardRequest) -> OpenRLHFRewardResponse:
         """Score a batch of model responses and return rewards."""
-        solutions = [extract_code(response) for response in request.responses]
-        if not solutions:
-            return OpenRLHFRewardResponse(rewards=[])
-        batch = dg.run_batch(env, solutions, max_parallel=min(len(solutions), 32))
-        return OpenRLHFRewardResponse(rewards=[r.score for r in batch.results])
+        responses = request.responses
+        found = [response for response in responses if response is not None]
+        if len(found) < len(responses):
+            logger.warning(
+                'OpenRLHF: %d of %d queries do not contain their prompt; scored 0 (%s)',
+                len(responses) - len(found),
+                len(responses),
+                PROMPT_MISMATCH,
+            )
+        solutions = [extract_code(response) for response in found]
+        results = iter(
+            dg.run_batch(env, solutions, max_parallel=min(len(solutions), 32)).results
+            if solutions
+            else ()
+        )
+        rewards: list[float] = []
+        error_types: list[str | None] = []
+        for response in responses:
+            result = None if response is None else next(results)
+            rewards.append(0.0 if result is None else result.score)
+            error_types.append(PROMPT_MISMATCH if result is None else result.error_type)
+        return OpenRLHFRewardResponse(rewards=rewards, error_types=error_types)
 
     return router

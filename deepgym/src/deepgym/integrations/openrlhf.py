@@ -13,10 +13,11 @@ Usage (custom app)::
     app = FastAPI()
     env = load_environment('coin_change')
     dg = DeepGym(mode='local')
-    app.include_router(create_openrlhf_router(env, dg))
+    app.include_router(create_openrlhf_router(env, dg, infra_failure_score='nan'))
 
     # Run with: uvicorn app:app --port 8000
-    # Train with: --remote_rm_url http://localhost:8000/reward/score
+    # Train with: --remote_rm_url http://localhost:8000/reward/score \
+    #   --algo.dynamic_filtering_enable
 
 The last fenced code block of each response (or all of it, if none) is what runs,
 as in the verl and TRL adapters.
@@ -38,14 +39,17 @@ and no request waits past 150 s, inside the 180 s OpenRLHF gives it; a first run
 going then scores 0, since the model's code may be what slows it. If the second grading
 fails too, can't start in time or is still going then, or the first one never started,
 or a query doesn't contain its prompt, the sample is rewarded the router's
-``infra_failure_score``, never a score from a run that didn't finish:
+``infra_failure_score``, never a score from a run that didn't finish. The router has no
+default for it, so the choice is made when it's set up, where no policy can reach it:
 
-- ``'zero'`` (the default): 0.0, logged as a warning with its error type and counted
-  toward the masked-rate warning (:class:`~deepgym.integrations.reward.MaskedRate`).
-  OpenRLHF trains on it as a failed answer; that is the limit of its API.
-- ``'nan'``: NaN, so dynamic filtering drops the sample's group, and is counted the same
-  way. Use it only with ``--algo.dynamic_filtering_enable``: without it OpenRLHF trains
-  on the NaN and the run breaks.
+- ``'nan'`` (recommended): NaN, so dynamic filtering drops the sample's group. It needs
+  ``--algo.dynamic_filtering_enable``: without it OpenRLHF trains on the NaN and the run
+  breaks.
+- ``'zero'``: 0.0, so OpenRLHF trains on DeepGym's failure as a failed answer, an
+  accepted leak.
+
+Either way the sample is logged as a warning with its error type and counted toward the
+masked-rate warning (:class:`~deepgym.integrations.reward.MaskedRate`).
 
 Note: This router is NOT automatically mounted by ``deepgym serve``.
 Create a custom FastAPI app to use it.
@@ -205,7 +209,8 @@ def _wait(run: concurrent.futures.Future[RunResult], deadline: float) -> RunResu
 def create_openrlhf_router(
     env: Environment,
     dg: DeepGym,
-    infra_failure_score: Literal['zero', 'nan'] = 'zero',
+    *,
+    infra_failure_score: Literal['zero', 'nan'] | None = None,
     max_parallel: int = 32,
 ) -> APIRouter:
     """Create a FastAPI router compatible with OpenRLHF's reward server protocol.
@@ -217,12 +222,23 @@ def create_openrlhf_router(
     Args:
         env: The environment every response is scored with.
         dg: The DeepGym client that scores them.
-        infra_failure_score: The reward of a sample that got no verdict through no fault
-            of the model: ``'zero'``, or ``'nan'`` for OpenRLHF runs with dynamic filtering
-            (see the module docstring).
+        infra_failure_score: Required. The reward of a sample DeepGym couldn't grade
+            through no fault of the model: ``'nan'`` (recommended, with OpenRLHF's dynamic
+            filtering) or ``'zero'`` (see the module docstring).
         max_parallel: Most runs going at once across every request, first gradings and
             second ones alike.
+
+    Raises:
+        ValueError: If *infra_failure_score* isn't ``'nan'`` or ``'zero'``.
     """
+    if infra_failure_score not in ('nan', 'zero'):
+        raise ValueError(
+            "Choose infra_failure_score, the reward of a sample DeepGym couldn't grade because "
+            "the sandbox provider or the network failed (OpenRLHF can't skip a sample): 'nan' "
+            '(recommended) drops its prompt group, and needs --algo.dynamic_filtering_enable, '
+            "without which the NaN breaks training; 'zero' trains on it as a failed answer, "
+            'an accepted leak that is logged and counted toward the masked-rate warning.'
+        )
     router = APIRouter(prefix='/reward')
     slots = concurrent.futures.ThreadPoolExecutor(max_parallel, 'deepgym-openrlhf')
     masked = MaskedRate('OpenRLHF reward server')

@@ -6,6 +6,7 @@ import math
 import threading
 import time
 from pathlib import Path
+from typing import Literal
 
 import httpx
 import pytest
@@ -439,16 +440,25 @@ def _openrlhf_score(env: Environment, dg: DeepGym, queries: list[str]) -> dict:
         'labels': [None] * len(queries),
     }
     app = FastAPI()
-    app.include_router(create_openrlhf_router(env, dg))
+    app.include_router(create_openrlhf_router(env, dg, infra_failure_score='zero'))
     response = TestClient(app).post('/reward/score', json=payload)
     assert response.status_code == 200, response.text
     return response.json()
 
 
-def _post(env: Environment, dg: DeepGym, payload: dict, **router_kwargs: str) -> dict:
+def _post(
+    env: Environment,
+    dg: DeepGym,
+    payload: dict,
+    infra_failure_score: Literal['zero', 'nan'] = 'zero',
+    max_parallel: int = 32,
+) -> dict:
     """POST *payload* to a fresh reward router; the request must succeed."""
     app = FastAPI()
-    app.include_router(create_openrlhf_router(env, dg, **router_kwargs))
+    router = create_openrlhf_router(
+        env, dg, infra_failure_score=infra_failure_score, max_parallel=max_parallel
+    )
+    app.include_router(router)
     response = TestClient(app).post('/reward/score', json=payload)
     assert response.status_code == 200, response.text
     return response.json()  # json.loads, which reads NaN as OpenRLHF's client does
@@ -523,11 +533,25 @@ class TestOpenRLHFIntegration:
     """Verify OpenRLHF router creation and endpoint."""
 
     def test_create_router_returns_api_router(self, env: Environment, local_dg: DeepGym) -> None:
-        router = create_openrlhf_router(env, local_dg)
+        router = create_openrlhf_router(env, local_dg, infra_failure_score='nan')
         assert router is not None
 
+    @pytest.mark.parametrize(
+        'kwargs', [{}, {'infra_failure_score': 'skip'}], ids=['unset', 'other']
+    )
+    def test_infra_failure_score_is_a_choice_made_at_setup(
+        self, env: Environment, local_dg: DeepGym, kwargs: dict
+    ) -> None:
+        """No default: what OpenRLHF trains on for our failures is decided by whoever sets it up."""
+        with pytest.raises(ValueError, match='infra_failure_score') as refused:
+            create_openrlhf_router(env, local_dg, **kwargs)
+
+        assert "'nan' (recommended)" in str(refused.value)
+        assert '--algo.dynamic_filtering_enable' in str(refused.value)
+        assert "'zero' trains on it as a failed answer" in str(refused.value)
+
     def test_score_endpoint(self, env: Environment, local_dg: DeepGym) -> None:
-        router = create_openrlhf_router(env, local_dg)
+        router = create_openrlhf_router(env, local_dg, infra_failure_score='zero')
         app = FastAPI()
         app.include_router(router)
         client = TestClient(app)
@@ -641,7 +665,7 @@ class TestOpenRLHFIntegration:
     ) -> None:
         """Failing again, or passing too late (2 s against 0.5 s), is never a pass or an error.
 
-        0 by default; NaN on request, which OpenRLHF's dynamic filtering drops.
+        0 in zero mode; NaN in nan mode, which OpenRLHF's dynamic filtering drops.
         """
         monkeypatch.setattr(openrlhf, '_RETRY_DELAY_S', 0.0)
         monkeypatch.setattr(openrlhf, '_REQUEST_BUDGET_S', budget)
@@ -718,7 +742,7 @@ class TestOpenRLHFIntegration:
         """
         dg = _GatedDeepGym()
         app = FastAPI()
-        app.include_router(create_openrlhf_router(env, dg))
+        app.include_router(create_openrlhf_router(env, dg, infra_failure_score='zero'))
         transport = httpx.ASGITransport(app=app)
 
         async with httpx.AsyncClient(transport=transport, base_url='http://test') as client:
@@ -733,7 +757,7 @@ class TestOpenRLHFIntegration:
         assert dg.finished == [extract_code(FENCED), 'slow']
 
     def test_score_endpoint_empty(self, env: Environment, local_dg: DeepGym) -> None:
-        router = create_openrlhf_router(env, local_dg)
+        router = create_openrlhf_router(env, local_dg, infra_failure_score='zero')
         app = FastAPI()
         app.include_router(router)
         client = TestClient(app)
@@ -776,7 +800,7 @@ class TestUntrustedInputSize:
         from deepgym.integrations.openrlhf import MAX_TEXT_CHARS
 
         app = FastAPI()
-        app.include_router(create_openrlhf_router(env, local_dg))
+        app.include_router(create_openrlhf_router(env, local_dg, infra_failure_score='zero'))
         too_long = 'x' * (MAX_TEXT_CHARS + 1)
 
         response = TestClient(app).post(

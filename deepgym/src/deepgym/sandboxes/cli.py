@@ -8,11 +8,13 @@ everything used here, so a provider only names its CLI and how it differs.
 from __future__ import annotations
 
 import contextlib
+import hashlib
 import os
 import shutil
 import subprocess
 import time
 from collections.abc import Mapping
+from pathlib import Path
 from typing import ClassVar
 from uuid import uuid4
 
@@ -25,6 +27,7 @@ DEFAULT_IMAGE = os.environ.get('DEEPGYM_CONTAINER_IMAGE', 'python:3.12-slim')
 # Caps per sandbox, so hostile code can't starve the machine running the containers.
 _LIMITS = ('--cpus', '2', '--memory', '2g')
 _START_TIMEOUT_S = 300
+_BUILD_TIMEOUT_S = 1800
 # Exit codes from coreutils `timeout`: 124 after SIGTERM, 137 after the follow-up SIGKILL.
 _TIMEOUT_EXIT_CODES = frozenset({124, 137})
 _NAME_PREFIX = 'deepgym-'
@@ -64,6 +67,31 @@ class CliContainer:
             raise SandboxError(f'Container did not start within {_START_TIMEOUT_S}s') from exc
         if started.returncode != 0:
             raise SandboxError(f'Failed to start container: {started.stderr.decode()[-1000:]}')
+
+    @classmethod
+    def build(cls, context: Path) -> str:
+        """Build the Dockerfile in *context*, unless an identical build exists; return its tag.
+
+        The tag hashes every file in *context*, so changing any of them means a new build.
+
+        Raises:
+            SandboxError: If the build fails or times out.
+        """
+        digest = hashlib.sha256()
+        for path in sorted(p for p in context.rglob('*') if p.is_file()):
+            data = path.read_bytes()
+            digest.update(f'{path.relative_to(context).as_posix()}\0{len(data)}\0'.encode())
+            digest.update(data)
+        tag = f'{_NAME_PREFIX}build:{digest.hexdigest()[:16]}'
+        if cls._cli('image', 'inspect', tag, timeout=30).returncode == 0:
+            return tag
+        try:
+            built = cls._cli('build', '--tag', tag, str(context), timeout=_BUILD_TIMEOUT_S)
+        except subprocess.TimeoutExpired as exc:
+            raise SandboxError(f'Building {context} took over {_BUILD_TIMEOUT_S}s') from exc
+        if built.returncode != 0:
+            raise SandboxError(f'Failed to build {context}: {built.stderr.decode()[-1000:]}')
+        return tag
 
     @classmethod
     def available(cls) -> bool:

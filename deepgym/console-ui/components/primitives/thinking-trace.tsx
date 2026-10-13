@@ -5,6 +5,7 @@
 import { RiArrowDownSLine, RiCheckLine, RiSparkling2Fill } from '@remixicon/react';
 import { useEffect, useRef, useState } from 'react';
 import { Collapse } from '@/components/ui/collapse';
+import { scrollToShow } from '@/lib/timeline';
 import { cx } from '@/utils/cx';
 
 export interface TraceRow {
@@ -20,10 +21,12 @@ interface ThinkingTraceProps {
   /** Index of the highlighted row. */
   selected: number;
   onSelect: (index: number) => void;
+  /** Keep the selected row scrolled into view as it changes. */
+  follow: boolean;
 }
 
-/** Expandable step trace; the selected row stays in view as it changes. */
-export function ThinkingTrace({ label, rows, selected, onSelect }: ThinkingTraceProps) {
+/** Expandable step trace; with `follow`, the selected row stays in view as it changes. */
+export function ThinkingTrace({ label, rows, selected, onSelect, follow }: ThinkingTraceProps) {
   const [open, setOpen] = useState(true);
   const list = useRef<HTMLDivElement>(null);
 
@@ -31,12 +34,9 @@ export function ThinkingTrace({ label, rows, selected, onSelect }: ThinkingTrace
   useEffect(() => {
     const box = list.current;
     const row = box?.querySelector<HTMLElement>(`[data-index="${selected}"]`);
-    if (!box || !row) return;
-    if (row.offsetTop < box.scrollTop) box.scrollTop = row.offsetTop;
-    else if (row.offsetTop + row.offsetHeight > box.scrollTop + box.clientHeight) {
-      box.scrollTop = row.offsetTop + row.offsetHeight - box.clientHeight;
-    }
-  }, [selected]);
+    if (!follow || !box || !row) return;
+    box.scrollTop = scrollToShow(box.scrollTop, box.clientHeight, row.offsetTop, row.offsetHeight);
+  }, [selected, follow]);
 
   return (
     <div className="flex w-full flex-col">

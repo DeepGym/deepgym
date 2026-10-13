@@ -2,8 +2,10 @@
 
 import { RiArrowLeftSLine, RiArrowRightSLine, RiPauseLine, RiPlayLine } from '@remixicon/react';
 import { useEffect, useState } from 'react';
+import { Checkbox } from 'react-aria-components';
 import { Chip } from '@/components/base/badges/chip';
 import { Button } from '@/components/base/buttons/button';
+import { CheckboxGlyph } from '@/components/base/checkbox/checkbox-glyph';
 import { Kbd } from '@/components/base/kbd/kbd';
 import { CodeBlock } from '@/components/primitives/code-block';
 import { ThinkingTrace } from '@/components/primitives/thinking-trace';
@@ -14,13 +16,15 @@ import type { EpisodeDetail } from '@/lib/types';
 import { useHotkey } from '@/lib/use-hotkey';
 import { describeAction } from './describe-action';
 import { ScreenshotViewer } from './screenshot-viewer';
+import { StepTimeline } from './step-timeline';
 
 const PLAY_INTERVAL_MS = 900;
 
-/** Step-by-step replay: screenshot, observation text, the action taken and its reward. */
+/** Step-by-step replay: a timeline of steps, then the screenshot, observation text, action taken and its reward. */
 export function EpisodeReplay({ episode }: { episode: EpisodeDetail }) {
   const [index, setIndex] = useState(0);
   const [playing, setPlaying] = useState(false);
+  const [follow, setFollow] = useState(true);
   const last = episode.frames.length - 1;
   const frame = episode.frames[index];
   const step = (delta: number) => setIndex((current) => Math.min(last, Math.max(0, current + delta)));
@@ -72,18 +76,30 @@ export function EpisodeReplay({ episode }: { episode: EpisodeDetail }) {
           disabled={index === last}
           onClick={() => step(1)}
         />
-        <input
-          type="range"
-          min={0}
-          max={last}
-          value={index}
-          onChange={(event) => setIndex(Number(event.target.value))}
-          aria-label="Step"
-          className="min-w-32 flex-1 accent-accent-400"
+        <StepTimeline
+          frames={episode.frames}
+          passed={episode.passed}
+          index={index}
+          onSelect={setIndex}
+          follow={follow}
         />
         <span className="font-mono text-caption-1-medium text-text-secondary tabular-nums">
           {index}/{last}
         </span>
+      </div>
+      <div className="-mt-2 flex flex-wrap items-center gap-x-4 gap-y-2">
+        <Checkbox
+          isSelected={follow}
+          onChange={setFollow}
+          className="flex cursor-pointer items-center gap-1.5 text-caption-1-medium text-text-secondary outline-none"
+        >
+          {(state) => (
+            <>
+              <CheckboxGlyph size="sm" state={state} />
+              Auto-scroll
+            </>
+          )}
+        </Checkbox>
         <span className="hidden items-center gap-1 text-caption-1-medium text-text-tertiary md:flex">
           <Kbd>←</Kbd>
           <Kbd>→</Kbd> step <Kbd>space</Kbd> play
@@ -118,6 +134,7 @@ export function EpisodeReplay({ episode }: { episode: EpisodeDetail }) {
             }))}
             selected={index}
             onSelect={setIndex}
+            follow={follow}
           />
           {episode.result && (
             <Card title="Final score">

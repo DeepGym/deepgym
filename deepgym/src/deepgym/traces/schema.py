@@ -196,8 +196,8 @@ class Provenance(BaseModel):
     package, and in traces before schema 1.1."""
 
     deepgym_dirty: bool | None = None
-    """Whether deepgym's files in that checkout differed from the commit, or had changed
-    since deepgym was imported; None without a commit."""
+    """Whether the files of the deepgym package folder differed from the commit, or had
+    changed since deepgym was imported; None without a commit."""
 
     started_at: AwareDatetime
 

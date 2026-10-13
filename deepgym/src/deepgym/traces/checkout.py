@@ -16,8 +16,11 @@ def git_checkout(package: Path, since: float | None = None) -> tuple[str | None,
 
     The package must be tracked by the repository around it, so an install inside some
     other project's checkout (a virtualenv in it, say) never reports that project's commit.
-    ``GIT_*`` variables are dropped, so they can't point git at another repository, and
-    git takes no optional locks, so it never blocks a commit running at the same time.
+    Only files in the package folder count as differences: it is the code that runs (an
+    editable install runs the folder itself), while tests, docs and ``pyproject.toml``
+    don't change what ran. ``GIT_*`` variables are dropped, so they can't point git at
+    another repository, and git takes no optional locks, so it never blocks a commit
+    running at the same time.
 
     Args:
         package: The package folder.

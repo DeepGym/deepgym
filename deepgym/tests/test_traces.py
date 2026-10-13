@@ -30,6 +30,8 @@ from deepgym.traces import (
     TraceStep,
     export_traces,
     load_trace,
+    merge_copies,
+    schema,
 )
 from deepgym.traces.capture import UNFINISHED
 from deepgym.traces.schema import (
@@ -202,6 +204,27 @@ class TestSchema:
         assert trajectory.final_observation == trace.steps[2].observation
         assert trajectory.step_rewards == [0.5, 0.5]
 
+    def test_merge_copies_keeps_the_furthest_and_refuses_disagreement(self) -> None:
+        graded = graded_trace()
+        unfinished = {'finished_at': None}
+        unstarted = graded.model_copy(
+            update={'initial_observation': None, 'steps': (), 'result': None, **unfinished}
+        )
+        snapshot = graded.model_copy(update={'result': None, **unfinished})
+        crashed = snapshot.model_copy(update={'error': UNFINISHED})
+        failed = graded.result.model_copy(update={'score': 0.0, 'passed': False})
+        regraded = graded.model_copy(update={'prior_results': (graded.result,), 'result': failed})
+
+        # A traced episode takes no action once graded, nor a grade once finished.
+        graded_early = graded.model_copy(update={'steps': graded.steps[:1], **unfinished})
+
+        assert merge_copies([unstarted, graded, snapshot]) == [graded]
+        assert merge_copies([snapshot, crashed]) == [crashed]
+        assert merge_copies([graded.model_copy(update=unfinished), regraded]) == [regraded]
+        for other in (regraded, graded_early, graded.model_copy(update={'task': 'other'})):
+            with pytest.raises(ValueError, match='trace0001'):
+                merge_copies([graded, other])
+
     def test_to_trajectory_never_moves_a_reward_to_another_step(self) -> None:
         trace = graded_trace()
         # An older trace: the first step's verifier gave no verdict and the episode went on.
@@ -317,7 +340,19 @@ class TestProvenance:
         (package / '__init__.py').write_text('x = 2\n')
         assert git_checkout(package) == (head, True)
 
-    def test_booted_image_resolves_the_digest(self) -> None:
+    def test_deepgym_checkout_flags_changes_since_the_first_look(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        looks = iter([('abc', False), ('def', False), ('abc', True), (None, None)])
+        monkeypatch.setattr(schema, '_first_checkout', lambda: ('abc', False))
+        monkeypatch.setattr(schema, 'git_checkout', lambda package: next(looks))
+
+        # Imported code stays at the first commit, so a later one only makes it dirty.
+        assert [deepgym_checkout() for _ in range(4)] == [('abc', False)] + [('abc', True)] * 3
+        monkeypatch.setattr(schema, '_first_checkout', lambda: (None, None))
+        assert deepgym_checkout() == (None, None)
+
+    def test_booted_image_takes_only_the_providers_digest(self) -> None:
         pinned = 'python:3.12-slim@sha256:' + 'cd' * 32
         env = WRITE_ENV.model_copy(update={'image': pinned})
 
@@ -325,13 +360,17 @@ class TestProvenance:
         resolved = unbooted.booted(
             SandboxImage('docker.io/library/python:3.12-slim', 'sha256:ab', None)
         )
+        # Built on top of the pinned image: the pin doesn't identify what booted.
         built = EnvFingerprint.of(env).booted(SandboxImage(pinned, None, 'built, no digest'))
 
         assert (unbooted.image_digest, unbooted.digest_unavailable) == (None, NOT_RESOLVED)
+        assert EnvFingerprint.of(env).image_digest == 'sha256:' + 'cd' * 32
         assert (resolved.image, resolved.image_digest, resolved.digest_unavailable) == (
             'docker.io/library/python:3.12-slim', 'sha256:ab', None
         )  # fmt: skip
-        assert (built.image_digest, built.digest_unavailable) == ('sha256:' + 'cd' * 32, None)
+        assert (built.image, built.image_digest, built.digest_unavailable) == (
+            pinned, None, 'built, no digest'
+        )  # fmt: skip
 
 
 class TestCapture:

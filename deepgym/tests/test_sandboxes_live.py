@@ -143,7 +143,7 @@ def test_trace_records_the_booted_image(
     resolved = dg.backend in ('apple', 'docker') or (dg.backend == 'daytona' and not image)
     if not resolved:
         assert fingerprint.image_digest is None and fingerprint.digest_unavailable, fingerprint
-        assert fingerprint.image == image
+        assert fingerprint.image == (image or fingerprint.image)
         return
     assert re.fullmatch(r'sha256:[0-9a-f]{64}', fingerprint.image_digest or ''), fingerprint
     assert fingerprint.image and fingerprint.digest_unavailable is None

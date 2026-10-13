@@ -764,8 +764,8 @@ with `--db` and `--traces`; a trace stored in both is exported once, and refused
 copies disagree. A trace without a verdict is exported with `has_verdict: false` and a
 null reward, or left out with `--only-valid`. `--rows rl` writes one conversation per
 trace (`messages`, `reward`, `step_rewards`, and `steps`: every action with its
-observation, step reward and the index of the reply that produced it) and skips traces
-whose first action has no model messages. Parquet needs
+observation text and screenshot, step reward and the index of the reply that produced
+it) and skips traces whose first action has no model messages. Parquet needs
 `pip install "deepgym[traces]"`. The ATIF mapping is documented in
 `deepgym/traces/atif.py`.
 

@@ -50,7 +50,11 @@ class ModalSandbox:
 
     def booted_image(self) -> SandboxImage:
         """Return the registry image given, or None for Modal's own Debian image; no digest."""
-        return SandboxImage(self._image, None, 'Modal reports no digest for the image it booted')
+        if self._image is None:
+            reason = 'Modal built its own Debian image (Python 3.12) and reports no digest'
+        else:
+            reason = 'Modal reports no digest for the image it booted'
+        return SandboxImage(self._image, None, reason)
 
     def exec(
         self,

@@ -10,10 +10,10 @@ Row shapes (``rows=``):
   ``messages`` key of verl's multi-turn SFT dataset), with token ids and logprobs where
   recorded; ``reward`` and ``passed`` come from the final verifier; ``step_rewards``
   are the step verifier's scores (null where none ran). ``steps`` holds every action in
-  order with its observation text, exit code, error and step reward, and
-  ``message_index``: where in ``messages`` the reply that produced it is, shared by the
-  actions of one turn. A trace whose first action has no model messages has no
-  conversation to train on and is skipped.
+  order with what it produced (text, base64 PNG screenshot, done flag, exit code, or the
+  error if nothing), its step reward, and ``message_index``: where in ``messages`` the
+  reply that produced it is, shared by the actions of one turn. A trace whose first
+  action has no model messages has no conversation to train on and is skipped.
 
 Every row carries ``has_verdict``, and its ``score``/``reward`` and ``passed`` are null
 without one, so a failed sandbox or verifier never reads as a scored 0. ``only_valid``
@@ -67,10 +67,13 @@ def rl_row(trace: Trace) -> Row | None:
         messages += [
             message.model_dump(mode='json', exclude_none=True) for message in step.messages
         ]
+        seen = step.observation
         steps.append({
             'message_index': len(messages) - 1,
             'action': step.action.model_dump(mode='json'),
-            'observation': None if step.observation is None else step.observation.content,
+            'observation': None if seen is None else seen.content,
+            'screenshot': None if seen is None else seen.screenshot,
+            'done': None if seen is None else seen.done,
             'exit_code': step.exit_code,
             'error': step.error,
             'reward': step.reward,
@@ -221,6 +224,8 @@ def _schema(rows: RowShape) -> pa.Schema:
         ('message_index', pa.int64()),
         ('action', action),
         ('observation', pa.string()),
+        ('screenshot', pa.string()),
+        ('done', pa.bool_()),
         ('exit_code', pa.int64()),
         ('error', pa.string()),
         ('reward', pa.float64()),

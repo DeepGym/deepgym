@@ -327,8 +327,10 @@ def test_modal_blocks_network_and_maps_results(monkeypatch: pytest.MonkeyPatch) 
     assert created['execs'][-1][:2] == ('/bin/sh', '-c')
     assert 'mkdir -p /a/b' in created['execs'][-1][2]
     assert created['w'] == '/a/b/c.txt' and created['terminated']
-    module.ModalSandbox('python:3.11-slim')
+    registry = module.ModalSandbox('python:3.11-slim')
     assert created['image'] == 'reg:python:3.11-slim'
+    for booted, name in ((box.booted_image(), None), (registry.booted_image(), 'python:3.11-slim')):
+        assert (booted.name, booted.digest) == (name, None) and booted.unavailable
 
     def refuse() -> None:
         raise RuntimeError('Modal is unavailable')
@@ -363,6 +365,7 @@ def test_e2b_runs_as_root_offline_and_maps_errors(monkeypatch: pytest.MonkeyPatc
     class Client:
         sandbox_id = 'e2b-1'
         commands = Commands()
+        default_template = 'base'
 
         @staticmethod
         def create(**kwargs: object) -> 'Client':
@@ -395,8 +398,10 @@ def test_e2b_runs_as_root_offline_and_maps_errors(monkeypatch: pytest.MonkeyPatc
     assert seen['timeout'] > 1
     with pytest.raises(SandboxError, match='not reachable'):
         box.exec('gone', timeout=1)
-    module.E2BSandbox('my-template')
+    named = module.E2BSandbox('my-template')
     assert seen['create']['template'] == 'my-template'
+    assert [box.booted_image().name, named.booted_image().name] == ['base', 'my-template']
+    assert box.booted_image().digest is None and box.booted_image().unavailable
     assert box.delete() is True
     seen['kill_fails'] = True
     assert box.delete() is False

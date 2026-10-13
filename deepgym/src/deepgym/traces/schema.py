@@ -105,15 +105,29 @@ def git_checkout(package: Path) -> tuple[str | None, bool | None]:
     return head.strip(), bool(status.strip())
 
 
+_PACKAGE = Path(__file__).resolve().parents[1]
+
+
 @functools.cache
+def _first_checkout() -> tuple[str | None, bool | None]:
+    return git_checkout(_PACKAGE)
+
+
 def deepgym_checkout() -> tuple[str | None, bool | None]:
-    """Return :func:`git_checkout` of the deepgym package this code runs from, once a process."""
-    return git_checkout(Path(__file__).resolve().parents[1])
+    """Return the commit of the deepgym checkout this code runs from, and whether it's dirty.
 
+    The commit is the one the checkout was at the first time this process asked: code
+    imported then keeps running, so a later commit would misname it. The checkout is dirty
+    if deepgym's files differed from that commit then, or have changed since.
 
-def _pinned_digest(image: str | None) -> str | None:
-    """Return the digest an image reference pins (``name@sha256:...``), if it pins one."""
-    return image.rpartition('@')[2] if image and '@' in image else None
+    Returns:
+        ``(commit, dirty)``, or ``(None, None)`` when not running from a git checkout.
+    """
+    commit, dirty = _first_checkout()
+    if commit is None:
+        return None, None
+    now, dirty_now = git_checkout(_PACKAGE)
+    return commit, bool(dirty or dirty_now or now != commit)
 
 
 class AgentMeta(BaseModel):
@@ -161,8 +175,8 @@ class EnvFingerprint(BaseModel):
     """The image the sandbox booted (its tag, snapshot or template), as the provider names it."""
 
     image_digest: str | None = None
-    """Content digest (``sha256:...``) of that image: pinned by its reference, or resolved
-    by the provider."""
+    """Content digest (``sha256:...``) of that image, as the provider resolved it; before
+    the sandbox boots (:meth:`of`), the digest the environment's image reference pins."""
 
     digest_unavailable: str | None = None
     """Why there is no ``image_digest``; traces before schema 1.1 have neither."""
@@ -190,7 +204,8 @@ class EnvFingerprint(BaseModel):
             The environment's fingerprint. Its image is the environment's own until
             :meth:`booted` says what the sandbox booted.
         """
-        digest = _pinned_digest(env.image)
+        image = env.image
+        digest = image.rpartition('@')[2] if image and '@' in image else None
         return cls(
             name=env.name,
             variant=variant,
@@ -202,7 +217,7 @@ class EnvFingerprint(BaseModel):
             if env.step_verifier_code
             else None,
             reference_sha256=None if reference is None else sha256_text(reference),
-            image=env.image,
+            image=image,
             image_digest=digest,
             digest_unavailable=None if digest else NOT_RESOLVED,
             snapshot=env.snapshot,
@@ -211,14 +226,15 @@ class EnvFingerprint(BaseModel):
     def booted(self, image: SandboxImage) -> EnvFingerprint:
         """Return this fingerprint with the image its sandbox booted, as the provider reports it.
 
-        A digest pinned by the image's reference stands when the provider resolves none.
+        Only the provider can tell a digest is what booted: an image it built from a
+        pinned reference is another image, so the pinned digest never stands in.
         """
-        digest = image.digest or _pinned_digest(image.name)
+        unavailable = None if image.digest else image.unavailable or NOT_RESOLVED
         return self.model_copy(
             update={
                 'image': image.name,
-                'image_digest': digest,
-                'digest_unavailable': None if digest else image.unavailable or NOT_RESOLVED,
+                'image_digest': image.digest,
+                'digest_unavailable': unavailable,
             }
         )
 
@@ -235,7 +251,7 @@ class Provenance(BaseModel):
 
     deepgym_version: str
     deepgym_commit: str | None = None
-    """Git commit of the deepgym checkout that ran the episode (see :func:`git_checkout`);
+    """Git commit of the deepgym checkout that ran the episode (see :func:`deepgym_checkout`);
     None when it ran from an installed package, and in traces before schema 1.1."""
 
     deepgym_dirty: bool | None = None
@@ -451,25 +467,31 @@ def _grades(trace: Trace) -> tuple[RunResult, ...]:
     return () if trace.result is None else (*trace.prior_results, trace.result)
 
 
-def _progress(trace: Trace) -> tuple[int, int, bool, bool]:
-    """How far a copy got: steps, grades, then whether it finished or says why it stopped."""
+def _progress(trace: Trace) -> tuple[int, int, bool, bool, bool]:
+    """How far a copy got: steps, grades, whether it started and finished, and says why it
+    stopped."""
     return (
         len(trace.steps),
         len(_grades(trace)),
+        trace.initial_observation is not None,
         trace.finished_at is not None,
         trace.error is not None,
     )
 
 
 def _cut_short(copy: Trace, furthest: Trace) -> bool:
-    """Whether *copy* is *furthest* recorded earlier, or the same trace."""
+    """Whether *copy* is *furthest* recorded earlier, or the same trace.
+
+    A graded copy has every step: a traced episode takes no action after it is scored.
+    """
     if copy.finished_at is not None:
         return copy == furthest
     grades = _grades(copy)
+    steps = furthest.steps if grades else furthest.steps[: len(copy.steps)]
     return (
         (copy.schema_version, copy.task, copy.provenance)
         == (furthest.schema_version, furthest.task, furthest.provenance)
         and copy.initial_observation in (None, furthest.initial_observation)
-        and copy.steps == furthest.steps[: len(copy.steps)]
+        and copy.steps == steps
         and grades == _grades(furthest)[: len(grades)]
     )

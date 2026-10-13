@@ -4,6 +4,7 @@ Regenerate the golden files after an intended format change with
 ``DEEPGYM_UPDATE_GOLDEN=1 pytest tests/test_traces_export.py`` and review the diff.
 """
 
+import base64
 import json
 import os
 import sys
@@ -167,6 +168,22 @@ class TestExporters:
             None,
             False,
         )
+
+    @pytest.mark.parametrize('fmt', ['jsonl', 'parquet'])
+    def test_rl_rows_keep_screenshots(self, tmp_path: Path, fmt: str) -> None:
+        trace = graded_trace()
+        shot = base64.b64encode(PNG).decode()
+        first = trace.steps[0]
+        seen = first.model_copy(
+            update={'observation': first.observation.model_copy(update={'screenshot': shot})}
+        )
+        trace = trace.model_copy(update={'steps': (seen, *trace.steps[1:])})
+
+        export_traces([trace], fmt, tmp_path / f'rl.{fmt}', rows='rl')
+
+        (row,) = _rows(tmp_path / f'rl.{fmt}', fmt)
+        assert [step['screenshot'] for step in row['steps']] == [shot, None, None]
+        assert [step['done'] for step in row['steps']] == [False, None, True]
 
     def test_only_valid_drops_unjudged_traces(self, tmp_path: Path) -> None:
         out = tmp_path / 'valid.jsonl'

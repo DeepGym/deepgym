@@ -48,8 +48,9 @@ class E2BSandbox:
         self.id = self._sandbox.sandbox_id
 
     def booted_image(self) -> SandboxImage:
-        """Return the template given, or None for E2B's default; templates have no digest."""
-        return SandboxImage(self._template, None, 'E2B boots templates, which have no image digest')
+        """Return the template the sandbox booted (E2B's default if none was given); no digest."""
+        template = self._template or E2BClient.default_template
+        return SandboxImage(template, None, 'E2B boots templates, which have no image digest')
 
     def exec(
         self,

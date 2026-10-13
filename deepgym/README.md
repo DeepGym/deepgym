@@ -359,6 +359,39 @@ result = dg.run(
 print(result.score)
 ```
 
+### MiMo-V2.6-RL code tasks
+
+[XiaomiMiMo/MiMo-V2.6-RL-oss](https://huggingface.co/datasets/XiaomiMiMo/MiMo-V2.6-RL-oss)
+(Apache-2.0) is the RL data behind MiMo-V2.6. Its code subset has 2,698 repo-level
+tasks, each with its own Docker image, hidden test patch and test command.
+
+```bash
+pip install datasets
+python scripts/import_mimo_rl.py   # writes ~/.deepgym/environments/mimo_code/
+docker pull docker.io/xiaomimimo/mimo-v2.6-rl-oss:format-code-task-001457
+```
+
+```python
+from deepgym import DeepGym, load_environment
+
+dg = DeepGym(mode='docker')
+env = load_environment('mimo_code/format-code-task-001457')
+result = dg.run(env, '''```diff\n... unified diff ...\n```''')
+```
+
+- The sandbox boots from the task's image. The hidden tests are applied, then the
+  model's diff minus any edits to the hidden test files; the score is 1.0 if the test
+  command exits 0, else 0.0, as in MiMo's training.
+- The tests run as root in that sandbox because the images expect root's toolchains
+  and caches, so the sandbox, not `deepgym_solution`, is what isolates them.
+- Images are amd64 and up to about 3.4 GB. Pull them first: a sandbox waits at most
+  5 minutes for its image. Docker sandboxes are capped at 2 CPUs and 2 GB, which some
+  builds exceed.
+- The other subsets aren't imported because their rewards can't be reproduced here:
+  cyber grades with a submit script inside each image, general with LLM-judged
+  rubrics against mock apps, webdev with a visual grader, and music with MiMo's
+  statistical style scorer.
+
 ### Terminal-Bench 2.0
 
 Runs terminal commands in a task sandbox and checks the expected output or state.
@@ -539,6 +572,7 @@ python scripts/import_humaneval.py      # 164 problems
 python scripts/import_evalplus.py       # HumanEval+ and MBPP+
 python scripts/import_mbpp.py           # 500 problems
 python scripts/import_bigcodebench.py   # 1,140 problems
+python scripts/import_mimo_rl.py        # 2,698 MiMo-V2.6-RL code tasks
 ```
 
 Imported problems are then available through `load_environment()`.

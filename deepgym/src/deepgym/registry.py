@@ -336,6 +336,9 @@ def _load_env_from_dir(
 
     if not task_path.exists():
         raise ValueError(f'task.md not found in {env_dir}')
+    test_patch_path = env_dir / 'test_patch.diff'
+    if test_patch_path.exists():
+        return _load_repo_patch_env(env_dir, test_patch_path, metadata)
     if not verifier_path.exists():
         raise ValueError(f'verifier.py not found in {env_dir}')
 
@@ -380,6 +383,30 @@ def _load_env_from_dir(
             for key in ('verifier_mode', 'timeout', 'case_timeout', 'image')
             if key in settings
         },
+    )
+
+
+_REPO_PATCH_KEYS = ('repo_dir', 'test_command', 'timeout', 'image', 'difficulty', 'domain', 'tags')
+
+
+def _load_repo_patch_env(
+    env_dir: Path, test_patch_path: Path, metadata: dict | None
+) -> Environment:
+    """Build a RepoPatchEnvironment from task.md, test_patch.diff and metadata.json.
+
+    The repo and its test command live in the image the metadata names; see
+    :class:`~deepgym.benchmark_envs.RepoPatchEnvironment`.
+    """
+    from deepgym.benchmark_envs import RepoPatchEnvironment
+
+    file_metadata = json.loads((env_dir / 'metadata.json').read_text(encoding='utf-8'))
+    settings = {**file_metadata, **(metadata or {})}
+    return RepoPatchEnvironment(
+        name=env_dir.name,
+        task=(env_dir / 'task.md').read_text(encoding='utf-8'),
+        # Bytes, not text mode: a patch to a CRLF file must keep its \r characters.
+        test_patch=test_patch_path.read_bytes().decode('utf-8'),
+        **{key: settings[key] for key in _REPO_PATCH_KEYS if key in settings},
     )
 
 

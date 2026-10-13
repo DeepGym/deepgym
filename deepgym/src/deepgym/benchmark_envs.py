@@ -23,7 +23,8 @@ from pydantic import Field, PrivateAttr
 from deepgym.integrations.hf import _require_datasets
 from deepgym.models import Environment, RunResult, VerifierResult
 from deepgym.sandbox import _extract_json_line, build_run_result
-from deepgym.sandboxes.daytona import cleanup_sandbox, create_sandbox
+from deepgym.sandboxes import open_sandbox
+from deepgym.sandboxes.daytona import DaytonaSandbox
 
 if TYPE_CHECKING:
     from deepgym.core import DeepGym
@@ -280,7 +281,7 @@ def _run_local_runner(
         return result, proc.stderr, proc.returncode
 
 
-def _run_daytona_runner(
+def _run_sandbox_runner(
     env: Environment,
     dg: DeepGym,
     script: str,
@@ -290,33 +291,59 @@ def _run_daytona_runner(
     archive_path: Path | None = None,
     timeout: int,
 ) -> tuple[VerifierResult, str, int, str]:
-    sandbox = create_sandbox(env, dg._daytona)
-    sandbox_id = getattr(sandbox, 'id', 'unknown')
-
+    """Run *script* as root in a fresh sandbox from *dg*'s provider, booted from *env*."""
+    sandbox = (
+        open_sandbox(dg._provider, env.image) if dg._provider else DaytonaSandbox(dg._daytona, env)
+    )
     try:
-        sandbox.fs.upload_file(script.encode('utf-8'), _RUNNER_PATH)
-        sandbox.fs.upload_file(
-            json.dumps(payload, ensure_ascii=False).encode('utf-8'),
-            _TASK_PATH,
-        )
+        sandbox.upload(script.encode('utf-8'), _RUNNER_PATH)
+        sandbox.upload(json.dumps(payload, ensure_ascii=False).encode('utf-8'), _TASK_PATH)
 
-        command = f'python {_RUNNER_PATH} {_TASK_PATH}'
+        command = f'python3 {_RUNNER_PATH} {_TASK_PATH}'
         if patch_text is not None:
-            sandbox.fs.upload_file(patch_text.encode('utf-8'), _PATCH_PATH)
+            sandbox.upload(patch_text.encode('utf-8'), _PATCH_PATH)
             command += f' {_PATCH_PATH}'
 
         if archive_path is not None:
-            sandbox.fs.upload_file(archive_path.read_bytes(), _ARCHIVE_PATH)
+            sandbox.upload(archive_path.read_bytes(), _ARCHIVE_PATH)
             command += f' {_ARCHIVE_PATH}'
 
-        response = sandbox.process.exec(command, timeout=timeout)
-        stdout = response.result if hasattr(response, 'result') else ''
-        stderr = getattr(response, 'stderr', '') or ''
-        exit_code = getattr(response, 'exit_code', 1)
-        result = _verifier_result_from_output(stdout, stderr, exit_code=exit_code)
-        return result, stderr, exit_code, str(sandbox_id)
+        response = sandbox.exec(command, timeout=timeout)
+        result = _verifier_result_from_output(response.output, '', exit_code=response.exit_code)
+        return result, '', response.exit_code, sandbox.id
     finally:
-        cleanup_sandbox(sandbox, dg._daytona)
+        sandbox.delete()
+
+
+def _execute_runner(
+    env: Environment,
+    dg: DeepGym,
+    script: str,
+    payload: dict[str, Any],
+    *,
+    patch_text: str | None = None,
+    archive_path: Path | None = None,
+    timeout: int,
+) -> RunResult:
+    """Run a self-contained benchmark runner on *dg*'s backend and time it."""
+    start = time.perf_counter()
+    if dg._local_executor is not None:
+        result, stderr, exit_code = _run_local_runner(
+            script, payload, patch_text=patch_text, archive_path=archive_path, timeout=timeout
+        )
+        sandbox_id = 'local'
+    else:
+        result, stderr, exit_code, sandbox_id = _run_sandbox_runner(
+            env,
+            dg,
+            script,
+            payload,
+            patch_text=patch_text,
+            archive_path=archive_path,
+            timeout=timeout,
+        )
+    elapsed_ms = (time.perf_counter() - start) * 1000
+    return build_run_result(result, elapsed_ms, sandbox_id, stderr=stderr, exit_code=exit_code)
 
 
 class PatchVerifier:
@@ -333,6 +360,7 @@ class PatchVerifier:
         return textwrap.dedent(
             """
             import json
+            import re
             import shutil
             import subprocess
             import sys
@@ -384,60 +412,67 @@ class PatchVerifier:
                         1,
                     )
 
-                repo_source = task['repo_source']
                 timeout = int(task.get('timeout', 1800))
                 test_commands = task.get('test_commands') or []
                 setup_commands = task.get('setup_commands', '')
                 test_patch = task.get('test_patch', '')
-                base_commit = task['base_commit']
+                apply_credit = float(task.get('apply_credit', 0.3))
+                # Files the hidden test patch touches belong to the tests: drop the
+                # candidate's edits to them instead of letting them clash or tamper.
+                excludes = [
+                    f'--exclude={path}'
+                    for path in re.findall(r'^diff --git a/(\\S+) b/', test_patch, re.MULTILINE)
+                ]
 
                 with tempfile.TemporaryDirectory(prefix='deepgym_patch_repo_') as temp_dir_name:
                     temp_dir = Path(temp_dir_name)
-                    repo_dir = temp_dir / 'repo'
+                    # A repo_dir is already checked out (e.g. baked into the task's image).
+                    repo_dir = Path(task.get('repo_dir') or temp_dir / 'repo')
 
-                    clone = subprocess.run(
-                        ['git', 'clone', repo_source, str(repo_dir)],
-                        capture_output=True,
-                        text=True,
-                        timeout=timeout,
-                    )
-                    if clone.returncode != 0:
-                        return _emit(
-                            {
-                                'schema_version': '1.0',
-                                'score': 0.0,
-                                'passed': False,
-                                'details': f'git clone failed: {_tail(clone.stderr or clone.stdout)}',
-                                'reward_components': {'apply': 0.0, 'tests': 0.0},
-                                'metrics': {'pass_fraction': 0.0, 'tests_run': 0},
-                                'truncated': False,
-                                'error_type': 'clone_failed',
-                                'cases': [],
-                            },
-                            1,
+                    if not task.get('repo_dir'):
+                        clone = subprocess.run(
+                            ['git', 'clone', task['repo_source'], str(repo_dir)],
+                            capture_output=True,
+                            text=True,
+                            timeout=timeout,
                         )
+                        if clone.returncode != 0:
+                            return _emit(
+                                {
+                                    'schema_version': '1.0',
+                                    'score': 0.0,
+                                    'passed': False,
+                                    'details': f'git clone failed: {_tail(clone.stderr or clone.stdout)}',
+                                    'reward_components': {'apply': 0.0, 'tests': 0.0},
+                                    'metrics': {'pass_fraction': 0.0, 'tests_run': 0},
+                                    'truncated': False,
+                                    'error_type': 'clone_failed',
+                                    'cases': [],
+                                },
+                                1,
+                            )
 
-                    checkout = subprocess.run(
-                        ['git', '-C', str(repo_dir), 'checkout', base_commit],
-                        capture_output=True,
-                        text=True,
-                        timeout=timeout,
-                    )
-                    if checkout.returncode != 0:
-                        return _emit(
-                            {
-                                'schema_version': '1.0',
-                                'score': 0.0,
-                                'passed': False,
-                                'details': f'git checkout failed: {_tail(checkout.stderr or checkout.stdout)}',
-                                'reward_components': {'apply': 0.0, 'tests': 0.0},
-                                'metrics': {'pass_fraction': 0.0, 'tests_run': 0},
-                                'truncated': False,
-                                'error_type': 'checkout_failed',
-                                'cases': [],
-                            },
-                            1,
+                        checkout = subprocess.run(
+                            ['git', '-C', str(repo_dir), 'checkout', task['base_commit']],
+                            capture_output=True,
+                            text=True,
+                            timeout=timeout,
                         )
+                        if checkout.returncode != 0:
+                            return _emit(
+                                {
+                                    'schema_version': '1.0',
+                                    'score': 0.0,
+                                    'passed': False,
+                                    'details': f'git checkout failed: {_tail(checkout.stderr or checkout.stdout)}',
+                                    'reward_components': {'apply': 0.0, 'tests': 0.0},
+                                    'metrics': {'pass_fraction': 0.0, 'tests_run': 0},
+                                    'truncated': False,
+                                    'error_type': 'checkout_failed',
+                                    'cases': [],
+                                },
+                                1,
+                            )
 
                     if setup_commands:
                         setup = _run(setup_commands, cwd=repo_dir, timeout=timeout)
@@ -483,7 +518,7 @@ class PatchVerifier:
                             )
 
                     check = subprocess.run(
-                        ['git', '-C', str(repo_dir), 'apply', '--check', str(patch_path)],
+                        ['git', '-C', str(repo_dir), 'apply', '--check', *excludes, str(patch_path)],
                         capture_output=True,
                         text=True,
                         timeout=timeout,
@@ -515,7 +550,7 @@ class PatchVerifier:
                         )
 
                     apply_patch = subprocess.run(
-                        ['git', '-C', str(repo_dir), 'apply', str(patch_path)],
+                        ['git', '-C', str(repo_dir), 'apply', *excludes, str(patch_path)],
                         capture_output=True,
                         text=True,
                         timeout=timeout,
@@ -540,10 +575,10 @@ class PatchVerifier:
                         return _emit(
                             {
                                 'schema_version': '1.0',
-                                'score': 0.3,
+                                'score': apply_credit,
                                 'passed': False,
                                 'details': 'Patch applies cleanly, but no test commands were provided.',
-                                'reward_components': {'apply': 0.3, 'tests': 0.0},
+                                'reward_components': {'apply': apply_credit, 'tests': 0.0},
                                 'metrics': {'pass_fraction': 0.0, 'tests_run': 0},
                                 'truncated': False,
                                 'cases': [],
@@ -572,7 +607,7 @@ class PatchVerifier:
                         )
 
                     pass_fraction = passed_count / len(test_commands)
-                    score = 0.3 + (0.7 * pass_fraction)
+                    score = apply_credit + (1 - apply_credit) * pass_fraction
                     return _emit(
                         {
                             'schema_version': '1.0',
@@ -583,8 +618,8 @@ class PatchVerifier:
                                 f'{passed_count}/{len(test_commands)} test commands passed.'
                             ),
                             'reward_components': {
-                                'apply': 0.3,
-                                'tests': round(0.7 * pass_fraction, 6),
+                                'apply': apply_credit,
+                                'tests': round((1 - apply_credit) * pass_fraction, 6),
                             },
                             'metrics': {
                                 'pass_fraction': pass_fraction,
@@ -742,25 +777,7 @@ class SWEBenchProEnvironment(Environment):
             'test_commands': self._build_test_commands(task),
             'timeout': self.timeout,
         }
-
-        start = time.perf_counter()
-        if dg._local_executor is not None:
-            result, stderr, exit_code = _run_local_runner(
-                PatchVerifier.build_runner_script(),
-                payload,
-                patch_text=patch_text,
-                timeout=self.timeout,
-            )
-            elapsed_ms = (time.perf_counter() - start) * 1000
-            return build_run_result(
-                result,
-                elapsed_ms,
-                'local',
-                stderr=stderr,
-                exit_code=exit_code,
-            )
-
-        result, stderr, exit_code, sandbox_id = _run_daytona_runner(
+        return _execute_runner(
             self,
             dg,
             PatchVerifier.build_runner_script(),
@@ -768,13 +785,48 @@ class SWEBenchProEnvironment(Environment):
             patch_text=patch_text,
             timeout=self.timeout,
         )
-        elapsed_ms = (time.perf_counter() - start) * 1000
-        return build_run_result(
-            result,
-            elapsed_ms,
-            sandbox_id,
-            stderr=stderr,
-            exit_code=exit_code,
+
+
+class RepoPatchEnvironment(Environment):
+    """A repo-level patch task whose repository, toolchain and tests ship in its image.
+
+    For datasets that publish one image per task with the repo already at
+    ``repo_dir``, such as the MiMo-V2.6-RL code subset. The model returns a unified
+    diff; the SWE-bench Pro patch runner applies the hidden ``test_patch``, then the
+    diff (minus any edits to the hidden test files), runs ``test_command`` and scores
+    1.0 if it exits 0, else 0.0.
+
+    The runner and the tests run as root in the sandbox booted from ``image``:
+    these test scripts expect root's toolchains and caches (``/root/go``,
+    ``$HOME/.pyenv``), so the sandbox, not ``deepgym_solution``, is the isolation
+    boundary. As with any repo patch task, a patch can also make the tests exit 0 by
+    editing the code they run, so the reward is only as strong as the tests.
+    """
+
+    verifier_code: str = 'return 0.0'
+    domain: str = 'software-engineering'
+    tags: list[str] = Field(default_factory=lambda: ['benchmark', 'patch'])
+    timeout: int = 1800
+    repo_dir: str
+    test_command: str
+    test_patch: str = ''
+
+    def run_with_deepgym(self, dg: DeepGym, model_output: str, **kwargs: Any) -> RunResult:
+        """Score *model_output*'s diff against the hidden tests; *kwargs* are ignored."""
+        payload = {
+            'repo_dir': self.repo_dir,
+            'test_patch': self.test_patch,
+            'test_commands': [self.test_command],
+            'timeout': self.timeout,
+            'apply_credit': 0.0,
+        }
+        return _execute_runner(
+            self,
+            dg,
+            PatchVerifier.build_runner_script(),
+            payload,
+            patch_text=PatchVerifier.extract_patch(model_output),
+            timeout=self.timeout,
         )
 
 
@@ -1116,26 +1168,7 @@ class TerminalBenchEnvironment(Environment):
             archive_path = Path(archive_dir_name) / f'{task.task_id}.tar.gz'
             with tarfile.open(archive_path, 'w:gz') as archive:
                 archive.add(task.task_dir, arcname=task.task_id)
-
-            start = time.perf_counter()
-            if dg._local_executor is not None:
-                result, stderr, exit_code = _run_local_runner(
-                    self.build_runner_script(),
-                    payload,
-                    patch_text=model_output,
-                    archive_path=archive_path,
-                    timeout=task.timeout_sec,
-                )
-                elapsed_ms = (time.perf_counter() - start) * 1000
-                return build_run_result(
-                    result,
-                    elapsed_ms,
-                    'local',
-                    stderr=stderr,
-                    exit_code=exit_code,
-                )
-
-            result, stderr, exit_code, sandbox_id = _run_daytona_runner(
+            return _execute_runner(
                 self,
                 dg,
                 self.build_runner_script(),
@@ -1143,14 +1176,6 @@ class TerminalBenchEnvironment(Environment):
                 patch_text=model_output,
                 archive_path=archive_path,
                 timeout=task.timeout_sec,
-            )
-            elapsed_ms = (time.perf_counter() - start) * 1000
-            return build_run_result(
-                result,
-                elapsed_ms,
-                sandbox_id,
-                stderr=stderr,
-                exit_code=exit_code,
             )
 
 

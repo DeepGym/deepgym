@@ -1,5 +1,9 @@
 # Changelog
 
+## Unreleased
+
+- **MiMo-V2.6-RL code tasks:** `scripts/import_mimo_rl.py` imports the 2,698 code tasks of `XiaomiMiMo/MiMo-V2.6-RL-oss` (Apache-2.0) as `mimo_code/<instance_id>` environments. Each is a `RepoPatchEnvironment`: its sandbox boots from the task's own image, the hidden test patch and then the model's diff are applied to the repo in place, and the score is 1.0 if the test command exits 0, else 0.0. The SWE-bench Pro patch runner now drops a candidate's edits to files the hidden test patch touches, and benchmark-backed envs start their sandbox from the client's provider instead of always Daytona. The cyber, general, webdev and music subsets aren't imported (see the README).
+
 ## 0.4.1 (2026-10-13)
 
 - **License:** DeepGym is now under the PolyForm Noncommercial License 1.0.0. Commercial use needs a license (contact@deepgym.io). Releases up to 0.4.0 stay MIT.

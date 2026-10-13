@@ -17,7 +17,7 @@ from typing import Any
 
 from pydantic import Field
 
-from deepgym.benchmark_envs import _run_daytona_runner, _run_local_runner
+from deepgym.benchmark_envs import _execute_runner
 from deepgym.cyberbench import classify_vulnerability_family
 from deepgym.models import Environment, RunResult
 
@@ -163,50 +163,21 @@ class CyberGymPatchEnvironment(Environment):
         )
 
     def run_with_deepgym(self, dg: Any, model_output: str, **kwargs: Any) -> RunResult:
-        """Run artifact-backed verifier via local or Daytona runner."""
+        """Run artifact-backed verifier locally or in a sandbox."""
         artifacts = self.artifacts or download_cybergym_artifacts(
             self.row,
             repo_id=self.repo_id,
             level=self.level,
         )
-        patch_text = extract_patch(model_output)
-        payload = build_payload(
-            self.row, artifacts, timeout=int(kwargs.get('timeout', self.timeout))
-        )
-        script = build_cybergym_patch_runner_script()
         timeout = int(kwargs.get('timeout', self.timeout))
-
-        if getattr(dg, '_local_executor', None) is not None:
-            verifier_result, stderr, exit_code = _run_local_runner(
-                script,
-                payload,
-                patch_text=patch_text,
-                archive_path=artifacts.repo_vul,
-                timeout=timeout,
-            )
-            import time
-
-            from deepgym.sandbox import build_run_result
-
-            return build_run_result(
-                verifier_result, time.perf_counter() * 0, 'local', stderr, exit_code
-            )
-
-        verifier_result, stderr, exit_code, sandbox_id = _run_daytona_runner(
+        return _execute_runner(
             self,
             dg,
-            script,
-            payload,
-            patch_text=patch_text,
+            build_cybergym_patch_runner_script(),
+            build_payload(self.row, artifacts, timeout=timeout),
+            patch_text=extract_patch(model_output),
             archive_path=artifacts.repo_vul,
             timeout=timeout,
-        )
-        import time
-
-        from deepgym.sandbox import build_run_result
-
-        return build_run_result(
-            verifier_result, time.perf_counter() * 0, sandbox_id, stderr, exit_code
         )
 
 

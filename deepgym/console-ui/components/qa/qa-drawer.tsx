@@ -3,16 +3,21 @@
 import { useState } from 'react';
 import { TaskRows } from '@/components/primitives/task-rows';
 import { Drawer } from '@/components/ui/overlay';
+import { VerdictBanner } from '@/components/ui/verdict-banner';
 import { timeAgo } from '@/lib/format';
 import type { QAReport } from '@/lib/types';
-import { QAStatusBadge } from './qa-status';
+import { failuresFirst, verdictLine } from '@/lib/verdict';
+import { qaStatus } from './qa-status';
 
-/** One environment's QA checks; a check's details expand under it. */
+/** One environment's QA checks: the verdict on top, failed checks first, each with its details inline. */
 export function QADrawer({ report, onClose }: { report: QAReport | null; onClose: () => void }) {
   // Keep the last report while the drawer animates closed.
   const [shown, setShown] = useState(report);
   const changed = report?.environment !== shown?.environment || report?.created_at !== shown?.created_at;
   if (report !== null && changed) setShown(report);
+
+  const skipped = shown !== null && qaStatus(shown) === 'skip';
+  const failed = shown?.checks.filter((check) => !check.passed).length ?? 0;
 
   return (
     <Drawer
@@ -23,20 +28,20 @@ export function QADrawer({ report, onClose }: { report: QAReport | null; onClose
     >
       {shown && (
         <div className="flex flex-col gap-4">
-          <div className="flex items-center gap-2 text-body-2-regular text-text-secondary">
-            <QAStatusBadge report={shown} />
-            <span>
-              {shown.checks.filter((check) => check.passed).length} of {shown.checks.length} checks passed,{' '}
-              {timeAgo(shown.created_at)}
-            </span>
-          </div>
+          <VerdictBanner passed={skipped ? null : shown.passed} meta={timeAgo(shown.created_at)}>
+            {skipped
+              ? 'QA skipped: this environment cannot be checked'
+              : verdictLine('QA', shown.passed, failed, shown.checks.length, 'check')}
+          </VerdictBanner>
           <TaskRows
-            rows={shown.checks.map((check) => ({
-              key: check.name,
-              label: check.name,
-              status: check.passed ? 'done' : 'failed',
-              details: check.details ? [{ label: check.details }] : undefined,
-            }))}
+            rows={failuresFirst(
+              shown.checks.map((check) => ({
+                key: check.name,
+                label: check.name,
+                subline: check.details || undefined,
+                status: check.passed ? 'done' : 'failed',
+              })),
+            )}
           />
         </div>
       )}

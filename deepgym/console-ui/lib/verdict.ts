@@ -7,6 +7,32 @@ export type Tone = 'good' | 'warn' | 'bad';
 /** Colour band of a value in [0, 1] (a score or a pass rate): good from 0.8, warn from 0.5, bad below. */
 export const scoreTone = (value: number): Tone => (value >= 0.8 ? 'good' : value >= 0.5 ? 'warn' : 'bad');
 
+export type TaskStatus = 'failed' | 'running' | 'queued' | 'done';
+
+const ATTENTION: Record<TaskStatus, number> = { failed: 0, running: 1, queued: 2, done: 3 };
+
+/** Rows that need attention first: failed, then running, queued, passed; order kept within each. */
+export const failuresFirst = <T extends { status: TaskStatus }>(rows: T[]): T[] =>
+  rows.toSorted((a, b) => ATTENTION[a.status] - ATTENTION[b.status]);
+
+/**
+ * Headline for a verdict banner, e.g. "QA failed: 2 of 6 checks" or "QA passed: 6 of 6 checks".
+ * `noun` is singular; it gets an "s" when `total` isn't 1.
+ */
+export function verdictLine(
+  subject: string,
+  passed: boolean,
+  failed: number,
+  total: number,
+  noun: string,
+): string {
+  const verdict = `${subject} ${passed ? 'passed' : 'failed'}`;
+  if (total === 0) return verdict;
+  const things = `${total} ${noun}${total === 1 ? '' : 's'}`;
+  if (passed) return `${verdict}: ${total - failed} of ${things}`;
+  return failed === 0 ? `${verdict}: every ${noun} passed` : `${verdict}: ${failed} of ${things}`;
+}
+
 /** Why a case passed or failed, in one line: its error, else what was expected and what came back. */
 export function caseReason(item: CaseResult): string {
   if (item.error) return item.error;

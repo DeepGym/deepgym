@@ -1,6 +1,26 @@
 import { expect, test } from 'bun:test';
 import type { CaseResult } from './types';
-import { caseReason, scoreTone } from './verdict';
+import { caseReason, failuresFirst, scoreTone, verdictLine } from './verdict';
+
+test('failures first, then in-flight, then passed, keeping order within each status', () => {
+  const rows = [
+    { key: 'a', status: 'done' },
+    { key: 'b', status: 'failed' },
+    { key: 'c', status: 'running' },
+    { key: 'd', status: 'failed' },
+    { key: 'e', status: 'queued' },
+  ] as const;
+  expect(failuresFirst([...rows]).map((row) => row.key)).toEqual(['b', 'd', 'c', 'e', 'a']);
+});
+
+test('verdict line counts failures when failed and passes when passed', () => {
+  expect(verdictLine('QA', false, 2, 6, 'check')).toBe('QA failed: 2 of 6 checks');
+  expect(verdictLine('QA', true, 0, 6, 'check')).toBe('QA passed: 6 of 6 checks');
+  expect(verdictLine('Run', true, 2, 10, 'case')).toBe('Run passed: 8 of 10 cases');
+  expect(verdictLine('Run', false, 0, 10, 'case')).toBe('Run failed: every case passed');
+  expect(verdictLine('Run', false, 1, 1, 'case')).toBe('Run failed: 1 of 1 case');
+  expect(verdictLine('Run', false, 0, 0, 'case')).toBe('Run failed');
+});
 
 const base: CaseResult = {
   id: 'c1',

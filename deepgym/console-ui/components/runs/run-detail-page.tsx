@@ -9,10 +9,12 @@ import { type TaskRow, TaskRows } from '@/components/primitives/task-rows';
 import { Card } from '@/components/ui/card';
 import { EmptyState } from '@/components/ui/empty-state';
 import { PageHeader } from '@/components/ui/page-header';
+import { VerdictBanner } from '@/components/ui/verdict-banner';
 import { api, useApi } from '@/lib/api';
 import { formatScore, timeAgo } from '@/lib/format';
 import type { RunDetail, RunSummary } from '@/lib/types';
 import { useQueryParam } from '@/lib/use-query-param';
+import { failuresFirst, verdictLine } from '@/lib/verdict';
 import { RunSource } from './run-source';
 import { RunSummary as RunSummaryStrip } from './run-summary';
 import { ScoreBreakdown } from './score-breakdown';
@@ -25,16 +27,26 @@ const taskStatus = (run: RunSummary): TaskRow['status'] =>
 function GroupRuns({ run }: { run: RunDetail }) {
   const { data } = useApi<RunSummary[]>(`/runs?group_id=${run.group_id}`, 2500, (runs) => runs.some(active));
   if (!data || data.length < 2) return null;
+  const running = data.filter(active).length;
+  const failed = data.filter((item) => !active(item) && !item.passed).length;
   const rows: TaskRow[] = data.map((item) => ({
     key: item.id,
     label: <span className={item.id === run.id ? 'text-accent-400' : undefined}>{item.environment}</span>,
+    subline: item.error_type ?? undefined,
     meta: formatScore(item.score),
     status: taskStatus(item),
     href: `/runs/detail/?id=${item.id}`,
   }));
   return (
     <Card title={`Eval ${run.group_id} - ${data.length} runs`}>
-      <TaskRows rows={rows} />
+      <div className="flex flex-col gap-3">
+        <VerdictBanner passed={running ? null : failed === 0}>
+          {running
+            ? `Eval running: ${data.length - running} of ${data.length} runs done`
+            : verdictLine('Eval', failed === 0, failed, data.length, 'run')}
+        </VerdictBanner>
+        <TaskRows rows={failuresFirst(rows)} />
+      </div>
     </Card>
   );
 }

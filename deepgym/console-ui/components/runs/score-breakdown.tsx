@@ -7,7 +7,9 @@ import { Card } from '@/components/ui/card';
 import { Collapse } from '@/components/ui/collapse';
 import { EmptyState } from '@/components/ui/empty-state';
 import { ScoreChip } from '@/components/ui/status-badge';
+import { VerdictBanner } from '@/components/ui/verdict-banner';
 import type { RunResult } from '@/lib/types';
+import { verdictLine } from '@/lib/verdict';
 import { cx } from '@/utils/cx';
 import { CasesTable } from './cases-table';
 
@@ -33,6 +35,11 @@ export function ScoreBreakdown({ result }: { result: RunResult }) {
 
   return (
     <Card title="Score breakdown" flush>
+      <div className="px-4 pb-3">
+        <VerdictBanner passed={result.passed}>
+          {verdictLine('Run', result.passed, failed, cases.length, 'case')}
+        </VerdictBanner>
+      </div>
       {components.length === 0 && cases.length === 0 && (
         <EmptyState icon={RiListCheck3} title="This verifier reports no reward components or cases" />
       )}

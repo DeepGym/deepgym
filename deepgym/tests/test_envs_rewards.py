@@ -229,3 +229,24 @@ def test_an_empty_answer_earns_nothing(dg: DeepGym, env_name: str) -> None:
 
     assert result.has_verdict
     assert result.score == 0.0
+
+
+@pytest.mark.parametrize(
+    ('env_name', 'function'),
+    [
+        ('anagram_check', 'is_anagram'),
+        ('palindrome_check', 'is_palindrome'),
+        ('valid_parentheses', 'is_valid'),
+    ],
+)
+@pytest.mark.parametrize('constant', ['True', 'False', '0'])
+def test_a_constant_answer_to_a_yes_no_task_earns_nothing(
+    dg: DeepGym, env_name: str, function: str, constant: str
+) -> None:
+    # Plain accuracy paid the majority class's share, and 0 == False passed as False.
+    answer = f'def {function}(*args):\n    return {constant}\n'
+
+    result = dg.run(load_environment(env_name), answer)
+
+    assert result.has_verdict
+    assert result.score == 0.0

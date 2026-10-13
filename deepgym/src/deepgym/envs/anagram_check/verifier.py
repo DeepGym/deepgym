@@ -78,7 +78,7 @@ def verify(solution_path, test_cases_path=None):
                 case['passed'] = False
                 case['score'] = 0.0
                 case['error'] = 'exceeded 5s time limit'
-            elif result == expected:
+            elif result is expected:  # a real bool: 0 == False must not pass
                 passed += 1
                 case['passed'] = True
                 case['score'] = 1.0
@@ -96,17 +96,29 @@ def verify(solution_path, test_cases_path=None):
 
         cases.append(case)
 
-    score = passed / total
+    score = _balanced(cases, [case[-1] for case in test_cases])
     return {
         'schema_version': '1.0',
         'score': score,
         'passed': score == 1.0,
-        'details': f'{passed}/{total} passed. ' + '; '.join(details)
-        if details
-        else f'{passed}/{total} passed',
+        'details': f'{passed}/{total} passed, balanced score {score:.2f}'
+        + ('. ' + '; '.join(details) if details else ''),
         'cases': cases,
         'seed': seed,
     }
+
+
+def _balanced(cases, labels):
+    """Recall on True cases plus recall on False cases, minus 1 (0 at worst).
+
+    A constant answer or a coin flip earns 0 however the cases are balanced, and only
+    getting every case right earns 1.
+    """
+    recall = []
+    for label in (True, False):
+        hits = [case['passed'] for case, want in zip(cases, labels) if want is label]
+        recall.append(sum(hits) / len(hits) if hits else 1.0)
+    return max(0.0, sum(recall) - 1.0)
 
 
 if __name__ == '__main__':

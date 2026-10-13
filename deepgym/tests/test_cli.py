@@ -221,13 +221,12 @@ class TestCLIRunSubcommand:
 
 
 class TestCLICreateSubcommand:
-    """Verify the create subcommand prints environment JSON."""
+    """Verify the create subcommand prints the named environment and saves nothing."""
 
-    def test_create_prints_json(self, capsys: pytest.CaptureFixture) -> None:
+    def test_create_prints_the_named_environment_and_says_it_is_not_saved(
+        self, capsys: pytest.CaptureFixture
+    ) -> None:
         sorting_dir = ENVS_DIR / 'python_sorting'
-        if not sorting_dir.exists():
-            pytest.skip('envs/python_sorting not found')
-
         args = [
             'deepgym',
             'create',
@@ -241,8 +240,11 @@ class TestCLICreateSubcommand:
         with patch.object(sys, 'argv', args):
             main()
 
-        captured = capsys.readouterr()
-        assert 'Environment created' in captured.out
+        out, err = capsys.readouterr()
+        env = json.loads(out)
+        assert env['name'] == 'test_env'
+        assert env['verifier_code'] == (sorting_dir / 'verifier.py').read_text(encoding='utf-8')
+        assert 'Not saved' in err
 
 
 class TestCLIAuditSubcommand:

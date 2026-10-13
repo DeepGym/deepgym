@@ -56,7 +56,9 @@ def _build_parser() -> argparse.ArgumentParser:
     eval_p.add_argument('--max-parallel', type=int, default=100, help='Max concurrent runs')
 
     # ── create ────────────────────────────────────────────────────────
-    create_p = sub.add_parser('create', help='Create/register an environment')
+    create_p = sub.add_parser(
+        'create', help='Print an environment as JSON, ready to POST to /v1/environments'
+    )
     create_p.add_argument('--name', required=True, help='Environment name')
     create_p.add_argument('--task', required=True, help='Task description / prompt')
     create_p.add_argument('--verifier', required=True, help='Path to verifier Python file')
@@ -354,20 +356,19 @@ def _cmd_eval(args: argparse.Namespace) -> None:
 def _cmd_create(args: argparse.Namespace) -> None:
     from deepgym.models import Environment
 
-    task_value = _read_file_or_string(args.task)
-    verifier_code = _read_file_or_string(args.verifier)
-
     env = Environment(
-        task=task_value,
-        verifier_code=verifier_code,
+        name=args.name,
+        task=_read_file_or_string(args.task),
+        verifier_code=_read_file_or_string(args.verifier),
         difficulty=args.difficulty,
         domain=args.domain,
         tags=args.tags,
     )
-
-    # Pretty-print the environment as JSON.
-    print('Environment created:')
-    print(json.dumps(env.model_dump(), indent=2, default=str))
+    print(json.dumps(env.model_dump(mode='json'), indent=2))
+    print(
+        'Not saved anywhere: POST it to /v1/environments to register it on a server.',
+        file=sys.stderr,
+    )
 
 
 def _cmd_audit(args: argparse.Namespace) -> None:

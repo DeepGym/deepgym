@@ -304,3 +304,13 @@ def sandbox_judge(
     # solution; run_solution shares only the directories it hands over.
     env['TMPDIR'] = f'{SANDBOX_ROOT}/tmp'
     return f'bash -c {shlex.quote(command)}', env
+
+
+def sandbox_judge_by_name(job: JudgeJob) -> tuple[str, dict[str, str]]:
+    """Return :func:`sandbox_judge`'s (command, env) for a root shell that runs
+    SANDBOX_SETUP itself, so its output isn't known here (an exported Harbor task).
+
+    The solver is named rather than numbered (setpriv takes either) and gets no network
+    namespace of its own: the sandbox itself must be offline.
+    """
+    return sandbox_judge(job, f'0 {SOLVER_USER} {SOLVER_USER} python3 0')

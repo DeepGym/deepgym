@@ -7,12 +7,14 @@ Usage::
 
     from deepgym.integrations.hf import push_environment_to_hub, load_environment_from_hub
 
-    # Push a built-in environment to your HF org
+    # Push a built-in environment to your HF org; the push returns its commit
     env = load_environment('coin_change')
-    push_environment_to_hub(env, repo_id='your-org/deepgym-coin-change', env_name='coin_change')
+    revision = push_environment_to_hub(
+        env, repo_id='your-org/deepgym-coin-change', env_name='coin_change'
+    )
 
-    # Load it back on any machine
-    env = load_environment_from_hub('your-org/deepgym-coin-change')
+    # Load exactly that commit on any machine
+    env = load_environment_from_hub('your-org/deepgym-coin-change', revision=revision)
 
     # Push eval results as a leaderboard dataset
     push_results_to_hub(results_dict, repo_id='your-org/deepgym-leaderboard')
@@ -21,39 +23,47 @@ Dataset schema (each row is one environment)::
 
     {
         "env_name": "coin_change",
-        "task": "Write a function coin_change(coins, amount)...",
-        "verifier_code": "...",
-        "test_cases": "[{...}]",   # JSON string, empty string if None
-        "timeout": 30,
-        "schema_version": "1.0"
+        "environment": "{...}",   # JSON: every Environment field, verifier inlined
+        "schema_version": "2.0"
     }
+
+A round trip gives back the environment that was pushed: verifier source, support
+files, test cases, timeouts, verifier mode, image and the rest. Only a plain
+``Environment`` round-trips; subclasses (repo-patch, benchmark, mixed environments) are
+refused. Rows in the 1.0 schema (task, verifier_code, test_cases, timeout) still load.
+
+A Hub dataset is untrusted input, so pushing and loading run the same checks (see
+:func:`environment_from_dict`) and data can't change how the sandbox runs it: no
+``env_vars``, no host paths, no verifier mode the verifier doesn't read as, plain
+relative support file names, and a custom ``image`` or ``snapshot`` only with
+``trust_image=True``.
+
+Without a ``revision``, ``datasets`` loads the repo's current ``main``, which changes
+with every push; pass the commit a push returned to pin it.
 """
 
 from __future__ import annotations
 
 import json
 import logging
-from typing import TYPE_CHECKING
+import posixpath
+from collections.abc import Mapping
+from types import ModuleType
+from typing import TYPE_CHECKING, Any
 
 from deepgym.models import Environment
+from deepgym.verifier_template import detect_verifier_mode
 
 if TYPE_CHECKING:
-    pass
+    from datasets import Dataset, Features  # type: ignore[import-untyped]
+    from huggingface_hub import CommitInfo
 
 logger = logging.getLogger(__name__)
 
-_SCHEMA_VERSION = '1.0'
-_DATASET_FEATURES_SCHEMA = {
-    'env_name': 'string',
-    'task': 'string',
-    'verifier_code': 'string',
-    'test_cases': 'string',
-    'timeout': 'int32',
-    'schema_version': 'string',
-}
+_SCHEMA_VERSION = '2.0'
 
 
-def _require_datasets() -> object:
+def _require_datasets() -> ModuleType:
     """Import datasets library or raise a helpful error."""
     try:
         import datasets  # type: ignore[import-untyped]
@@ -65,7 +75,63 @@ def _require_datasets() -> object:
     return datasets
 
 
-def environment_to_dict(env: Environment, env_name: str = '') -> dict:
+def _hub_environment(manifest: Mapping[str, Any], *, trust_image: bool) -> Environment:
+    """Validate an environment manifest on its way to or from the Hub.
+
+    Pushes and loads run these same checks, so a row that loads is one a push could have
+    written, and a row can't change how the sandbox runs its environment.
+
+    Args:
+        manifest: Every Environment field, with the verifier source inlined.
+        trust_image: Whether a custom ``image`` or ``snapshot`` may be used.
+
+    Returns:
+        The validated Environment.
+
+    Raises:
+        ValueError: If a field is unknown or of the wrong type (there is no coercion);
+            the row names a ``verifier_path`` (that file would be read on the loading
+            machine); it sets ``env_vars`` (they reach the verifier's and the solution's
+            processes, and may hold credentials); ``verifier_mode`` is neither ``auto``
+            nor the mode the verifier reads as; a support file name isn't a plain
+            relative path; or it names an image or snapshot and *trust_image* is False.
+    """
+    unknown = manifest.keys() - Environment.model_fields.keys()
+    if unknown:
+        raise ValueError(f'Unknown environment fields {sorted(unknown)}; upgrade deepgym')
+    env = Environment.model_validate(manifest, strict=True)
+    if env.verifier_path is not None:
+        raise ValueError('A Hub environment must inline its verifier, not name a verifier_path')
+    if env.env_vars:
+        raise ValueError(
+            'env_vars cannot go through the Hub: they reach the verifier and the solution, and '
+            "may hold credentials. Clear them (env.model_copy(update={'env_vars': None})) and "
+            'set them where the environment runs'
+        )
+    detected = detect_verifier_mode(env.verifier_code)
+    if env.verifier_mode not in ('auto', detected):
+        raise ValueError(
+            f'verifier_mode {env.verifier_mode!r} does not match the verifier, which reads as '
+            f'{detected!r}'
+        )
+    # The model already refuses absolute paths and ..; canonical form also rules out
+    # ., empty parts and trailing slashes.
+    bad = [
+        name
+        for name in env.support_files
+        if '\\' in name or '\0' in name or posixpath.normpath(name) != name
+    ]
+    if bad:
+        raise ValueError(f'Support file names must be plain relative paths: {bad}')
+    if (env.image or env.snapshot) and not trust_image:
+        raise ValueError(
+            f'The environment runs in {env.image or env.snapshot!r}; pass trust_image=True '
+            'to run an image a Hub dataset names'
+        )
+    return env
+
+
+def environment_to_dict(env: Environment, env_name: str = '') -> dict[str, str]:
     """Serialise an Environment to a flat dict for HF dataset rows.
 
     Args:
@@ -73,49 +139,58 @@ def environment_to_dict(env: Environment, env_name: str = '') -> dict:
         env_name: Friendly name for the dataset row (optional).
 
     Returns:
-        Dict with keys: env_name, task, verifier_code, test_cases, timeout,
-        schema_version.
+        Dict with keys env_name, environment (every field as JSON, with the verifier
+        source inlined) and schema_version.
+
+    Raises:
+        TypeError: If *env* is an Environment subclass, whose extra fields and runner
+            the row can't carry.
+        ValueError: If loading the row would refuse it (see :func:`_hub_environment`);
+            your own image is fine to push.
     """
-    if env.verifier_path is not None:
-        verifier_code = env.verifier_path.read_text(encoding='utf-8')
-    else:
-        verifier_code = env.verifier_code
-
-    test_cases_str = json.dumps(env.test_cases, ensure_ascii=False) if env.test_cases else ''
-
+    if type(env) is not Environment:
+        raise TypeError(
+            f'{type(env).__name__} cannot be pushed to the Hub: only a plain Environment '
+            'round-trips'
+        )
+    manifest = env.model_dump(mode='json', exclude={'verifier_path'})
+    manifest['verifier_code'] = env.verifier_source
+    _hub_environment(manifest, trust_image=True)
     return {
-        'env_name': env_name or '',
-        'task': env.task,
-        'verifier_code': verifier_code,
-        'test_cases': test_cases_str,
-        'timeout': env.timeout,
+        'env_name': env_name,
+        'environment': json.dumps(manifest, ensure_ascii=False),
         'schema_version': _SCHEMA_VERSION,
     }
 
 
-def environment_from_dict(row: dict) -> Environment:
+def environment_from_dict(row: Mapping[str, Any], *, trust_image: bool = False) -> Environment:
     """Deserialise an Environment from a HF dataset row.
 
     Args:
         row: Dict produced by :func:`environment_to_dict` or loaded from HF.
+        trust_image: Allow the row's ``image`` or ``snapshot``; refused otherwise.
 
     Returns:
         Reconstructed Environment.
-    """
-    test_cases = None
-    raw_tc = row.get('test_cases', '')
-    if raw_tc:
-        try:
-            test_cases = json.loads(raw_tc)
-        except json.JSONDecodeError as exc:
-            logger.warning('Failed to parse test_cases from HF row: %s', exc)
 
-    return Environment(
-        task=row['task'],
-        verifier_code=row['verifier_code'],
-        test_cases=test_cases,
-        timeout=int(row.get('timeout', 30)),
-    )
+    Raises:
+        ValueError: If the row is in an unknown schema version, holds invalid JSON, or
+            fails the checks every Hub environment goes through (see
+            :func:`_hub_environment`).
+    """
+    version = row.get('schema_version', '1.0')
+    if version == '1.0':
+        manifest = {
+            'task': row['task'],
+            'verifier_code': row['verifier_code'],
+            'timeout': int(row.get('timeout', 30)),
+        }
+        if row.get('test_cases'):
+            manifest['test_cases'] = json.loads(row['test_cases'])
+        return _hub_environment(manifest, trust_image=trust_image)
+    if version != _SCHEMA_VERSION:
+        raise ValueError(f'Unknown environment schema_version {version!r}; upgrade deepgym')
+    return _hub_environment(json.loads(row['environment']), trust_image=trust_image)
 
 
 def push_environment_to_hub(
@@ -125,11 +200,11 @@ def push_environment_to_hub(
     *,
     private: bool = False,
     token: str | None = None,
-) -> None:
+) -> str:
     """Push a single DeepGym environment to HuggingFace Hub as a dataset.
 
-    Creates or updates the dataset at ``repo_id`` with one row containing
-    the environment's task, verifier code, and test cases.
+    Creates or updates the dataset at ``repo_id`` with one row holding the
+    whole environment.
 
     Args:
         env: Environment to push.
@@ -138,14 +213,14 @@ def push_environment_to_hub(
         private: Whether to create the dataset as private.
         token: HF API token (uses HF_TOKEN env var / cached login if None).
 
+    Returns:
+        The commit the push made: pass it as ``revision`` to load exactly this version.
+
     Raises:
         ImportError: If ``datasets`` package is not installed.
+        TypeError, ValueError: If *env* can't round-trip (see :func:`environment_to_dict`).
     """
-    datasets = _require_datasets()
-    row = environment_to_dict(env, env_name=env_name)
-    dataset = datasets.Dataset.from_list([row])
-    dataset.push_to_hub(repo_id, private=private, token=token)
-    logger.info('Pushed environment %r to %s', env_name or 'unnamed', repo_id)
+    return push_environments_to_hub({env_name: env}, repo_id, private=private, token=token)
 
 
 def push_environments_to_hub(
@@ -154,7 +229,7 @@ def push_environments_to_hub(
     *,
     private: bool = False,
     token: str | None = None,
-) -> None:
+) -> str:
     """Push multiple environments to HuggingFace Hub as a single dataset.
 
     Args:
@@ -163,14 +238,74 @@ def push_environments_to_hub(
         private: Whether to create the dataset as private.
         token: HF API token (uses HF_TOKEN env var / cached login if None).
 
+    Returns:
+        The commit the push made: pass it as ``revision`` to load exactly this version.
+
     Raises:
         ImportError: If ``datasets`` package is not installed.
+        TypeError, ValueError: If an environment can't round-trip (see
+            :func:`environment_to_dict`).
     """
     datasets = _require_datasets()
     rows = [environment_to_dict(env, env_name=name) for name, env in envs.items()]
     dataset = datasets.Dataset.from_list(rows)
-    dataset.push_to_hub(repo_id, private=private, token=token)
-    logger.info('Pushed %d environments to %s', len(rows), repo_id)
+    commit = dataset.push_to_hub(repo_id, private=private, token=token)
+    revision = _replace_stale_features(commit, dataset.features, token) or commit.oid
+    logger.info('Pushed %d environments to %s at %s', len(rows), repo_id, revision)
+    return revision
+
+
+def _replace_stale_features(
+    commit: CommitInfo, features: Features, token: str | None
+) -> str | None:
+    """Rewrite the dataset card's features if an earlier push left different ones there.
+
+    ``push_to_hub`` keeps the features a repo's card already lists for the config, so
+    after a schema 1.0 push the 2.0 rows wouldn't load. The card is read at the push's
+    *commit* and fixed on top of it, in the repository the push resolved.
+
+    Returns:
+        The commit that fixed the card, or None if it was already right.
+
+    Raises:
+        huggingface_hub.errors.HfHubHTTPError: If another push landed after *commit*, so
+            the fix can't build on it; push again.
+    """
+    from datasets.info import DatasetInfosDict  # type: ignore[import-untyped]
+    from huggingface_hub import CommitOperationAdd, DatasetCard, HfApi, hf_hub_download
+
+    repo_id = commit.repo_url.repo_id
+    readme = hf_hub_download(
+        repo_id, 'README.md', repo_type='dataset', revision=commit.oid, token=token
+    )
+    card = DatasetCard.load(readme)
+    infos = DatasetInfosDict.from_dataset_card_data(card.data)
+    info = infos.get('default')
+    if info is None or info.features == features:
+        return None
+    info.features = features
+    infos.to_dataset_card_data(card.data)
+    fixed = HfApi(token=token).create_commit(
+        repo_id,
+        operations=[
+            CommitOperationAdd(path_in_repo='README.md', path_or_fileobj=str(card).encode())
+        ],
+        commit_message=f'Update the dataset card to DeepGym environment schema {_SCHEMA_VERSION}',
+        repo_type='dataset',
+        parent_commit=commit.oid,
+    )
+    return fixed.oid
+
+
+def _load_rows(repo_id: str, split: str, revision: str | None, token: str | None) -> Dataset:
+    """Load the dataset at *revision*, warning when it isn't pinned."""
+    if revision is None:
+        logger.warning(
+            'Loading %s at its current main, which changes with every push; pass revision= '
+            '(the commit a push returned) to load the same environments every time',
+            repo_id,
+        )
+    return _require_datasets().load_dataset(repo_id, split=split, revision=revision, token=token)
 
 
 def load_environment_from_hub(
@@ -178,7 +313,9 @@ def load_environment_from_hub(
     env_name: str | None = None,
     *,
     split: str = 'train',
+    revision: str | None = None,
     token: str | None = None,
+    trust_image: bool = False,
 ) -> Environment:
     """Load a DeepGym environment from a HuggingFace Hub dataset.
 
@@ -187,17 +324,19 @@ def load_environment_from_hub(
         env_name: If the dataset contains multiple environments, filter by
             this name. If None, loads the first (or only) row.
         split: Dataset split to load from (default: ``'train'``).
+        revision: Commit (or branch or tag) to load; None loads the current ``main``.
         token: HF API token (uses HF_TOKEN env var / cached login if None).
+        trust_image: Run the image or snapshot the row names; refused otherwise.
 
     Returns:
         Reconstructed Environment.
 
     Raises:
         ImportError: If ``datasets`` package is not installed.
-        ValueError: If ``env_name`` is specified but not found in the dataset.
+        ValueError: If ``env_name`` is specified but not found in the dataset, or the
+            row can't be read (see :func:`environment_from_dict`).
     """
-    datasets = _require_datasets()
-    dataset = datasets.load_dataset(repo_id, split=split, token=token)
+    dataset = _load_rows(repo_id, split, revision, token)
 
     if env_name is not None:
         matches = [row for row in dataset if row.get('env_name') == env_name]
@@ -210,21 +349,25 @@ def load_environment_from_hub(
     else:
         row = dataset[0]
 
-    return environment_from_dict(row)
+    return environment_from_dict(row, trust_image=trust_image)
 
 
 def load_all_environments_from_hub(
     repo_id: str,
     *,
     split: str = 'train',
+    revision: str | None = None,
     token: str | None = None,
+    trust_image: bool = False,
 ) -> dict[str, Environment]:
     """Load all environments from a HuggingFace Hub dataset.
 
     Args:
         repo_id: HF dataset repo ID containing multiple environment rows.
         split: Dataset split to load from (default: ``'train'``).
+        revision: Commit (or branch or tag) to load; None loads the current ``main``.
         token: HF API token (uses HF_TOKEN env var / cached login if None).
+        trust_image: Run the images or snapshots the rows name; refused otherwise.
 
     Returns:
         Dict mapping ``env_name`` to ``Environment``. Rows without an
@@ -232,13 +375,13 @@ def load_all_environments_from_hub(
 
     Raises:
         ImportError: If ``datasets`` package is not installed.
+        ValueError: If a row can't be read (see :func:`environment_from_dict`).
     """
-    datasets = _require_datasets()
-    dataset = datasets.load_dataset(repo_id, split=split, token=token)
+    dataset = _load_rows(repo_id, split, revision, token)
     result: dict[str, Environment] = {}
     for i, row in enumerate(dataset):
         key = row.get('env_name') or str(i)
-        result[key] = environment_from_dict(row)
+        result[key] = environment_from_dict(row, trust_image=trust_image)
     return result
 
 

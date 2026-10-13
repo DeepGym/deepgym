@@ -381,9 +381,23 @@ count as a wrong answer.
 ```python
 from deepgym.integrations.hf import push_environment_to_hub, load_environment_from_hub
 
-push_environment_to_hub(env, repo_id='your-org/deepgym-coin-change', env_name='coin_change')
-env = load_environment_from_hub('your-org/deepgym-coin-change')
+revision = push_environment_to_hub(
+    env, repo_id='your-org/deepgym-coin-change', env_name='coin_change'
+)
+env = load_environment_from_hub('your-org/deepgym-coin-change', revision=revision)
 ```
+
+A round trip gives back the environment that was pushed: verifier source, support
+files, test cases, timeouts, verifier mode, image. Pass `revision` (the commit a push
+returns); without it you get whatever `main` holds now. Only a plain `Environment`
+round-trips; subclasses (repo-patch, benchmark and mixed environments) are refused.
+
+A Hub dataset is untrusted, so pushes and loads run the same checks and a row can't
+change how its environment runs: fields must be known and of the right type, the
+verifier is inlined (no host path), there are no `env_vars` (they reach the verifier and
+the solution, and may hold credentials), `verifier_mode` must match the verifier,
+support file names are plain relative paths, and a custom `image` or `snapshot` loads
+only with `trust_image=True`.
 
 ## Repo, terminal and cyber tasks
 

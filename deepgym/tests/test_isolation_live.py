@@ -4,8 +4,8 @@ import os
 
 import pytest
 
-from deepgym import DeepGym, load_environment
-from deepgym.models import Environment
+from deepgym import Action, DeepGym, load_environment
+from deepgym.models import Environment, MultiTurnEnvironment
 from tests.test_isolation import LOOPBACK_PROBE, LOOPBACK_PROBE_VERIFIER, WRONG, _env
 from tests.test_session import ALWAYS_EQUAL, FIXED, debug_fix_score
 
@@ -128,6 +128,32 @@ def test_setsid_daemon_dies_with_its_script(dg: DeepGym) -> None:
 def test_session_verifier_loads_agent_code_as_another_user(dg: DeepGym) -> None:
     for buggy, expected in ((FIXED, 1.0), (ALWAYS_EQUAL, 0.0)):
         assert debug_fix_score(dg, buggy) == expected
+
+
+_SOLVER_PROBE_VERIFIER = """
+import json, subprocess
+from deepgym_solution import load_solution
+
+nnp = 'NoNewPrivs:\\t1' in load_solution('probe.py').status()
+# The verifier's sudo must start nothing as the solver but no-new-privs code.
+pinned = subprocess.run(['sudo', '-n', '-u', 'dgsolver', '--', 'id'], capture_output=True)
+pinned = pinned.returncode != 0
+ok = nnp and pinned
+print(json.dumps({'score': float(ok), 'passed': ok, 'details': f'nnp={nnp} pinned={pinned}'}))
+"""
+
+
+def test_session_solution_cannot_gain_privileges(dg: DeepGym) -> None:
+    """Agent code a session verifier loads runs as the solver with no-new-privs, so no
+    setuid binary (sudo, su, mount, chrome-sandbox, ...) lifts it past the agent's rights."""
+    env = MultiTurnEnvironment(task='t', final_verifier_code=_SOLVER_PROBE_VERIFIER, max_steps=2)
+    probe = "def status():\n    return open('/proc/self/status').read()\n"
+    actions = iter([
+        Action(action_type='write_file', path='probe.py', content=probe),
+        Action(action_type='done'),
+    ])  # fmt: skip
+    _, result = dg.run_episode(env, lambda obs: next(actions))
+    assert result.passed, result.output
 
 
 def test_judge_temp_files_are_private(dg: DeepGym) -> None:

@@ -521,6 +521,30 @@ def test_session_write_file_is_staged_then_written_as_agent() -> None:
     assert f'< {staged}' in box.commands[-1] and '/tmp/deepgym/a/b.py' in box.commands[-1]
 
 
+@pytest.mark.parametrize('ids', ['0 997 996 996', '997 997 996 0'], ids=['agent', 'group'])
+def test_session_refuses_root_ids_for_its_users(ids: str) -> None:
+    output = f'{ids} 0 /usr/bin/setpriv /usr/bin/nsenter /usr/bin/sudo\n/tmp/deepgym'
+    box = FakeSandbox(network_blocked=True, answers=[('useradd', output)])
+    with pytest.raises(SandboxError, match='root'):
+        SandboxBackend(box)
+    assert box.deleted
+
+
+def test_session_solver_rule_is_checked_installed_whole_and_pinned() -> None:
+    """The verifier's sudo only starts code as the solver under no-new-privs, and the rule
+    is checked by visudo and renamed into place, never written where sudo reads it."""
+    box = FakeSandbox(network_blocked=True, answers=[('useradd', _DAYTONA_USERS[1])])
+    backend = SandboxBackend(box)
+    setup = next(c for c in box.commands if 'useradd' in c)
+    assert '> /etc/sudoers.d/deepgym' not in setup
+    assert 'visudo -cqf' in setup and '/etc/sudoers.d/deepgym' in setup
+    assert 'NOPASSWD: %s --no-new-privs -- *' in setup
+    prefix = json.loads(backend._runtime_env['DEEPGYM_ISOLATION'])['prefix']
+    assert prefix == [
+        '/usr/bin/sudo', '-n', '-u', 'dgsolver', '--', '/usr/bin/setpriv', '--no-new-privs', '--',
+    ]  # fmt: skip
+
+
 def test_session_closes_sandbox_when_setup_fails() -> None:
     box = FakeSandbox(network_blocked=True, answers=[])
     box.exec = lambda command, **kw: ExecResult(1, 'setpriv missing')  # type: ignore[method-assign]

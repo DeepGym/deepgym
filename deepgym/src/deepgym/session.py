@@ -258,8 +258,10 @@ os.execvp('sleep', ['sleep', 'infinity'])
 """
 
 
-# Lets the verifier user start code as the solver user (deepgym_solution), and nothing else.
-_SUDOERS_RULE = f'{_VERIFIER_USER} ALL=({SOLVER_USER}) NOPASSWD: ALL'
+# Lets the verifier user start code as the solver user (deepgym_solution), and nothing else,
+# always under no-new-privs so no setuid binary lifts that code. A printf format: %s is
+# setpriv's path.
+_SUDOERS_RULE = f'{_VERIFIER_USER} ALL=({SOLVER_USER}) NOPASSWD: %s --no-new-privs -- *\\n'
 
 
 class SandboxBackend:
@@ -271,7 +273,8 @@ class SandboxBackend:
     root, and a different user means it can't read, signal or write into a verifier.
     The agent also gets no-new-privs and an empty bounding set, so no setuid binary
     lifts it. Where sudo exists, the verifier keeps it, limited to starting the code it
-    loads through ``deepgym_solution`` as a third user that can't touch the verifier;
+    loads through ``deepgym_solution`` as a third user that can't touch the verifier,
+    with no-new-privs like the agent;
     elsewhere the verifier is locked down like the agent and ``deepgym_solution`` is
     unavailable. When the provider doesn't block the network itself, everything joins
     one loopback-only network namespace, so servers started during setup stay reachable
@@ -311,8 +314,12 @@ class SandboxBackend:
                     f'chgrp {_VERIFIER_USER} {_VERIFIER_DIR} && solver=0 && '
                     'if command -v sudo >/dev/null && [ -d /etc/sudoers.d ]; then '
                     f'{_ADD_USER} {SOLVER_USER} && '
-                    f'echo {shlex.quote(_SUDOERS_RULE)} > /etc/sudoers.d/deepgym && '
-                    'chmod 440 /etc/sudoers.d/deepgym && '
+                    # sudo skips names with a dot, so the rule counts only once visudo has
+                    # passed it and a rename puts it in place whole, never through a link.
+                    'rule=$(mktemp /etc/sudoers.d/.deepgym.XXXXXX) && '
+                    f'printf {shlex.quote(_SUDOERS_RULE)} "$(command -v setpriv)" > "$rule" && '
+                    'chmod 440 "$rule" && visudo -cqf "$rule" && '
+                    'mv -f "$rule" /etc/sudoers.d/deepgym && '
                     f'mkdir -p -m 755 {_RUNTIME_DIR} && solver=1; fi && mkdir -p {quoted} && '
                     f'echo "$(id -u {_AGENT_USER}) $(id -g {_AGENT_USER}) '
                     f'$(id -u {_VERIFIER_USER}) $(id -g {_VERIFIER_USER}) $solver '
@@ -328,6 +335,10 @@ class SandboxBackend:
             agent_uid, agent_gid, verifier_uid, verifier_gid, solver, setpriv, nsenter, sudo = (
                 ids.split()[-8:]
             )
+            # They go straight into setpriv: a root id would make the agent root.
+            user_ids = (agent_uid, agent_gid, verifier_uid, verifier_gid)
+            if not all(v.isdecimal() and int(v) > 0 for v in user_ids):
+                raise SandboxError(f'Refusing session users with root or unknown ids: {ids!r}')
             # The folder may be a link in the image: own and use where it really leads.
             try:
                 self._workdir = check_workdir(real.strip())
@@ -347,7 +358,7 @@ class SandboxBackend:
             if solver == '1':
                 runtime = f'{_RUNTIME_DIR}/{RUNTIME_FILE}'
                 sandbox.upload(RUNTIME_SOURCE.encode('utf-8'), runtime)
-                prefix = [sudo, '-n', '-u', SOLVER_USER, '--']
+                prefix = [sudo, '-n', '-u', SOLVER_USER, '--', setpriv, '--no-new-privs', '--']
                 self._runtime_env = {
                     'DEEPGYM_ISOLATION': json.dumps({'kind': 'user', 'prefix': prefix}),
                     'DEEPGYM_RUNTIME': runtime,

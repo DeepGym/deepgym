@@ -15,8 +15,9 @@ from deepgym.benchmark_envs import (
     _split_batch_kwargs,
 )
 from deepgym.exceptions import SandboxError
+from deepgym.harbor import HarborEnvironment
 from deepgym.integrations.trl import make_trl_reward_fn
-from deepgym.models import Environment
+from deepgym.models import Environment, RunResult
 from deepgym.registry import load_environment
 
 
@@ -96,39 +97,48 @@ def swebench_repo(tmp_path: Path) -> dict[str, object]:
 
 @pytest.fixture()
 def terminal_task_root(tmp_path: Path) -> Path:
+    """A Terminal-Bench (Harbor) dataset with one task: write "done" to /app/output.txt."""
     task_root = tmp_path / 'terminal-bench'
     task_dir = task_root / 'echo-task'
-    environment_dir = task_dir / 'environment'
-    tests_dir = task_dir / 'tests'
-    environment_dir.mkdir(parents=True)
-    tests_dir.mkdir()
-
+    (task_dir / 'tests').mkdir(parents=True)
     (task_dir / 'instruction.md').write_text(
-        'Write a terminal command that creates output.txt with the value "done".\n',
+        'Write a terminal command that creates /app/output.txt with the value "done".\n',
         encoding='utf-8',
     )
     (task_dir / 'task.toml').write_text(
-        '[verifier]\ntimeout_sec = 60\n',
+        '[verifier]\ntimeout_sec = 60\n\n'
+        '[environment]\ndocker_image = "python:3.12-slim"\nworkdir = "/app"\n',
         encoding='utf-8',
     )
-    (tests_dir / 'test.sh').write_text(
+    (task_dir / 'tests' / 'test.sh').write_text(
         '#!/bin/sh\n'
-        'mkdir -p logs/verifier\n'
-        'if [ "$(cat environment/output.txt 2>/dev/null)" = "done" ]; then\n'
-        '  echo 1 > logs/verifier/reward.txt\n'
-        '  exit 0\n'
-        'fi\n'
-        'echo 0 > logs/verifier/reward.txt\n'
-        'exit 1\n',
+        'if [ "$(cat /app/output.txt 2>/dev/null)" = "done" ]; then\n'
+        '  echo 1 > /logs/verifier/reward.txt\n'
+        'else\n'
+        '  echo 0 > /logs/verifier/reward.txt\n'
+        'fi\n',
         encoding='utf-8',
-    )
-    subprocess.run(
-        ['chmod', '+x', str(tests_dir / 'test.sh')],
-        check=True,
-        capture_output=True,
-        text=True,
     )
     return task_root
+
+
+@pytest.fixture()
+def harbor_runs(monkeypatch: pytest.MonkeyPatch) -> list[tuple[str, str]]:
+    """Record Harbor runs as (task, script) and score them 1.0 without booting containers.
+
+    Real Harbor runs are in test_harbor_live.py.
+    """
+    runs: list[tuple[str, str]] = []
+
+    def run(env: HarborEnvironment, dg: object, model_output: str, **kwargs: object) -> RunResult:
+        runs.append((env.name, model_output))
+        return RunResult(
+            score=1.0, passed=True, output='', stderr='', exit_code=0,
+            execution_time_ms=0.0, sandbox_id='stub',
+        )  # fmt: skip
+
+    monkeypatch.setattr(HarborEnvironment, 'run_with_deepgym', run)
+    return runs
 
 
 class TestPatchVerifier:
@@ -230,21 +240,31 @@ class TestSWEBenchEnvironment:
 
 
 class TestTerminalBenchEnvironment:
-    """Verify terminal task execution in local mode."""
+    """Verify Terminal-Bench loads its tasks and runs each as a Harbor environment."""
 
     def test_registry_load_returns_terminal_env(self) -> None:
         env = load_environment('terminal_bench_2')
         assert isinstance(env, TerminalBenchEnvironment)
 
-    def test_runs_terminal_task_in_sandbox(
+    def test_runs_the_chosen_task_as_a_harbor_environment(
         self,
         sandbox_dg,
         terminal_task_root: Path,
+        harbor_runs: list[tuple[str, str]],
     ) -> None:
         env = TerminalBenchEnvironment(task_root=terminal_task_root, default_task_id='echo-task')
-        result = sandbox_dg.run(env, 'printf done > output.txt\n', task_id='echo-task')
+        result = sandbox_dg.run(env, 'printf done > /app/output.txt\n', task_id='echo-task')
         assert result.score == pytest.approx(1.0)
-        assert result.passed is True
+        assert harbor_runs == [('echo-task', 'printf done > /app/output.txt\n')]
+
+    def test_local_mode_refuses_to_run_commands(
+        self,
+        local_dg,
+        terminal_task_root: Path,
+    ) -> None:
+        env = TerminalBenchEnvironment(task_root=terminal_task_root)
+        with pytest.raises(SandboxError, match="mode='docker'"):
+            local_dg.run(env, 'printf done > /app/output.txt\n', task_id='echo-task')
 
 
 class TestMixedEnvironment:
@@ -299,6 +319,7 @@ class TestMixedEnvironment:
         sandbox_dg,
         swebench_repo: dict[str, object],
         terminal_task_root: Path,
+        harbor_runs: list[tuple[str, str]],
     ) -> None:
         terminal_env = TerminalBenchEnvironment(
             task_root=terminal_task_root,
@@ -310,10 +331,11 @@ class TestMixedEnvironment:
         reward_fn = make_trl_reward_fn(env=mixed, dg=sandbox_dg)
 
         scores = reward_fn(
-            completions=[swebench_repo['patch_text'], 'printf done > output.txt\n'],
+            completions=[swebench_repo['patch_text'], 'printf done > /app/output.txt\n'],
             environment_name=['swebench_pro', 'terminal_bench_2'],
             task=[swebench_repo['row'], None],
             task_id=[None, 'echo-task'],
         )
 
         assert scores == pytest.approx([1.0, 1.0])
+        assert harbor_runs == [('echo-task', 'printf done > /app/output.txt\n')]

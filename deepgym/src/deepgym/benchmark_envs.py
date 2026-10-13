@@ -6,9 +6,6 @@ from __future__ import annotations
 import json
 import random
 import re
-import subprocess
-import tarfile
-import tempfile
 import textwrap
 import time
 from collections.abc import Sequence
@@ -18,6 +15,8 @@ from typing import TYPE_CHECKING, Any
 
 from pydantic import Field, PrivateAttr
 
+from deepgym.exceptions import DeepGymError
+from deepgym.harbor import HarborEnvironment, HarborTask, load_tasks
 from deepgym.integrations.hf import _require_datasets
 from deepgym.models import Environment, RunResult, VerifierResult
 from deepgym.sandbox import _extract_json_line, build_run_result
@@ -78,24 +77,6 @@ class SWEBenchTask:
     repo_source: str | None = None
 
 
-@dataclass(slots=True)
-class TerminalBenchTask:
-    """Normalized Terminal-Bench task metadata."""
-
-    task_id: str
-    task_dir: Path
-    instruction: str
-    test_command: str = 'bash tests/test.sh'
-    docker_image: str | None = None
-    timeout_sec: int = 1800
-
-
-def _deepgym_cache_dir(name: str) -> Path:
-    cache_dir = Path.home() / '.deepgym' / 'benchmarks' / name
-    cache_dir.mkdir(parents=True, exist_ok=True)
-    return cache_dir
-
-
 def _coerce_json_list(value: Any) -> list[str]:
     if value is None:
         return []
@@ -111,10 +92,6 @@ def _coerce_json_list(value: Any) -> list[str]:
     if isinstance(value, str):
         return [value]
     return [str(value)]
-
-
-def _coerce_path(value: str | Path) -> Path:
-    return value if isinstance(value, Path) else Path(value)
 
 
 def _split_batch_kwargs(batch_size: int, kwargs: dict[str, Any]) -> list[dict[str, Any]]:
@@ -188,30 +165,6 @@ def _parse_patch_from_model_output(model_output: str) -> str:
 
 def _shell_snippet(value: str) -> str:
     return "'" + value.replace("'", "'\\''") + "'"
-
-
-def _to_int(value: Any, default: int) -> int:
-    try:
-        return int(float(value))
-    except (TypeError, ValueError):
-        return default
-
-
-def _parse_task_toml(task_toml: Path) -> dict[str, Any]:
-    try:
-        import tomllib  # type: ignore[attr-defined]
-
-        return tomllib.loads(task_toml.read_text(encoding='utf-8'))
-    except ModuleNotFoundError:
-        text = task_toml.read_text(encoding='utf-8')
-        verifier_timeout = re.search(r'timeout_sec\s*=\s*([0-9.]+)', text)
-        docker_image = re.search(r'docker_image\s*=\s*"([^"]+)"', text)
-        return {
-            'verifier': {
-                'timeout_sec': float(verifier_timeout.group(1)) if verifier_timeout else 1800.0,
-            },
-            'environment': {'docker_image': docker_image.group(1) if docker_image else None},
-        }
 
 
 def _verifier_result_from_output(
@@ -872,7 +825,12 @@ class RepoPatchEnvironment(Environment):
 
 
 class TerminalBenchEnvironment(Environment):
-    """Terminal-Bench benchmark adapter."""
+    """Terminal-Bench 2.0, a Harbor dataset: each run scores one task as a HarborEnvironment.
+
+    Tasks load from *task_root* if given, else from Hugging Face, falling back to GitHub.
+    Runs pick a task by ``task_id`` (or ``instance_id``), ``task_dir``, a task dict with a
+    ``task_dir``, or a :class:`~deepgym.harbor.HarborTask`, else ``default_task_id``.
+    """
 
     name: str | None = 'terminal_bench_2'
     task: str = 'Complete the terminal task by executing shell commands in the sandbox.'
@@ -880,113 +838,53 @@ class TerminalBenchEnvironment(Environment):
     type: str = 'tool-use'
     domain: str = 'terminal'
     tags: list[str] = Field(default_factory=lambda: ['benchmark', 'terminal-bench', 'shell'])
-    timeout: int = 1800
-    snapshot: str | None = 'docker-dind'
     dataset_id: str = 'harborframework/terminal-bench-2.0'
     source_url: str = 'https://huggingface.co/datasets/harborframework/terminal-bench-2.0'
     fallback_source_url: str = 'https://github.com/laude-institute/terminal-bench-2.git'
     task_root: Path | None = None
     default_task_id: str | None = None
 
-    _tasks: dict[str, TerminalBenchTask] = PrivateAttr(default_factory=dict)
-
-    def _ensure_task_root(self) -> Path:
-        if self.task_root is not None:
-            return self.task_root
-
-        cache_dir = _deepgym_cache_dir('terminal-bench-2.0')
-        repo_dir = cache_dir / 'repo'
-        if not repo_dir.exists():
-            clone_command = ['git', 'clone', '--depth', '1', self.source_url, str(repo_dir)]
-            clone = subprocess.run(clone_command, capture_output=True, text=True)
-            if clone.returncode != 0:
-                fallback = subprocess.run(
-                    ['git', 'clone', '--depth', '1', self.fallback_source_url, str(repo_dir)],
-                    capture_output=True,
-                    text=True,
-                )
-                if fallback.returncode != 0:
-                    raise RuntimeError(
-                        'Failed to clone terminal-bench-2.0 from either Hugging Face or GitHub.'
-                    )
-        self.task_root = repo_dir
-        return repo_dir
+    _tasks: dict[str, HarborTask] = PrivateAttr(default_factory=dict)
 
     def _ensure_loaded(self) -> None:
         if self._tasks:
             return
-        task_root = self._ensure_task_root()
-        for candidate in task_root.iterdir():
-            if not candidate.is_dir():
-                continue
-            instruction_path = candidate / 'instruction.md'
-            task_toml = candidate / 'task.toml'
-            if not instruction_path.exists() or not task_toml.exists():
-                continue
-            parsed = _parse_task_toml(task_toml)
-            timeout_sec = _to_int(
-                (parsed.get('verifier') or {}).get('timeout_sec'),
-                self.timeout,
-            )
-            docker_image = (parsed.get('environment') or {}).get('docker_image')
-            task = TerminalBenchTask(
-                task_id=candidate.name,
-                task_dir=candidate,
-                instruction=instruction_path.read_text(encoding='utf-8'),
-                test_command='bash tests/test.sh',
-                docker_image=str(docker_image) if docker_image else None,
-                timeout_sec=timeout_sec,
-            )
-            self._tasks[task.task_id] = task
-        if self.default_task_id is None and self._tasks:
+        if self.task_root is not None:
+            tasks = load_tasks(self.task_root)
+        else:
+            try:
+                tasks = load_tasks(self.source_url)
+            except DeepGymError:
+                tasks = load_tasks(self.fallback_source_url)
+        self._tasks = {task.name: task for task in tasks}
+        if self.default_task_id is None:
             self.default_task_id = next(iter(self._tasks))
 
     def list_task_ids(self) -> list[str]:
         self._ensure_loaded()
         return list(self._tasks)
 
-    def get_task(self, task_id: str) -> TerminalBenchTask:
+    def get_task(self, task_id: str) -> HarborTask:
         self._ensure_loaded()
         try:
             return self._tasks[task_id]
         except KeyError as exc:
             raise ValueError(f'Unknown Terminal-Bench task: {task_id!r}') from exc
 
-    def _resolve_task(self, **kwargs: Any) -> TerminalBenchTask:
+    def _resolve_task(self, **kwargs: Any) -> HarborTask:
         for key in _TASK_ROUTE_KEYS:
-            if key in kwargs and kwargs[key]:
-                raw = kwargs[key]
-                if isinstance(raw, TerminalBenchTask):
-                    return raw
-                if isinstance(raw, dict):
-                    task_dir = _coerce_path(raw['task_dir'])
-                    return TerminalBenchTask(
-                        task_id=str(raw.get('task_id', task_dir.name)),
-                        task_dir=task_dir,
-                        instruction=str(raw.get('instruction', '')),
-                        test_command=str(raw.get('test_command', 'bash tests/test.sh')),
-                        docker_image=str(raw['docker_image']) if raw.get('docker_image') else None,
-                        timeout_sec=_to_int(raw.get('timeout_sec'), self.timeout),
-                    )
+            raw = kwargs.get(key)
+            if isinstance(raw, HarborTask):
+                return raw
+            if isinstance(raw, dict) and raw.get('task_dir'):
+                return HarborTask.from_dir(Path(raw['task_dir']))
 
         task_id = kwargs.get('task_id') or kwargs.get('instance_id')
         if task_id:
             return self.get_task(str(task_id))
 
-        task_dir = kwargs.get('task_dir')
-        if task_dir:
-            candidate_dir = _coerce_path(task_dir)
-            instruction_path = candidate_dir / 'instruction.md'
-            return TerminalBenchTask(
-                task_id=str(kwargs.get('task_id', candidate_dir.name)),
-                task_dir=candidate_dir,
-                instruction=instruction_path.read_text(encoding='utf-8')
-                if instruction_path.exists()
-                else '',
-                test_command=str(kwargs.get('test_command', 'bash tests/test.sh')),
-                docker_image=str(kwargs['docker_image']) if kwargs.get('docker_image') else None,
-                timeout_sec=_to_int(kwargs.get('timeout_sec'), self.timeout),
-            )
+        if kwargs.get('task_dir'):
+            return HarborTask.from_dir(Path(kwargs['task_dir']))
 
         if self.default_task_id is not None:
             return self.get_task(self.default_task_id)
@@ -1001,192 +899,14 @@ class TerminalBenchEnvironment(Environment):
         **kwargs: Any,
     ) -> list[ResolvedRun]:
         per_item_kwargs = _split_batch_kwargs(len(outputs), kwargs)
-        runs: list[ResolvedRun] = []
-        for index, output in enumerate(outputs):
-            task = self._resolve_task(**per_item_kwargs[index])
-            runs.append(ResolvedRun(env=self, output=output, kwargs={'task': task}))
-        return runs
-
-    @staticmethod
-    def build_runner_script() -> str:
-        """Return the self-contained terminal task runner."""
-        return textwrap.dedent(
-            """
-            import json
-            import shutil
-            import subprocess
-            import sys
-            import tarfile
-            import tempfile
-            import uuid
-            from pathlib import Path
-
-
-            def _emit(result: dict, exit_code: int) -> int:
-                print(json.dumps(result))
-                return exit_code
-
-
-            def _run(command: str, *, cwd: Path | None = None, timeout: int = 300) -> subprocess.CompletedProcess[str]:
-                return subprocess.run(
-                    command,
-                    shell=True,
-                    cwd=str(cwd) if cwd is not None else None,
-                    capture_output=True,
-                    text=True,
-                    timeout=timeout,
-                )
-
-
-            def _read_reward(task_dir: Path) -> float | None:
-                candidates = [
-                    task_dir / 'logs' / 'verifier' / 'reward.txt',
-                    task_dir / 'logs' / 'reward.txt',
-                ]
-                for candidate in candidates:
-                    if candidate.exists():
-                        try:
-                            return float(candidate.read_text(encoding='utf-8').strip())
-                        except ValueError:
-                            return None
-                return None
-
-
-            def _tail(text: str, limit: int = 400) -> str:
-                text = text.strip()
-                if len(text) <= limit:
-                    return text
-                return text[-limit:]
-
-
-            def main() -> int:
-                task = json.loads(Path(sys.argv[1]).read_text(encoding='utf-8'))
-                commands = Path(sys.argv[2]).read_text(encoding='utf-8')
-                archive_path = Path(sys.argv[3])
-                timeout = int(task.get('timeout_sec', 1800))
-                docker_image = task.get('docker_image')
-
-                with tempfile.TemporaryDirectory(prefix='deepgym_terminal_task_') as temp_dir_name:
-                    temp_dir = Path(temp_dir_name)
-                    with tarfile.open(archive_path, 'r:gz') as archive:
-                        archive.extractall(temp_dir)
-
-                    task_dir = temp_dir / task['task_id']
-                    env_dir = task_dir / 'environment'
-                    if not env_dir.exists():
-                        env_dir = task_dir
-
-                    test_command = task.get('test_command', 'bash tests/test.sh')
-                    command_result = None
-                    test_result = None
-
-                    if docker_image and shutil.which('docker'):
-                        logs_dir = task_dir / 'logs' / 'verifier'
-                        logs_dir.mkdir(parents=True, exist_ok=True)
-                        container_name = f'deepgym-tb-{uuid.uuid4().hex[:10]}'
-                        pull = _run(f'docker pull {docker_image}', timeout=timeout)
-                        if pull.returncode != 0:
-                            return _emit(
-                                {
-                                    'schema_version': '1.0',
-                                    'score': 0.0,
-                                    'passed': False,
-                                    'details': f'docker pull failed: {_tail(pull.stderr or pull.stdout)}',
-                                    'reward_components': {'commands': 0.0, 'tests': 0.0},
-                                    'metrics': {},
-                                    'truncated': False,
-                                    'error_type': 'docker_pull_failed',
-                                    'cases': [],
-                                },
-                                1,
-                            )
-                        run = _run(
-                            ' '.join(
-                                [
-                                    'docker run -d --rm',
-                                    f'--name {container_name}',
-                                    f'-v {env_dir}:/app',
-                                    f'-v {task_dir / "tests"}:/tests',
-                                    f'-v {task_dir / "logs"}:/logs',
-                                    docker_image,
-                                    'sh -lc "sleep infinity"',
-                                ]
-                            ),
-                            timeout=timeout,
-                        )
-                        if run.returncode != 0:
-                            return _emit(
-                                {
-                                    'schema_version': '1.0',
-                                    'score': 0.0,
-                                    'passed': False,
-                                    'details': f'docker run failed: {_tail(run.stderr or run.stdout)}',
-                                    'reward_components': {'commands': 0.0, 'tests': 0.0},
-                                    'metrics': {},
-                                    'truncated': False,
-                                    'error_type': 'docker_run_failed',
-                                    'cases': [],
-                                },
-                                1,
-                            )
-                        try:
-                            command_result = _run(
-                                f'docker exec {container_name} sh -lc {json.dumps(commands)}',
-                                timeout=timeout,
-                            )
-                            test_result = _run(
-                                f'docker exec {container_name} sh -lc {json.dumps(test_command)}',
-                                timeout=timeout,
-                            )
-                        finally:
-                            _run(f'docker rm -f {container_name}', timeout=60)
-                    else:
-                        command_result = _run(commands, cwd=env_dir, timeout=timeout)
-                        test_result = _run(test_command, cwd=task_dir, timeout=timeout)
-
-                    reward = _read_reward(task_dir)
-                    if reward is None:
-                        reward = 1.0 if test_result.returncode == 0 else 0.0
-                    reward = max(0.0, min(1.0, reward))
-
-                    return _emit(
-                        {
-                            'schema_version': '1.0',
-                            'score': reward,
-                            'passed': reward >= 0.999999,
-                            'details': (
-                                f'Command exit={command_result.returncode}; '
-                                f'test exit={test_result.returncode}; reward={reward:.3f}'
-                            ),
-                            'reward_components': {
-                                'commands': 1.0 if command_result.returncode == 0 else 0.0,
-                                'tests': reward,
-                            },
-                            'metrics': {
-                                'command_exit_code': command_result.returncode,
-                                'test_exit_code': test_result.returncode,
-                            },
-                            'truncated': False,
-                            'cases': [
-                                {
-                                    'id': 'terminal_task',
-                                    'passed': reward >= 0.999999,
-                                    'score': reward,
-                                    'input_summary': task['task_id'],
-                                    'actual_summary': _tail(test_result.stdout),
-                                    'error': _tail(command_result.stderr + '\\n' + test_result.stderr) or None,
-                                    'execution_time_ms': 0.0,
-                                }
-                            ],
-                        },
-                        0 if reward >= 0.999999 else 1,
-                    )
-
-
-            if __name__ == '__main__':
-                sys.exit(main())
-            """
-        )
+        return [
+            ResolvedRun(
+                env=HarborEnvironment.from_task(self._resolve_task(**per_item_kwargs[index])),
+                output=output,
+                kwargs={},
+            )
+            for index, output in enumerate(outputs)
+        ]
 
     def run_with_deepgym(
         self,
@@ -1194,30 +914,9 @@ class TerminalBenchEnvironment(Environment):
         model_output: str,
         **kwargs: Any,
     ) -> RunResult:
-        task = kwargs.get('task')
-        if not isinstance(task, TerminalBenchTask):
-            task = self._resolve_task(**kwargs)
-
-        payload = {
-            'task_id': task.task_id,
-            'test_command': task.test_command,
-            'docker_image': task.docker_image,
-            'timeout_sec': task.timeout_sec,
-        }
-
-        with tempfile.TemporaryDirectory(prefix='deepgym_terminal_archive_') as archive_dir_name:
-            archive_path = Path(archive_dir_name) / f'{task.task_id}.tar.gz'
-            with tarfile.open(archive_path, 'w:gz') as archive:
-                archive.add(task.task_dir, arcname=task.task_id)
-            return _execute_runner(
-                self,
-                dg,
-                self.build_runner_script(),
-                payload,
-                patch_text=model_output,
-                archive_path=archive_path,
-                timeout=task.timeout_sec,
-            )
+        """Score *model_output*, a bash script, on the task the kwargs pick."""
+        env = HarborEnvironment.from_task(self._resolve_task(**kwargs))
+        return env.run_with_deepgym(dg, model_output)
 
 
 class MixedEnvironment(Environment):

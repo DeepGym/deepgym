@@ -1,5 +1,7 @@
 """Exporting DeepGym environments as Harbor tasks, and reading them back."""
 
+import json
+import shlex
 import subprocess
 import sys
 from pathlib import Path
@@ -74,8 +76,39 @@ def test_exported_scripts_are_valid_bash_and_quote_the_judge_environment(
     assert "'SEED=1'\"'\"'; touch /tmp/pwned; echo '\"'\"'$(id)'" in test_sh
     assert 'setpriv' in test_sh and '--reuid=dgsolver' in test_sh
     assert test_sh.index('rm -f /logs/verifier/reward.json') < test_sh.index('verifier.py')
-    assert test_sh.index("sh -c 'kill -9 -1'") < test_sh.index('python3 - ')
+    assert test_sh.index("sh -c 'kill -9 -1'") < test_sh.index('python3 -I - ')
     assert '> /opt/deepgym/verdict.out' in test_sh
+
+
+def test_exported_reward_parser_never_imports_from_the_work_directory(tmp_path: Path) -> None:
+    test_sh = (
+        export_environment(load_environment('two_sum'), tmp_path) / 'tests/test.sh'
+    ).read_text()
+    invocation, rest = test_sh.split(" <<'EOF'\n", 1)
+    parser = rest.split('\nEOF\n', 1)[0]
+    flags = shlex.split(invocation.splitlines()[-1])
+    python_flags = flags[flags.index('python3') + 1 : flags.index('-')]
+    logs, workdir = tmp_path / 'logs', tmp_path / 'app'
+    logs.mkdir()
+    workdir.mkdir()
+    (workdir / 'json.py').write_text('raise SystemExit("decoy json imported")\n')
+    verdict = tmp_path / 'verdict.out'
+    verdict.write_text('{"score": 1.0, "passed": true}\n')
+
+    done = subprocess.run(
+        [sys.executable, *python_flags, '-', str(verdict)],
+        input=parser.replace('/logs/verifier', str(logs)),
+        cwd=workdir,
+        capture_output=True,
+        text=True,
+    )
+
+    assert done.returncode == 0, done.stderr
+    assert json.loads((logs / 'reward.json').read_text()) == {'reward': 1.0}
+    assert test_sh.index('cd / ') < test_sh.index('python3')
+    interpreters = [line for line in test_sh.splitlines() if 'python3' in line or 'bash /' in line]
+    assert interpreters and all(line.startswith('/usr/bin/env -i ') for line in interpreters)
+    assert python_flags == ['-I']
 
 
 def test_export_reimports_as_a_runnable_harbor_environment(tmp_path: Path) -> None:

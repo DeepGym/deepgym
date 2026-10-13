@@ -6,22 +6,31 @@ tests/ to /tests only now, empties /logs/verifier, runs tests/test.sh as root (H
 default verifier user), then reads the reward with a separate command. Nothing the agent
 wrote can be in /tests or /logs/verifier, and none of its processes is alive.
 
-Tests usually run the agent's code; what that code does while they run is the task's to
-guard against, as with any Harbor verifier.
+The harness's own commands here run with an empty environment and only root-owned
+folders on PATH. tests/test.sh gets the image's environment, minus PATH entries in the
+work directory, so files the agent left there can't stand in for commands the tests call.
+
+Reward precedence follows Harbor: reward.json wins over reward.txt, and both must be
+written during this run, since the folder is emptied first. Tests usually run the agent's
+code as root; whatever that code writes while they run, including a reward file, is the
+task's to guard against, as with any Harbor verifier. Tasks DeepGym exports write
+reward.json last, after every solution process is gone, so theirs is always the harness's.
 """
 
 from __future__ import annotations
 
 import json
 import math
+import posixpath
 import shlex
 import statistics
+from pathlib import PurePosixPath
 
 from deepgym.exceptions import SandboxError, VerifierError
 from deepgym.harbor.task import STAGING_DIR, HarborTask, pack_files
 from deepgym.models import SCORE_TOLERANCE, VerifierResult, checked_score
 from deepgym.sandbox import ExecutionResult
-from deepgym.sandboxes import ExecResult, Sandbox
+from deepgym.sandboxes import TRUSTED_PATH, ExecResult, Sandbox
 from deepgym.session import SandboxBackend
 
 TESTS_DIR = '/tests'
@@ -50,21 +59,24 @@ def grade(sandbox: Sandbox, task: HarborTask, workspace: bytes, workdir: str) ->
     """
     backend = SandboxBackend(sandbox, workdir)  # deletes the sandbox if setup fails
     try:
+        image_path = sandbox.exec('printf %s "$PATH"', timeout=30).output
         backend.restore_workdir(workspace)
         sandbox.upload(pack_files(task.tests), _TESTS_ARCHIVE)
-        staged = sandbox.exec(
+        staged = backend.exec_trusted(
             f'rm -rf {TESTS_DIR} {REWARD_DIR} && mkdir -p {TESTS_DIR} {REWARD_DIR} && '
-            f'tar -xzf {_TESTS_ARCHIVE} -C {TESTS_DIR} && rm -f {_TESTS_ARCHIVE}',
+            f'tar -xzf {_TESTS_ARCHIVE} -C {TESTS_DIR} && rm -f {_TESTS_ARCHIVE} && '
+            f'chmod +x {TESTS_DIR}/test.sh',
             timeout=120,
         )
         if staged.exit_code != 0:
             raise SandboxError(f'Failed to stage the tests: {staged.output[-500:]}')
         tests = backend.exec_root(
-            f'chmod +x {TESTS_DIR}/test.sh && {TESTS_DIR}/test.sh',
+            f'{TESTS_DIR}/test.sh',
             math.ceil(task.verifier_timeout_sec),
             offline=task.verifier_network == 'no-network',
+            env={'PATH': outside_workdir(image_path, backend.workdir)},
         )
-        listing = sandbox.exec(read_reward_command(REWARD_DIR), timeout=60)
+        listing = backend.exec_trusted(read_reward_command(REWARD_DIR), timeout=60)
         return ExecutionResult(
             reward_result(listing.output, tests),
             stderr=tests.output[-_LOG_TAIL:],
@@ -74,10 +86,26 @@ def grade(sandbox: Sandbox, task: HarborTask, workspace: bytes, workdir: str) ->
         backend.close()
 
 
+def outside_workdir(path: str, workdir: str) -> str:
+    """Return the PATH value *path* without entries in *workdir* or relative ones.
+
+    Example:
+        >>> outside_workdir('/app/bin:/usr/bin:.:/opt/conda/bin', '/app')
+        '/usr/bin:/opt/conda/bin'
+    """
+    entries = (entry for entry in path.split(':') if entry.startswith('/'))
+    kept = [
+        entry
+        for entry in entries
+        if not PurePosixPath(posixpath.normpath(entry)).is_relative_to(workdir)
+    ]
+    return ':'.join(kept) or TRUSTED_PATH
+
+
 def read_reward_command(directory: str) -> str:
     """Shell that prints the reward file's name, then its contents; ``none`` if missing.
 
-    reward.json wins over reward.txt, as in Harbor.
+    reward.json wins over reward.txt, as in Harbor (see the module docstring).
     """
     folder = shlex.quote(directory)
     return (

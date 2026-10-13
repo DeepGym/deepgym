@@ -458,7 +458,10 @@ or the reward file. This holds on every provider.
 - On Apple container and Daytona the image needs python3 and util-linux to cut the agent
   off the network.
 - The agent owns the work directory (`[environment].workdir`, else the image's WORKDIR),
-  so it can't be `/`, `/tmp`, `/root` or a system folder.
+  so it can't be `/`, `/tmp`, `/root` or a system folder, however it is spelled or linked.
+- DeepGym's own root commands never use the image's environment or PATH. `test.sh` gets
+  the image's environment minus PATH entries in the work directory. As in Harbor,
+  `reward.json` wins over `reward.txt`; tests that run the agent's code as root trust it.
 - `mode='local'` runs on your machine without isolation, for tasks that use relative
   paths only.
 

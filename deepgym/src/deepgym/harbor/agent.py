@@ -56,7 +56,7 @@ def run_agent(sandbox: Sandbox, task: HarborTask, script: str) -> AgentRun:
             timed_out = False
         except TimeoutError:
             timed_out = True
-        return AgentRun(backend.archive_workdir(), workdir, timed_out)
+        return AgentRun(backend.archive_workdir(), backend.workdir, timed_out)
     finally:
         backend.close()
 

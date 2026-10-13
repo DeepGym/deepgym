@@ -16,9 +16,17 @@ Usage (custom app)::
     app.include_router(create_openrlhf_router(env, dg))
 
     # Run with: uvicorn app:app --port 8000
+    # Train with: --remote_rm_url http://localhost:8000/reward/score
+
+The last fenced code block of each response (or all of it, if none) is what runs,
+as in the verl and TRL adapters.
 
 Note: This router is NOT automatically mounted by ``deepgym serve``.
 Create a custom FastAPI app to use it.
+
+Sources:
+    - https://github.com/OpenRLHF/OpenRLHF (openrlhf/utils/agent.py,
+      openrlhf/cli/serve_rm.py)
 """
 
 from __future__ import annotations
@@ -30,17 +38,41 @@ except ImportError as _exc:
         'FastAPI is required for the OpenRLHF integration. '
         'Install with: pip install "deepgym[server]"'
     ) from _exc
-from pydantic import BaseModel
+from pydantic import BaseModel, model_validator
 
 from deepgym.core import DeepGym
+from deepgym.integrations.verl import extract_code
 from deepgym.models import Environment
 
 
 class OpenRLHFRewardRequest(BaseModel):
-    """Request format compatible with OpenRLHF's reward API."""
+    """Reward request in either shape OpenRLHF clients send.
+
+    OpenRLHF's agent client sends ``query`` (each prompt and its response decoded
+    together, special tokens included), ``prompts`` and ``labels`` (unused here).
+    Older clients send ``outputs``, the responses alone. A query that doesn't start
+    with its prompt (a tokenizer that doesn't round-trip it) is scored whole.
+    """
 
     prompts: list[str]
-    outputs: list[str]
+    query: list[str] | None = None
+    outputs: list[str] | None = None
+
+    @model_validator(mode='after')
+    def check_responses(self) -> OpenRLHFRewardRequest:
+        """Require ``query`` or ``outputs``, with one prompt per query."""
+        if self.outputs is None and self.query is None:
+            raise ValueError('send query (prompt + response, as OpenRLHF does) or outputs')
+        if self.outputs is None and len(self.query) != len(self.prompts):
+            raise ValueError('query and prompts must have the same length')
+        return self
+
+    @property
+    def responses(self) -> list[str]:
+        """Each sample's response: ``outputs``, or each query with its prompt removed."""
+        if self.outputs is not None:
+            return self.outputs
+        return [query.removeprefix(prompt) for query, prompt in zip(self.query, self.prompts)]
 
 
 class OpenRLHFRewardResponse(BaseModel):
@@ -55,10 +87,11 @@ def create_openrlhf_router(env: Environment, dg: DeepGym) -> APIRouter:
 
     @router.post('/score')
     async def score(request: OpenRLHFRewardRequest) -> OpenRLHFRewardResponse:
-        """Score a batch of model outputs and return rewards."""
-        if not request.outputs:
+        """Score a batch of model responses and return rewards."""
+        solutions = [extract_code(response) for response in request.responses]
+        if not solutions:
             return OpenRLHFRewardResponse(rewards=[])
-        batch = dg.run_batch(env, request.outputs, max_parallel=min(len(request.outputs), 32))
+        batch = dg.run_batch(env, solutions, max_parallel=min(len(solutions), 32))
         return OpenRLHFRewardResponse(rewards=[r.score for r in batch.results])
 
     return router

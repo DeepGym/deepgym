@@ -269,6 +269,34 @@ class TestOpenRLHFIntegration:
         assert len(data['rewards']) == 1
         assert data['rewards'][0] >= 0.5
 
+    def test_score_endpoint_accepts_the_official_agent_payload(
+        self, env: Environment, local_dg: DeepGym
+    ) -> None:
+        """Built like OpenRLHF's SingleTurnAgentExecutor._fetch_rewards_via_http does it.
+
+        openrlhf/utils/agent.py posts {'query', 'prompts', 'labels'}, where each query is
+        ``hf_tokenizer.decode(prompt_ids + action_ids, skip_special_tokens=False)``: the
+        templated prompt and the response decoded together, special tokens included.
+        """
+        prompt = (
+            '<|im_start|>user\nWrite reverse_string(s). For example:\n'
+            f'```python\n{GOOD_SOLUTION}```<|im_end|>\n<|im_start|>assistant\n'
+        )
+        responses = [f'Sure:\n```python\n{GOOD_SOLUTION}```<|im_end|>', 'No idea.<|im_end|>']
+        payload = {
+            'query': [prompt + response for response in responses],
+            'prompts': [prompt] * len(responses),
+            'labels': [None] * len(responses),
+        }
+        app = FastAPI()
+        app.include_router(create_openrlhf_router(env, local_dg))
+
+        response = TestClient(app).post('/reward/score', json=payload)
+
+        assert response.status_code == 200, response.text
+        # The second response has no code; the example in its prompt must not be scored.
+        assert response.json()['rewards'] == [1.0, 0.0]
+
     def test_score_endpoint_empty(self, env: Environment, local_dg: DeepGym) -> None:
         router = create_openrlhf_router(env, local_dg)
         app = FastAPI()

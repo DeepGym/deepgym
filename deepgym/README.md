@@ -314,6 +314,7 @@ from deepgym.integrations.openrlhf import create_openrlhf_router
 app = FastAPI()
 app.include_router(create_openrlhf_router(env, dg))
 # Run with: uvicorn app:app --port 8000
+# Train with: --remote_rm_url http://localhost:8000/reward/score
 ```
 
 ### lm-evaluation-harness

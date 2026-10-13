@@ -283,6 +283,12 @@ def _relay(listener: socket.socket, connect: Callable[[], socket.socket]) -> Non
     threading.Thread(target=accept, daemon=True).start()
 
 
+# Run in a child: bind the inherited socket (argv[1]) at argv[2] with umask 0.
+_BIND_ANY_USER = (
+    'import os, socket, sys; os.umask(0); socket.socket(fileno=int(sys.argv[1])).bind(sys.argv[2])'
+)
+
+
 @contextlib.contextmanager
 def _loopback(port: int | None) -> Iterator[list[str]]:
     """Yield a command prefix that gives the solution the judge's 127.0.0.1:*port*.
@@ -293,9 +299,12 @@ def _loopback(port: int | None) -> Iterator[list[str]]:
     each connection through a Unix socket to the judge's port. Elsewhere the port
     is reachable as it is (macOS allows it in the profile), so the prefix is empty.
 
-    The socket lives in the runtime directory, not the solution-writable workdir:
-    the judge owns it, bwrap mounts it read-only and a sandbox user may enter it, but
-    the solution can't replace anything there. Nothing is ever chmodded by path.
+    Each call gets its own randomly named directory in the runtime directory, not in
+    the solution-writable workdir: the judge owns it, bwrap mounts it read-only and a
+    sandbox user may enter it, but the solution can't predict, create or replace
+    anything there, so concurrent calls sharing a workdir can't interfere. Modes are
+    set at creation or through a file descriptor, never by path, and the judge's own
+    umask never changes.
     """
     spec = _isolation()
     if port is None or not (spec['kind'] == 'bwrap' or spec.get('own_network')):
@@ -311,12 +320,15 @@ def _loopback(port: int | None) -> Iterator[list[str]]:
     try:
         with socket.socket(socket.AF_UNIX) as listener:
             # Connecting needs write permission on the socket and the solution may be
-            # another user, so create it 0o777. umask is process-wide: hold it for bind only.
-            umask = os.umask(0)
-            try:
-                listener.bind(path)
-            finally:
-                os.umask(umask)
+            # another user, so it must be created 0o777. umask is process-wide, so a child
+            # binds the shared socket with umask 0 rather than the judge loosening its own.
+            fileno = listener.fileno()
+            subprocess.run(
+                [sys.executable, '-I', '-S', '-c', _BIND_ANY_USER, str(fileno), path],
+                pass_fds=(fileno,),
+                capture_output=True,
+                check=True,
+            )
             listener.listen()
             _relay(listener, lambda: socket.create_connection(('127.0.0.1', port)))
             yield [_python(), '-I', '-B', _runtime(), '--forward', str(port), path]

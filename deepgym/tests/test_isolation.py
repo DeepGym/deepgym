@@ -639,17 +639,17 @@ def test_solution_reaches_only_the_judges_loopback_port(dg: DeepGym) -> None:
     assert dg.run(env, LOOPBACK_PROBE).output == 'open closed closed'
 
 
-def test_loopback_socket_setup_never_chmods_through_a_swapped_path(monkeypatch) -> None:
-    """A solution racing the judge in a shared workdir can't redirect the socket's permissions.
-
-    The swap after bind() stands in for a solution (or an overlapping run) replacing the
-    socket with a symlink to a file root later imports, such as Python's socket.py.
+def test_overlapping_loopback_setups_in_a_shared_workdir_stay_judge_owned(monkeypatch) -> None:
+    """Two overlapping calls sharing a workdir with a planted symlink and directory each get
+    their own unpredictable, judge-owned socket that relays to their own port, and neither
+    loosens the judge's umask nor chmods anything by path.
     """
     from deepgym import solution_runtime
 
     base = Path(tempfile.mkdtemp(dir='/tmp'))  # AF_UNIX paths must stay short
+    servers = [socket.create_server(('127.0.0.1', 0)) for _ in range(2)]
     try:
-        target = base / 'socket.py'
+        target = base / 'socket.py'  # stands in for a module root imports
         target.write_text('# root imports this')
         target.chmod(0o644)
         runtime = base / 'runtime' / 'deepgym_solution.py'
@@ -657,27 +657,43 @@ def test_loopback_socket_setup_never_chmods_through_a_swapped_path(monkeypatch) 
         runtime.write_text('')
         work = base / 'work'
         work.mkdir()
-        (work / 'planted').symlink_to(target)
+        (work / 'loopback.sock').symlink_to(target)
+        (work / 'tmpplanted').mkdir()
+        planted = sorted(p.name for p in work.iterdir())
 
-        class SwapAfterBind(socket.socket):
-            def bind(self, address: object) -> None:
-                super().bind(address)
-                if isinstance(address, str):
-                    os.unlink(address)
-                    os.symlink(target, address)
-
+        calls: list[tuple[str, object]] = []
+        umask, chmod = os.umask, os.chmod
+        monkeypatch.setattr(os, 'umask', lambda m: calls.append(('umask', m)) or umask(m))
+        monkeypatch.setattr(
+            os, 'chmod', lambda *a, **k: calls.append(('chmod', a)) or chmod(*a, **k)
+        )
         isolation = {'kind': 'user', 'prefix': [], 'own_network': True}
         monkeypatch.setenv('DEEPGYM_ISOLATION', json.dumps(isolation))
         monkeypatch.setenv('DEEPGYM_RUNTIME', str(runtime))
-        monkeypatch.setattr(socket, 'socket', SwapAfterBind)
+        ports = [server.getsockname()[1] for server in servers]
 
-        with solution_runtime._loopback(8080) as forwarder:
-            assert oct(target.stat().st_mode & 0o777) == oct(0o644)
-            socket_dir = Path(forwarder[-1]).parent
-            assert work not in socket_dir.parents
-            assert oct(socket_dir.stat().st_mode & 0o777) == oct(0o711)
-            assert [p.name for p in work.iterdir()] == ['planted']
+        with (
+            solution_runtime._loopback(ports[0]) as first,
+            solution_runtime._loopback(ports[1]) as second,
+        ):
+            paths = [Path(first[-1]), Path(second[-1])]
+            assert paths[0].parent != paths[1].parent
+            for path, server in zip(paths, servers):
+                assert path.parent.parent == runtime.parent
+                assert oct(path.parent.stat().st_mode & 0o777) == oct(0o711)
+                assert oct(path.stat().st_mode & 0o777) == oct(0o777)
+                server.settimeout(5)
+                with socket.socket(socket.AF_UNIX) as client:
+                    client.connect(str(path))
+                    server.accept()[0].close()  # relayed to this call's own port
+
+        assert calls == []
+        assert not any(path.parent.exists() for path in paths)
+        assert oct(target.stat().st_mode & 0o777) == oct(0o644)
+        assert sorted(p.name for p in work.iterdir()) == planted
     finally:
+        for server in servers:
+            server.close()
         shutil.rmtree(base)
 
 

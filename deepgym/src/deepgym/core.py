@@ -30,6 +30,7 @@ from deepgym.sandboxes import PROVIDERS, Provider, Sandbox, check_provider, open
 from deepgym.sandboxes.daytona import DaytonaDesktop, DaytonaSandbox
 from deepgym.session import LocalBackend, SandboxBackend, Session, run_episode
 from deepgym.traces import AgentMeta, EnvFingerprint, Provenance, TracedSession
+from deepgym.traces.schema import deepgym_checkout
 
 logger = logging.getLogger(__name__)
 
@@ -256,14 +257,19 @@ class DeepGym:
         """
         # Run the environment that was fingerprinted, even if the caller changes theirs.
         env = env.model_copy(deep=True)
+        commit, dirty = deepgym_checkout()
         provenance = Provenance(
             env=EnvFingerprint.of(env, variant=variant, seed=seed, reference=reference),
             agent=agent,
             provider=self.backend,
             deepgym_version=__version__,
+            deepgym_commit=commit,
+            deepgym_dirty=dirty,
             started_at=datetime.now(timezone.utc),
         )
-        return TracedSession(self.session(env), env, provenance)
+        session = self.session(env)
+        booted = provenance.env.booted(session.booted_image())
+        return TracedSession(session, env, provenance.model_copy(update={'env': booted}))
 
     # ------------------------------------------------------------------
     # Batch run

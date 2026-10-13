@@ -6,9 +6,12 @@ cost money, so they run only when named, e.g. DEEPGYM_LIVE_PROVIDERS=modal,e2b,d
 
 import asyncio
 import contextlib
+import json
 import os
+import re
 import shlex
 import subprocess
+from pathlib import Path
 
 import pytest
 
@@ -17,6 +20,7 @@ from deepgym.exceptions import DeepGymError, SandboxError
 from deepgym.models import Action, MultiTurnEnvironment
 from deepgym.sandboxes.apple import AppleContainer
 from deepgym.sandboxes.docker import DockerContainer
+from deepgym.traces import AgentMeta
 from tests.test_isolation import _env
 
 # Every live isolation test, rerun here on each provider via this module's `dg`.
@@ -123,6 +127,33 @@ return {'score': float(version == [3, 11]), 'passed': version == [3, 11], 'detai
         session.start()
         step = session.step(Action(action_type='bash', content='python3 --version'))
     assert 'Python 3.11' in step.observation.content
+
+
+@pytest.mark.parametrize('image', [None, _PY311])
+def test_trace_records_the_booted_image(
+    dg: DeepGym, image: str | None, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv('DEEPGYM_TRACES_DIR', str(tmp_path))
+    env = MultiTurnEnvironment(task='t', final_verifier_code='print(1.0)', image=image)
+
+    with dg.trace(env, AgentMeta(name='probe')) as tr:
+        fingerprint = tr.trace.provenance.env
+
+    # Daytona builds an environment's own image and reports no digest for it.
+    resolved = dg.backend in ('apple', 'docker') or (dg.backend == 'daytona' and not image)
+    if not resolved:
+        assert fingerprint.image_digest is None and fingerprint.digest_unavailable, fingerprint
+        assert fingerprint.image == image
+        return
+    assert re.fullmatch(r'sha256:[0-9a-f]{64}', fingerprint.image_digest or ''), fingerprint
+    assert fingerprint.image and fingerprint.digest_unavailable is None
+    if dg.backend == 'apple':
+        listed = subprocess.run(
+            ['container', 'image', 'inspect', fingerprint.image], capture_output=True, check=True
+        )
+        assert json.loads(listed.stdout)[0]['configuration']['descriptor']['digest'] == (
+            fingerprint.image_digest
+        )
 
 
 def test_session_is_offline_but_keeps_local_servers(dg: DeepGym) -> None:

@@ -658,7 +658,7 @@ def _cmd_benchmark_audit(args: argparse.Namespace) -> None:
 def _cmd_traces(args: argparse.Namespace) -> None:
     from deepgym.console.db import DEFAULT_DB_PATH
     from deepgym.console.episode_store import EpisodeStore
-    from deepgym.traces import Trace, export_traces, is_trace_file, load_trace, traces_dir
+    from deepgym.traces import export_traces, is_trace_file, load_trace, merge_copies, traces_dir
 
     if args.db is None and args.traces is None:
         db = DEFAULT_DB_PATH if DEFAULT_DB_PATH.exists() else None
@@ -684,15 +684,17 @@ def _cmd_traces(args: argparse.Namespace) -> None:
     traces, untraced = EpisodeStore(db).traces() if db else ([], 0)
     traces += [load_trace(file) for file in files]
     # A trace can be both on disk and in the console: keep the copy that got furthest.
-    unique: dict[str, Trace] = {}
-    for trace in sorted(traces, key=lambda t: (t.result is not None, len(t.steps))):
-        unique[trace.trace_id] = trace
+    try:
+        unique = merge_copies(traces)
+    except ValueError as exc:
+        print(f'Error: {exc}', file=sys.stderr)
+        sys.exit(1)
     if not unique:
         print('Error: no traces found', file=sys.stderr)
         sys.exit(1)
 
     report = export_traces(
-        sorted(unique.values(), key=lambda trace: trace.provenance.started_at),
+        sorted(unique, key=lambda trace: trace.provenance.started_at),
         args.format,
         out,
         rows=args.rows,

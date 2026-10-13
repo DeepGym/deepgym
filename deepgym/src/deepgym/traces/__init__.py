@@ -16,6 +16,7 @@ from deepgym.traces.schema import (
     Trace,
     TraceMessage,
     TraceStep,
+    merge_copies,
 )
 
 __all__ = [
@@ -31,6 +32,7 @@ __all__ = [
     'export_traces',
     'is_trace_file',
     'load_trace',
+    'merge_copies',
     'rl_row',
     'summary_row',
     'to_atif',

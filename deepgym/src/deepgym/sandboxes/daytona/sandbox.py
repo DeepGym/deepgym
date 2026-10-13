@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import logging
 import posixpath
+import re
 import shlex
 from collections.abc import Mapping
 from types import ModuleType
@@ -18,7 +19,12 @@ from uuid import uuid4
 
 from deepgym.exceptions import SandboxError
 from deepgym.models import Environment, MultiTurnEnvironment
-from deepgym.sandboxes.protocol import TRUSTED_PATH, ExecResult, SandboxTimeoutError
+from deepgym.sandboxes.protocol import (
+    TRUSTED_PATH,
+    ExecResult,
+    SandboxImage,
+    SandboxTimeoutError,
+)
 
 if TYPE_CHECKING:
     from daytona import (
@@ -119,6 +125,19 @@ def _delete_labelled(daytona: Daytona, label: dict[str, str]) -> None:
         logger.warning('Could not check for leaked sandboxes labelled %s', label)
 
 
+def snapshot_digest(ref: str | None) -> str | None:
+    """Return the image digest a Daytona snapshot reference carries, or None if it carries none.
+
+    Daytona stores a snapshot of a registry image as ``<registry>/daytona-<hex>:daytona``,
+    where ``<hex>`` is that image's registry digest (checked against Docker Hub for
+    ``daytonaio/sandbox:0.8.0`` and three other images).
+    """
+    # ponytail: an observed Daytona naming scheme, not a documented API; if Daytona drops it,
+    # traces fall back to "no digest". Use a digest field once Daytona's API has one.
+    match = re.fullmatch(r'[^@]+/daytona-([0-9a-f]{64}):daytona', ref or '')
+    return f'sha256:{match[1]}' if match else None
+
+
 def is_timeout(exc: Exception) -> bool:
     """Return True if a Daytona exec failed because the command outran its timeout."""
     try:
@@ -155,6 +174,7 @@ class DaytonaSandbox:
             SandboxError: If creation fails or the sandbox can't be reached.
         """
         self._daytona = daytona
+        self._image = env.image
         self._session = isinstance(env, MultiTurnEnvironment)
         params = _session_params(env) if self._session else create_params(env)
         # A label lets us find and delete the sandbox if create() fails after allocating it.
@@ -186,6 +206,28 @@ class DaytonaSandbox:
     def computer_use(self) -> ComputerUse:
         """Daytona's desktop API for this sandbox."""
         return self._sandbox.computer_use
+
+    def booted_image(self) -> SandboxImage:
+        """Return the image the sandbox booted and its digest, as Daytona reports them.
+
+        Only a snapshot of a registry image has a digest: Daytona's default snapshot, or one
+        the environment names. A sandbox Daytona built, from the environment's image or a
+        Dockerfile, comes with a build reference but no digest of what it pulled.
+        """
+        name = self._sandbox.snapshot
+        if not name:
+            return SandboxImage(
+                self._image, None, 'Daytona built the sandbox and reports no digest'
+            )
+        try:
+            snapshot = self._daytona.snapshot.get(name)
+        except Exception as exc:
+            return SandboxImage(name, None, f'could not look up Daytona snapshot {name}: {exc}')
+        digest = None if snapshot.build_info else snapshot_digest(snapshot.ref)
+        if snapshot.image_name and digest:
+            return SandboxImage(snapshot.image_name, digest, None)
+        reason = f'Daytona reports no registry digest for snapshot {name}'
+        return SandboxImage(snapshot.image_name or name, None, reason)
 
     def exec(
         self,

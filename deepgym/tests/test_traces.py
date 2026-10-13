@@ -13,11 +13,13 @@ from pathlib import Path
 import pytest
 from pydantic import ValidationError
 
+import deepgym
 from deepgym import ComputerUseEnvironment, DeepGym
 from deepgym.console.episode_store import EpisodeStore, record_episode
 from deepgym.exceptions import ActionError, DeepGymError, SandboxError, VerifierError
 from deepgym.models import Action, MultiTurnEnvironment, RunResult, Trajectory
-from deepgym.session import LocalBackend, Session
+from deepgym.sandboxes import SandboxImage
+from deepgym.session import LOCAL_IMAGE, LocalBackend, Session
 from deepgym.traces import (
     AgentMeta,
     EnvFingerprint,
@@ -30,7 +32,13 @@ from deepgym.traces import (
     load_trace,
 )
 from deepgym.traces.capture import UNFINISHED
-from deepgym.traces.schema import environment_sha256, json_text
+from deepgym.traces.schema import (
+    NOT_RESOLVED,
+    deepgym_checkout,
+    environment_sha256,
+    git_checkout,
+    json_text,
+)
 from tests.trace_samples import ENV, crashed_trace, graded_trace, unjudged_trace
 
 SRC = Path(__file__).resolve().parent.parent / 'src'
@@ -257,6 +265,74 @@ class TestProvenance:
 
         assert environment_sha256(shell) != environment_sha256(desktop)
 
+    def test_trace_records_code_and_image_identity(self, dg: DeepGym, tmp_path: Path) -> None:
+        pq = pytest.importorskip('pyarrow.parquet')
+        with dg.trace(WRITE_ENV, AGENT) as tr:
+            tr.start()
+        trace = load_trace(tr.path)
+        export_traces([trace], 'jsonl', tmp_path / 'traces.jsonl')
+        export_traces([trace], 'parquet', tmp_path / 'traces.parquet')
+        export_traces([trace], 'atif', tmp_path / 'atif')
+
+        provenance = trace.provenance
+        head = subprocess.run(['git', '-C', str(SRC), 'rev-parse', 'HEAD'], capture_output=True)
+        assert trace.schema_version == '1.1'
+        assert provenance.deepgym_version == deepgym.__version__
+        assert provenance.deepgym_commit == (head.stdout.decode().strip() or None)
+        assert (provenance.deepgym_commit, provenance.deepgym_dirty) == deepgym_checkout()
+        assert (provenance.env.image, provenance.env.image_digest) == (None, None)
+        assert provenance.env.digest_unavailable == LOCAL_IMAGE.unavailable
+        (jsonl,) = [
+            json.loads(line) for line in (tmp_path / 'traces.jsonl').read_text().splitlines()
+        ]
+        (parquet,) = pq.read_table(tmp_path / 'traces.parquet').to_pylist()
+        atif = json.loads((tmp_path / 'atif' / f'{trace.trace_id}.json').read_text())
+        for exported in (jsonl, json.loads(parquet['trace']), atif['extra']['deepgym']):
+            assert exported['schema_version'] == '1.1'
+            assert Provenance.model_validate(exported['provenance']) == provenance
+
+    def test_git_checkout(self, tmp_path: Path) -> None:
+        package = tmp_path / 'repo' / 'pkg'
+        package.mkdir(parents=True)
+        (package / '__init__.py').write_text('x = 1\n')
+
+        def git(*args: str) -> str:
+            config = (
+                'user.name=t', 'user.email=t@t', 'commit.gpgsign=false', 'core.hooksPath=/dev/null'
+            )  # fmt: skip
+            options = [part for setting in config for part in ('-c', setting)]
+            command = ['git', '-C', str(package), *options, *args]
+            return subprocess.run(command, check=True, capture_output=True, text=True).stdout
+
+        assert git_checkout(package) == (None, None)  # not in a repository
+        git('init', '--quiet')
+        assert git_checkout(package) == (None, None)  # untracked: some other project's checkout
+        git('add', '.')
+        git('commit', '--quiet', '-m', 'first')
+        head = git('rev-parse', 'HEAD').strip()
+        assert git_checkout(package) == (head, False)
+        (package / 'new.py').write_text('y = 2\n')
+        assert git_checkout(package) == (head, True)
+        (package / 'new.py').unlink()
+        (package / '__init__.py').write_text('x = 2\n')
+        assert git_checkout(package) == (head, True)
+
+    def test_booted_image_resolves_the_digest(self) -> None:
+        pinned = 'python:3.12-slim@sha256:' + 'cd' * 32
+        env = WRITE_ENV.model_copy(update={'image': pinned})
+
+        unbooted = EnvFingerprint.of(env.model_copy(update={'image': 'python:3.12-slim'}))
+        resolved = unbooted.booted(
+            SandboxImage('docker.io/library/python:3.12-slim', 'sha256:ab', None)
+        )
+        built = EnvFingerprint.of(env).booted(SandboxImage(pinned, None, 'built, no digest'))
+
+        assert (unbooted.image_digest, unbooted.digest_unavailable) == (None, NOT_RESOLVED)
+        assert (resolved.image, resolved.image_digest, resolved.digest_unavailable) == (
+            'docker.io/library/python:3.12-slim', 'sha256:ab', None
+        )  # fmt: skip
+        assert (built.image_digest, built.digest_unavailable) == ('sha256:' + 'cd' * 32, None)
+
 
 class TestCapture:
     """dg.trace records as the episode runs and keeps partial traces."""
@@ -400,6 +476,29 @@ class TestCapture:
 
         trace = load_trace(tr.path)
         assert len(trace.steps) == 1 and trace.has_verdict
+
+    def test_every_grade_is_kept(self, dg: DeepGym, tmp_path: Path) -> None:
+        # A flaky final verifier: fails the first time it grades, passes after.
+        flaky = (
+            'import json, pathlib\n'
+            'again = pathlib.Path("graded").exists()\n'
+            'pathlib.Path("graded").write_text("x")\n'
+            'print(json.dumps({"score": float(again), "passed": again}))\n'
+        )
+        env = WRITE_ENV.model_copy(update={'final_verifier_code': flaky})
+
+        with dg.trace(env, AGENT) as tr:
+            tr.start()
+            tr.step(Action(action_type='done'))
+            first, second = tr.score(), tr.score()
+        export_traces([load_trace(tr.path)], 'jsonl', tmp_path / 'out.jsonl')
+
+        trace = load_trace(tr.path)
+        assert (first.passed, second.passed) == (False, True)
+        assert (trace.prior_results, trace.result) == ((first,), second)
+        assert trace == tr.trace
+        (row,) = [json.loads(line) for line in (tmp_path / 'out.jsonl').read_text().splitlines()]
+        assert Trace.model_validate(row) == trace
 
     def test_nan_verifier_output_stays_strict_json(self, dg: DeepGym, tmp_path: Path) -> None:
         env = WRITE_ENV.model_copy(

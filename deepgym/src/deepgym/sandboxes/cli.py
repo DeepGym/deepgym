@@ -26,6 +26,7 @@ from deepgym.sandboxes.protocol import (
     TIMEOUT_EXIT_CODES,
     TRUSTED_PATH,
     ExecResult,
+    SandboxImage,
     SandboxTimeoutError,
 )
 
@@ -61,10 +62,11 @@ class CliContainer:
 
     def __init__(self, image: str | None = None) -> None:
         self.id = f'{_NAME_PREFIX}{uuid4().hex[:12]}'
+        self.image = image or DEFAULT_IMAGE
         try:
             started = self._cli(
                 'run', '--detach', '--rm', '--name', self.id, '--label', 'deepgym=1',
-                *_LIMITS, *self.run_flags, image or DEFAULT_IMAGE, 'sleep', 'infinity',
+                *_LIMITS, *self.run_flags, self.image, 'sleep', 'infinity',
                 timeout=_START_TIMEOUT_S,
             )  # fmt: skip
         except subprocess.TimeoutExpired as exc:
@@ -151,6 +153,37 @@ class CliContainer:
                 raise SandboxTimeoutError(f'command exceeded {timeout}s')
         output = done.stdout.decode('utf-8', 'replace') + done.stderr.decode('utf-8', 'replace')
         return ExecResult(done.returncode, output)
+
+    def booted_image(self) -> SandboxImage:
+        """Return the image the container runs and its digest, as the CLI reports them.
+
+        A failed lookup is the reason there is no digest, never an error.
+        """
+        try:
+            return self._inspect_image()
+        except (SandboxError, subprocess.TimeoutExpired, ValueError, LookupError, TypeError) as exc:
+            return SandboxImage(self.image, None, f'could not inspect container {self.id}: {exc}')
+
+    def _inspect_image(self) -> SandboxImage:
+        """Ask the CLI which image the container runs.
+
+        Raises:
+            SandboxError: If the CLI fails.
+            ValueError, LookupError, TypeError: If its answer isn't shaped as expected.
+        """
+        raise NotImplementedError
+
+    @classmethod
+    def _answer(cls, *args: str) -> str:
+        """Return the stdout of ``<cli> <args>``.
+
+        Raises:
+            SandboxError: If the command fails.
+        """
+        done = cls._cli(*args, timeout=30)
+        if done.returncode != 0:
+            raise SandboxError(done.stderr.decode('utf-8', 'replace').strip()[-500:])
+        return done.stdout.decode('utf-8', 'replace')
 
     def upload(self, content: bytes, path: str) -> None:
         """Write *content* to *path* inside the container, creating parent directories.

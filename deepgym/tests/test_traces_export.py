@@ -11,15 +11,50 @@ from pathlib import Path
 
 import pytest
 
+from deepgym import DeepGym
 from deepgym.cli import main
 from deepgym.console.episode_store import record_episode
 from deepgym.exceptions import DeepGymError
-from deepgym.models import Trajectory
-from deepgym.traces import Trace, export_traces, to_atif, write_atif
+from deepgym.models import Action, MultiTurnEnvironment, Trajectory
+from deepgym.traces import (
+    AgentMeta,
+    Trace,
+    TraceMessage,
+    export_traces,
+    load_trace,
+    to_atif,
+    write_atif,
+)
 from tests.trace_samples import PNG, crashed_trace, graded_trace, unjudged_trace
 
 GOLDEN = Path(__file__).resolve().parent / 'golden' / 'traces'
 UPDATE = os.environ.get('DEEPGYM_UPDATE_GOLDEN') == '1'
+
+# One model turn issues two bash commands, the next a write_file tool call plus a bash
+# command, the last finishes. The step verifier pays step N a reward of N/10, so a reward
+# moved onto any other action shows.
+THREE_FILES = MultiTurnEnvironment(
+    name='three_files',
+    task='Create a.txt, b.txt and c.txt.',
+    step_verifier_code='import os\nprint(int(os.environ["STEP_NUMBER"]) / 10)\n',
+    final_verifier_code='import json\nprint(json.dumps({"score": 1.0, "passed": True}))\n',
+)
+REPLIES = ('run two commands', 'write c.txt, then read it', 'done')
+ACTIONS = (
+    Action(action_type='bash', content='touch a.txt && echo A'),
+    Action(action_type='bash', content='touch b.txt && echo B'),
+    Action(action_type='write_file', path='c.txt', content='c'),
+    Action(action_type='bash', content='cat c.txt'),
+    Action(action_type='done'),
+)
+# (turn, action, observation, step reward) of every action, in order.
+EXPECTED = [
+    (1, ACTIONS[0], 'A\n', 0.1),
+    (1, ACTIONS[1], 'B\n', 0.2),
+    (2, ACTIONS[2], 'wrote c.txt', 0.3),
+    (2, ACTIONS[3], 'c', 0.4),
+    (3, ACTIONS[4], '', 0.5),
+]
 
 
 def _samples() -> list[Trace]:
@@ -28,6 +63,70 @@ def _samples() -> list[Trace]:
 
 def _jsonl(path: Path) -> list[dict]:
     return [json.loads(line) for line in path.read_text(encoding='utf-8').splitlines()]
+
+
+def _rows(out: Path, fmt: str) -> list[dict]:
+    """Read back the rows of a JSONL or Parquet export."""
+    if fmt == 'jsonl':
+        return _jsonl(out)
+    return pytest.importorskip('pyarrow.parquet').read_table(out).to_pylist()
+
+
+def _reply(content: str) -> TraceMessage:
+    return TraceMessage(role='assistant', content=content)
+
+
+@pytest.fixture
+def multi_action(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> tuple[Trace, Trajectory]:
+    """A local episode of THREE_FILES, and the trajectory its session recorded."""
+    monkeypatch.setenv('DEEPGYM_TRACES_DIR', str(tmp_path / 'traces'))
+    with DeepGym(mode='local').trace(THREE_FILES, AgentMeta(name='scripted')) as tr:
+        tr.start()
+        prompt = TraceMessage(role='user', content=THREE_FILES.task)
+        first = tr.step(ACTIONS[0], [prompt, _reply(REPLIES[0])]).observation
+        second = tr.step(ACTIONS[1]).observation  # the same reply: no new messages
+        seen = [TraceMessage(role='tool', content=obs.content) for obs in (first, second)]
+        third = tr.step(ACTIONS[2], [*seen, _reply(REPLIES[1])]).observation
+        fourth = tr.step(ACTIONS[3]).observation
+        seen = [TraceMessage(role='tool', content=obs.content) for obs in (third, fourth)]
+        tr.step(ACTIONS[4], [*seen, _reply(REPLIES[2])])
+        tr.score()
+    return load_trace(tr.path), tr._session.trajectory
+
+
+def _trace_records(data: dict) -> list[tuple]:
+    """(turn, action, observation, reward) of each step of a whole exported trace."""
+    turn = {index: number for number, steps in enumerate(data['turns'], 1) for index in steps}
+    return [
+        (turn[step['index']], Action.model_validate(step['action']),
+         step['observation'] and step['observation']['content'], step['reward'])
+        for step in data['steps']
+    ]  # fmt: skip
+
+
+def _rl_records(row: dict) -> list[tuple]:
+    """(turn, action, observation, reward) of each step of an RL row; a turn is its reply."""
+    replies = sorted({step['message_index'] for step in row['steps']})
+    return [
+        (replies.index(step['message_index']) + 1, Action.model_validate(step['action']),
+         step['observation'], step['reward'])
+        for step in row['steps']
+    ]  # fmt: skip
+
+
+def _atif_records(document: dict) -> list[tuple]:
+    """(turn, action, observation, reward) of each tool call; a turn is one agent step."""
+    records = []
+    calls = [step for step in document['steps'] if step.get('tool_calls')]
+    for turn, step in enumerate(calls, 1):
+        results = {result['source_call_id']: result for result in step['observation']['results']}
+        for call in step['tool_calls']:
+            result = results[call['tool_call_id']]
+            action = Action.model_validate(
+                {'action_type': call['function_name'], **call['arguments']}
+            )
+            records.append((turn, action, result['content'], result['extra'].get('reward')))
+    return records
 
 
 def _check_golden(actual: Path, name: str) -> None:
@@ -119,6 +218,27 @@ class TestExporters:
 
         harbor.Trajectory.model_validate(document)
 
+    def test_schema_1_0_traces_still_load_and_export(self, tmp_path: Path) -> None:
+        pq = pytest.importorskip('pyarrow.parquet')
+        # Written by schema 1.0: an event log and a JSONL export of the same trace.
+        old = load_trace(GOLDEN / 'v1_0' / 'events.jsonl')
+        (row,) = _jsonl(GOLDEN / 'v1_0' / 'export.jsonl')
+
+        export_traces([old], 'jsonl', tmp_path / 'out.jsonl')
+        export_traces([old], 'parquet', tmp_path / 'out.parquet')
+        export_traces([old], 'atif', tmp_path / 'atif')
+
+        assert Trace.model_validate(row) == old
+        assert old.schema_version == '1.0'
+        provenance = old.provenance
+        assert (provenance.deepgym_commit, provenance.env.digest_unavailable) == (None, None)
+        assert old.prior_results == ()
+        (parquet,) = pq.read_table(tmp_path / 'out.parquet').to_pylist()
+        atif = json.loads((tmp_path / 'atif' / 'trace0001.json').read_text())
+        for exported in (*_jsonl(tmp_path / 'out.jsonl'), json.loads(parquet['trace'])):
+            assert Trace.model_validate(exported) == old
+        assert atif['extra']['deepgym']['schema_version'] == '1.0'
+
     def test_atif_needs_whole_traces(self, tmp_path: Path) -> None:
         with pytest.raises(ValueError, match='whole traces'):
             export_traces(_samples(), 'atif', tmp_path, rows='rl')
@@ -133,7 +253,9 @@ class TestExporters:
         document, _ = to_atif(trace)
 
         action = next(step for step in document['steps'] if step.get('tool_calls'))
-        assert action['extra'] == {'step_verifier': {'score': 0, 'exit_code': 2}}
+        (result,) = action['observation']['results']
+        assert result['extra']['step_verifier'] == {'score': 0, 'exit_code': 2}
+        assert 'reward' not in result['extra']
 
     def test_duplicate_trace_ids_are_refused(self, tmp_path: Path) -> None:
         with pytest.raises(ValueError, match='share ids'):
@@ -151,6 +273,76 @@ class TestExporters:
             export_traces(_samples(), 'atif', tmp_path / 'atif', only_valid=True)
 
 
+class TestMultiActionTurns:
+    """A turn that issues several actions keeps each one, in its turn, in every export."""
+
+    @pytest.mark.parametrize('fmt', ['jsonl', 'parquet'])
+    def test_rl_rows(self, multi_action: tuple, tmp_path: Path, fmt: str) -> None:
+        trace, _ = multi_action
+        out = tmp_path / f'rl.{fmt}'
+
+        report = export_traces([trace], fmt, out, rows='rl')
+
+        (row,) = _rows(out, fmt)
+        assert (report.written, report.skipped) == (1, {})
+        assert _rl_records(row) == EXPECTED
+        assert all(set(step['action']) == set(Action.model_fields) for step in row['steps'])
+        assert row['step_rewards'] == [reward for *_, reward in EXPECTED]
+        assert [(m['role'], m['content']) for m in row['messages']] == [
+            ('user', THREE_FILES.task),
+            ('assistant', REPLIES[0]),
+            ('tool', 'A\n'),
+            ('tool', 'B\n'),
+            ('assistant', REPLIES[1]),
+            ('tool', 'wrote c.txt'),
+            ('tool', 'c'),
+            ('assistant', REPLIES[2]),
+        ]
+        assert [row['messages'][step['message_index']]['content'] for step in row['steps']] == [
+            REPLIES[0], REPLIES[0], REPLIES[1], REPLIES[1], REPLIES[2]
+        ]  # fmt: skip
+
+    @pytest.mark.parametrize('fmt', ['jsonl', 'parquet'])
+    def test_trace_rows(self, multi_action: tuple, tmp_path: Path, fmt: str) -> None:
+        trace, _ = multi_action
+        out = tmp_path / f'traces.{fmt}'
+
+        export_traces([trace], fmt, out)
+
+        (row,) = _rows(out, fmt)
+        data = json.loads(row['trace']) if fmt == 'parquet' else row
+        assert Trace.model_validate(data) == trace
+        assert data['turns'] == [[1, 2], [3, 4], [5]]
+        assert _trace_records(data) == EXPECTED
+
+    def test_atif(self, multi_action: tuple, tmp_path: Path) -> None:
+        trace, _ = multi_action
+
+        export_traces([trace], 'atif', tmp_path / 'atif')
+
+        document = json.loads((tmp_path / 'atif' / f'{trace.trace_id}.json').read_text())
+        assert _atif_records(document) == EXPECTED
+        agent = [step for step in document['steps'] if step['source'] == 'agent']
+        assert [step['message'] for step in agent] == list(REPLIES)
+        assert [step['llm_call_count'] for step in agent] == [1, 1, 1]
+
+    def test_atif_validates_against_harbor(self, multi_action: tuple) -> None:
+        harbor = pytest.importorskip('harbor.models.trajectories')
+
+        harbor.Trajectory.model_validate(to_atif(multi_action[0])[0])
+
+    def test_to_trajectory_matches_the_session(self, multi_action: tuple) -> None:
+        trace, recorded = multi_action
+
+        trajectory = trace.to_trajectory()
+
+        assert trajectory == recorded
+        assert [action for _, action in trajectory.steps] == list(ACTIONS)
+        shown = [obs.content for obs, _ in trajectory.steps[1:]]
+        assert [*shown, trajectory.final_observation.content] == [obs for _, _, obs, _ in EXPECTED]
+        assert trajectory.step_rewards == [reward for *_, reward in EXPECTED]
+
+
 class TestCli:
     """``deepgym traces export`` reads the console database and trace files."""
 
@@ -165,7 +357,8 @@ class TestCli:
         db = tmp_path / 'console.db'
         graded = graded_trace()
         # Recorded mid-episode; the trace file below got further.
-        record_episode(graded.model_copy(update={'result': None, 'steps': ()}), db_path=db)
+        early = graded.model_copy(update={'result': None, 'steps': (), 'finished_at': None})
+        record_episode(early, db_path=db)
         record_episode(crashed_trace(), db_path=db)
         record_episode(unjudged_trace(), db_path=db)
         record_episode(Trajectory(), environment='legacy', db_path=db)
@@ -182,6 +375,41 @@ class TestCli:
         assert 'Wrote 1 of 3 traces' in printed
         assert 'skipped 1: incomplete' in printed and 'skipped 1: no_verdict' in printed
         assert '1 console episodes were recorded without a trace' in printed
+
+    def test_conflicting_copies_are_refused(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture
+    ) -> None:
+        db = tmp_path / 'console.db'
+        graded = graded_trace()
+        record_episode(graded, db_path=db)
+        # The same trace id on disk, graded differently: neither copy can be picked.
+        failed = graded.result.model_copy(update={'score': 0.0, 'passed': False})
+        (tmp_path / 'other.jsonl').write_text(
+            _event_log(graded.model_copy(update={'result': failed}))
+        )
+        out = tmp_path / 'out.jsonl'
+
+        with pytest.raises(SystemExit) as exit_info:
+            self._run(monkeypatch, '--format', 'jsonl', '--out', str(out), '--db', str(db),
+                      '--traces', str(tmp_path / 'other.jsonl'))  # fmt: skip
+
+        assert exit_info.value.code == 1
+        assert 'trace0001' in capsys.readouterr().err
+        assert not out.exists()
+
+    def test_identical_copies_are_merged(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        db = tmp_path / 'console.db'
+        graded = graded_trace()
+        record_episode(graded, db_path=db)
+        (tmp_path / 'same.jsonl').write_text(_event_log(graded))
+        out = tmp_path / 'out.jsonl'
+
+        self._run(monkeypatch, '--format', 'jsonl', '--out', str(out), '--db', str(db),
+                  '--traces', str(tmp_path / 'same.jsonl'))  # fmt: skip
+
+        assert [Trace.model_validate(row) for row in _jsonl(out)] == [graded]
 
     def test_defaults_read_traces_dir(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
@@ -250,6 +478,7 @@ def _event_log(trace: Trace) -> str:
         *({'event': 'step', 'step': step.model_dump(mode='json')} for step in trace.steps),
     ]
     if trace.result is not None:
-        events.append({'event': 'result', 'result': trace.result.model_dump(mode='json')})
+        for result in (*trace.prior_results, trace.result):
+            events.append({'event': 'result', 'result': result.model_dump(mode='json')})
     events.append({'event': 'end', 'error': trace.error, 'finished_at': '2026-10-01T12:00:04Z'})
     return ''.join(json.dumps(event) + '\n' for event in events)

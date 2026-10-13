@@ -60,12 +60,14 @@ from deepgym.sandbox import (
     split_wrapped_output,
     wrap_stderr,
 )
-from deepgym.sandboxes import TRUSTED_PATH, ExecResult, Sandbox
+from deepgym.sandboxes import TRUSTED_PATH, ExecResult, Sandbox, SandboxImage
 
 if TYPE_CHECKING:
     from deepgym.sandboxes.daytona import DaytonaDesktop
 
 logger = logging.getLogger(__name__)
+
+LOCAL_IMAGE = SandboxImage(None, None, 'the local backend runs on the host, not in an image')
 
 _SANDBOX_WORKDIR = '/tmp/deepgym'
 # Unprivileged user that runs sandbox session commands, file writes and the desktop.
@@ -156,6 +158,10 @@ class SessionBackend(Protocol):
         """Return the screen as a base64 PNG."""
         ...
 
+    def booted_image(self) -> SandboxImage:
+        """Return the image the sandbox booted and its digest (see :class:`Sandbox`)."""
+        ...
+
     def close(self) -> None:
         """Release the sandbox."""
         ...
@@ -238,6 +244,10 @@ class LocalBackend:
     def screenshot(self) -> str:
         """Refuse: the local backend has no display."""
         raise DeepGymError('Screenshots need the Daytona backend')
+
+    def booted_image(self) -> SandboxImage:
+        """Return :data:`LOCAL_IMAGE`: there is no image."""
+        return LOCAL_IMAGE
 
     def close(self) -> None:
         """Kill leftover background processes and delete the temp directory."""
@@ -666,6 +676,10 @@ class SandboxBackend:
         """
         return self._need_desktop('Screenshots').screenshot()
 
+    def booted_image(self) -> SandboxImage:
+        """Return the image the sandbox booted and its digest, as its provider reports them."""
+        return self._sandbox.booted_image()
+
     def close(self) -> None:
         """Delete the sandbox.
 
@@ -814,6 +828,10 @@ class Session:
     def sandbox_id(self) -> str:
         """Identifier of the backing sandbox."""
         return self._backend.sandbox_id
+
+    def booted_image(self) -> SandboxImage:
+        """Return the image the backing sandbox booted and its digest, or why there is none."""
+        return self._backend.booted_image()
 
     def start(self) -> Observation:
         """Write files, start the desktop, run setup, and return the first observation.

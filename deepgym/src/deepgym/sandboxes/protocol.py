@@ -36,6 +36,19 @@ class ExecResult(NamedTuple):
     output: str
 
 
+class SandboxImage(NamedTuple):
+    """The image a sandbox booted, as its provider reports it."""
+
+    name: str | None
+    """Its tag, or the snapshot or template name; None if the provider names none."""
+
+    digest: str | None
+    """Content digest (``sha256:...``) the provider resolved it to."""
+
+    unavailable: str | None
+    """Why there is no digest."""
+
+
 class SandboxTimeoutError(TimeoutError):
     """Raised when a sandbox command outruns its timeout."""
 
@@ -45,6 +58,13 @@ class Sandbox(Protocol):
 
     id: str
     network_blocked: bool
+
+    def booted_image(self) -> SandboxImage:
+        """Return the image the sandbox booted and its digest; never raises.
+
+        A provider that can't say gives the reason in ``unavailable`` instead of a guess.
+        """
+        ...
 
     def exec(
         self,

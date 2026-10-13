@@ -25,10 +25,10 @@ from deepgym.exceptions import DeepGymError, SandboxError, VerifierError
 from deepgym.judge import JudgeJob
 from deepgym.models import Action, Environment, MultiTurnEnvironment
 from deepgym.sandbox import build_run_result, run_judge_in_sandbox, split_wrapped_output
-from deepgym.sandboxes import ExecResult, SandboxTimeoutError, open_sandbox
+from deepgym.sandboxes import ExecResult, SandboxImage, SandboxTimeoutError, open_sandbox
 from deepgym.sandboxes.apple import AppleContainer
 from deepgym.sandboxes.cli import DEFAULT_IMAGE
-from deepgym.sandboxes.daytona import cleanup_sandbox
+from deepgym.sandboxes.daytona import cleanup_sandbox, snapshot_digest
 from deepgym.sandboxes.docker import DockerContainer
 from deepgym.session import SandboxBackend
 
@@ -204,6 +204,64 @@ def test_cli_delete_fails_only_while_the_container_still_runs(
     assert box.delete() is False
     listing = ''  # gone already (--rm, or killed from the console): nothing left to delete
     assert box.delete() is True
+
+
+def _answering(monkeypatch: pytest.MonkeyPatch, answers: dict[str, tuple[int, str]]) -> None:
+    """Fake the CLI: each command whose argv contains a key gets that (exit code, stdout)."""
+
+    def fake_run(argv: list[str], **kwargs: object) -> subprocess.CompletedProcess:
+        code, out = next((v for k, v in answers.items() if k in ' '.join(argv)), (0, ''))
+        return subprocess.CompletedProcess(argv, code, out.encode(), b'inspect failed')
+
+    monkeypatch.setattr(subprocess, 'run', fake_run)
+
+
+_DIGEST = 'sha256:' + 'a6' * 32
+
+
+def test_apple_reports_the_digest_its_container_booted(monkeypatch: pytest.MonkeyPatch) -> None:
+    image = {'reference': 'docker.io/library/python:3.12-slim', 'descriptor': {'digest': _DIGEST}}
+    _answering(monkeypatch, {'inspect': (0, json.dumps([{'configuration': {'image': image}}]))})
+
+    booted = AppleContainer(image='python:3.12-slim').booted_image()
+
+    assert booted == SandboxImage('docker.io/library/python:3.12-slim', _DIGEST, None)
+
+
+def test_docker_reports_the_registry_digest_of_its_containers_image(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    image_id = 'sha256:' + 'cc' * 32
+    _answering(monkeypatch, {
+        '{{.Image}}': (0, f'{image_id}\n'),
+        f'RepoDigests}}}} {image_id}': (0, json.dumps([f'python@{_DIGEST}'])),
+    })  # fmt: skip
+    pulled = DockerContainer(image='python:3.12-slim').booted_image()
+    _answering(monkeypatch, {'{{.Image}}': (0, f'{image_id}\n'), 'RepoDigests': (0, '[]')})
+    built = DockerContainer(image='deepgym-build:abc').booted_image()
+
+    assert pulled == SandboxImage('python:3.12-slim', _DIGEST, None)
+    assert (built.name, built.digest) == ('deepgym-build:abc', None)
+    assert image_id in built.unavailable
+
+
+def test_cli_image_lookup_failure_is_recorded_not_raised(monkeypatch: pytest.MonkeyPatch) -> None:
+    _answering(monkeypatch, {'inspect': (1, '')})
+
+    booted = AppleContainer().booted_image()
+
+    assert (booted.name, booted.digest) == (DEFAULT_IMAGE, None)
+    assert 'inspect failed' in booted.unavailable
+
+
+def test_daytona_snapshot_ref_carries_the_image_digest() -> None:
+    hexdigest = 'ed' * 32
+
+    assert snapshot_digest(f'cr.app.daytona.io/sbox/daytona-{hexdigest}:daytona') == (
+        f'sha256:{hexdigest}'
+    )
+    assert snapshot_digest('cr.app.daytona.io/sbox/daytona-abc:daytona') is None
+    assert snapshot_digest(None) is None
 
 
 def test_unknown_provider_is_rejected() -> None:

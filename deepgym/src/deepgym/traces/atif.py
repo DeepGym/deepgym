@@ -11,21 +11,21 @@ Mapping, one ATIF document per trace:
   ``agent.extra.sampling``).
 * Step 1 is a ``user`` step with the task. If the session started, a ``system`` step
   carries the first observation (an environment reset, in ATIF's terms).
-* Each trace step becomes, in order: one step per recorded model message before the
-  reply (``system`` -> system, ``user`` -> user, ``tool`` -> user with
-  ``extra.role='tool'``, ``assistant`` -> agent with ``llm_call_count=1``), then one
-  ``agent`` step for the action. That step's ``message`` is the assistant reply (the
-  last message, when it's the assistant's; '' otherwise), its single tool call is the
+* Each model turn (:attr:`Trace.turns`) becomes, in order: one step per recorded model
+  message before the reply (``system`` -> system, ``user`` -> user, ``tool`` -> user
+  with ``extra.role='tool'``, ``assistant`` -> agent with ``llm_call_count=1``), then one
+  ``agent`` step for its actions. That step's ``message`` is the assistant reply (the
+  last message, when it's the assistant's; '' otherwise), and it has one tool call per
   action (``function_name`` = action type, ``arguments`` = the action's non-default
-  fields) and its observation is what the action produced, or the error if it produced
-  nothing. Exit code, done flag, ``applied`` and error go in the observation result's
-  ``extra``; the step reward and step verifier output in the step's ``extra``.
+  fields), in order, each with its own observation result: what the action produced, or
+  the error if it produced nothing. Exit code, done flag, ``applied``, error, step
+  reward and step verifier output go in that result's ``extra``.
 * Assistant token ids and logprobs become ``metrics.completion_token_ids`` and
   ``metrics.logprobs``; token data on other roles has no ATIF field and is dropped.
 * Screenshots are PNG files under ``images/<trace_id>/`` next to the document, referenced
   from ``image`` content parts, as the spec's storage convention says.
-* Root ``extra.deepgym`` holds the trace schema version, provenance, final result,
-  status, ``has_verdict``, error and finish time.
+* Root ``extra.deepgym`` holds the trace schema version, provenance, final result and
+  any ``prior_results``, status, ``has_verdict``, error and finish time.
 """
 
 from __future__ import annotations
@@ -72,12 +72,10 @@ def to_atif(trace: Trace) -> tuple[dict[str, JsonValue], dict[str, bytes]]:
 
     steps: list[dict[str, JsonValue]] = [{'source': 'user', 'message': trace.task}]
     if trace.initial_observation is not None:
-        reset = content(trace.initial_observation, 'reset')
-        steps.append(
-            {'source': 'system', 'message': 'Environment reset', 'observation': _results(reset)}
-        )
-    for step in trace.steps:
-        steps.extend(_turn(step, content))
+        reset = {'results': [_result(content(trace.initial_observation, 'reset'))]}
+        steps.append({'source': 'system', 'message': 'Environment reset', 'observation': reset})
+    for turn in trace.turns:
+        steps.extend(_turn([trace.steps[index - 1] for index in turn], content))
     agent = trace.provenance.agent
     document = {
         'schema_version': ATIF_VERSION,
@@ -93,7 +91,7 @@ def to_atif(trace: Trace) -> tuple[dict[str, JsonValue], dict[str, bytes]]:
         'notes': 'Exported from a DeepGym trace; provenance and the verdict are in extra.deepgym.',
         'extra': {
             'deepgym': trace.model_dump(
-                mode='json', exclude={'task', 'initial_observation', 'steps'}
+                mode='json', exclude={'task', 'initial_observation', 'steps', 'turns'}
             )
         },
     }  # fmt: skip
@@ -129,45 +127,46 @@ def write_atif(traces: Sequence[Trace], out: Path) -> int:
 
 
 def _turn(
-    step: TraceStep, content: Callable[[Observation, str], Content]
+    steps: Sequence[TraceStep], content: Callable[[Observation, str], Content]
 ) -> list[dict[str, JsonValue]]:
-    """Return the ATIF steps for one trace step: context messages, then the action."""
-    messages = step.messages
+    """Return the ATIF steps for one model turn: context messages, then its actions."""
+    messages = steps[0].messages
     has_reply = bool(messages) and messages[-1].role == 'assistant'
     context, reply = (messages[:-1], messages[-1]) if has_reply else (messages, None)
-    turn = [_message_step(message) for message in context]
-    call_id = f'call_{step.index}'
-    observed = (
-        (step.error or '')
-        if step.observation is None
-        else content(step.observation, f'step_{step.index}')
-    )
-    turn.append(
-        _compact({
-            'timestamp': step.timestamp.isoformat(),
-            'source': 'agent',
-            'message': '' if reply is None else reply.content,
-            'tool_calls': [{
-                'tool_call_id': call_id,
-                'function_name': step.action.action_type,
-                'arguments': step.action.model_dump(
-                    mode='json', exclude={'action_type'}, exclude_defaults=True
-                ),
-            }],
-            'observation': _results(observed, call_id, _compact({
-                'exit_code': step.exit_code,
-                'done': None if step.observation is None else step.observation.done,
-                'applied': step.applied,
-                'error': step.error,
-            })),
-            'metrics': None if reply is None else _metrics(reply),
-            'llm_call_count': None if reply is None else 1,
-            'extra': _compact({
-                'reward': step.reward, 'step_verifier': step.step_verifier,
-            }) or None,
-        })
-    )  # fmt: skip
-    return turn
+    calls: list[JsonValue] = []
+    results: list[JsonValue] = []
+    for step in steps:
+        call_id = f'call_{step.index}'
+        calls.append({
+            'tool_call_id': call_id,
+            'function_name': step.action.action_type,
+            'arguments': step.action.model_dump(
+                mode='json', exclude={'action_type'}, exclude_defaults=True
+            ),
+        })  # fmt: skip
+        observed = (
+            (step.error or '')
+            if step.observation is None
+            else content(step.observation, f'step_{step.index}')
+        )
+        results.append(_result(observed, call_id, _compact({
+            'exit_code': step.exit_code,
+            'done': None if step.observation is None else step.observation.done,
+            'applied': step.applied,
+            'error': step.error,
+            'reward': step.reward,
+            'step_verifier': step.step_verifier,
+        })))  # fmt: skip
+    action = _compact({
+        'timestamp': steps[0].timestamp.isoformat(),
+        'source': 'agent',
+        'message': '' if reply is None else reply.content,
+        'tool_calls': calls,
+        'observation': {'results': results},
+        'metrics': None if reply is None else _metrics(reply),
+        'llm_call_count': None if reply is None else 1,
+    })  # fmt: skip
+    return [*map(_message_step, context), action]
 
 
 def _message_step(message: TraceMessage) -> dict[str, JsonValue]:
@@ -193,15 +192,11 @@ def _metrics(message: TraceMessage) -> dict[str, JsonValue] | None:
     return metrics or None
 
 
-def _results(
+def _result(
     content: Content, call_id: str | None = None, extra: dict[str, JsonValue] | None = None
 ) -> dict[str, JsonValue]:
-    """Return an ATIF observation holding one result."""
-    return {
-        'results': [
-            _compact({'source_call_id': call_id, 'content': content, 'extra': extra or None})
-        ]
-    }
+    """Return one ATIF observation result."""
+    return _compact({'source_call_id': call_id, 'content': content, 'extra': extra or None})
 
 
 def _compact(fields: dict[str, JsonValue]) -> dict[str, JsonValue]:

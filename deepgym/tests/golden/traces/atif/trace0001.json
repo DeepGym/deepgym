@@ -75,7 +75,11 @@
             "extra": {
               "exit_code": 0,
               "done": false,
-              "applied": true
+              "applied": true,
+              "reward": 0.5,
+              "step_verifier": {
+                "score": 0.5
+              }
             }
           }
         ]
@@ -93,13 +97,7 @@
           -0.125
         ]
       },
-      "llm_call_count": 1,
-      "extra": {
-        "reward": 0.5,
-        "step_verifier": {
-          "score": 0.5
-        }
-      }
+      "llm_call_count": 1
     },
     {
       "step_id": 6,
@@ -162,24 +160,22 @@
             "content": "",
             "extra": {
               "done": true,
-              "applied": true
+              "applied": true,
+              "reward": 0.5,
+              "step_verifier": {
+                "score": 0.5
+              }
             }
           }
         ]
       },
-      "llm_call_count": 1,
-      "extra": {
-        "reward": 0.5,
-        "step_verifier": {
-          "score": 0.5
-        }
-      }
+      "llm_call_count": 1
     }
   ],
   "notes": "Exported from a DeepGym trace; provenance and the verdict are in extra.deepgym.",
   "extra": {
     "deepgym": {
-      "schema_version": "1.0",
+      "schema_version": "1.1",
       "trace_id": "trace0001",
       "provenance": {
         "env": {
@@ -193,6 +189,7 @@
           "reference_sha256": "a8bad614127cbaaaaa67e14952ae0fc6c0dce71bdff0822d038556b7dfbe3431",
           "image": "python:3.12-slim@sha256:abababababababababababababababababababababababababababababababab",
           "image_digest": "sha256:abababababababababababababababababababababababababababababababab",
+          "digest_unavailable": null,
           "snapshot": null
         },
         "agent": {
@@ -206,6 +203,8 @@
         },
         "provider": "local",
         "deepgym_version": "0.4.1",
+        "deepgym_commit": null,
+        "deepgym_dirty": null,
         "started_at": "2026-10-01T12:00:00Z"
       },
       "result": {
@@ -223,6 +222,7 @@
         "error_type": null,
         "cases": null
       },
+      "prior_results": [],
       "error": null,
       "finished_at": "2026-10-01T12:00:04Z",
       "status": "complete",

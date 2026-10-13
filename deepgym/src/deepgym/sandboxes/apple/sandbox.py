@@ -14,6 +14,7 @@ import shutil
 import subprocess
 
 from deepgym.sandboxes.cli import CliContainer, RunningSandbox
+from deepgym.sandboxes.protocol import SandboxImage
 
 
 class AppleContainer(CliContainer):
@@ -37,6 +38,11 @@ class AppleContainer(CliContainer):
         except (OSError, subprocess.SubprocessError):
             return False
         return status.returncode == 0 and 'running' in status.stdout
+
+    def _inspect_image(self) -> SandboxImage:
+        """Read the reference and digest of the image the container was created from."""
+        image = json.loads(self._answer('inspect', self.id))[0]['configuration']['image']
+        return SandboxImage(image['reference'], image['descriptor']['digest'], None)
 
     @staticmethod
     def _parse_listing(output: str) -> list[RunningSandbox]:

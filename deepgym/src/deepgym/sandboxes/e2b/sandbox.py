@@ -20,7 +20,12 @@ from e2b import (
 from e2b import Sandbox as E2BClient
 
 from deepgym.exceptions import SandboxError
-from deepgym.sandboxes.protocol import TIMEOUT_EXIT_CODES, ExecResult, SandboxTimeoutError
+from deepgym.sandboxes.protocol import (
+    TIMEOUT_EXIT_CODES,
+    ExecResult,
+    SandboxImage,
+    SandboxTimeoutError,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -36,10 +41,15 @@ class E2BSandbox:
     network_blocked = True
 
     def __init__(self, template: str | None = None) -> None:
+        self._template = template
         self._sandbox = E2BClient.create(
             template=template, timeout=LIFETIME_S, allow_internet_access=False
         )
         self.id = self._sandbox.sandbox_id
+
+    def booted_image(self) -> SandboxImage:
+        """Return the template given, or None for E2B's default; templates have no digest."""
+        return SandboxImage(self._template, None, 'E2B boots templates, which have no image digest')
 
     def exec(
         self,

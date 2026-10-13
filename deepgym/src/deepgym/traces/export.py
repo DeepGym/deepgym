@@ -9,8 +9,11 @@ Row shapes (``rows=``):
   the model messages recorded at each step (TRL's conversational format, the
   ``messages`` key of verl's multi-turn SFT dataset), with token ids and logprobs where
   recorded; ``reward`` and ``passed`` come from the final verifier; ``step_rewards``
-  are the step verifier's scores (null where none ran). A trace with a step that has no
-  model messages has no conversation to train on and is skipped.
+  are the step verifier's scores (null where none ran). ``steps`` holds every action in
+  order with its observation text, exit code, error and step reward, and
+  ``message_index``: where in ``messages`` the reply that produced it is, shared by the
+  actions of one turn. A trace whose first action has no model messages has no
+  conversation to train on and is skipped.
 
 Every row carries ``has_verdict``, and its ``score``/``reward`` and ``passed`` are null
 without one, so a failed sandbox or verifier never reads as a scored 0. ``only_valid``
@@ -50,24 +53,38 @@ class ExportReport(BaseModel):
 
 
 def rl_row(trace: Trace) -> Row | None:
-    """Return *trace* as one SFT/RL row, or None if a step has no model messages."""
-    if not trace.steps or not all(step.messages for step in trace.steps):
+    """Return *trace* as one SFT/RL row, or None if its first action has no model messages.
+
+    A later action without messages came from the reply before it (see :attr:`Trace.turns`).
+    """
+    if not trace.steps or not trace.steps[0].messages:
         return None
     verdict = trace.result if trace.has_verdict else None
     provenance = trace.provenance
+    messages: list[JsonValue] = []
+    steps: list[JsonValue] = []
+    for step in trace.steps:
+        messages += [
+            message.model_dump(mode='json', exclude_none=True) for message in step.messages
+        ]
+        steps.append({
+            'message_index': len(messages) - 1,
+            'action': step.action.model_dump(mode='json'),
+            'observation': None if step.observation is None else step.observation.content,
+            'exit_code': step.exit_code,
+            'error': step.error,
+            'reward': step.reward,
+        })  # fmt: skip
     return {
         'trace_id': trace.trace_id,
         'data_source': provenance.env.name or '',
         'agent': provenance.agent.name,
         'model': provenance.agent.model,
-        'messages': [
-            message.model_dump(mode='json', exclude_none=True)
-            for step in trace.steps
-            for message in step.messages
-        ],
+        'messages': messages,
         'reward': None if verdict is None else verdict.score,
         'passed': None if verdict is None else verdict.passed,
         'step_rewards': [step.reward for step in trace.steps],
+        'steps': steps,
         'has_verdict': trace.has_verdict,
     }
 
@@ -190,6 +207,24 @@ def _schema(rows: RowShape) -> pa.Schema:
         ('token_ids', pa.list_(pa.int64())),
         ('logprobs', pa.list_(pa.float64())),
     ])  # fmt: skip
+    action = pa.struct([
+        ('action_type', pa.string()),
+        ('content', pa.string()),
+        ('x', pa.int64()),
+        ('y', pa.int64()),
+        ('to_x', pa.int64()),
+        ('to_y', pa.int64()),
+        ('path', pa.string()),
+        ('amount', pa.int64()),
+    ])  # fmt: skip
+    step = pa.struct([
+        ('message_index', pa.int64()),
+        ('action', action),
+        ('observation', pa.string()),
+        ('exit_code', pa.int64()),
+        ('error', pa.string()),
+        ('reward', pa.float64()),
+    ])  # fmt: skip
     return pa.schema([
         ('trace_id', pa.string()),
         ('data_source', pa.string()),
@@ -199,5 +234,6 @@ def _schema(rows: RowShape) -> pa.Schema:
         ('reward', pa.float64()),
         ('passed', pa.bool_()),
         ('step_rewards', pa.list_(pa.float64())),
+        ('steps', pa.list_(step)),
         ('has_verdict', pa.bool_()),
     ])  # fmt: skip

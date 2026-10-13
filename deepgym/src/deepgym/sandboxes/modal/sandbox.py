@@ -13,7 +13,12 @@ from collections.abc import Mapping
 
 import modal
 
-from deepgym.sandboxes.protocol import TRUSTED_PATH, ExecResult, SandboxTimeoutError
+from deepgym.sandboxes.protocol import (
+    TRUSTED_PATH,
+    ExecResult,
+    SandboxImage,
+    SandboxTimeoutError,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -28,6 +33,7 @@ class ModalSandbox:
     network_blocked = True
 
     def __init__(self, image: str | None = None) -> None:
+        self._image = image
         app = modal.App.lookup(APP_NAME, create_if_missing=True)
         self._sandbox = modal.Sandbox.create(
             'sleep', 'infinity',
@@ -41,6 +47,10 @@ class ModalSandbox:
             timeout=LIFETIME_S,
         )  # fmt: skip
         self.id = self._sandbox.object_id
+
+    def booted_image(self) -> SandboxImage:
+        """Return the registry image given, or None for Modal's own Debian image; no digest."""
+        return SandboxImage(self._image, None, 'Modal reports no digest for the image it booted')
 
     def exec(
         self,

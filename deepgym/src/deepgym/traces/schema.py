@@ -1,18 +1,26 @@
 """Versioned trace schema: one graded agent episode with its provenance.
 
 A :class:`Trace` is what an episode leaves behind for training: where it ran
-(environment, verifier and image fingerprints, deepgym version, provider), who acted
-(agent, model and sampling config, as the caller describes them), every step (the
-action, the model messages behind it, what came back, the step reward and its
-verifier output) and the final verdict.
+(environment, verifier and image fingerprints, deepgym version and commit, provider),
+who acted (agent, model and sampling config, as the caller describes them), every step
+(the action, the model messages behind it, what came back, the step reward and its
+verifier output) and every grade, the last of them the verdict.
+
+Schema 1.1 added the deepgym commit, the image digest the provider resolved (or why
+there is none) and every grade but the last. Traces written as 1.0 still load, with
+those fields empty.
 """
 
 from __future__ import annotations
 
+import functools
 import hashlib
 import json
+import os
+import subprocess
 from collections import Counter
 from collections.abc import Sequence
+from pathlib import Path
 from typing import Literal
 
 from pydantic import (
@@ -28,8 +36,11 @@ from pydantic import (
 from pydantic_core import to_json
 
 from deepgym.models import Action, MultiTurnEnvironment, Observation, RunResult, Trajectory
+from deepgym.sandboxes import SandboxImage
 
-TRACE_SCHEMA_VERSION = '1.0'
+TRACE_SCHEMA_VERSION = '1.1'
+
+NOT_RESOLVED = 'not resolved: no sandbox reported which image it booted'
 
 SamplingValue = str | int | FiniteFloat | bool | None
 
@@ -59,6 +70,50 @@ def environment_sha256(env: MultiTurnEnvironment) -> str:
     if 'allowed_actions' in data:
         data['allowed_actions'] = sorted(data['allowed_actions'])
     return sha256_text(json.dumps(data, sort_keys=True, separators=(',', ':')))
+
+
+def git_checkout(package: Path) -> tuple[str | None, bool | None]:
+    """Return the git commit *package* is checked out at, and whether its files differ from it.
+
+    The package must be tracked by the repository around it, so an install inside some
+    other project's checkout (a virtualenv in it, say) never reports that project's commit.
+    ``GIT_*`` variables are dropped, so they can't point git at another repository, and
+    git takes no optional locks, so it never blocks a commit running at the same time.
+
+    Returns:
+        ``(commit, dirty)``; ``(None, None)`` when *package* isn't tracked in a git
+        checkout, or git can't tell.
+    """
+    env = {key: value for key, value in os.environ.items() if not key.startswith('GIT_')}
+
+    def git(*args: str) -> str | None:
+        try:
+            done = subprocess.run(
+                ['git', '--no-optional-locks', '-C', str(package), *args],
+                capture_output=True, text=True, timeout=10, env=env, check=False,
+            )  # fmt: skip
+        except (OSError, subprocess.SubprocessError):
+            return None
+        return done.stdout if done.returncode == 0 else None
+
+    if git('ls-files', '--error-unmatch', '--', '.') is None:
+        return None, None
+    head = git('rev-parse', '--verify', 'HEAD')
+    status = git('status', '--porcelain', '--', '.')
+    if head is None or status is None:
+        return None, None
+    return head.strip(), bool(status.strip())
+
+
+@functools.cache
+def deepgym_checkout() -> tuple[str | None, bool | None]:
+    """Return :func:`git_checkout` of the deepgym package this code runs from, once a process."""
+    return git_checkout(Path(__file__).resolve().parents[1])
+
+
+def _pinned_digest(image: str | None) -> str | None:
+    """Return the digest an image reference pins (``name@sha256:...``), if it pins one."""
+    return image.rpartition('@')[2] if image and '@' in image else None
 
 
 class AgentMeta(BaseModel):
@@ -103,8 +158,14 @@ class EnvFingerprint(BaseModel):
     """Hash of the reference solution the caller supplied, if any."""
 
     image: str | None = None
+    """The image the sandbox booted (its tag, snapshot or template), as the provider names it."""
+
     image_digest: str | None = None
-    """Content digest of the image, known when the image reference pins one (``@sha256:``)."""
+    """Content digest (``sha256:...``) of that image: pinned by its reference, or resolved
+    by the provider."""
+
+    digest_unavailable: str | None = None
+    """Why there is no ``image_digest``; traces before schema 1.1 have neither."""
 
     snapshot: str | None = None
 
@@ -126,9 +187,10 @@ class EnvFingerprint(BaseModel):
             reference: Reference solution source, hashed when given.
 
         Returns:
-            The environment's fingerprint.
+            The environment's fingerprint. Its image is the environment's own until
+            :meth:`booted` says what the sandbox booted.
         """
-        image = env.image
+        digest = _pinned_digest(env.image)
         return cls(
             name=env.name,
             variant=variant,
@@ -140,9 +202,24 @@ class EnvFingerprint(BaseModel):
             if env.step_verifier_code
             else None,
             reference_sha256=None if reference is None else sha256_text(reference),
-            image=image,
-            image_digest=image.rpartition('@')[2] if image and '@' in image else None,
+            image=env.image,
+            image_digest=digest,
+            digest_unavailable=None if digest else NOT_RESOLVED,
             snapshot=env.snapshot,
+        )
+
+    def booted(self, image: SandboxImage) -> EnvFingerprint:
+        """Return this fingerprint with the image its sandbox booted, as the provider reports it.
+
+        A digest pinned by the image's reference stands when the provider resolves none.
+        """
+        digest = image.digest or _pinned_digest(image.name)
+        return self.model_copy(
+            update={
+                'image': image.name,
+                'image_digest': digest,
+                'digest_unavailable': None if digest else image.unavailable or NOT_RESOLVED,
+            }
         )
 
 
@@ -157,6 +234,13 @@ class Provenance(BaseModel):
     """Where the episode ran: 'local', 'daytona', 'docker', ..."""
 
     deepgym_version: str
+    deepgym_commit: str | None = None
+    """Git commit of the deepgym checkout that ran the episode (see :func:`git_checkout`);
+    None when it ran from an installed package, and in traces before schema 1.1."""
+
+    deepgym_dirty: bool | None = None
+    """Whether deepgym's files in that checkout differed from the commit; None without one."""
+
     started_at: AwareDatetime
 
 
@@ -193,8 +277,10 @@ class TraceStep(BaseModel):
     action: Action
     messages: tuple[TraceMessage, ...] = ()
     """Model messages new at this step, ending with the assistant reply that produced the
-    action: the prompt on the first step, the rendered observation and reply after that.
-    Concatenated over all steps they are the whole conversation. Empty when not supplied."""
+    action: the prompt on the first step, the rendered observations and reply after that.
+    Concatenated over all steps they are the whole conversation. Empty on the second and
+    later actions of one reply, which continue its turn (see :attr:`Trace.turns`), and
+    when not supplied."""
 
     observation: Observation | None = None
     """What the action produced; None if it failed before producing anything."""
@@ -230,14 +316,18 @@ class Trace(BaseModel):
 
     model_config = ConfigDict(frozen=True)
 
-    schema_version: Literal['1.0'] = TRACE_SCHEMA_VERSION
+    schema_version: Literal['1.0', '1.1'] = TRACE_SCHEMA_VERSION
     trace_id: str = Field(pattern=r'^[A-Za-z0-9_-]{1,64}$')
     task: str
     provenance: Provenance
     initial_observation: Observation | None = None
     steps: tuple[TraceStep, ...] = ()
     result: RunResult | None = None
-    """The final verifier's result; None if the episode was never scored."""
+    """The final verifier's last result, the verdict; None if the episode was never scored."""
+
+    prior_results: tuple[RunResult, ...] = ()
+    """Earlier results of the final verifier, oldest first, each replaced by a later grade
+    of the same final state: the episode's grades are ``(*prior_results, result)``."""
 
     error: str | None = None
     """What ended the episode early, if anything did."""
@@ -250,6 +340,29 @@ class Trace(BaseModel):
         if [step.index for step in self.steps] != list(range(1, len(self.steps) + 1)):
             raise ValueError('step indexes must run 1, 2, 3, ... in order')
         return self
+
+    @model_validator(mode='after')
+    def check_grades(self) -> Trace:
+        """Reject earlier grades without a last one."""
+        if self.prior_results and self.result is None:
+            raise ValueError('prior_results need a final result')
+        return self
+
+    @computed_field  # type: ignore[prop-decorator]
+    @property
+    def turns(self) -> list[list[int]]:
+        """Step indexes by model turn: the actions one assistant reply produced, in order.
+
+        A step without messages belongs to the turn before it; one that comes before any
+        model messages is a group of its own, its turn unknown.
+        """
+        turns: list[list[int]] = []
+        for step in self.steps:
+            if turns and not step.messages and self.steps[turns[-1][0] - 1].messages:
+                turns[-1].append(step.index)
+            else:
+                turns.append([step.index])
+        return turns
 
     @computed_field  # type: ignore[prop-decorator]
     @property
@@ -306,3 +419,57 @@ def check_unique_ids(traces: Sequence[Trace]) -> None:
     repeated = [key for key, count in ids.items() if count > 1]
     if repeated:
         raise ValueError(f'Traces share ids {repeated}; keep one copy of each')
+
+
+def merge_copies(traces: Sequence[Trace]) -> list[Trace]:
+    """Keep one copy of each trace, the one that got furthest, if its copies agree.
+
+    A trace can be stored twice, e.g. in the console mid-episode and on disk once it
+    ended. Copies agree when each is the furthest one cut short: the same start, steps
+    and grades that begin the furthest one's, and, once finished, nothing different.
+
+    Raises:
+        ValueError: If copies of a trace disagree: keeping either would drop the other.
+    """
+    copies: dict[str, list[Trace]] = {}
+    for trace in traces:
+        copies.setdefault(trace.trace_id, []).append(trace)
+    kept: list[Trace] = []
+    conflicts: list[str] = []
+    for trace_id, group in copies.items():
+        furthest = max(group, key=_progress)
+        if all(_cut_short(copy, furthest) for copy in group):
+            kept.append(furthest)
+        else:
+            conflicts.append(trace_id)
+    if conflicts:
+        raise ValueError(f'Copies of traces {conflicts} disagree; keep the right copy of each')
+    return kept
+
+
+def _grades(trace: Trace) -> tuple[RunResult, ...]:
+    return () if trace.result is None else (*trace.prior_results, trace.result)
+
+
+def _progress(trace: Trace) -> tuple[int, int, bool, bool]:
+    """How far a copy got: steps, grades, then whether it finished or says why it stopped."""
+    return (
+        len(trace.steps),
+        len(_grades(trace)),
+        trace.finished_at is not None,
+        trace.error is not None,
+    )
+
+
+def _cut_short(copy: Trace, furthest: Trace) -> bool:
+    """Whether *copy* is *furthest* recorded earlier, or the same trace."""
+    if copy.finished_at is not None:
+        return copy == furthest
+    grades = _grades(copy)
+    return (
+        (copy.schema_version, copy.task, copy.provenance)
+        == (furthest.schema_version, furthest.task, furthest.provenance)
+        and copy.initial_observation in (None, furthest.initial_observation)
+        and copy.steps == furthest.steps[: len(copy.steps)]
+        and grades == _grades(furthest)[: len(grades)]
+    )

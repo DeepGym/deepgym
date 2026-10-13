@@ -1,10 +1,11 @@
 """Record a session's trace to disk while the episode runs.
 
 Each trace is an append-only JSONL file of events: ``start`` (provenance and task),
-``reset`` (the first observation), one ``step`` per action, ``result`` (the final
-verdict) and ``end``. Every event is flushed when it happens, so a crash loses at most
-the record being written. :func:`load_trace` rebuilds a :class:`Trace` from whatever
-reached the disk; a trace that was never scored is incomplete.
+``reset`` (the first observation), one ``step`` per action, one ``result`` per grade
+(the last is the verdict) and ``end``. Every event is flushed when it happens, so a
+crash loses at most the record being written. :func:`load_trace` rebuilds a
+:class:`Trace` from whatever reached the disk; a trace that was never scored is
+incomplete.
 """
 
 from __future__ import annotations
@@ -57,6 +58,9 @@ class TracedSession:
             tr.score()
         tr.trace.has_verdict
 
+    When one reply issues several actions, step each one, passing the reply's messages
+    with the first only: the others continue its turn (see :attr:`Trace.turns`).
+
     Leaving the block closes the session. An exception, or leaving before ``score()``,
     keeps everything recorded so far and marks the trace incomplete. The trace keeps
     its own copies of actions, observations and results, so changing the objects
@@ -77,7 +81,7 @@ class TracedSession:
         self._provenance = provenance.model_copy(deep=True)
         self._initial: Observation | None = None
         self._steps: list[TraceStep] = []
-        self._result: RunResult | None = None
+        self._results: list[RunResult] = []
         self._error: str | None = None
         self._finished_at: datetime | None = None
         self._file: TextIO | None = None
@@ -98,7 +102,8 @@ class TracedSession:
                 provenance=self._provenance,
                 initial_observation=self._initial,
                 steps=tuple(self._steps),
-                result=self._result,
+                result=self._results[-1] if self._results else None,
+                prior_results=tuple(self._results[:-1]),
                 error=self._error,
                 finished_at=self._finished_at,
             ).model_copy(deep=True)
@@ -142,7 +147,7 @@ class TracedSession:
         """
         with self._lock:
             self._check_open()
-            if self._result is not None:
+            if self._results:
                 raise DeepGymError('The episode was already scored; open a new trace to act')
             if self._initial is None or self._session.done:
                 raise DeepGymError('The episode is not running; call start() or open a new trace')
@@ -188,6 +193,9 @@ class TracedSession:
     def score(self) -> RunResult:
         """Run the final verifier and record its result.
 
+        Calling it again grades the same final state again. Every result is kept: the
+        last is the trace's verdict, the others its ``prior_results``.
+
         Raises:
             DeepGymError: If the trace is closed or the episode never started.
             VerifierError: As :meth:`Session.score`; the error is recorded first.
@@ -197,8 +205,8 @@ class TracedSession:
             if self._initial is None:
                 raise DeepGymError('The episode never started; call start() first')
             result = self._recorded(self._session.score)
-            self._result = result.model_copy(deep=True)
-            self._write({'event': 'result', 'result': self._result})
+            self._results.append(result.model_copy(deep=True))
+            self._write({'event': 'result', 'result': self._results[-1]})
             return result
 
     def close(self) -> None:
@@ -320,6 +328,7 @@ def load_trace(path: Path) -> Trace:
     fields = {key: head[key] for key in ('schema_version', 'trace_id', 'task', 'provenance')}
     fields['error'] = UNFINISHED
     steps = []
+    results = []
     for event in rest:
         match event.get('event') if isinstance(event, dict) else None:
             case 'reset':
@@ -327,12 +336,14 @@ def load_trace(path: Path) -> Trace:
             case 'step':
                 steps.append(event['step'])
             case 'result':
-                fields['result'] = event['result']
+                results.append(event['result'])
             case 'end':
                 fields['error'] = event['error']
                 fields['finished_at'] = event['finished_at']
             case other:
                 raise DeepGymError(f'{path}: unknown trace event {other!r}')
+    if results:
+        fields['result'], fields['prior_results'] = results[-1], results[:-1]
     return Trace.model_validate({**fields, 'steps': steps})
 
 

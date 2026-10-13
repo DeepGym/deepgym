@@ -36,12 +36,12 @@ MIXED = Environment(
     task='Say right.',
     verifier_code=(
         'source = open(solution_path).read()\n'
-        "if 'boom' in source:\n"
-        "    raise RuntimeError('verifier bug')\n"
+        "if 'boom' in source:  # a crash after reading the answer would be the answer's 0\n"
+        "    return {'score': 0.0, 'passed': False, 'error_type': 'runtime_error'}\n"
         "return 1.0 if 'right' in source else 0.0\n"
     ),
 )
-"""Judges 'wrong' 0.0 (a real zero) and crashes on 'boom': no verdict."""
+"""Judges 'wrong' 0.0 (a real zero) and reports its own error on 'boom': no verdict."""
 
 
 @pytest.fixture()

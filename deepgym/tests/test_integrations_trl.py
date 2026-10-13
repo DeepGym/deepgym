@@ -30,11 +30,12 @@ MIXED = Environment(
     task='Say right.',
     verifier_code=(
         'source = open(solution_path).read()\n'
-        "if 'boom' in source:\n"
-        "    raise RuntimeError('verifier bug')\n"
+        "if 'boom' in source:  # a crash after reading the answer would be the answer's 0\n"
+        "    return {'score': 0.0, 'passed': False, 'error_type': 'runtime_error'}\n"
         "return 1.0 if 'right' in source else 0.0\n"
     ),
 )
+"""Judges 'right' 1.0 and 'wrong' 0.0, and reports its own error on 'boom': no verdict."""
 
 
 def _scripted_rollout(prompts: list, trainer: object) -> dict:
@@ -84,7 +85,7 @@ def test_grpo_trains_on_a_real_zero_and_leaves_a_crash_out(
     advantages = list(trainer._logs['advantages'])
     assert rewards[:3] == [1.0, 1.0, 0.0]
     assert math.isnan(rewards[3])
-    # The baseline is the mean and std of [1, 1, 0]; the crash gets no advantage.
+    # The baseline is the mean and std of [1, 1, 0]; the unjudged answer gets no advantage.
     mean, std = 2 / 3, math.sqrt(1 / 3)
     expected = [(1 - mean) / (std + 1e-4)] * 2 + [(0 - mean) / (std + 1e-4), 0.0]
     assert advantages == pytest.approx(expected, abs=1e-4)

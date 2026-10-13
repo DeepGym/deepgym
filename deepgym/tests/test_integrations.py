@@ -5,7 +5,6 @@ import logging
 import math
 import threading
 import time
-import types
 from pathlib import Path
 
 import httpx
@@ -15,7 +14,8 @@ from fastapi.testclient import TestClient
 
 from deepgym.async_core import AsyncDeepGym
 from deepgym.core import DeepGym
-from deepgym.exceptions import NoVerdictError, SandboxError
+from deepgym.exceptions import NoVerdictError, SandboxError, VerifierError
+from deepgym.exceptions import TimeoutError as DeepGymTimeout
 from deepgym.integrations import openrlhf
 from deepgym.integrations import verl as verl_module
 from deepgym.integrations.dapo import (
@@ -45,7 +45,6 @@ from deepgym.integrations.verl import (
     verl_rows,
 )
 from deepgym.models import Environment, RunResult
-from deepgym.sandbox import error_result
 
 ENVS_DIR = Path(__file__).resolve().parent.parent / 'src' / 'deepgym' / 'envs'
 REVERSE_DIR = ENVS_DIR / 'reverse_string'
@@ -455,42 +454,49 @@ def _post(env: Environment, dg: DeepGym, payload: dict, **router_kwargs: str) ->
     return response.json()  # json.loads, which reads NaN as OpenRLHF's client does
 
 
-class _FlakyDeepGym(DeepGym):
-    """A client whose provider fails outputs marked 'outage' on its first *failing_calls* calls.
+class _ScriptedDeepGym(DeepGym):
+    """A client that runs nothing: each run of an output does the next step of its script.
 
-    Other outputs are judged 1.0 if they say 'right', else 0.0, after *seconds*, without
-    running anything.
+    A step that is an exception is raised; a number is seconds to wait before judging.
+    Every run first waits *seconds*. A judged output scores 1.0 if it says 'right', else
+    0.0. The client records each run's output and the most runs going at once.
     """
 
-    def __init__(self, failing_calls: int, seconds: float = 0.0) -> None:
+    def __init__(
+        self, script: dict[str, list[BaseException | float]] | None = None, seconds: float = 0.0
+    ) -> None:
         super().__init__(mode='local')
-        self.failing_calls = failing_calls
+        self.script = {output: list(steps) for output, steps in (script or {}).items()}
         self.seconds = seconds
-        self.calls: list[list[str]] = []
+        self.calls: list[str] = []
+        self.running = self.most_running = 0
+        self._lock = threading.Lock()
 
-    def run_batch(self, env: Environment, outputs: list[str], **kwargs: object) -> object:
-        self.calls.append(list(outputs))
-        time.sleep(self.seconds)
-        outage = len(self.calls) <= self.failing_calls
-        judged = [
-            RunResult(
-                score=float('right' in output),
-                passed='right' in output,
+    def run(self, env: Environment, model_output: str, **kwargs: object) -> RunResult:
+        with self._lock:
+            self.calls.append(model_output)
+            steps = self.script.get(model_output)
+            step = steps.pop(0) if steps else 0.0
+            self.running += 1
+            self.most_running = max(self.most_running, self.running)
+        try:
+            time.sleep(self.seconds)
+            if isinstance(step, BaseException):
+                raise step
+            time.sleep(step)
+            judged = 'right' in model_output
+            return RunResult(
+                score=float(judged),
+                passed=judged,
                 output='',
                 stderr='',
                 exit_code=0,
                 execution_time_ms=0.0,
                 sandbox_id='fake',
             )
-            for output in outputs
-        ]
-        unavailable = error_result(SandboxError('provider unavailable'))
-        return types.SimpleNamespace(
-            results=[
-                unavailable if outage and 'outage' in output else result
-                for output, result in zip(outputs, judged, strict=True)
-            ]
-        )
+        finally:
+            with self._lock:
+                self.running -= 1
 
 
 class _GatedDeepGym(DeepGym):
@@ -502,15 +508,15 @@ class _GatedDeepGym(DeepGym):
         self.other_scored = threading.Event()
         self.finished: list[str] = []
 
-    def run_batch(self, env: Environment, outputs: list[str], **kwargs: object) -> object:
-        if outputs == ['slow']:
+    def run(self, env: Environment, model_output: str, **kwargs: object) -> RunResult:
+        if model_output == 'slow':
             self.slow_started.set()
             self.other_scored.wait(timeout=10)
-        batch = super().run_batch(env, outputs, **kwargs)
-        self.finished.extend(outputs)
-        if outputs != ['slow']:
+        result = super().run(env, model_output, **kwargs)
+        self.finished.append(model_output)
+        if model_output != 'slow':
             self.other_scored.set()
-        return batch
+        return result
 
 
 class TestOpenRLHFIntegration:
@@ -588,60 +594,113 @@ class TestOpenRLHFIntegration:
 
         assert data == {'rewards': [0.0], 'error_types': ['runtime_error']}
 
-    def test_a_provider_failure_is_run_again(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        monkeypatch.setattr(openrlhf, '_RETRY_DELAYS_S', (0.0, 0.0))
-        dg = _FlakyDeepGym(failing_calls=1)
+    def test_a_provider_failure_is_graded_once_more(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """A failure is_infrastructure_failure calls ours gets one more grading of the response."""
+        monkeypatch.setattr(openrlhf, '_RETRY_DELAY_S', 0.0)
+        dg = _ScriptedDeepGym({'right': [ConnectionError('provider unavailable')]})
 
-        data = _post(MIXED, dg, {'prompts': ['p'] * 2, 'outputs': ['right # outage', 'wrong']})
+        data = _post(MIXED, dg, {'prompts': ['p'] * 2, 'outputs': ['right', 'wrong']})
 
         assert data == {'rewards': [1.0, 0.0], 'error_types': [None, None]}
-        assert dg.calls == [['right # outage', 'wrong'], ['right # outage']]
+        assert sorted(dg.calls) == ['right', 'right', 'wrong']
 
-    def test_the_request_answers_by_its_deadline(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        """OpenRLHF gives up on a request after 180 s, so scoring is never waited on past it.
+    @pytest.mark.parametrize(
+        'failure',
+        [
+            SandboxError('Sandbox 7f3a is not running'),
+            DeepGymTimeout('Command exceeded 30s timeout'),
+            VerifierError('Verifier did not produce valid JSON'),
+        ],
+        ids=['sandbox_killed', 'hung', 'verifier_failed'],
+    )
+    def test_a_failure_the_model_may_have_caused_is_never_graded_again(
+        self, monkeypatch: pytest.MonkeyPatch, failure: Exception
+    ) -> None:
+        """It scores 0, even with NaN asked for: a second grading could hand it a pass."""
+        monkeypatch.setattr(openrlhf, '_RETRY_DELAY_S', 0.0)
+        dg = _ScriptedDeepGym({'right': [failure]})
 
-        A slow provider (here, a run that takes 2 s against a 0.2 s budget) gets the
-        fallback reward instead of timing the request out.
-        """
-        monkeypatch.setattr(openrlhf, '_REQUEST_BUDGET_S', 0.2)
-        dg = _FlakyDeepGym(failing_calls=0, seconds=2.0)
+        data = _post(MIXED, dg, {'prompts': ['p'], 'outputs': ['right']}, infra_failure_score='nan')
 
-        start = time.monotonic()
-        data = _post(MIXED, dg, {'prompts': ['p'], 'outputs': ['right']})
-
-        assert time.monotonic() - start < 1.5
-        assert data == {'rewards': [0.0], 'error_types': ['deadline_exceeded']}
+        assert data['rewards'] == [0.0]
+        assert dg.calls == ['right']
 
     @pytest.mark.parametrize('infra_failure_score', ['zero', 'nan'])
-    def test_a_lasting_provider_failure_gets_the_configured_reward(
+    @pytest.mark.parametrize(
+        ('second', 'budget'),
+        [(ConnectionError('still unavailable'), 150.0), (2.0, 0.5)],
+        ids=['fails_too', 'out_of_time'],
+    )
+    def test_a_second_grading_that_fails_gets_the_infrastructure_score(
         self,
         monkeypatch: pytest.MonkeyPatch,
         caplog: pytest.LogCaptureFixture,
         infra_failure_score: str,
+        second: BaseException | float,
+        budget: float,
     ) -> None:
-        """0 by default; NaN on request, which OpenRLHF's dynamic filtering drops."""
-        monkeypatch.setattr(openrlhf, '_RETRY_DELAYS_S', (0.0, 0.0))
-        dg = _FlakyDeepGym(failing_calls=99)
-        payload = {'prompts': ['p'] * 2, 'outputs': ['right # outage', 'right']}
+        """Failing again, or passing too late (2 s against 0.5 s), is never a pass or an error.
+
+        0 by default; NaN on request, which OpenRLHF's dynamic filtering drops.
+        """
+        monkeypatch.setattr(openrlhf, '_RETRY_DELAY_S', 0.0)
+        monkeypatch.setattr(openrlhf, '_REQUEST_BUDGET_S', budget)
+        dg = _ScriptedDeepGym({'right': [ConnectionError('provider unavailable'), second]})
+        payload = {'prompts': ['p'], 'outputs': ['right']}
 
         with caplog.at_level(logging.WARNING, logger='deepgym.integrations.openrlhf'):
             data = _post(MIXED, dg, payload, infra_failure_score=infra_failure_score)
 
-        failed, judged = data['rewards']
-        assert (failed == 0.0) if infra_failure_score == 'zero' else math.isnan(failed)
-        assert judged == 1.0
-        assert data['error_types'] == ['sandbox_error', None]
-        assert len(dg.calls) == 3  # the first run and two more
-        assert 'got no verdict (sandbox_error)' in caplog.text
+        (reward,) = data['rewards']
+        assert (reward == 0.0) if infra_failure_score == 'zero' else math.isnan(reward)
+        assert data['error_types'] == ['unknown_error']
+        assert dg.calls == ['right', 'right']
+        assert 'no verdict (unknown_error)' in caplog.text
+
+    def test_second_gradings_take_the_same_slots(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Every run, first or second, waits for one of max_parallel slots: never more."""
+        monkeypatch.setattr(openrlhf, '_RETRY_DELAY_S', 0.0)
+        outputs = [f'right {i}' for i in range(4)]
+        dg = _ScriptedDeepGym({o: [ConnectionError('unavailable')] for o in outputs}, 0.05)
+
+        data = _post(MIXED, dg, {'prompts': outputs, 'outputs': outputs}, max_parallel=2)
+
+        assert data['rewards'] == [1.0] * 4
+        assert len(dg.calls) == 8
+        assert dg.most_running == 2
+
+    def test_a_run_its_request_gave_up_on_keeps_its_slot(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Answering at the deadline never frees a slot the run still holds.
+
+        The next request's run can't start, so it gets the infrastructure score too.
+        """
+        monkeypatch.setattr(openrlhf, '_REQUEST_BUDGET_S', 0.3)
+        dg = _ScriptedDeepGym({'right': [1.0]})
+        app = FastAPI()
+        app.include_router(create_openrlhf_router(MIXED, dg, max_parallel=1))
+        client = TestClient(app)
+
+        first = client.post('/reward/score', json={'prompts': ['p'], 'outputs': ['right']})
+        second = client.post('/reward/score', json={'prompts': ['p'], 'outputs': ['wrong']})
+
+        expected = {'rewards': [0.0], 'error_types': ['deadline_exceeded']}
+        assert first.json() == second.json() == expected
+        assert dg.calls == ['right']
+        assert dg.most_running == 1
 
     def test_lasting_failures_count_toward_the_masked_rate_warning(
         self, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
     ) -> None:
-        monkeypatch.setattr(openrlhf, '_RETRY_DELAYS_S', ())
-        outputs = ['right # outage'] * 6 + ['right'] * (MASKED_BATCH - 6)
+        monkeypatch.setattr(openrlhf, '_RETRY_DELAY_S', 0.0)
+        failing = [f'right {i} outage' for i in range(6)]
+        outputs = failing + ['right'] * (MASKED_BATCH - 6)
+        down = [ConnectionError('down'), ConnectionError('down')]
+        dg = _ScriptedDeepGym({output: list(down) for output in failing})
 
         with caplog.at_level(logging.WARNING, logger='deepgym.integrations.reward'):
-            _post(MIXED, _FlakyDeepGym(failing_calls=99), {'prompts': outputs, 'outputs': outputs})
+            _post(MIXED, dg, {'prompts': outputs, 'outputs': outputs})
 
         assert f'6 of the last {MASKED_BATCH} samples got no verdict' in caplog.text
 

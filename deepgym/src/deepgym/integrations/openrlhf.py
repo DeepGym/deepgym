@@ -28,12 +28,16 @@ only way OpenRLHF drops samples is ``--algo.dynamic_filtering_enable``, which dr
 prompt's whole group when the mean of its scores falls outside
 ``--algo.dynamic_filtering_range``; a NaN always does.
 
-So the endpoint never fails a request over a run. A judged run gets its score, and a
-failure the model caused is judged and scores 0 (``RunResult.has_verdict`` says which).
-A run the sandbox provider or the network failed is run again after a short pause, and
-no request waits on scoring past 150 s, so it answers inside the 180 s OpenRLHF gives it.
-A run that still fails that way, one still going at that point, or a query that doesn't
-contain its prompt is rewarded the router's ``infra_failure_score``:
+So the endpoint never fails a request over a run. A judged run gets its score. A run
+without a verdict for a reason the model may have caused (the verifier failed, the run
+timed out, the sandbox broke) scores 0 in either mode, with a warning, and is never run
+again. A run the sandbox provider or the network failed (see
+:func:`~deepgym.exceptions.is_infrastructure_failure`) is graded once more after a short
+pause. Every run, first or repeated, takes one of the router's ``max_parallel`` slots,
+and no request waits past 150 s, inside the 180 s OpenRLHF gives it. If the second
+grading fails too, can't start in time or is still going then, or the first one is, or a
+query doesn't contain its prompt, the sample is rewarded the router's
+``infra_failure_score``, never a score from a run that didn't finish:
 
 - ``'zero'`` (the default): 0.0, logged as a warning with its error type and counted
   toward the masked-rate warning (:class:`~deepgym.integrations.reward.MaskedRate`).
@@ -41,9 +45,6 @@ contain its prompt is rewarded the router's ``infra_failure_score``:
 - ``'nan'``: NaN, so dynamic filtering drops the sample's group, and is counted the same
   way. Use it only with ``--algo.dynamic_filtering_enable``: without it OpenRLHF trains
   on the NaN and the run breaks.
-
-Any other run without a verdict (the verifier failed, or the run timed out) may follow
-from the model's output, so it scores 0 in either mode, with a warning.
 
 Note: This router is NOT automatically mounted by ``deepgym serve``.
 Create a custom FastAPI app to use it.
@@ -72,9 +73,11 @@ except ImportError as _exc:
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from deepgym.core import DeepGym
+from deepgym.exceptions import error_type_for, is_infrastructure_failure
 from deepgym.integrations.reward import MaskedRate
 from deepgym.integrations.verl import extract_code
 from deepgym.models import Environment, RunResult
+from deepgym.sandbox import error_result
 
 logger = logging.getLogger(__name__)
 
@@ -86,12 +89,8 @@ DEADLINE_EXCEEDED = 'deadline_exceeded'
 """error_type of a sample still being scored when its request had to answer; it gets the
 router's infra_failure_score (a run the model hangs ends at its own timeout, well before)."""
 
-_RETRYABLE = frozenset({'sandbox_error', 'unknown_error'})
-"""error_type of a run the sandbox provider or the network failed (see error_type_for)."""
-_NOT_THE_MODELS = _RETRYABLE | {PROMPT_MISMATCH, DEADLINE_EXCEEDED}
-"""Why a sample may get no verdict without the model's output being the cause."""
-_RETRY_DELAYS_S = (1.0, 2.0)
-"""Pause before each re-run of a provider or network failure."""
+_RETRY_DELAY_S = 1.0
+"""Pause before the one re-run of a provider or network failure."""
 _REQUEST_BUDGET_S = 150.0
 """Most time a request may take, inside the 180 s OpenRLHF gives each attempt."""
 
@@ -176,47 +175,33 @@ class OpenRLHFRewardResponse(BaseModel):
     error_types: list[str | None] = Field(default_factory=list)
 
 
-def _score_by(
-    deadline: float, dg: DeepGym, env: Environment, solutions: list[str]
-) -> list[RunResult] | None:
-    """Score *solutions*, or stop waiting at *deadline* (``time.monotonic``) and return None.
+def _wait(run: concurrent.futures.Future[RunResult], deadline: float) -> RunResult | str:
+    """Return *run*'s result, or why the provider, the network or the clock stopped it.
 
-    Runs still going then finish in the background and delete their own sandboxes.
+    A run that raised for a reason the model may have caused comes back as a result
+    without a verdict, scored 0. A run the provider or the network failed (see
+    :func:`~deepgym.exceptions.is_infrastructure_failure`), or one not done by *deadline*
+    (``time.monotonic``), comes back as its error_type: there is no score to give. A run
+    still waiting for a slot then never starts; one already going keeps its slot until it
+    ends, so it still counts against the router's limit.
     """
-    pool = concurrent.futures.ThreadPoolExecutor(max_workers=1)
-    batch = pool.submit(dg.run_batch, env, solutions, max_parallel=min(len(solutions), 32))
-    pool.shutdown(wait=False)
     try:
-        return list(batch.result(timeout=max(0.0, deadline - time.monotonic())).results)
+        return run.result(timeout=max(0.0, deadline - time.monotonic()))
     except concurrent.futures.TimeoutError:
-        return None
-
-
-def _score_retrying(dg: DeepGym, env: Environment, solutions: list[str]) -> list[RunResult | None]:
-    """Score *solutions*, running again those the provider or the network left unjudged.
-
-    Each re-run waits its ``_RETRY_DELAYS_S`` pause. Nothing is waited for past
-    ``_REQUEST_BUDGET_S``, so the request always answers before OpenRLHF gives up on it; a
-    sample still being scored then is None.
-    """
-    deadline = time.monotonic() + _REQUEST_BUDGET_S
-    results: list[RunResult | None] = [None] * len(solutions)
-    pending = list(range(len(solutions)))
-    for delay in (0.0, *_RETRY_DELAYS_S):
-        if not pending or time.monotonic() + delay >= deadline:
-            break
-        time.sleep(delay)
-        scored = _score_by(deadline, dg, env, [solutions[i] for i in pending])
-        if scored is None:
-            break
-        for i, result in zip(pending, scored, strict=True):
-            results[i] = result
-        pending = [i for i in pending if results[i].error_type in _RETRYABLE]
-    return results
+        run.cancel()
+        return DEADLINE_EXCEEDED
+    except Exception as exc:
+        if is_infrastructure_failure(exc):
+            logger.warning('OpenRLHF: the provider or network failed a run: %s', exc)
+            return error_type_for(exc)
+        return error_result(exc)
 
 
 def create_openrlhf_router(
-    env: Environment, dg: DeepGym, infra_failure_score: Literal['zero', 'nan'] = 'zero'
+    env: Environment,
+    dg: DeepGym,
+    infra_failure_score: Literal['zero', 'nan'] = 'zero',
+    max_parallel: int = 32,
 ) -> APIRouter:
     """Create a FastAPI router compatible with OpenRLHF's reward server protocol.
 
@@ -227,44 +212,51 @@ def create_openrlhf_router(
     Args:
         env: The environment every response is scored with.
         dg: The DeepGym client that scores them.
-        infra_failure_score: The reward of a sample that got no verdict: ``'zero'``, or
-            ``'nan'`` for OpenRLHF runs with dynamic filtering (see the module docstring).
+        infra_failure_score: The reward of a sample that got no verdict through no fault
+            of the model: ``'zero'``, or ``'nan'`` for OpenRLHF runs with dynamic filtering
+            (see the module docstring).
+        max_parallel: Most runs going at once across every request, first gradings and
+            second ones alike.
     """
     router = APIRouter(prefix='/reward')
+    slots = concurrent.futures.ThreadPoolExecutor(max_parallel, 'deepgym-openrlhf')
     masked = MaskedRate('OpenRLHF reward server')
     fallback = 0.0 if infra_failure_score == 'zero' else math.nan
 
     @router.post('/score', response_model=OpenRLHFRewardResponse)
     def score(request: OpenRLHFRewardRequest) -> Response:
         """Score a batch of model responses and return a reward for every one."""
+        deadline = time.monotonic() + _REQUEST_BUDGET_S
         responses = request.responses
-        found = [i for i, response in enumerate(responses) if response is not None]
-        solutions = [extract_code(responses[i]) for i in found]
-        results = dict(zip(found, _score_retrying(dg, env, solutions), strict=True))
+        codes = {i: extract_code(r) for i, r in enumerate(responses) if r is not None}
+        runs = {i: slots.submit(dg.run, env, code) for i, code in codes.items()}
+        outcomes = {i: _wait(run, deadline) for i, run in runs.items()}
+        # A provider or network failure is graded once more, in the same slots and time.
+        retry = [i for i, o in outcomes.items() if isinstance(o, str) and o != DEADLINE_EXCEEDED]
+        if retry and time.monotonic() + _RETRY_DELAY_S < deadline:
+            time.sleep(_RETRY_DELAY_S)
+            reruns = {i: slots.submit(dg.run, env, codes[i]) for i in retry}
+            for i, rerun in reruns.items():
+                outcome = _wait(rerun, deadline)
+                if isinstance(outcome, RunResult) and outcome.has_verdict:
+                    outcomes[i] = outcome
         rewards: list[float] = []
         error_types: list[str | None] = []
         for i in range(len(responses)):
-            result = results.get(i)
-            if result is not None and result.has_verdict:
-                masked.record(masked=False)
-                rewards.append(result.score)
-                error_types.append(result.error_type)
+            outcome = outcomes.get(i, PROMPT_MISMATCH)
+            masked.record(masked=isinstance(outcome, str))
+            if isinstance(outcome, str):
+                logger.warning('OpenRLHF: no verdict (%s); rewarded %s', outcome, fallback)
+                rewards.append(fallback)
+                error_types.append(outcome)
                 continue
-            if i not in results:
-                error_type = PROMPT_MISMATCH
-            elif result is None:
-                error_type = DEADLINE_EXCEEDED
-            else:
-                error_type = result.error_type or 'no_verdict'
-            # Any other failure may be the model's output breaking the verifier: it scores 0.
-            infra = error_type in _NOT_THE_MODELS
-            masked.record(masked=infra)
-            reward = fallback if infra else 0.0
-            logger.warning(
-                'OpenRLHF: a sample got no verdict (%s); rewarded %s', error_type, reward
-            )
-            rewards.append(reward)
-            error_types.append(error_type)
+            if not outcome.has_verdict:
+                logger.warning(
+                    'OpenRLHF: no verdict (%s), maybe the model output; rewarded 0',
+                    outcome.error_type,
+                )
+            rewards.append(outcome.score if outcome.has_verdict else 0.0)
+            error_types.append(outcome.error_type)
         body = OpenRLHFRewardResponse(rewards=rewards, error_types=error_types)
         # FastAPI's own rendering writes a NaN as null, or refuses it, by version.
         return Response(body.model_dump_json(), media_type='application/json')

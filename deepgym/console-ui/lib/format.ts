@@ -30,6 +30,11 @@ export function formatScore(score: number | null | undefined): string {
   return score === null || score === undefined ? '-' : score.toFixed(2);
 }
 
+/** A fraction in [0, 1] as a whole percent, or a dash when unknown. */
+export function formatPercent(fraction: number | null): string {
+  return fraction === null ? '-' : `${Math.round(fraction * 100)}%`;
+}
+
 /** Case-insensitive match of `query` against any of `fields`. */
 export function matches(query: string, ...fields: (string | undefined)[]): boolean {
   const needle = query.trim().toLowerCase();

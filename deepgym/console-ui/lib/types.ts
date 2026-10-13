@@ -135,3 +135,30 @@ export interface QAReport {
   checks: QACheck[];
   created_at: string;
 }
+
+export interface RunTotals {
+  runs: number;
+  finished: number;
+  passed: number;
+  /** Runs with an error_type. */
+  errors: number;
+  mean_score: number | null;
+  mean_duration_ms: number | null;
+}
+
+export interface EnvironmentStats extends RunTotals {
+  environment: string;
+}
+
+/** Aggregates of the runs started in the last `hours` (all runs when null). */
+export interface RunStats {
+  hours: number | null;
+  current: RunTotals;
+  /** The window of the same length just before, for deltas. */
+  previous: RunTotals | null;
+  /** Finished runs per score tenth, 0.0-0.1 ... 0.9-1.0. */
+  score_bins: number[];
+  /** Most common first. */
+  error_types: { error_type: string; count: number }[];
+  environments: EnvironmentStats[];
+}

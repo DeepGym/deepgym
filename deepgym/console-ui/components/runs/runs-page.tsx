@@ -11,12 +11,16 @@ import {
 import { Card } from '@/components/ui/card';
 import { FilterSelect } from '@/components/ui/filter-select';
 import { PageHeader } from '@/components/ui/page-header';
+import { RangeControl, useRange } from '@/components/ui/range-control';
+import { Stat } from '@/components/ui/stat';
 import { useApi } from '@/lib/api';
-import { RUN_MODES, type RunSummary } from '@/lib/types';
+import { RANGES } from '@/lib/stats';
+import { RUN_MODES, type RunStats, type RunSummary } from '@/lib/types';
 import { useHotkey } from '@/lib/use-hotkey';
 import { useQueryParam } from '@/lib/use-query-param';
+import { isActive } from '@/lib/verdict';
 import { NewRunDialog } from './new-run-dialog';
-import { RunStats } from './run-stats';
+import { KpiTiles, ScoreDistribution } from './run-stats';
 import { RunsTable } from './runs-table';
 
 const STATUSES = ['all', 'queued', 'running', 'completed', 'failed'] as const;
@@ -38,7 +42,10 @@ function FilterChip({ label, onClear }: { label: string; onClear: () => void }) 
   );
 }
 
-/** Runs table with status, provider, environment and eval-group filters, plus the New run dialog (?new=). */
+/**
+ * Stats for the chosen window (?range=) with deltas, and the runs table with status, provider,
+ * environment and eval-group filters, plus the New run dialog (?new=).
+ */
 export function RunsPage() {
   const router = useRouter();
   const [status, setStatus] = useQueryParam('status');
@@ -48,12 +55,19 @@ export function RunsPage() {
   const [newRun, setNewRun] = useQueryParam('new');
   useHotkey('n', () => setNewRun('1'), newRun === null);
 
-  const params = new URLSearchParams({ limit: '500' });
-  if (status) params.set('status', status);
-  if (provider) params.set('provider', provider);
-  if (environment) params.set('environment', environment);
-  if (group) params.set('group_id', group);
-  const { data, error } = useApi<RunSummary[]>(`/runs?${params}`, 2500);
+  const [range, setRange] = useRange();
+
+  const filters = new URLSearchParams();
+  if (status) filters.set('status', status);
+  if (provider) filters.set('provider', provider);
+  if (environment) filters.set('environment', environment);
+  if (group) filters.set('group_id', group);
+  const { data, error } = useApi<RunSummary[]>(`/runs?${filters}&limit=500`, 2500);
+  // An eval group is one batch, so its stats cover all of it rather than a time window.
+  const { data: stats } = useApi<RunStats>(
+    `/runs/stats?${filters}${group ? '' : `&hours=${RANGES[range]}`}`,
+    5000,
+  );
   const runs = data ?? [];
 
   return (
@@ -62,12 +76,20 @@ export function RunsPage() {
         title="Runs"
         description="Score a solution, or a reference, against one environment or a small eval. Updates live."
         actions={
-          <Button leadingIcon={RiAddLine} onClick={() => setNewRun('1')}>
-            New run
-          </Button>
+          <>
+            {!group && <RangeControl value={range} onChange={setRange} />}
+            <Button leadingIcon={RiAddLine} onClick={() => setNewRun('1')}>
+              New run
+            </Button>
+          </>
         }
       />
-      <RunStats runs={runs} />
+      <KpiTiles stats={stats} range={group ? null : range}>
+        <Stat label="In flight" value={String(runs.filter(isActive).length)} hint="queued or running" />
+      </KpiTiles>
+      <div className="mt-3">
+        <ScoreDistribution bins={stats?.score_bins} />
+      </div>
       <Card flush className="mt-4">
         <div className="flex flex-wrap items-center gap-2 p-3">
           <div className="scrollbar-thin max-w-full overflow-x-auto">

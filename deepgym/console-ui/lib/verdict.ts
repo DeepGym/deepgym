@@ -1,13 +1,22 @@
 /** Pure helpers behind the console's verdict views: score colour bands, case reasons and headlines. */
 
-import type { CaseResult } from './types';
+import type { CaseResult, RunStatus, RunSummary } from './types';
 
 export type Tone = 'good' | 'warn' | 'bad';
 
 /** Colour band of a value in [0, 1] (a score or a pass rate): good from 0.8, warn from 0.5, bad below. */
 export const scoreTone = (value: number): Tone => (value >= 0.8 ? 'good' : value >= 0.5 ? 'warn' : 'bad');
 
+/** Whether a run is still queued or running. */
+export const isActive = <T extends { status: RunStatus }>(
+  run: T,
+): run is T & { status: 'queued' | 'running' } => run.status === 'queued' || run.status === 'running';
+
 export type TaskStatus = 'failed' | 'running' | 'queued' | 'done';
+
+/** A run's row status: in flight as is, otherwise its pass/fail verdict. */
+export const runTaskStatus = (run: RunSummary): TaskStatus =>
+  isActive(run) ? run.status : run.passed ? 'done' : 'failed';
 
 const ATTENTION: Record<TaskStatus, number> = { failed: 0, running: 1, queued: 2, done: 3 };
 

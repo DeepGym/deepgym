@@ -14,27 +14,24 @@ import { api, useApi } from '@/lib/api';
 import { formatScore, timeAgo } from '@/lib/format';
 import type { RunDetail, RunSummary } from '@/lib/types';
 import { useQueryParam } from '@/lib/use-query-param';
-import { failuresFirst, verdictLine } from '@/lib/verdict';
+import { failuresFirst, isActive, runTaskStatus, verdictLine } from '@/lib/verdict';
 import { RunSource } from './run-source';
 import { RunSummary as RunSummaryStrip } from './run-summary';
 import { ScoreBreakdown } from './score-breakdown';
 
-const active = (run: { status: string }) => run.status === 'queued' || run.status === 'running';
-
-const taskStatus = (run: RunSummary): TaskRow['status'] =>
-  active(run) ? (run.status as 'queued' | 'running') : run.passed ? 'done' : 'failed';
-
 function GroupRuns({ run }: { run: RunDetail }) {
-  const { data } = useApi<RunSummary[]>(`/runs?group_id=${run.group_id}`, 2500, (runs) => runs.some(active));
+  const { data } = useApi<RunSummary[]>(`/runs?group_id=${run.group_id}`, 2500, (runs) =>
+    runs.some(isActive),
+  );
   if (!data || data.length < 2) return null;
-  const running = data.filter(active).length;
-  const failed = data.filter((item) => !active(item) && !item.passed).length;
+  const running = data.filter(isActive).length;
+  const failed = data.filter((item) => !isActive(item) && !item.passed).length;
   const rows: TaskRow[] = data.map((item) => ({
     key: item.id,
     label: <span className={item.id === run.id ? 'text-accent-400' : undefined}>{item.environment}</span>,
     subline: item.error_type ?? undefined,
     meta: formatScore(item.score),
-    status: taskStatus(item),
+    status: runTaskStatus(item),
     href: `/runs/detail/?id=${item.id}`,
   }));
   return (
@@ -55,7 +52,7 @@ function GroupRuns({ run }: { run: RunDetail }) {
 export function RunDetailPage() {
   const router = useRouter();
   const [id] = useQueryParam('id');
-  const { data: run, error } = useApi<RunDetail>(id ? `/runs/${id}` : null, 1500, active);
+  const { data: run, error } = useApi<RunDetail>(id ? `/runs/${id}` : null, 1500, isActive);
   const [rerunning, setRerunning] = useState(false);
 
   if (!id || error) {
@@ -105,7 +102,7 @@ export function RunDetailPage() {
             <Button
               size="small"
               leadingIcon={RiRestartLine}
-              disabled={rerunning || active(run)}
+              disabled={rerunning || isActive(run)}
               onClick={rerun}
             >
               Run again

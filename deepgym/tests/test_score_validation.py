@@ -5,7 +5,7 @@ import math
 import pytest
 
 from deepgym import DeepGym
-from deepgym.exceptions import InvalidScoreError, VerifierError
+from deepgym.exceptions import InvalidScoreError, NoVerdictError, VerifierError
 from deepgym.integrations.dapo import make_dapo_reward_fn, make_dapo_shaped_reward_fn
 from deepgym.integrations.trl import make_trl_reward_fn
 from deepgym.integrations.verl import make_verl_compute_score
@@ -57,11 +57,12 @@ class TestInvalidScores:
     def test_reward_fns_never_hand_out_the_invalid_score(
         self, dg: DeepGym, make_env, score: str
     ) -> None:
-        """An invalid score is no verdict: None for TRL-style callbacks, 0.0 for verl's."""
+        """An invalid score is no verdict: None for TRL-style callbacks; verl's raise."""
         env = make_env(score)
         assert make_trl_reward_fn(env, dg)(completions=['']) == [None]
         assert make_dapo_reward_fn(env, dg)(completions=['']) == [None]
-        assert make_verl_compute_score(env, dg)('ds', '', '') == 0.0
+        with pytest.raises(NoVerdictError, match='invalid_score'):
+            make_verl_compute_score(env, dg)('ds', '', '')
 
 
 @pytest.mark.parametrize('make_env', [_body, _script], ids=['body', 'script'])

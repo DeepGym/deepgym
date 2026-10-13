@@ -424,12 +424,11 @@ class TestCLIQALocalExecGuard:
         args = ['deepgym', 'qa', 'reverse_string', '--model', 'm', '--samples', '2']
         args += ['--reruns', '0', '--allow-local-exec']
 
-        with patch.object(sys, 'argv', args), pytest.raises(SystemExit) as exc_info:
-            main()
+        with patch.object(sys, 'argv', args):
+            main()  # every sample solved: reported as too_easy, never a failed gate
 
-        assert exc_info.value.code == 1  # every sample solved: too_easy
         captured = capsys.readouterr()
-        assert 'difficulty: too_easy: pass@1=1.00 pass@2=1.00' in captured.out
+        assert 'difficulty: too_easy, no_variance: pass@1=1.00 pass@2=1.00' in captured.out
         assert ('WARNING: no sandbox-exec or bwrap' in captured.err) is (isolation == 'none')
 
 

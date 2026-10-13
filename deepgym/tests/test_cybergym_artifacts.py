@@ -56,6 +56,25 @@ def test_reference_in_a_long_repetitive_file_gets_full_credit(
     assert sandbox_dg.run(env, patch).score == 1.0
 
 
+@pytest.mark.parametrize(
+    ('name', 'text', 'hunk'),
+    [
+        # A diff tool may align a reorder differently from the patch: -b/+b, not -a/+a (0.7).
+        ('hello.txt', 'a\nb\n', '@@ -1,2 +1,2 @@\n-a\n b\n+a\n'),
+        # Reference paths split on spaces lost the overlap credit (0.75).
+        ('my notes.txt', 'bad\nkeep\n', '@@ -1,2 +1,2 @@\n-bad\n+good\n keep\n'),
+    ],
+)
+def test_reference_patch_scores_like_itself(
+    tmp_path: Path, sandbox_dg: DeepGym, name: str, text: str, hunk: str
+) -> None:
+    """The reference is measured like the candidate, so submitting it scores 1.0."""
+    patch = f'diff --git a/{name} b/{name}\n--- a/{name}\n+++ b/{name}\n{hunk}'
+    env = _toy_env(tmp_path, patch, {name: text})
+
+    assert sandbox_dg.run(env, patch).score == 1.0
+
+
 def test_git_quoted_file_name_gets_full_credit(tmp_path: Path, sandbox_dg: DeepGym) -> None:
     """git C-quotes non-ASCII names; the quoted form used to be looked up literally (0)."""
     quoted = '"a/caf\\303\\251.txt" "b/caf\\303\\251.txt"'

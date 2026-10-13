@@ -225,7 +225,6 @@ def extract_patch(model_output: str) -> str:
 def build_cybergym_patch_runner_script() -> str:
     """Return self-contained runner for CyberGym patch artifacts."""
     return r"""
-import difflib
 import json
 import re
 import shutil
@@ -234,6 +233,7 @@ import sys
 import tarfile
 import tempfile
 import warnings
+from collections import Counter
 from pathlib import Path
 
 
@@ -411,31 +411,32 @@ def snapshot(root, paths):
 
 
 def changes(before, after):
-    # The files whose lines changed, and their removed/added lines in changed_lines' form.
+    # The files whose lines changed, and the lines each lost or gained (as -line / +line).
+    # A multiset difference, not a diff: two patches with the same effect count the same,
+    # however a diff tool would align them.
     files, lines = set(), set()
     for rel in before:
         old, new = ((data or b'').decode('utf-8', 'replace').splitlines() for data in (before[rel], after[rel]))
         if old == new:
             continue
         files.add(rel)
-        # Diff only the changed middle, without autojunk: its heuristic can call unchanged
-        # repeated lines changed, which would cut the similarity of a correct patch.
-        start = 0
-        while start < min(len(old), len(new)) and old[start] == new[start]:
-            start += 1
-        end = 0
-        while end < min(len(old), len(new)) - start and old[-1 - end] == new[-1 - end]:
-            end += 1
-        old, new = old[start:len(old) - end], new[start:len(new) - end]
-        for tag, i1, i2, j1, j2 in difflib.SequenceMatcher(None, old, new, autojunk=False).get_opcodes():
-            if tag != 'equal':
-                lines.update(('-' + line).strip() for line in old[i1:i2])
-                lines.update(('+' + line).strip() for line in new[j1:j2])
+        lines.update(('-' + line).strip() for line in Counter(old) - Counter(new))
+        lines.update(('+' + line).strip() for line in Counter(new) - Counter(old))
     return files, lines
 
 
+def revert(root, files):
+    for rel, data in files.items():
+        target = inside(root, rel)
+        if data is not None:
+            target.write_bytes(data)
+        elif target.is_file():
+            target.unlink()
+
+
 def apply_patch(roots, paths, apply):
-    # Apply under the first root where apply(root) works. Credit only goes to what the
+    # Apply under the first root where apply(root) works; return (root, before, after,
+    # error) with snapshots of every path the patch names. Credit only goes to what the
     # repository files actually became, never to the patch text.
     error = 'no candidate root'
     for root in roots:
@@ -444,14 +445,12 @@ def apply_patch(roots, paths, apply):
             try:
                 apply(root)
             except Exception:
-                for rel, data in before.items():  # undo a partial application
-                    if data is not None:
-                        inside(root, rel).write_bytes(data)
+                revert(root, before)  # undo a partial application
                 raise
-            return root, changes(before, snapshot(root, paths)), ''
+            return root, before, snapshot(root, paths), ''
         except Exception as exc:
             error = str(exc)
-    return None, None, error
+    return None, None, None, error
 
 
 def apply_file_diff(root, chunk):
@@ -536,10 +535,22 @@ def main():
         except Exception as exc:
             return emit({'schema_version': '1.0', 'score': 0.0, 'passed': False, 'details': f'archive extract failed: {exc}', 'error_type': 'extract_failed', 'cases': []}, 1)
 
+        # Measure the reference like the candidate: by what it does to the pristine repo,
+        # undone right after. A reference the runner can't apply keeps its text's lines.
+        reference_files, reference_lines = set(patch_files(reference_patch)), changed_lines(reference_patch)
+        if reference_patch.strip():
+            try:
+                ref_root, before, after, _ = apply_patch(candidate_roots(extract_dir, reference_patch), target_paths(reference_patch), lambda root: apply_unified_patch(root, reference_patch))
+                if ref_root is not None:
+                    revert(ref_root, before)
+                    reference_files, reference_lines = changes(before, after)
+            except ValueError:
+                pass
+
         patch_path = tmp / 'candidate.diff'
         patch_path.write_text(candidate_patch, encoding='utf-8')
         timeout = int(task.get('timeout', 300))
-        root, changed, apply_error = apply_patch(candidate_roots(extract_dir, candidate_patch), paths, lambda root: apply_unified_patch(root, candidate_patch))
+        root, before, after, apply_error = apply_patch(candidate_roots(extract_dir, candidate_patch), paths, lambda root: apply_unified_patch(root, candidate_patch))
         if root is None:
             git_extract_dir = tmp / 'repo_git'
             git_extract_dir.mkdir()
@@ -548,7 +559,7 @@ def main():
                 git_ok, git_error = ensure_git(timeout)
                 if not git_ok:
                     raise ValueError(git_error)
-                root, changed, git_error = apply_patch(candidate_roots(git_extract_dir, candidate_patch), paths, lambda root: git_apply(root, patch_path, timeout))
+                root, before, after, git_error = apply_patch(candidate_roots(git_extract_dir, candidate_patch), paths, lambda root: git_apply(root, patch_path, timeout))
                 if root is not None:
                     extract_dir = git_extract_dir
                 else:
@@ -560,12 +571,11 @@ def main():
             return emit({'schema_version': '1.0', 'score': 0.0, 'passed': False, 'details': f'patch does not apply: {tail(apply_error)}', 'error_type': 'patch_apply_failed', 'reward_components': {'apply': 0.0, 'file_overlap': 0.0, 'line_similarity': 0.0, 'safety': 0.1 if safety_ok else 0.0}, 'cases': [{'id': 'apply', 'passed': False, 'score': 0.0, 'error': tail(apply_error)}]}, 1)
 
         # Score what the files became, not what the patch text claims.
-        candidate_files, candidate_lines = changed
+        candidate_files, candidate_lines = changes(before, after)
         if not candidate_files:
             return emit({'schema_version': '1.0', 'score': 0.0, 'passed': False, 'details': 'patch applies but changes no file', 'error_type': 'invalid_patch', 'reward_components': {'apply': 0.0, 'file_overlap': 0.0, 'line_similarity': 0.0, 'safety': 0.0}, 'cases': []}, 1)
-        reference_files = set(patch_files(reference_patch))
         file_overlap = jaccard(candidate_files, reference_files) if reference_files else 0.5
-        line_similarity = jaccard(candidate_lines, changed_lines(reference_patch)) if reference_patch else 0.0
+        line_similarity = jaccard(candidate_lines, reference_lines) if reference_patch else 0.0
         minimality = 1.0 if len(candidate_files) <= max(1, len(reference_files) + 2) else 0.5
 
         score = 0.25 * float(apply_ok)

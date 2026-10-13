@@ -176,6 +176,12 @@ _CARGO_DEPS = (
     '[package]\nname = "calc"\nversion = "1.0.0"\n\n[dependencies]\nserde = "1.0.100"\n\n'
     '[dev-dependencies]\nproptest = "1.0.0"\n\n[build-dependencies]\ncc = "1.0.0"\n'
 )
+# Members inheriting version.workspace = true are released by bumping [workspace.package];
+# [workspace.dependencies], shared by every member, stays compared.
+_CARGO_WS_PACKAGE = (
+    '[workspace]\nmembers = ["core"]\n\n[workspace.package]\nversion = "0.9.0"\n'
+    'edition = "2021"\n\n[workspace.dependencies]\nserde = "1.0.100"\n'
+)
 # Example and bench targets run under `cargo test` when their test flag is on.
 _CARGO_TARGETS = (
     '[package]\nname = "calc"\nversion = "1.0.0"\n\n'
@@ -348,6 +354,18 @@ _PACKAGE_WORKSPACES = _PACKAGE.replace('"version"', '"workspaces": ["packages/*"
             id='cargo-build-dependencies',
         ),
         pytest.param(
+            {'Cargo.toml': _CARGO_WS_PACKAGE},
+            {'Cargo.toml': _CARGO_WS_PACKAGE.replace('0.9.0', '0.9.1')},
+            False,
+            id='cargo-workspace-package-version-allowed',
+        ),
+        pytest.param(
+            {'Cargo.toml': _CARGO_WS_PACKAGE},
+            {'Cargo.toml': _CARGO_WS_PACKAGE.replace('1.0.100', '1.0.200')},
+            True,
+            id='cargo-workspace-dependencies',
+        ),
+        pytest.param(
             {'Cargo.toml': _CARGO_TARGETS},
             {'Cargo.toml': _CARGO_TARGETS.replace('"demo"\ntest = false', '"demo"\ntest = true')},
             True,
@@ -452,16 +470,21 @@ def test_config_edits_outside_the_test_section_are_allowed(
         ('tox.toml', True),
         ('go.work', True),
         # Only what a runner itself treats as a test or its config is a test file: Go tests
-        # are *_test.go, so cmd/test.go is code; so are a setup module and a doc named
-        # after a tool. The tools' own setup and config files are not.
+        # are *_test.go, so cmd/test.go is code; so is a doc named after a tool. The tools'
+        # own setup and config files are not.
         ('cmd/test.go', False),
         ('src/spec.go', False),
         ('calc_test.go', True),
-        ('src/i18n.setup.ts', False),
         ('docs/jest.md', False),
         ('jest.setup.js', True),
         ('vitest.offline.config.ts', True),
         ('src/setupTests.ts', True),
+        # A setup file runs inside the test process: refused when named for a test tool or
+        # kept in a test directory, but an ordinary *.setup.* module is code.
+        ('src/test.setup.ts', True),
+        ('e2e/auth.setup.ts', True),
+        ('tests/global.setup.ts', True),
+        ('src/i18n.setup.ts', False),
     ],
 )
 def test_paths_refused_by_name(
@@ -549,29 +572,46 @@ def test_vendored_toml_source_needs_no_getsource(monkeypatch: pytest.MonkeyPatch
     assert '_VENDORED_TOML' in PatchVerifier.build_runner_script()
 
 
-@pytest.mark.parametrize('stalls', ['test_patch', 'model_patch', 'git_root'])
-def test_path_listing_timeout_has_no_verdict(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture, stalls: str
+@pytest.mark.parametrize(
+    ('target', 'fails', 'error_type'),
+    [
+        pytest.param('test_patch', False, 'validation_timeout', id='test-patch-timeout'),
+        pytest.param('model_patch', False, 'validation_timeout', id='model-patch-timeout'),
+        pytest.param('git_root', False, 'validation_timeout', id='git-root-timeout'),
+        # Guessing the top-level instead could check the wrong, missing files and grade a
+        # patch that edits the real ones.
+        pytest.param('git_root', True, 'validation_error', id='git-root-unknown'),
+    ],
+)
+def test_validation_faults_have_no_verdict(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture,
+    target: str,
+    fails: bool,
+    error_type: str,
 ) -> None:
-    # git stalling while the runner lists paths is the runner's failure, not the model's:
-    # no verdict, so trainers mask it, instead of an uncaught TimeoutExpired.
+    # git stalling or failing while the runner lists paths or finds the repo top-level is the
+    # runner's failure, not the model's: no verdict, so trainers mask it rather than grade it.
     env = _env(tmp_path)
     patch_file = tmp_path / 'candidate.diff'
     patch_file.write_text(_diff(Path(env.repo_dir), _FIX))
     task_file = tmp_path / 'task.json'
     task = {'repo_dir': env.repo_dir, 'test_patch': env.test_patch, 'timeout': 60}
     task_file.write_text(json.dumps({**task, 'test_commands': [env.test_command]}))
-    stalled = {
+    hit = {
         'test_patch': lambda args: '--numstat' in args and args[-1].endswith('test_patch.diff'),
         'model_patch': lambda args: '--numstat' in args and args[-1] == str(patch_file),
         'git_root': lambda args: 'rev-parse' in args,
-    }[stalls]
+    }[target]
     real_run = subprocess.run
 
     def run(args: list[str], **kwargs: object) -> subprocess.CompletedProcess:
-        if stalled(args):
-            raise subprocess.TimeoutExpired(args, 60)
-        return real_run(args, **kwargs)
+        if not hit(args):
+            return real_run(args, **kwargs)
+        if fails:
+            return subprocess.CompletedProcess(args, 128, b'', b'fatal: not a git repository')
+        raise subprocess.TimeoutExpired(args, 60)
 
     runner = _runner()
     monkeypatch.setattr(subprocess, 'run', run)
@@ -580,7 +620,7 @@ def test_path_listing_timeout_has_no_verdict(
     exit_code = runner['main']()
 
     result = VerifierResult.model_validate_json(capsys.readouterr().out)
-    assert result.error_type == 'validation_timeout'
+    assert result.error_type == error_type
     assert result.score == 0.0
     assert not is_verdict(exit_code, result.error_type)
 
@@ -600,6 +640,24 @@ def test_named_config_paths_reads_the_command_line(tmp_path: Path) -> None:
         'sub/pkg/plug/__init__.py',
     }
     assert named(["pytest -c 'unbalanced"], repo, repo) == set()
+    # pytest however it is started; another program's -c or -p names no test config.
+    started = ['PYTHONPATH=. python3 -B -m pytest -c a.ini', 'py.test -p plug']
+    assert named(started, repo, repo) == {'a.ini', 'plug.py', 'plug/__init__.py'}
+    others = ['gcc -c src/calc.c -o calc.o && ./check', 'cargo test -p calc', 'sh -c "pytest -c x"']
+    assert named(others, repo, repo) == set()
+
+
+def test_another_programs_flags_name_no_test_config(tmp_path: Path, sandbox_dg: DeepGym) -> None:
+    # A compile step's -c (gcc -c src/calc.c; here wc -c calc.py) names the very file a real
+    # fix edits, so only a pytest run's flags count.
+    env = _env(tmp_path)
+    command = env.test_command.replace(' && ', ' && wc -c calc.py && ', 1)
+    env = env.model_copy(update={'test_command': command})
+
+    result = sandbox_dg.run(env, _diff(Path(env.repo_dir), _FIX))
+
+    assert result.error_type is None
+    assert result.score == 1.0
 
 
 @pytest.mark.parametrize(

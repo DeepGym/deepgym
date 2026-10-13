@@ -276,13 +276,15 @@ class PatchVerifier:
     def build_runner_script() -> str:
         """Return the self-contained patch runner script.
 
-        A vendored TOML parser is inlined as ``_VENDORED_TOML`` so the config comparison
-        matches the tools on any image Python; see :func:`_vendored_toml_source`. It is a
-        string exec'd lazily, not live code, so an interpreter too old to compile it fails
-        only the config comparison (closed), never the whole run.
+        A vendored TOML parser is inlined as ``_VENDORED_TOML`` and exec'd only when the
+        image's Python lacks ``tomllib`` (3.10), so the config comparison matches the tools
+        either way; see :func:`_vendored_toml_source`. The runner itself needs Python 3.10+:
+        its annotations (``Path | None``) are evaluated as each function is defined, so on an
+        older image the whole runner fails at load, before it emits a result.
         """
         return f'_VENDORED_TOML = {_vendored_toml_source()!r}\n\n' + textwrap.dedent(
             """
+            import itertools
             import json
             import os
             import re
@@ -392,8 +394,9 @@ class PatchVerifier:
                 # Whether *name* (lowercased basename) is itself a test, a test runner config,
                 # or an import hook a runner loads by name -- refused wherever it sits. A name
                 # that only shares a word with one is ordinary code: in Go only *_test.go is a
-                # test (testdata/ is in _TEST_DIRS), so cmd/test.go is not; nor are i18n.setup.ts
-                # or a jest.md doc (jest/vitest setup files match the _JS_TOOLS rule instead).
+                # test (testdata/ is in _TEST_DIRS), so cmd/test.go is not, nor is a jest.md doc.
+                # Whether a *.setup.* file is a test setup file depends on where it sits; see
+                # _infra_reason.
                 segments = name.split('.')
                 return (
                     name in _INFRA_FILES
@@ -401,7 +404,8 @@ class PatchVerifier:
                     or (name.startswith('test_') and name.endswith('.py'))
                     or (len(segments) > 2 and segments[-2] in ('test', 'spec', 'e2e') and segments[-1] in _JS_EXTS)
                     or (len(segments) > 1 and segments[0] in _JS_TOOLS and segments[1] in ('config', 'conf', 'setup', 'workspace', 'preset'))
-                    or (segments[-1] in _JS_EXTS and (segments[0] == 'setuptests' or (len(segments) > 2 and segments[0] in ('jest', 'vitest'))))
+                    or segments[0] == 'setuptests'
+                    or (len(segments) > 2 and segments[0] in ('jest', 'vitest') and segments[-1] in _JS_EXTS)
                     or name.startswith(('.babelrc', '.mocharc', '.nycrc', '.c8rc'))
                 )
 
@@ -421,6 +425,15 @@ class PatchVerifier:
                 if any((repo_root / Path(*raw[:depth]) / 'pyvenv.cfg').is_file() for depth in range(len(raw))):
                     return 'inside a virtualenv'
                 if _is_test_file(name):
+                    return 'test file or test configuration'
+                # A test setup file runs inside the test process, but ordinary modules are named
+                # *.setup.* too (src/i18n.setup.ts): refuse one named for a test tool or kept in
+                # a test directory.
+                segments = name.split('.')
+                if len(segments) > 2 and segments[-2] == 'setup' and segments[-1] in _JS_EXTS and (
+                    name.startswith(('test', 'jest', 'vitest', 'playwright'))
+                    or any(part in ('test', 'tests', '__tests__', 'e2e', 'spec') for part in dirs)
+                ):
                     return 'test file or test configuration'
                 # In a test directory, refuse executable code (a helper a test imports, or a
                 # module that runs at import) and the package marker, but allow data fixtures.
@@ -442,7 +455,7 @@ class PatchVerifier:
 
             def _toml_loads(text: str) -> dict:
                 # Parse TOML with the image's stdlib tomllib if present, else the inlined copy.
-                # Raises on a too-old interpreter or malformed TOML, which fails the check closed.
+                # Raises on malformed TOML, which fails the check closed.
                 if not _TOML_LOADS:
                     try:
                         import tomllib
@@ -489,8 +502,14 @@ class PatchVerifier:
                     # Every target table (with its `test` flag) and what only tests or build.rs
                     # build with. [dependencies] is left out: a version bump there is a real fix.
                     keys = ('lib', 'bin', 'test', 'bench', 'example', 'features',
-                            'dev-dependencies', 'build-dependencies', 'workspace')
+                            'dev-dependencies', 'build-dependencies')
                     if any(before.get(key) != after.get(key) for key in keys):
+                        return True
+                    # [workspace] picks the crates that build and test (members, default-members,
+                    # exclude) and their shared dependencies. Its [workspace.package] is only the
+                    # metadata members inherit (version.workspace = true), allowed like [package]'s.
+                    workspaces = [dict(_toml_table(doc.get('workspace')), package=None) for doc in (before, after)]
+                    if workspaces[0] != workspaces[1]:
                         return True
                     # Package-level auto-discovery and build script decide which tests cargo runs.
                     auto = ('autotests', 'autobenches', 'autobins', 'autoexamples', 'autolib', 'build')
@@ -528,10 +547,26 @@ class PatchVerifier:
                     return True
 
 
+            def _pytest_args(words: list[str]) -> list[str] | None:
+                # The arguments of a pytest run (pytest, py.test or python -m pytest, after any
+                # NAME=value prefixes), or None for any other program: its -c or -p (gcc -c, cargo
+                # -p) names no test config.
+                while words and re.match(r'[A-Za-z_][A-Za-z0-9_]*=', words[0]):
+                    words = words[1:]
+                program = words[0].rsplit('/', 1)[-1] if words else ''
+                if program in ('pytest', 'py.test'):
+                    return words[1:]
+                rest = words[1:]
+                while rest and rest[0].startswith('-') and rest[0] != '-m':
+                    rest = rest[1:]  # interpreter flags such as -B
+                return rest[2:] if program.startswith('python') and rest[:2] == ['-m', 'pytest'] else None
+
+
             def _named_config_paths(commands: list[str], repo_dir: Path, repo_root: Path) -> set[str]:
-                # Repo-relative files the test commands themselves name as runner config (-c,
-                # --config-file) or as a pytest plugin module (-p). Only the command line is
-                # read, not a script it runs or a quoted `bash -c` string.
+                # Repo-relative files a pytest run in the test commands names as its config (-c,
+                # --config-file) or as a plugin module (-p). Only the command line is read, split
+                # into simple commands at shell operators, not a script it runs or a quoted
+                # `bash -c` string.
                 root = os.path.realpath(repo_root)
                 named = set()
                 for command in commands:
@@ -542,20 +577,22 @@ class PatchVerifier:
                     except ValueError:
                         continue
                     cwd = repo_dir
-                    for flag, value in zip(tokens, [*tokens[1:], '']):
-                        if flag.startswith('--config-file='):
-                            flag, value = flag.split('=', 1)
-                        if flag == 'cd':
-                            cwd = cwd / value
-                            continue
-                        if not value or flag not in ('-c', '--config-file', '-p') or value.startswith('no:'):
-                            continue
-                        module = value.replace('.', '/')
-                        files = [module + '.py', module + '/__init__.py'] if flag == '-p' else [value]
-                        for file in files:
-                            rel = os.path.relpath(os.path.realpath(cwd / file), root)
-                            if rel != '..' and not rel.startswith('../'):
-                                named.add(rel)
+                    for _, group in itertools.groupby(tokens, lambda token: bool(token) and set(token) <= set('();<>|&')):
+                        words = list(group)
+                        if words[:1] == ['cd'] and len(words) > 1:
+                            cwd = cwd / words[1]
+                        args = _pytest_args(words) or []
+                        for flag, value in zip(args, [*args[1:], '']):
+                            if flag.startswith('--config-file='):
+                                flag, value = flag.split('=', 1)
+                            if not value or flag not in ('-c', '--config-file', '-p') or value.startswith('no:'):
+                                continue
+                            module = value.replace('.', '/')
+                            files = [module + '.py', module + '/__init__.py'] if flag == '-p' else [value]
+                            for file in files:
+                                rel = os.path.relpath(os.path.realpath(cwd / file), root)
+                                if rel != '..' and not rel.startswith('../'):
+                                    named.add(rel)
                 return named
 
 
@@ -588,8 +625,10 @@ class PatchVerifier:
                 return list(dict.fromkeys(flagged))
 
 
-            def _git_root(repo_dir: Path, timeout: int) -> Path:
+            def _git_root(repo_dir: Path, timeout: int) -> Path | None:
                 # The repository top-level: numstat reports paths relative to it, not to repo_dir.
+                # None when git cannot tell: guessing repo_dir (maybe a subdirectory) would check
+                # the wrong, missing files and grade a patch that edits the real ones.
                 # git appends exactly one newline, so strip only that -- a path may legitimately
                 # end in a space or '\\r', and either .strip() or text-mode newline translation
                 # would then name a different, missing directory. Read bytes and trim one '\\n'.
@@ -600,7 +639,7 @@ class PatchVerifier:
                 )
                 raw = proc.stdout[:-1] if proc.stdout.endswith(b'\\n') else proc.stdout
                 top = os.fsdecode(raw)
-                return Path(top) if proc.returncode == 0 and top else repo_dir
+                return Path(top) if proc.returncode == 0 and top else None
 
 
             def _patch_paths(repo_dir: Path, patch_file: Path, timeout: int) -> list[str] | None:
@@ -875,11 +914,28 @@ class PatchVerifier:
                             },
                             1,
                         )
+                    if repo_root is None:
+                        # Without the top-level the paths can't be checked: no verdict, so
+                        # trainers mask the sample rather than grade an unchecked patch.
+                        return _emit(
+                            {
+                                'schema_version': '1.0',
+                                'score': 0.0,
+                                'passed': False,
+                                'details': 'git cannot find the repository top-level, so the patch was not scored.',
+                                'reward_components': {'apply': 0.0, 'tests': 0.0},
+                                'metrics': {'pass_fraction': 0.0, 'tests_run': 0},
+                                'truncated': False,
+                                'error_type': 'validation_error',
+                                'cases': [],
+                            },
+                            1,
+                        )
                     hidden_set = set(hidden)
                     exposed = [rel for rel in model_paths if rel not in hidden_set]
                     tampered = {rel: _infra_reason(repo_root, rel) for rel in exposed}
-                    # A config file the test command names is refused outright, unless it is one
-                    # whose test part is compared below (`-c pyproject.toml`).
+                    # A config file or plugin a pytest run in the test command names is refused
+                    # outright, unless it is one whose test part is compared below (`-c pyproject.toml`).
                     for rel in _named_config_paths(test_commands, repo_dir, repo_root).intersection(exposed):
                         if _components(rel)[-1] not in _CONFIG_FILES:
                             tampered[rel] = tampered[rel] or 'test configuration named by the test command'

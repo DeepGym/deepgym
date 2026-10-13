@@ -37,12 +37,14 @@ test('zoom steps through the levels and stops at either end', () => {
   expect(stepZoom(0.25, -1)).toBe(0.25);
 });
 
-test('steps are coloured by reward sign; the final frame by the verdict', () => {
+test('steps are coloured by exit code, then reward sign; the final frame by the verdict', () => {
   expect(stepTone(frame(0.5, click), null)).toBe('good');
   expect(stepTone(frame(-1, click), true)).toBe('bad');
   expect(stepTone(frame(0, click), true)).toBe('neutral');
   expect(stepTone(frame(null), false)).toBe('bad');
   expect(stepTone(frame(null), null)).toBe('neutral');
+  expect(stepTone({ ...frame(0.5, click), metadata: { exit_code: 1 } }, true)).toBe('bad');
+  expect(stepTone({ ...frame(0, click), metadata: { exit_code: 0 } }, true)).toBe('neutral');
 });
 
 test('scrolls only as far as needed to show the item', () => {

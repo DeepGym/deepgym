@@ -34,8 +34,13 @@ export function stepZoom(zoom: number, direction: 1 | -1): number {
 
 export type StepTone = 'good' | 'bad' | 'neutral';
 
-/** Colour of a step: the sign of its reward; the final observation takes the episode's verdict. */
+/**
+ * Colour of a step: bad if its command exited non-zero, else the sign of its reward;
+ * the final observation takes the episode's verdict.
+ */
 export function stepTone(frame: Frame, passed: boolean | null): StepTone {
+  const exitCode = frame.metadata?.exit_code;
+  if (typeof exitCode === 'number' && exitCode !== 0) return 'bad';
   if (frame.reward !== null && frame.reward !== 0) return frame.reward > 0 ? 'good' : 'bad';
   if (frame.action === null && passed !== null) return passed ? 'good' : 'bad';
   return 'neutral';

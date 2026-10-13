@@ -30,6 +30,9 @@ from tests.test_isolation_live import (  # noqa: F401
     test_solution_user_cannot_touch_judge,
 )
 
+# One xdist worker runs these: the leak check sees every deepgym- container.
+pytestmark = pytest.mark.xdist_group('live-containers')
+
 _CLOUD = set(os.environ.get('DEEPGYM_LIVE_PROVIDERS', '').split(','))
 _PROVIDERS = [
     pytest.param(

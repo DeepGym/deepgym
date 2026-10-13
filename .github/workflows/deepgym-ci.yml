@@ -20,14 +20,14 @@ defaults:
 jobs:
   test:
     name: DeepGym Test (Python ${{ matrix.python-version }})
-    runs-on: ubuntu-latest
+    runs-on: blacksmith-4vcpu-ubuntu-2404
     strategy:
       fail-fast: false
       matrix:
         python-version: ['3.10', '3.11', '3.12']
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: useblacksmith/checkout@v1
 
       - name: Set up Python ${{ matrix.python-version }}
         uses: actions/setup-python@v5
@@ -46,19 +46,19 @@ jobs:
         run: ruff format --check src/ tests/
 
       - name: Run tests
-        run: pytest --tb=short -q
+        run: pytest --tb=short -q -n auto --dist loadgroup
         env:
           DEEPGYM_NO_AUTH: 'true'
 
   console-ui:
     name: Console UI (lint, types, tests, build)
-    runs-on: ubuntu-latest
+    runs-on: blacksmith-4vcpu-ubuntu-2404
     defaults:
       run:
         working-directory: deepgym/console-ui
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: useblacksmith/checkout@v1
 
       - uses: oven-sh/setup-bun@v2
 

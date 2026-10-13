@@ -284,27 +284,46 @@ def _relay(listener: socket.socket, connect: Callable[[], socket.socket]) -> Non
 
 
 @contextlib.contextmanager
-def _loopback(workdir: str, port: int | None) -> Iterator[list[str]]:
+def _loopback(port: int | None) -> Iterator[list[str]]:
     """Yield a command prefix that gives the solution the judge's 127.0.0.1:*port*.
 
     Where the solution has its own network namespace (bwrap, or a sandbox user
     with an offline namespace), the judge's loopback isn't the solution's. The
     prefix starts a forwarder there that listens on 127.0.0.1:*port* and pipes
-    each connection through a Unix socket in *workdir* to the judge's port.
-    Elsewhere the port is reachable as it is (macOS allows it in the profile), so
-    the prefix is empty.
+    each connection through a Unix socket to the judge's port. Elsewhere the port
+    is reachable as it is (macOS allows it in the profile), so the prefix is empty.
+
+    The socket lives in the runtime directory, not the solution-writable workdir:
+    the judge owns it, bwrap mounts it read-only and a sandbox user may enter it, but
+    the solution can't replace anything there. Nothing is ever chmodded by path.
     """
     spec = _isolation()
     if port is None or not (spec['kind'] == 'bwrap' or spec.get('own_network')):
         yield []
         return
-    path = os.path.join(tempfile.mkdtemp(dir=workdir), 'loopback.sock')
-    with socket.socket(socket.AF_UNIX) as listener:
-        listener.bind(path)
-        os.chmod(path, 0o777)  # the solution may run as another user
-        listener.listen()
-        _relay(listener, lambda: socket.create_connection(('127.0.0.1', port)))
-        yield [_python(), '-I', '-B', _runtime(), '--forward', str(port), path]
+    socket_dir = tempfile.mkdtemp(dir=os.path.dirname(_runtime()))
+    fd = os.open(socket_dir, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    try:
+        os.fchmod(fd, 0o711)  # the solution may enter it, not list or write it
+    finally:
+        os.close(fd)
+    path = os.path.join(socket_dir, 'loopback.sock')
+    try:
+        with socket.socket(socket.AF_UNIX) as listener:
+            # Connecting needs write permission on the socket and the solution may be
+            # another user, so create it 0o777. umask is process-wide: hold it for bind only.
+            umask = os.umask(0)
+            try:
+                listener.bind(path)
+            finally:
+                os.umask(umask)
+            listener.listen()
+            _relay(listener, lambda: socket.create_connection(('127.0.0.1', port)))
+            yield [_python(), '-I', '-B', _runtime(), '--forward', str(port), path]
+    finally:
+        with contextlib.suppress(OSError):
+            os.unlink(path)
+            os.rmdir(socket_dir)
 
 
 def _scratch_dir() -> str:
@@ -375,7 +394,7 @@ def run_solution(
     with (
         tempfile.TemporaryFile() as out,
         tempfile.TemporaryFile() as err,
-        _loopback(workdir, loopback_port) as forwarder,
+        _loopback(loopback_port) as forwarder,
     ):
         proc = subprocess.Popen(
             _launch_argv([*forwarder, *command], workdir, env, allow_subprocess, loopback_port),

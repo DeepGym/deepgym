@@ -4,7 +4,15 @@ Runs locally. File-isolation checks need sandbox-exec (macOS) or bwrap (Linux)
 and are skipped where neither works.
 """
 
+import json
+import os
+import shutil
+import socket
+import subprocess
+import sys
+import tempfile
 import time
+from pathlib import Path
 
 import pytest
 
@@ -600,6 +608,8 @@ except Exception:
 
 LOOPBACK_PROBE_VERIFIER = """
 import socket
+import subprocess
+import sys
 from deepgym_solution import run_solution
 
 def verify(solution_path):
@@ -629,6 +639,68 @@ def test_solution_reaches_only_the_judges_loopback_port(dg: DeepGym) -> None:
     assert dg.run(env, LOOPBACK_PROBE).output == 'open closed closed'
 
 
+def test_loopback_socket_setup_never_chmods_through_a_swapped_path(monkeypatch) -> None:
+    """A solution racing the judge in a shared workdir can't redirect the socket's permissions.
+
+    The swap after bind() stands in for a solution (or an overlapping run) replacing the
+    socket with a symlink to a file root later imports, such as Python's socket.py.
+    """
+    from deepgym import solution_runtime
+
+    base = Path(tempfile.mkdtemp(dir='/tmp'))  # AF_UNIX paths must stay short
+    try:
+        target = base / 'socket.py'
+        target.write_text('# root imports this')
+        target.chmod(0o644)
+        runtime = base / 'runtime' / 'deepgym_solution.py'
+        runtime.parent.mkdir()
+        runtime.write_text('')
+        work = base / 'work'
+        work.mkdir()
+        (work / 'planted').symlink_to(target)
+
+        class SwapAfterBind(socket.socket):
+            def bind(self, address: object) -> None:
+                super().bind(address)
+                if isinstance(address, str):
+                    os.unlink(address)
+                    os.symlink(target, address)
+
+        isolation = {'kind': 'user', 'prefix': [], 'own_network': True}
+        monkeypatch.setenv('DEEPGYM_ISOLATION', json.dumps(isolation))
+        monkeypatch.setenv('DEEPGYM_RUNTIME', str(runtime))
+        monkeypatch.setattr(socket, 'socket', SwapAfterBind)
+
+        with solution_runtime._loopback(8080) as forwarder:
+            assert oct(target.stat().st_mode & 0o777) == oct(0o644)
+            socket_dir = Path(forwarder[-1]).parent
+            assert work not in socket_dir.parents
+            assert oct(socket_dir.stat().st_mode & 0o777) == oct(0o711)
+            assert [p.name for p in work.iterdir()] == ['planted']
+    finally:
+        shutil.rmtree(base)
+
+
+def test_root_loopback_bootstrap_ignores_modules_planted_in_cwd_or_env(tmp_path) -> None:
+    from deepgym.judge import _LOOPBACK_UP_THEN_EXEC
+
+    marker = tmp_path / 'pwned'
+    for name in ('socket', 'fcntl', 'struct', 'sitecustomize'):
+        (tmp_path / f'{name}.py').write_text(f'open({str(marker)!r}, "w").write("{name}")\n')
+    env = {**os.environ, 'PYTHONPATH': str(tmp_path), 'PYTHONSTARTUP': str(tmp_path / 'fcntl.py')}
+
+    # Not root (and maybe not Linux), so the ioctl fails; any planted import would run first.
+    subprocess.run(
+        [sys.executable, '-I', '-S', '-c', _LOOPBACK_UP_THEN_EXEC, 'true'],
+        cwd=tmp_path,
+        env=env,
+        capture_output=True,
+        check=False,
+    )
+
+    assert not marker.exists()
+
+
 def test_sharing_a_workdir_never_follows_symlinks(tmp_path) -> None:
     from deepgym.solution_runtime import _share_with_solution
 
@@ -653,6 +725,9 @@ def test_sharing_a_workdir_never_follows_symlinks(tmp_path) -> None:
 def test_sandbox_isolation_goes_offline_or_fails_closed() -> None:
     offline = sandbox_isolation('0 999 987 /usr/bin/python3 1')[0]['prefix']
     assert offline[:3] == ['unshare', '--net', '--']
+    # Root brings loopback up from the solution's cwd: no cwd, site or env on its path.
+    assert offline[3:7] == ['/usr/bin/python3', '-I', '-S', '-c']
+    assert "{'PATH': '/usr/sbin:/usr/bin:/sbin:/bin'}" in offline[7]
     assert '--bounding-set=-all' in offline
     assert sandbox_isolation('0 999 987 /usr/bin/python3 0')[0]['prefix'][0] == 'setpriv'
     with pytest.raises(SandboxError, match='network'):

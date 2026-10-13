@@ -230,12 +230,14 @@ def local_judge(job: JudgeJob) -> Iterator[tuple[list[str], dict[str, str], str]
 
 # Runs as root in the solution's fresh network namespace: bring loopback up (it starts
 # down and slim images have no `ip`), then exec the rest of the command, which drops root.
+# Its working directory is the solution's, so it runs with `python -I -S` (no cwd, site
+# or PYTHON* variables on the import path) and execs with a fixed PATH and nothing else.
 _LOOPBACK_UP_THEN_EXEC = """
 import fcntl, os, socket, struct, sys
 s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
 flags = struct.unpack('16sH', fcntl.ioctl(s, 0x8913, struct.pack('16sH', b'lo', 0)))[1]
 fcntl.ioctl(s, 0x8914, struct.pack('16sH', b'lo', flags | 1))
-os.execvp(sys.argv[1], sys.argv[1:])
+os.execvpe(sys.argv[1], sys.argv[1:], {'PATH': '/usr/sbin:/usr/bin:/sbin:/bin'})
 """
 
 
@@ -260,8 +262,7 @@ def sandbox_isolation(setup_output: str, *, require_offline: bool = False) -> tu
     drop += ['--inh-caps=-all', '--bounding-set=-all', '--no-new-privs', '--']
     offline: list[str] = []
     if netns == '1':
-        # -I: the solution can write to the working directory; root must not import from it.
-        offline = ['unshare', '--net', '--', python, '-I', '-c', _LOOPBACK_UP_THEN_EXEC]
+        offline = ['unshare', '--net', '--', python, '-I', '-S', '-c', _LOOPBACK_UP_THEN_EXEC]
     if judge_uid == '0':
         prefix = [*offline, *drop]
     elif offline:

@@ -28,8 +28,9 @@ exec {as_agent} env -i DISPLAY="$DISPLAY" HOME={home} LANG="$LANG" LC_ALL="$LC_A
 # root-window properties any X client can set: VNC_CONNECT (connect out) and X11VNC_REMOTE
 # (remote control). Turn both off, and with -safer its -gui and -connect file channels too.
 _X11VNC_RC = 'novncconnect\nnoremote\nnocmds\nsafer\n'
-# x11vnc flags that would skip that file or undo a line of it.
-_X11VNC_OVERRIDES = '-norc -rc -yesremote -vncconnect -unsafe'
+# The only flags x11vnc may run with: the ones Daytona starts it with. Any other flag, such
+# as one that skips that file or undoes a line of it, refuses the desktop.
+_X11VNC_FLAGS = '-display -forever -shared -rfbport'
 
 _CHROMIUM_POLICY = json.dumps(
     {
@@ -45,6 +46,9 @@ _CHROMIUM_POLICY = json.dumps(
 )
 
 # Terminals, run dialogs, Python's IDLE, and the panel and desktop menus that can launch anything.
+# This names known launchers, so it can't be complete: it is defense in depth. What the agent
+# can still start runs as the agent, offline, with no way to root, the verifier or Daytona's
+# daemon; those boundaries don't depend on this list.
 _LAUNCHERS = (
     'xfce4-terminal x-terminal-emulator xterm uxterm xfce4-appfinder exo-open idle idle3 '
     'xfce4-panel xfdesktop xfce4-settings-manager xfce4-settings-editor xfce4-keyboard-settings'
@@ -102,7 +106,8 @@ done
 """
 
 # Runs as root once Daytona has started the desktop: the session must be the agent's (so
-# the wrapper ran), and every x11vnc must read the options above.
+# the wrapper ran), and every x11vnc must run with allowed flags only and read the options
+# above.
 _CHECK_STARTED = """set -eu
 agent=$(stat -c %u {home})
 owners= vnc=
@@ -115,9 +120,9 @@ done
   echo "xfce4-session runs as uid '$owners', not as the agent ($agent)"; exit 1; }}
 [ -n "$vnc" ] || {{ echo 'x11vnc is not running'; exit 1; }}
 for pid in $vnc; do
-  args=" $(tr '\\0' ' ' < /proc/$pid/cmdline | sed 's/ --/ -/g') "
-  for flag in {overrides}; do
-    case "$args" in *" $flag "*) echo "x11vnc runs with $flag"; exit 1;; esac
+  for arg in $(tr '\\0' '\\n' < /proc/$pid/cmdline | tail -n +2 | sed 's/^--/-/'); do
+    case "$arg" in -*) case " {flags} " in *" $arg "*) ;; *)
+      echo "x11vnc runs with $arg, which is not an allowed flag"; exit 1;; esac;; esac
   done
   home=$(tr '\\0' '\\n' < /proc/$pid/environ | sed -n 's/^HOME=//p')
   [ "$(cat "$home/.x11vncrc")" = "$(printf %s {rc})" ] || {{
@@ -185,7 +190,7 @@ class DaytonaDesktop:
         except Exception as exc:
             raise SandboxError(f'Failed to start desktop: {exc}') from exc
         check = _CHECK_STARTED.format(
-            home=shlex.quote(home), overrides=_X11VNC_OVERRIDES, rc=rc, marker=_LOCKED
+            home=shlex.quote(home), flags=_X11VNC_FLAGS, rc=rc, marker=_LOCKED
         )
         _confirm('check', as_root(check, 60))
 

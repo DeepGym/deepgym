@@ -794,7 +794,9 @@ def test_daytona_desktop_runs_as_the_agent_and_is_locked_down(
         assert x11vnc_option in prepare
     assert '|| true' not in prepare and '2>/dev/null' not in prepare, 'no step may fail quietly'
     check = next(c for c in events[started:] if 'ps -C xfce4-session' in c)
-    assert 'x11vncrc' in check and '-norc' in check
+    # x11vnc may run only with the flags Daytona starts it with, not "anything but a list".
+    assert 'x11vncrc' in check and '-display -forever -shared -rfbport' in check
+    assert '-norc' not in check
 
 
 @pytest.mark.parametrize(

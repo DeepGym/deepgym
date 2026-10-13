@@ -161,6 +161,7 @@ def build_exploit_record(
                 'strategy': r.strategy,
                 'score': r.score,
                 'exploited': r.exploited,
+                'inconclusive': r.inconclusive,
                 'details': r.details,
             }
             for r in report.results

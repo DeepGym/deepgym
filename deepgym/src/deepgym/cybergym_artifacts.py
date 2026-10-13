@@ -253,7 +253,7 @@ def patch_files(patch_text):
         if line.startswith('diff --git '):
             parts = line.split()
             if len(parts) >= 4:
-                files.append(parts[2][2:] if parts[2].startswith('a/') else parts[2])
+                files.append(strip_prefix(parts[2]))
     return sorted(set(files))
 
 
@@ -338,6 +338,10 @@ def split_file_diffs(patch_text):
 
 def strip_prefix(path):
     path = path.strip()
+    if len(path) > 1 and path[0] == path[-1] == '"':
+        # git C-quotes unusual names: "a/caf\303\251.txt" is a/café.txt.
+        escaped = path[1:-1].encode('latin-1', 'backslashreplace').decode('unicode_escape')
+        path = escaped.encode('latin-1', 'replace').decode('utf-8', 'replace')
     if path == '/dev/null':
         return path
     if path.startswith(('a/', 'b/')):
@@ -414,7 +418,16 @@ def changes(before, after):
         if old == new:
             continue
         files.add(rel)
-        for tag, i1, i2, j1, j2 in difflib.SequenceMatcher(None, old, new).get_opcodes():
+        # Diff only the changed middle, without autojunk: its heuristic can call unchanged
+        # repeated lines changed, which would cut the similarity of a correct patch.
+        start = 0
+        while start < min(len(old), len(new)) and old[start] == new[start]:
+            start += 1
+        end = 0
+        while end < min(len(old), len(new)) - start and old[-1 - end] == new[-1 - end]:
+            end += 1
+        old, new = old[start:len(old) - end], new[start:len(new) - end]
+        for tag, i1, i2, j1, j2 in difflib.SequenceMatcher(None, old, new, autojunk=False).get_opcodes():
             if tag != 'equal':
                 lines.update(('-' + line).strip() for line in old[i1:i2])
                 lines.update(('+' + line).strip() for line in new[j1:j2])

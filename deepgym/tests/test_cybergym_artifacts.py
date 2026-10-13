@@ -23,15 +23,18 @@ def _write_tar(source_dir: Path, archive_path: Path) -> None:
         tar.add(source_dir / 'src-vul', arcname='src-vul')
 
 
-def _toy_env(tmp_path: Path) -> CyberGymPatchEnvironment:
-    """hello.txt holds 'bad\\nkeep\\n'; the reference patch turns 'bad' into 'good'."""
+def _toy_env(
+    tmp_path: Path, reference: str = _REFERENCE, files: dict[str, str] | None = None
+) -> CyberGymPatchEnvironment:
+    """By default hello.txt holds 'bad\\nkeep\\n' and the reference turns 'bad' into 'good'."""
     repo = tmp_path / 'repo' / 'src-vul' / 'toy'
     repo.mkdir(parents=True)
-    (repo / 'hello.txt').write_text('bad\nkeep\n', encoding='utf-8')
+    for name, text in (files or {'hello.txt': 'bad\nkeep\n'}).items():
+        (repo / name).write_text(text, encoding='utf-8')
     archive = tmp_path / 'repo-vul.tar.gz'
     _write_tar(tmp_path / 'repo', archive)
     patch = tmp_path / 'patch.diff'
-    patch.write_text(_REFERENCE, encoding='utf-8')
+    patch.write_text(reference, encoding='utf-8')
     artifacts = CyberGymArtifacts(task_id='toy:3', repo_vul=archive, patch=patch)
     return CyberGymPatchEnvironment.from_row({'task_id': 'toy:3'}, artifacts=artifacts, timeout=30)
 
@@ -41,6 +44,26 @@ def test_independent_fix_gets_full_credit(tmp_path: Path, sandbox_dg: DeepGym) -
 
     assert result.score == 1.0
     assert result.passed is True
+
+
+def test_reference_in_a_long_repetitive_file_gets_full_credit(
+    tmp_path: Path, sandbox_dg: DeepGym
+) -> None:
+    """difflib's autojunk counted the 300 unchanged repeated lines as changed (0.9)."""
+    patch = _HEADER + '@@ -1 +1 @@\n-bad\n+good\n@@ -302 +302 @@\n-end\n+done\n'
+    env = _toy_env(tmp_path, patch, {'hello.txt': 'bad\n' + 'x = 0;\n' * 300 + 'end\n'})
+
+    assert sandbox_dg.run(env, patch).score == 1.0
+
+
+def test_git_quoted_file_name_gets_full_credit(tmp_path: Path, sandbox_dg: DeepGym) -> None:
+    """git C-quotes non-ASCII names; the quoted form used to be looked up literally (0)."""
+    quoted = '"a/caf\\303\\251.txt" "b/caf\\303\\251.txt"'
+    patch = f'diff --git {quoted}\n--- "a/caf\\303\\251.txt"\n+++ "b/caf\\303\\251.txt"\n'
+    patch += '@@ -1,2 +1,2 @@\n-bad\n+good\n keep\n'
+    env = _toy_env(tmp_path, patch, {'café.txt': 'bad\nkeep\n'})
+
+    assert sandbox_dg.run(env, patch).score == 1.0
 
 
 @pytest.mark.parametrize(

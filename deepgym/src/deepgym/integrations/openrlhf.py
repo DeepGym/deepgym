@@ -93,9 +93,9 @@ PROMPT_MISMATCH = 'prompt_mismatch'
 text, such as a fenced example in the prompt, it gets the router's infra_failure_score."""
 
 DEADLINE_EXCEEDED = 'deadline_exceeded'
-"""error_type of a sample not graded when its request had to answer. If its run never
-started, it gets the router's infra_failure_score; if it was still going, it scores 0,
-since the model's code may be what slowed it."""
+"""error_type of a sample not graded by its request's deadline. If its run hadn't started
+by then, it never does and gets the router's infra_failure_score; if it was still going,
+it scores 0, since the model's code may be what slowed it."""
 
 _RETRY_DELAY_S = 1.0
 """Pause before the one re-run of a provider or network failure."""
@@ -183,46 +183,57 @@ class OpenRLHFRewardResponse(BaseModel):
     error_types: list[str | None] = Field(default_factory=list)
 
 
-async def _settle(
-    runs: Mapping[int, concurrent.futures.Future[RunResult]], deadline: float
-) -> dict[int, RunResult | str]:
-    """Wait for *runs* until *deadline* (``time.monotonic``) and return each one's outcome.
+def _grade(dg: DeepGym, env: Environment, code: str, deadline: float) -> RunResult | str:
+    """Grade *code* in one of the router's slots, as it stands at *deadline*.
 
-    The wait is on the event loop, so a request holds no thread while it's graded.
-    """
-    waits = [asyncio.wrap_future(run) for run in runs.values()]
-    if waits:
-        await asyncio.wait(waits, timeout=max(0.0, deadline - time.monotonic()))
-    for wait in waits:  # outcomes are read from the runs; this keeps asyncio from logging them
-        if wait.done():
-            wait.exception()
-        else:
-            wait.cancel()
-    return {i: _outcome(run) for i, run in runs.items()}
-
-
-def _outcome(run: concurrent.futures.Future[RunResult]) -> RunResult | str:
-    """Return *run*'s result, or why the provider, the network or the clock stopped it.
-
+    Its outcome turns on when the run started and ended, never on when the request reads it.
     A run the provider or the network failed (see
-    :func:`~deepgym.exceptions.is_infrastructure_failure`), or one still waiting for a slot,
-    which then never starts, comes back as its error_type: there is no score to give.
-    Anything else the model may have caused, so it comes back as a result without a
-    verdict, scored 0: a run that raised for any other reason, or one still going (it
-    keeps its slot until it ends, and may be slow because of the model's code).
+    :func:`~deepgym.exceptions.is_infrastructure_failure`), or one whose slot came after
+    *deadline* (``time.monotonic``), which then doesn't start, comes back as its error_type:
+    there is no score to give. Anything else the model may have caused, so it comes back as
+    a result without a verdict, scored 0: a run that raised for any other reason, or one
+    that ended after *deadline* (the model's code may be what slowed it).
     """
-    if run.cancel():
+    if time.monotonic() >= deadline:
         return DEADLINE_EXCEEDED
-    if not run.done():
-        unfinished = error_result(TimeoutError('still running at the request deadline'))
-        return unfinished.model_copy(update={'error_type': DEADLINE_EXCEEDED})
+    outcome: RunResult | str
     try:
-        return run.result()
+        outcome = dg.run(env, code)
     except Exception as exc:
         if is_infrastructure_failure(exc):
             logger.warning('OpenRLHF: the provider or network failed a run: %s', exc)
-            return error_type_for(exc)
-        return error_result(exc)
+            outcome = error_type_for(exc)
+        else:
+            outcome = error_result(exc)
+    return _unfinished() if time.monotonic() > deadline else outcome
+
+
+def _unfinished() -> RunResult:
+    """Return the outcome of a run still going at its request's deadline: no verdict, 0."""
+    unfinished = error_result(TimeoutError('still running at the request deadline'))
+    return unfinished.model_copy(update={'error_type': DEADLINE_EXCEEDED})
+
+
+async def _settle(
+    runs: Mapping[int, concurrent.futures.Future[RunResult | str]], deadline: float
+) -> dict[int, RunResult | str]:
+    """Wait for *runs* until *deadline* (``time.monotonic``), then return each one's outcome.
+
+    The wait is on the event loop, so a request holds no thread while it's graded. When it
+    ends, at the deadline or because the request was cancelled, a run still waiting for a
+    slot never starts, and one still going keeps its slot until it ends and scores 0.
+    """
+    try:
+        if runs:
+            waits = [asyncio.wrap_future(run) for run in runs.values()]
+            await asyncio.wait(waits, timeout=max(0.0, deadline - time.monotonic()))
+    finally:
+        for run in runs.values():
+            run.cancel()
+    return {
+        i: DEADLINE_EXCEEDED if run.cancelled() else run.result() if run.done() else _unfinished()
+        for i, run in runs.items()
+    }
 
 
 def create_openrlhf_router(
@@ -270,13 +281,13 @@ def create_openrlhf_router(
         deadline = time.monotonic() + _REQUEST_BUDGET_S
         responses = request.responses
         codes = {i: extract_code(r) for i, r in enumerate(responses) if r is not None}
-        runs = {i: slots.submit(dg.run, env, code) for i, code in codes.items()}
+        runs = {i: slots.submit(_grade, dg, env, code, deadline) for i, code in codes.items()}
         outcomes = await _settle(runs, deadline)
         # A provider or network failure is graded once more, in the same slots and time.
         retry = [i for i, o in outcomes.items() if isinstance(o, str) and o != DEADLINE_EXCEEDED]
         if retry and time.monotonic() + _RETRY_DELAY_S < deadline:
             await asyncio.sleep(_RETRY_DELAY_S)
-            reruns = {i: slots.submit(dg.run, env, codes[i]) for i in retry}
+            reruns = {i: slots.submit(_grade, dg, env, codes[i], deadline) for i in retry}
             for i, outcome in (await _settle(reruns, deadline)).items():
                 if isinstance(outcome, RunResult) and outcome.has_verdict:
                     outcomes[i] = outcome

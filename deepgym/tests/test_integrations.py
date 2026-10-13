@@ -470,7 +470,8 @@ class _ScriptedDeepGym(DeepGym):
 
     A step that is an exception is raised; a number is seconds to wait before judging.
     Every run first waits *seconds*. A judged output scores 1.0 if it says 'right', else
-    0.0. The client records each run's output and the most runs going at once.
+    0.0. The client records each run's output, the most runs going at once, and when the
+    first run started.
     """
 
     def __init__(
@@ -481,6 +482,7 @@ class _ScriptedDeepGym(DeepGym):
         self.seconds = seconds
         self.calls: list[str] = []
         self.running = self.most_running = 0
+        self.started = threading.Event()
         self._lock = threading.Lock()
 
     def run(self, env: Environment, model_output: str, **kwargs: object) -> RunResult:
@@ -490,6 +492,7 @@ class _ScriptedDeepGym(DeepGym):
             step = steps.pop(0) if steps else 0.0
             self.running += 1
             self.most_running = max(self.most_running, self.running)
+        self.started.set()
         try:
             time.sleep(self.seconds)
             if isinstance(step, BaseException):
@@ -789,6 +792,54 @@ class TestOpenRLHFIntegration:
 
         assert [reply.json()['rewards'] for reply in replies] == [[1.0], [1.0]]
         assert dg.most_running == 2
+
+    async def test_runs_score_as_they_stood_at_the_deadline_however_late_it_is_read(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A busy event loop that reads the outcomes late changes none of them.
+
+        With one slot and the loop held past the 0.3 s deadline, the first run ends after it
+        and scores 0, and the second, whose slot only came after it, never starts.
+        """
+        monkeypatch.setattr(openrlhf, '_REQUEST_BUDGET_S', 0.3)
+        dg = _ScriptedDeepGym(seconds=0.6)
+        app = FastAPI()
+        app.include_router(
+            create_openrlhf_router(MIXED, dg, infra_failure_score='nan', max_parallel=1)
+        )
+        transport = httpx.ASGITransport(app=app)
+        payload = {'prompts': ['p', 'p'], 'outputs': ['right', 'right too']}
+
+        async with httpx.AsyncClient(transport=transport, base_url='http://test') as client:
+            reply = asyncio.create_task(client.post('/reward/score', json=payload))
+            assert await asyncio.to_thread(dg.started.wait, 5)
+            time.sleep(1.0)  # holds the event loop past the deadline and both slots' turns
+            data = (await reply).json()
+
+        assert data['rewards'][0] == 0.0
+        assert math.isnan(data['rewards'][1])
+        assert data['error_types'] == ['deadline_exceeded', 'deadline_exceeded']
+        assert dg.calls == ['right']
+
+    async def test_a_cancelled_request_starts_none_of_its_waiting_runs(self) -> None:
+        """A request cancelled while it's graded, as at shutdown, leaves no run queued."""
+        dg = _ScriptedDeepGym(seconds=0.2)
+        app = FastAPI()
+        app.include_router(
+            create_openrlhf_router(MIXED, dg, infra_failure_score='nan', max_parallel=1)
+        )
+        transport = httpx.ASGITransport(app=app)
+        payload = {'prompts': ['p', 'p'], 'outputs': ['first', 'waiting']}
+
+        async with httpx.AsyncClient(transport=transport, base_url='http://test') as client:
+            reply = asyncio.create_task(client.post('/reward/score', json=payload))
+            assert await asyncio.to_thread(dg.started.wait, 5)
+            reply.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await reply
+            await asyncio.sleep(0.4)
+
+        assert dg.calls == ['first']
 
     def test_score_endpoint_empty(self, env: Environment, local_dg: DeepGym) -> None:
         router = create_openrlhf_router(env, local_dg, infra_failure_score='zero')

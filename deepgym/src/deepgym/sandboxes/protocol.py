@@ -5,6 +5,11 @@ because the judge creates its own unprivileged users inside (see
 :data:`deepgym.judge.SANDBOX_SETUP`), and ``upload`` writes a file as root.
 Untrusted code never runs as root: the judge and sessions drop to those users.
 
+``exec`` starts ``/bin/sh`` by absolute path, so the image's PATH, which may include
+folders the agent writes, never picks the shell that runs as root. Commands that run as
+root and must not trust the image's environment wrap themselves in
+:data:`TRUSTED_PATH` (see :func:`deepgym.session.trusted`).
+
 ``network_blocked`` says the provider itself stops all egress. When it doesn't,
 DeepGym puts untrusted code in its own offline network namespace instead, and
 refuses to run if the sandbox can't make one.
@@ -16,6 +21,9 @@ from collections.abc import Mapping
 from typing import NamedTuple, Protocol
 
 from deepgym.exceptions import TimeoutError
+
+TRUSTED_PATH = '/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin'
+"""Root-owned system folders only; no agent work directory may hold or sit in them."""
 
 
 class ExecResult(NamedTuple):
@@ -43,7 +51,7 @@ class Sandbox(Protocol):
         env: Mapping[str, str] | None = None,
         timeout: int | None = None,
     ) -> ExecResult:
-        """Run *command* with ``sh -c`` as root.
+        """Run *command* with ``/bin/sh -c`` as root, in the image's environment.
 
         Raises:
             SandboxTimeoutError: If the command outruns *timeout* seconds.

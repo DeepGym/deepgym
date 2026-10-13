@@ -21,7 +21,7 @@ from uuid import uuid4
 from pydantic import BaseModel, ConfigDict
 
 from deepgym.exceptions import SandboxError
-from deepgym.sandboxes.protocol import ExecResult, SandboxTimeoutError
+from deepgym.sandboxes.protocol import TRUSTED_PATH, ExecResult, SandboxTimeoutError
 
 DEFAULT_IMAGE = os.environ.get('DEEPGYM_CONTAINER_IMAGE', 'python:3.12-slim')
 # Caps per sandbox, so hostile code can't starve the machine running the containers.
@@ -124,8 +124,8 @@ class CliContainer:
             argv += ['--env', f'{key}={value}']
         argv.append(self.id)
         if timeout:
-            argv += ['timeout', '--kill-after=2', str(timeout)]
-        argv += ['sh', '-c', command]
+            argv += ['/usr/bin/timeout', '--kill-after=2', str(timeout)]
+        argv += ['/bin/sh', '-c', command]
         start = time.monotonic()
         try:
             done = self._cli(*argv, timeout=(timeout or 3600) + 15)
@@ -143,10 +143,10 @@ class CliContainer:
         Raises:
             SandboxError: If the write fails.
         """
-        script = 'mkdir -p "$(dirname "$1")" && cat > "$1"'
+        script = f'PATH={TRUSTED_PATH}; mkdir -p "$(dirname "$1")" && cat > "$1"'
         try:
             done = self._cli(
-                'exec', '--interactive', self.id, 'sh', '-c', script, 'upload', path,
+                'exec', '--interactive', self.id, '/bin/sh', '-c', script, 'upload', path,
                 input=content, timeout=120,
             )  # fmt: skip
         except subprocess.TimeoutExpired as exc:

@@ -13,7 +13,7 @@ from collections.abc import Mapping
 
 import modal
 
-from deepgym.sandboxes.protocol import ExecResult, SandboxTimeoutError
+from deepgym.sandboxes.protocol import TRUSTED_PATH, ExecResult, SandboxTimeoutError
 
 logger = logging.getLogger(__name__)
 
@@ -57,7 +57,7 @@ class ModalSandbox:
         """
         start = time.monotonic()
         process = self._sandbox.exec(
-            'sh', '-c', command, workdir=cwd, env=dict(env) if env else None, timeout=timeout
+            '/bin/sh', '-c', command, workdir=cwd, env=dict(env) if env else None, timeout=timeout
         )
         output = process.stdout.read() + process.stderr.read()
         exit_code = process.wait()
@@ -68,7 +68,8 @@ class ModalSandbox:
 
     def upload(self, content: bytes, path: str) -> None:
         """Write *content* to *path*, creating parent directories."""
-        self.exec(f'mkdir -p {shlex.quote(posixpath.dirname(path))}', timeout=60)
+        folder = shlex.quote(posixpath.dirname(path))
+        self.exec(f'PATH={TRUSTED_PATH} mkdir -p {folder}', timeout=60)
         self._sandbox.filesystem.write_bytes(content, path)
 
     def delete(self) -> None:

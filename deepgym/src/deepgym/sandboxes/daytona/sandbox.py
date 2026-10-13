@@ -18,7 +18,7 @@ from uuid import uuid4
 
 from deepgym.exceptions import SandboxError
 from deepgym.models import Environment, MultiTurnEnvironment
-from deepgym.sandboxes.protocol import ExecResult, SandboxTimeoutError
+from deepgym.sandboxes.protocol import TRUSTED_PATH, ExecResult, SandboxTimeoutError
 
 if TYPE_CHECKING:
     from daytona import (
@@ -171,7 +171,7 @@ class DaytonaSandbox:
             self.delete()
             raise SandboxError(f'Could not prepare sandbox {self.id}: {probe.output[-500:]}')
         if stage != 'root':
-            self._sudo, self._stage = 'sudo -n -E ', stage
+            self._sudo, self._stage = '/usr/bin/sudo -n -E ', stage
 
     @property
     def computer_use(self) -> ComputerUse:
@@ -193,7 +193,7 @@ class DaytonaSandbox:
         """
         try:
             response = self._sandbox.process.exec(
-                f'{self._sudo}sh -c {shlex.quote(command)}',
+                f'{self._sudo}/bin/sh -c {shlex.quote(command)}',
                 cwd=cwd,
                 env=dict(env) if env else None,
                 timeout=timeout,
@@ -217,7 +217,8 @@ class DaytonaSandbox:
         self._sandbox.fs.upload_file(content, staged)
         src, dst = shlex.quote(staged), shlex.quote(path)
         moved = self.exec(
-            f'mkdir -p {shlex.quote(posixpath.dirname(path))} && cat {src} > {dst}; '
+            f'PATH={TRUSTED_PATH}; mkdir -p {shlex.quote(posixpath.dirname(path))} && '
+            f'cat {src} > {dst}; '
             f'status=$?; rm -f {src}; exit $status',
             timeout=60,
         )

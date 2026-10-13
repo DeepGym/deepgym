@@ -13,7 +13,7 @@ from pathlib import Path
 from typing import Literal
 
 from deepgym.exceptions import DeepGymError
-from deepgym.sandboxes.protocol import ExecResult, Sandbox, SandboxTimeoutError
+from deepgym.sandboxes.protocol import TRUSTED_PATH, ExecResult, Sandbox, SandboxTimeoutError
 
 Provider = Literal['apple', 'docker', 'modal', 'e2b']
 PROVIDERS: tuple[Provider, ...] = ('apple', 'docker', 'modal', 'e2b')
@@ -24,6 +24,7 @@ __all__ = [
     'Provider',
     'Sandbox',
     'SandboxTimeoutError',
+    'TRUSTED_PATH',
     'build_image',
     'check_provider',
     'open_sandbox',

@@ -128,6 +128,9 @@ class TestExporters:
             export_traces([graded_trace(), graded_trace()], 'atif', tmp_path / 'atif')
         with pytest.raises(ValueError, match='share ids'):
             write_atif([graded_trace(), graded_trace()], tmp_path / 'direct')
+        upper = graded_trace().model_copy(update={'trace_id': 'TRACE0001'})
+        with pytest.raises(ValueError, match='share ids'):
+            write_atif([graded_trace(), upper], tmp_path / 'cased')
 
     def test_atif_refuses_a_populated_directory(self, tmp_path: Path) -> None:
         export_traces(_samples(), 'atif', tmp_path / 'atif')

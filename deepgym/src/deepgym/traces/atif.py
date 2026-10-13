@@ -115,15 +115,16 @@ def write_atif(traces: Sequence[Trace], out: Path) -> int:
     out.mkdir(parents=True, exist_ok=True)
     if any(out.iterdir()):
         raise DeepGymError(f'{out} is not empty; export ATIF into a new directory')
+    # Files are created exclusively ('x'), so nothing written by this export is replaced.
     for trace in traces:
         document, images = to_atif(trace)
-        (out / f'{trace.trace_id}.json').write_text(
-            json_text(document, indent=2) + '\n', encoding='utf-8'
-        )
+        with (out / f'{trace.trace_id}.json').open('x', encoding='utf-8') as file:
+            file.write(json_text(document, indent=2) + '\n')
         for relative, png in images.items():
             target = out / relative
             target.parent.mkdir(parents=True, exist_ok=True)
-            target.write_bytes(png)
+            with target.open('xb') as file:
+                file.write(png)
     return len(traces)
 
 

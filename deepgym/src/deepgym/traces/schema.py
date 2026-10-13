@@ -280,9 +280,13 @@ class Trace(BaseModel):
 def check_unique_ids(traces: Sequence[Trace]) -> None:
     """Refuse traces that share an id: an export would keep one and silently drop the rest.
 
+    Ids are compared ignoring case, because ATIF names files after them and macOS and
+    Windows file systems ignore case.
+
     Raises:
-        ValueError: If two traces have the same ``trace_id``.
+        ValueError: If two traces have the same ``trace_id``, ignoring case.
     """
-    repeated = [key for key, count in Counter(t.trace_id for t in traces).items() if count > 1]
+    ids = Counter(trace.trace_id.casefold() for trace in traces)
+    repeated = [key for key, count in ids.items() if count > 1]
     if repeated:
         raise ValueError(f'Traces share ids {repeated}; keep one copy of each')

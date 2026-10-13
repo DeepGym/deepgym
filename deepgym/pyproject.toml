@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "deepgym"
-version = "0.4.0"
+version = "0.4.1"
 description = "RL training environments with verifiable rewards for coding agents"
 readme = "README.md"
 license = {text = "PolyForm-Noncommercial-1.0.0"}

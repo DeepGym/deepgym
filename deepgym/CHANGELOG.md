@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.4.1 (2026-10-13)
 
 - **License:** DeepGym is now under the PolyForm Noncommercial License 1.0.0. Commercial use needs a license (contact@deepgym.io). Releases up to 0.4.0 stay MIT.
 

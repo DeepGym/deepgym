@@ -3,6 +3,7 @@
 Runs through the sandbox code path (``sandbox_dg``); local mode refuses patch tasks.
 """
 
+import json
 import subprocess
 import sys
 from pathlib import Path
@@ -12,6 +13,7 @@ import pytest
 from deepgym import DeepGym
 from deepgym.adversarial import PATCH_TAMPERING_ATTACKS, new_files_diff
 from deepgym.benchmark_envs import RepoPatchEnvironment
+from deepgym.models import VerifierResult, is_verdict
 
 _CALC = 'def add(a, b):\n    return a - b\n'
 _FIX = {'calc.py': 'def add(a, b):\n    return a + b\n'}
@@ -31,9 +33,12 @@ def _git(repo: Path, *args: str) -> str:
     return subprocess.run([*command, *args], check=True, capture_output=True).stdout.decode()
 
 
-def _diff(repo: Path, files: dict[str, str]) -> str:
-    """Return the diff that writes *files* into *repo*, leaving the repo unchanged."""
+def _diff(repo: Path, files: dict[str, str | None]) -> str:
+    """Return the diff that writes *files* into *repo* (None deletes one), leaving it unchanged."""
     for name, content in files.items():
+        if content is None:
+            (repo / name).unlink()
+            continue
         (repo / name).parent.mkdir(parents=True, exist_ok=True)
         (repo / name).write_text(content)
     _git(repo, 'add', '-A')
@@ -43,7 +48,9 @@ def _diff(repo: Path, files: dict[str, str]) -> str:
     return diff
 
 
-def _env(tmp_path: Path, extra: dict[str, str] | None = None) -> RepoPatchEnvironment:
+def _env(
+    tmp_path: Path, extra: dict[str, str] | None = None, flags: str = ''
+) -> RepoPatchEnvironment:
     """A repo whose hidden test patch adds a check only a real fix of add() passes."""
     repo = tmp_path / 'repo'
     files = {'calc.py': _CALC, 'tests/test_calc.py': _BASE_TEST, **(extra or {})}
@@ -53,7 +60,7 @@ def _env(tmp_path: Path, extra: dict[str, str] | None = None) -> RepoPatchEnviro
     _git(repo, 'init', '-q')
     _git(repo, 'add', '-A')
     _git(repo, 'commit', '-qm', 'base')
-    pytest_cmd = f'PYTHONPATH=. "{sys.executable}" -m pytest -q tests/test_calc.py'
+    pytest_cmd = f'PYTHONPATH=. "{sys.executable}" -m pytest -q {flags} tests/test_calc.py'
     return RepoPatchEnvironment(
         task='Fix add().',
         repo_dir=str(repo),
@@ -61,6 +68,15 @@ def _env(tmp_path: Path, extra: dict[str, str] | None = None) -> RepoPatchEnviro
         test_patch=_diff(repo, {'tests/test_calc.py': _HIDDEN_TEST}),
         timeout=120,
     )
+
+
+def _runner() -> dict:
+    """The patch runner's functions, exec'd from the script the sandbox runs."""
+    from deepgym.benchmark_envs import PatchVerifier
+
+    namespace: dict = {'__name__': 'deepgym_patch_runner'}
+    exec(compile(PatchVerifier.build_runner_script(), 'runner', 'exec'), namespace)
+    return namespace
 
 
 @pytest.mark.parametrize('attack', sorted(PATCH_TAMPERING_ATTACKS))
@@ -155,6 +171,23 @@ _CARGO_FEATURE = (
 _CARGO_METADATA = (
     '[package]\nname = "calc"\nversion = "1.0.0"\n\n[package.metadata]\nrelease-notes = "a"\n'
 )
+# A [dependencies] bump can be the fix; dev- and build-dependencies only build tests and build.rs.
+_CARGO_DEPS = (
+    '[package]\nname = "calc"\nversion = "1.0.0"\n\n[dependencies]\nserde = "1.0.100"\n\n'
+    '[dev-dependencies]\nproptest = "1.0.0"\n\n[build-dependencies]\ncc = "1.0.0"\n'
+)
+# Example and bench targets run under `cargo test` when their test flag is on.
+_CARGO_TARGETS = (
+    '[package]\nname = "calc"\nversion = "1.0.0"\n\n'
+    '[[example]]\nname = "demo"\ntest = false\n\n[[bench]]\nname = "speed"\ntest = false\n'
+)
+# tox runs its [testenv] commands, wherever the tox config sits.
+_TOX_TOML = '[env_run_base]\ncommands = [["pytest"]]\n'
+_PY_TOX_LEGACY = _PYPROJECT_PLAIN + (
+    '\n[tool.tox]\nlegacy_tox_ini = """\n[testenv]\ncommands = pytest\n"""\n'
+)
+_PY_TOX_NATIVE = _PYPROJECT_PLAIN + '\n[tool.tox.env_run_base]\ncommands = [["pytest"]]\n'
+_PACKAGE_WORKSPACES = _PACKAGE.replace('"version"', '"workspaces": ["packages/*"],\n  "version"')
 
 
 @pytest.mark.parametrize(
@@ -296,13 +329,98 @@ _CARGO_METADATA = (
             False,
             id='codex7-comment-only-allowed',
         ),
+        pytest.param(
+            {'Cargo.toml': _CARGO_DEPS},
+            {'Cargo.toml': _CARGO_DEPS.replace('1.0.100', '1.0.200')},
+            False,
+            id='cargo-dependency-bump-allowed',
+        ),
+        pytest.param(
+            {'Cargo.toml': _CARGO_DEPS},
+            {'Cargo.toml': _CARGO_DEPS.replace('proptest = "1.0.0"', 'proptest = "1.1.0"')},
+            True,
+            id='cargo-dev-dependencies',
+        ),
+        pytest.param(
+            {'Cargo.toml': _CARGO_DEPS},
+            {'Cargo.toml': _CARGO_DEPS.replace('cc = "1.0.0"', 'cc = "1.1.0"')},
+            True,
+            id='cargo-build-dependencies',
+        ),
+        pytest.param(
+            {'Cargo.toml': _CARGO_TARGETS},
+            {'Cargo.toml': _CARGO_TARGETS.replace('"demo"\ntest = false', '"demo"\ntest = true')},
+            True,
+            id='cargo-example-test-flag',
+        ),
+        pytest.param(
+            {'Cargo.toml': _CARGO_TARGETS},
+            {'Cargo.toml': _CARGO_TARGETS.replace('"speed"\ntest = false', '"speed"\ntest = true')},
+            True,
+            id='cargo-bench-test-flag',
+        ),
+        pytest.param(
+            {'tox.toml': _TOX_TOML},
+            {'tox.toml': _TOX_TOML.replace('"pytest"', '"true"')},
+            True,
+            id='tox-toml-commands',
+        ),
+        pytest.param(
+            {'tox.ini': '[testenv]\ncommands = pytest\n'},
+            {'tox.ini': '[testenv]\ncommands = true\n'},
+            True,
+            id='tox-ini-commands',
+        ),
+        pytest.param(
+            {'pyproject.toml': _PY_TOX_LEGACY},
+            {'pyproject.toml': _PY_TOX_LEGACY.replace('commands = pytest', 'commands = true')},
+            True,
+            id='pyproject-legacy-tox-commands',
+        ),
+        pytest.param(
+            {'pyproject.toml': _PY_TOX_NATIVE},
+            {'pyproject.toml': _PY_TOX_NATIVE.replace('"pytest"', '"true"')},
+            True,
+            id='pyproject-tox-env-commands',
+        ),
+        pytest.param(
+            {'package.json': _PACKAGE_WORKSPACES},
+            {'package.json': _PACKAGE_WORKSPACES.replace('packages/*', 'packages/core')},
+            True,
+            id='package-workspaces',
+        ),
+        pytest.param(
+            # A new go.mod below the root splits off a module `go test ./...` then skips.
+            {},
+            {'pkg/go.mod': 'module example.com/pkg\n'},
+            True,
+            id='nested-go-mod-added',
+        ),
+        pytest.param(
+            {'pkg/go.mod': 'module example.com/pkg\n'},
+            {'pkg/go.mod': None},
+            True,
+            id='nested-go-mod-removed',
+        ),
+        pytest.param(
+            {'pkg/go.mod': 'module example.com/pkg\n\ngo 1.21\n'},
+            {'pkg/go.mod': 'module example.com/pkg\n\ngo 1.22\n'},
+            False,
+            id='nested-go-mod-edit-allowed',
+        ),
+        pytest.param(
+            {},
+            {'go.mod': 'module example.com/calc\n'},
+            False,
+            id='root-go-mod-added-allowed',
+        ),
     ],
 )
 def test_config_edits_outside_the_test_section_are_allowed(
     tmp_path: Path,
     sandbox_dg: DeepGym,
     extra: dict[str, str],
-    edit: dict[str, str],
+    edit: dict[str, str | None],
     refused: bool,
 ) -> None:
     env = _env(tmp_path, extra)
@@ -330,9 +448,23 @@ def test_config_edits_outside_the_test_section_are_allowed(
         ('package-lock.json', False),
         ('go.sum', False),
         ('scripts/latest.sh', False),
+        # tox config and go.work pick what `tox` / `go test` run: refused.
+        ('tox.toml', True),
+        ('go.work', True),
+        # Only what a runner itself treats as a test or its config is a test file: Go tests
+        # are *_test.go, so cmd/test.go is code; so are a setup module and a doc named
+        # after a tool. The tools' own setup and config files are not.
+        ('cmd/test.go', False),
+        ('src/spec.go', False),
+        ('calc_test.go', True),
+        ('src/i18n.setup.ts', False),
+        ('docs/jest.md', False),
+        ('jest.setup.js', True),
+        ('vitest.offline.config.ts', True),
+        ('src/setupTests.ts', True),
     ],
 )
-def test_build_and_runner_files_refused_lockfiles_allowed(
+def test_paths_refused_by_name(
     tmp_path: Path, sandbox_dg: DeepGym, name: str, refused: bool
 ) -> None:
     env = _env(tmp_path)
@@ -392,6 +524,102 @@ def test_config_comparison_needs_no_tomllib(tmp_path: Path, sandbox_dg: DeepGym)
 
     assert result.error_type is None
     assert result.score == 1.0
+
+
+def test_vendored_toml_source_needs_no_getsource(monkeypatch: pytest.MonkeyPatch) -> None:
+    # A compiled or sourceless tomllib/tomli has no source for inspect.getsource, and a host
+    # may have neither module: the parser ships as package data instead.
+    import inspect
+
+    from deepgym.benchmark_envs import PatchVerifier, _vendored_toml_source
+
+    def no_source(obj: object) -> str:
+        raise OSError('could not get source code')
+
+    monkeypatch.setattr(inspect, 'getsource', no_source)
+    monkeypatch.setitem(sys.modules, 'tomllib', None)
+    monkeypatch.setitem(sys.modules, 'tomli', None)
+
+    namespace: dict = {}
+    exec(compile(_vendored_toml_source(), 'vendored', 'exec'), namespace)
+
+    assert namespace['loads']('[tool.pytest]\naddopts = "-q"\n') == {
+        'tool': {'pytest': {'addopts': '-q'}}
+    }
+    assert '_VENDORED_TOML' in PatchVerifier.build_runner_script()
+
+
+@pytest.mark.parametrize('stalls', ['test_patch', 'model_patch', 'git_root'])
+def test_path_listing_timeout_has_no_verdict(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture, stalls: str
+) -> None:
+    # git stalling while the runner lists paths is the runner's failure, not the model's:
+    # no verdict, so trainers mask it, instead of an uncaught TimeoutExpired.
+    env = _env(tmp_path)
+    patch_file = tmp_path / 'candidate.diff'
+    patch_file.write_text(_diff(Path(env.repo_dir), _FIX))
+    task_file = tmp_path / 'task.json'
+    task = {'repo_dir': env.repo_dir, 'test_patch': env.test_patch, 'timeout': 60}
+    task_file.write_text(json.dumps({**task, 'test_commands': [env.test_command]}))
+    stalled = {
+        'test_patch': lambda args: '--numstat' in args and args[-1].endswith('test_patch.diff'),
+        'model_patch': lambda args: '--numstat' in args and args[-1] == str(patch_file),
+        'git_root': lambda args: 'rev-parse' in args,
+    }[stalls]
+    real_run = subprocess.run
+
+    def run(args: list[str], **kwargs: object) -> subprocess.CompletedProcess:
+        if stalled(args):
+            raise subprocess.TimeoutExpired(args, 60)
+        return real_run(args, **kwargs)
+
+    runner = _runner()
+    monkeypatch.setattr(subprocess, 'run', run)
+    monkeypatch.setattr(sys, 'argv', ['runner', str(task_file), str(patch_file)])
+
+    exit_code = runner['main']()
+
+    result = VerifierResult.model_validate_json(capsys.readouterr().out)
+    assert result.error_type == 'validation_timeout'
+    assert result.score == 0.0
+    assert not is_verdict(exit_code, result.error_type)
+
+
+def test_named_config_paths_reads_the_command_line(tmp_path: Path) -> None:
+    repo = tmp_path.resolve()
+    named = _runner()['_named_config_paths']
+    command = (
+        f'cd {repo}/sub && pytest -c ci.ini --config-file={repo}/top.ini -c /dev/null '
+        '-p no:cacheprovider -p pkg.plug tests'
+    )
+
+    assert named([command], repo, repo) == {
+        'sub/ci.ini',
+        'top.ini',
+        'sub/pkg/plug.py',
+        'sub/pkg/plug/__init__.py',
+    }
+    assert named(["pytest -c 'unbalanced"], repo, repo) == set()
+
+
+@pytest.mark.parametrize(
+    ('edit', 'refused'),
+    [
+        pytest.param({'ci.ini': '[pytest]\naddopts = -k nothing\n'}, True, id='config-file'),
+        pytest.param({'localplugin.py': 'VALUE = 2\n'}, True, id='plugin-module'),
+        pytest.param({}, False, id='fix-only'),
+    ],
+)
+def test_files_the_test_command_names_are_test_config(
+    tmp_path: Path, sandbox_dg: DeepGym, edit: dict[str, str], refused: bool
+) -> None:
+    files = {'ci.ini': '[pytest]\n', 'localplugin.py': 'VALUE = 1\n'}
+    env = _env(tmp_path, files, flags='-c ci.ini -p localplugin')
+
+    result = sandbox_dg.run(env, _diff(Path(env.repo_dir), {**_FIX, **edit}))
+
+    assert result.error_type == ('test_infra_tampering' if refused else None)
+    assert result.score == (0.0 if refused else 1.0)
 
 
 def test_production_package_named_test_is_refused_known_false_positive(

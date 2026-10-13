@@ -3,7 +3,6 @@
 
 from __future__ import annotations
 
-import inspect
 import json
 import random
 import re
@@ -251,31 +250,18 @@ def _vendored_toml_source() -> str:
 
     The runner executes in the task image's interpreter, where ``tomllib`` (Python 3.11+)
     may be absent, so a config comparison that imported it would fail closed on every
-    older image. CPython's ``tomllib`` is the ``tomli`` package verbatim, pure Python in
-    four small modules with only intra-package imports; this concatenates them into one
-    module so the runner parses ``pyproject.toml``/``Cargo.toml`` exactly as the tools
-    that consume them do -- dotted keys, inline tables, duplicate-key and table-redefinition
-    rejection -- independent of the image's Python.
+    older image. ``vendored_toml.txt`` is CPython's ``tomllib`` (the ``tomli`` package
+    verbatim) concatenated into one module, so the runner parses ``pyproject.toml``/
+    ``Cargo.toml`` exactly as the tools that consume them do -- dotted keys, inline tables,
+    duplicate-key and table-redefinition rejection -- independent of the image's Python.
+    It ships as package data and is read as text, not rebuilt from this host's modules
+    with ``inspect.getsource``, which fails when the host's ``tomllib``/``tomli`` is
+    compiled or installed without its ``.py`` source.
 
     Returns:
         Python source defining ``loads`` and ``TOMLDecodeError`` at module scope.
-
-    Raises:
-        ModuleNotFoundError: If neither ``tomllib`` nor ``tomli`` is importable here.
     """
-    try:
-        from tomllib import _parser, _re, _types  # type: ignore[attr-defined]
-    except ModuleNotFoundError:
-        from tomli import _parser, _re, _types  # type: ignore[no-redef]
-
-    parts = ['from __future__ import annotations']
-    for module in (_types, _re, _parser):
-        src = inspect.getsource(module)
-        src = re.sub(r'(?ms)^from \.\w+ import \([^)]*\)[ \t]*\n', '', src)
-        src = re.sub(r'(?m)^from \.\w+ import .*\n', '', src)
-        src = re.sub(r'(?m)^from __future__ import .*\n', '', src)
-        parts.append(src)
-    return '\n'.join(parts)
+    return Path(__file__).with_name('vendored_toml.txt').read_text(encoding='utf-8')
 
 
 class PatchVerifier:
@@ -300,6 +286,7 @@ class PatchVerifier:
             import json
             import os
             import re
+            import shlex
             import shutil
             import subprocess
             import sys
@@ -356,9 +343,11 @@ class PatchVerifier:
             }
             # Build scripts and runner config that execute code: `make test`, a gradle/maven
             # test task or a build.rs can be rewritten to exit 0 without running the tests, so
-            # any edit is refused. (A lockfile or go.sum cannot forge a pass on its own -- the
-            # stub package a repoint needs is caught by its own runner `bin` -- so those stay
-            # allowed, as a real dependency fix updates them.)
+            # any edit is refused. tox.ini/tox.toml (whose [testenv] commands are what `tox`
+            # runs) and go.work (which modules `go test` sees) are refused the same way. (A
+            # lockfile or go.sum cannot forge a pass on its own -- the stub package a repoint
+            # needs is caught by its own runner `bin` -- so those stay allowed, as a real
+            # dependency fix updates them.)
             _INFRA_FILES = {
                 'conftest.py', 'pytest.py', 'pytest.ini', '.pytest.ini', 'pytest.toml',
                 '.pytest.toml', 'tox.ini', 'noxfile.py', 'tests.py', 'sitecustomize.py',
@@ -366,7 +355,7 @@ class PatchVerifier:
                 'phpunit.xml', 'phpunit.xml.dist', 'phpunit.dist.xml', 'pom.xml', 'build.gradle',
                 'build.gradle.kts', 'settings.gradle', 'settings.gradle.kts', 'build.rs',
                 'rakefile', 'makefile', 'gnumakefile', '.npmrc', '.yarnrc', '.yarnrc.yml',
-                'setup.py',
+                'setup.py', 'tox.toml', 'go.work',
             }
             # Executable extensions: a code file inside a test directory can run at import or
             # be imported by a test, so it is refused there; a data file is not.
@@ -385,10 +374,12 @@ class PatchVerifier:
             # catches on the stub's own package.json, and the report gate is the backstop.
             _PACKAGE_KEYS = (
                 'scripts', 'bin', 'jest', 'mocha', 'ava', 'babel', 'nyc', 'c8', 'vitest', 'tap',
-                'wdio',
+                'wdio', 'workspaces',
             )
             # Config files that are test infrastructure only in part; _config_tampered decides.
-            _CONFIG_FILES = {'pyproject.toml', 'setup.cfg', 'package.json', 'cargo.toml'}
+            # The keys it compares are knowingly incomplete (a runner reads more than any list
+            # here); the per-test report gate supersedes this comparison.
+            _CONFIG_FILES = {'pyproject.toml', 'setup.cfg', 'package.json', 'cargo.toml', 'go.mod'}
             _SYMLINK = b'\\0deepgym-symlink'
 
 
@@ -399,16 +390,18 @@ class PatchVerifier:
 
             def _is_test_file(name: str) -> bool:
                 # Whether *name* (lowercased basename) is itself a test, a test runner config,
-                # or an import hook a runner loads by name -- refused wherever it sits.
+                # or an import hook a runner loads by name -- refused wherever it sits. A name
+                # that only shares a word with one is ordinary code: in Go only *_test.go is a
+                # test (testdata/ is in _TEST_DIRS), so cmd/test.go is not; nor are i18n.setup.ts
+                # or a jest.md doc (jest/vitest setup files match the _JS_TOOLS rule instead).
                 segments = name.split('.')
                 return (
                     name in _INFRA_FILES
                     or name.endswith(('_test.py', '_test.go', '_spec.rb', '.pth'))
                     or (name.startswith('test_') and name.endswith('.py'))
-                    or (segments[0] in ('test', 'tests', 'spec', 'suite_test') and segments[-1] == 'go')
-                    or (len(segments) > 2 and segments[-2] in ('test', 'spec', 'e2e', 'setup') and segments[-1] in _JS_EXTS)
+                    or (len(segments) > 2 and segments[-2] in ('test', 'spec', 'e2e') and segments[-1] in _JS_EXTS)
                     or (len(segments) > 1 and segments[0] in _JS_TOOLS and segments[1] in ('config', 'conf', 'setup', 'workspace', 'preset'))
-                    or segments[0] in ('setuptests', 'jest', 'vitest')
+                    or (segments[-1] in _JS_EXTS and (segments[0] == 'setuptests' or (len(segments) > 2 and segments[0] in ('jest', 'vitest'))))
                     or name.startswith(('.babelrc', '.mocharc', '.nycrc', '.c8rc'))
                 )
 
@@ -493,7 +486,9 @@ class PatchVerifier:
                 # key, a redefined table or any syntax error, which fails closed above.
                 before, after = _toml_loads(old_text), _toml_loads(new_text)
                 if name == 'cargo.toml':
-                    keys = ('lib', 'bin', 'test', 'bench', 'features', 'dependencies',
+                    # Every target table (with its `test` flag) and what only tests or build.rs
+                    # build with. [dependencies] is left out: a version bump there is a real fix.
+                    keys = ('lib', 'bin', 'test', 'bench', 'example', 'features',
                             'dev-dependencies', 'build-dependencies', 'workspace')
                     if any(before.get(key) != after.get(key) for key in keys):
                         return True
@@ -501,6 +496,8 @@ class PatchVerifier:
                     auto = ('autotests', 'autobenches', 'autobins', 'autoexamples', 'autolib', 'build')
                     pkg_before, pkg_after = _toml_table(before.get('package')), _toml_table(after.get('package'))
                     return any(pkg_before.get(key) != pkg_after.get(key) for key in auto)
+                # [tool.tox] is compared whole, so its [testenv] commands count whether they sit
+                # in a legacy_tox_ini string or in env_run_base/env tables.
                 tool_keys = ('pytest', 'coverage', 'tox', 'nose')
                 before_tool, after_tool = _toml_table(before.get('tool')), _toml_table(after.get('tool'))
                 return any(before_tool.get(key) != after_tool.get(key) for key in tool_keys) or (
@@ -508,12 +505,19 @@ class PatchVerifier:
                 )
 
 
-            def _config_tampered(name: str, old: bytes | None, new: bytes | None) -> bool:
-                # Whether turning *old* into *new* changes the test-relevant part of a config file.
-                # Fails closed: a symlink, or anything that cannot be parsed and shown unchanged,
-                # counts as tampering, so a parse error becomes a trained zero, never a masked run.
+            def _config_tampered(rel: str, old: bytes | None, new: bytes | None) -> bool:
+                # Whether turning *old* into *new* changes the test-relevant part of config file
+                # *rel*. Fails closed: a symlink, or anything that cannot be parsed and shown
+                # unchanged, counts as tampering, so a parse error becomes a trained zero, never
+                # a masked run.
+                parts = _components(rel)
+                name = parts[-1]
                 if _SYMLINK in (old, new):
                     return True
+                if name == 'go.mod':
+                    # Adding or removing a go.mod below the root makes or merges a nested module,
+                    # which `go test ./...` skips or newly runs; editing one (a version bump) is a fix.
+                    return len(parts) > 1 and (old is None) != (new is None)
                 old_text = (old or b'').decode('utf-8', 'replace')
                 new_text = (new or b'').decode('utf-8', 'replace')
                 if old_text == new_text:
@@ -522,6 +526,37 @@ class PatchVerifier:
                     return _test_part_changed(name, old_text, new_text)
                 except Exception:
                     return True
+
+
+            def _named_config_paths(commands: list[str], repo_dir: Path, repo_root: Path) -> set[str]:
+                # Repo-relative files the test commands themselves name as runner config (-c,
+                # --config-file) or as a pytest plugin module (-p). Only the command line is
+                # read, not a script it runs or a quoted `bash -c` string.
+                root = os.path.realpath(repo_root)
+                named = set()
+                for command in commands:
+                    lexer = shlex.shlex(command, posix=True, punctuation_chars=True)
+                    lexer.whitespace_split = True
+                    try:
+                        tokens = list(lexer)
+                    except ValueError:
+                        continue
+                    cwd = repo_dir
+                    for flag, value in zip(tokens, [*tokens[1:], '']):
+                        if flag.startswith('--config-file='):
+                            flag, value = flag.split('=', 1)
+                        if flag == 'cd':
+                            cwd = cwd / value
+                            continue
+                        if not value or flag not in ('-c', '--config-file', '-p') or value.startswith('no:'):
+                            continue
+                        module = value.replace('.', '/')
+                        files = [module + '.py', module + '/__init__.py'] if flag == '-p' else [value]
+                        for file in files:
+                            rel = os.path.relpath(os.path.realpath(cwd / file), root)
+                            if rel != '..' and not rel.startswith('../'):
+                                named.add(rel)
+                return named
 
 
             def _read_config(path: Path) -> bytes | None:
@@ -751,7 +786,27 @@ class PatchVerifier:
                     # goes last, so no spelling of a path in the diff can change the tests.
                     test_patch_file = temp_dir / 'test_patch.diff'
                     test_patch_file.write_text(test_patch, encoding='utf-8')
-                    hidden = _patch_paths(repo_dir, test_patch_file, timeout) if test_patch else []
+                    # Listing paths only parses the patches. If git stalls, the runner failed,
+                    # not the model, so there is no verdict and trainers mask the sample.
+                    try:
+                        hidden = _patch_paths(repo_dir, test_patch_file, timeout) if test_patch else []
+                        model_paths = _patch_paths(repo_dir, patch_path, timeout)
+                        repo_root = _git_root(repo_dir, timeout)
+                    except subprocess.TimeoutExpired:
+                        return _emit(
+                            {
+                                'schema_version': '1.0',
+                                'score': 0.0,
+                                'passed': False,
+                                'details': 'Listing the paths the patches touch timed out, so the patch was not scored.',
+                                'reward_components': {'apply': 0.0, 'tests': 0.0},
+                                'metrics': {'pass_fraction': 0.0, 'tests_run': 0},
+                                'truncated': False,
+                                'error_type': 'validation_timeout',
+                                'cases': [],
+                            },
+                            1,
+                        )
                     if hidden is None:
                         return _emit(
                             {
@@ -805,7 +860,6 @@ class PatchVerifier:
                     # that touches any other test infrastructure is refused outright: a new
                     # conftest.py, plugin, TestMain or runner config could make the tests
                     # report a pass without running them.
-                    model_paths = _patch_paths(repo_dir, patch_path, timeout)
                     if model_paths is None:
                         return _emit(
                             {
@@ -821,10 +875,14 @@ class PatchVerifier:
                             },
                             1,
                         )
-                    repo_root = _git_root(repo_dir, timeout)
                     hidden_set = set(hidden)
                     exposed = [rel for rel in model_paths if rel not in hidden_set]
                     tampered = {rel: _infra_reason(repo_root, rel) for rel in exposed}
+                    # A config file the test command names is refused outright, unless it is one
+                    # whose test part is compared below (`-c pyproject.toml`).
+                    for rel in _named_config_paths(test_commands, repo_dir, repo_root).intersection(exposed):
+                        if _components(rel)[-1] not in _CONFIG_FILES:
+                            tampered[rel] = tampered[rel] or 'test configuration named by the test command'
                     for flagged in _mode_change_paths(patch_text):
                         tampered[flagged] = 'changes a file mode or creates a symlink'
                     configs = {
@@ -856,8 +914,7 @@ class PatchVerifier:
                         )
 
                     for rel, old in configs.items():
-                        name = _components(rel)[-1]
-                        if _config_tampered(name, old, _read_config(repo_root / rel)):
+                        if _config_tampered(rel, old, _read_config(repo_root / rel)):
                             tampered[rel] = tampered[rel] or 'changes test configuration'
                     tampered = {rel: reason for rel, reason in sorted(tampered.items()) if reason}
                     if tampered:

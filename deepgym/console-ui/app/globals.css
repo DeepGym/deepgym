@@ -22,6 +22,7 @@
   --color-accent-950: #1b2747;
 
   --font-display: var(--font-inter-tight), var(--font-inter), ui-sans-serif, system-ui, sans-serif;
+  --font-wordmark: var(--font-geist-sans), var(--font-inter), ui-sans-serif, sans-serif;
 }
 
 @utility text-mono-label {

@@ -312,7 +312,7 @@ class TestAttacksTargetTheEntryPoint:
 
 @pytest.mark.parametrize(
     ('strategy', 'printed'),
-    [('hardcoded', ['true', '0', '""']), ('pattern', ['[1]', 'null', '""'])],
+    [('hardcoded', ['true', '0', '']), ('pattern', ['[1]', 'null', '""'])],
 )
 def test_payloads_carry_json_values_as_python(strategy: str, printed: list[str]) -> None:
     cases = [{'input': [1], 'expected': True}, {'input': None, 'output': 0}, {'answer': ''}]
@@ -322,7 +322,7 @@ def test_payloads_carry_json_values_as_python(strategy: str, printed: list[str])
 
     run = subprocess.run([sys.executable, '-c', code], capture_output=True, text=True)
     assert run.returncode == 0, run.stderr  # JSON true and null used to be NameErrors
-    assert run.stdout.split() == printed  # falsey expectations are kept, not dropped
+    assert run.stdout.splitlines() == printed  # falsey ones kept; text printed as it is
 
 
 class _ScriptedLLM:

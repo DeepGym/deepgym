@@ -282,6 +282,9 @@ def compare_results() -> None:
         for vid in sorted(common):
             w = white_lookup[vid]
             b = black_lookup[vid]
+            if w.verifier_hash != b.verifier_hash:
+                print(f'  {vid[0]}/{vid[1]}: STALE (the verifier changed between the scans)')
+                continue
             if w.exploitable and b.exploitable:
                 both_exploitable += 1
                 label = 'BOTH'

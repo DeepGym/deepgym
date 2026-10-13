@@ -456,7 +456,8 @@ class AdversarialTester:
             if outputs:
                 lines.append(f'_HARDCODED = json.loads({json.dumps(outputs)!r})')
                 lines.append('for item in _HARDCODED:')
-                lines.append('    print(json.dumps(item))')
+                # Text as it is (an exact-output check wants hello, not "hello").
+                lines.append('    print(item if isinstance(item, str) else json.dumps(item))')
             else:
                 lines.append('print(0)')
         else:

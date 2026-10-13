@@ -92,6 +92,15 @@ _PROTECTED_PATHS = tuple(
 _TRANSFER_TIMEOUT_S = 600
 # Largest gzipped work directory archive_workdir hands back; it is held in memory.
 _MAX_ARCHIVE_BYTES = 256 << 20
+# Image variables naming files the dynamic loader reads before any command root runs:
+# library lists (a bare name is searched in system folders) and folder lists.
+_LOADER_LIBRARIES = frozenset({'LD_PRELOAD', 'LD_AUDIT'})
+_LOADER_FOLDERS = frozenset({
+    'LD_LIBRARY_PATH', 'LD_ORIGIN_PATH', 'LD_DEBUG_OUTPUT', 'LD_PROFILE_OUTPUT',
+    'GCONV_PATH', 'LOCPATH',
+})  # fmt: skip
+# Folders anyone can write, besides the agent's own work directory and home.
+_SHARED_WRITABLE = ('/tmp', '/var/tmp', '/dev/shm')
 _DISPLAY = ':0'
 _STEP_OUTPUT = '_step_output.txt'
 
@@ -333,6 +342,7 @@ class SandboxBackend:
                     'DEEPGYM_RUNTIME': runtime,
                     'DEEPGYM_PYTHON': self.python,
                 }
+            self._refuse_loader_paths_the_agent_writes()
             self._offline = ''
             if not sandbox.network_blocked:
                 self._make_offline_namespace()
@@ -345,6 +355,43 @@ class SandboxBackend:
     def workdir(self) -> str:
         """The work directory, as it really is in the sandbox (links resolved)."""
         return self._workdir
+
+    def _refuse_loader_paths_the_agent_writes(self) -> None:
+        """Refuse an image whose loader variables point where the agent can write.
+
+        Every provider starts its commands with the image's environment, so the first
+        program of each root command loads what ``LD_PRELOAD``, ``LD_LIBRARY_PATH`` and
+        the like name. That is safe only while no agent can change those files.
+
+        Raises:
+            SandboxError: If such a variable holds a relative entry, or one that resolves
+                into the work directory, the agent's home or a world-writable folder.
+        """
+        listed = self._sandbox.exec('/usr/bin/env -0', timeout=30).output
+        entries = [
+            (name, entry)
+            for name, _, value in (item.partition('=') for item in listed.split('\0'))
+            if value and (name in _LOADER_LIBRARIES or name in _LOADER_FOLDERS)
+            for entry in value.replace(' ', ':').split(':')
+            if not (name in _LOADER_LIBRARIES and entry and '/' not in entry)
+        ]
+        if not entries:
+            return
+        # An empty or relative entry is looked up from the working folder.
+        relative = [(name, entry) for name, entry in entries if not entry.startswith('/')]
+        if relative:
+            raise SandboxError(f'The image sets {relative} relative to the working folder')
+        resolved = self._sandbox.exec(
+            trusted('; '.join(f'realpath -m -- {shlex.quote(entry)}' for _, entry in entries)),
+            timeout=30,
+        ).output.splitlines()
+        writable = [self._workdir, _AGENT_HOME, *_SHARED_WRITABLE]
+        for (name, entry), real in zip(entries, resolved, strict=False):
+            if any(PurePosixPath(real).is_relative_to(folder) for folder in writable):
+                raise SandboxError(
+                    f'The image sets {name}={entry}, which resolves to {real}, a folder the '
+                    'agent can write; root would load it'
+                )
 
     def _make_offline_namespace(self) -> None:
         """Make a loopback-only network namespace and bind-mount it at ``_NETNS``.
@@ -386,16 +433,12 @@ class SandboxBackend:
         )
 
     def exec_root(
-        self,
-        command: str,
-        timeout: int,
-        *,
-        offline: bool,
-        env: Mapping[str, str] | None = None,
+        self, command: str, timeout: int, *, offline: bool, env: Mapping[str, str]
     ) -> ExecResult:
         """Run a task's own *command* (such as its tests) with bash as root in the work directory.
 
-        It gets the image's environment with *env* on top, as the task expects. Only for a
+        It gets only *env*, never the image's environment, whose startup variables
+        (BASH_ENV, PYTHONSTARTUP, ...) could name files in the work directory. Only for a
         sandbox no agent process runs in, such as a grader's fresh one. *offline* joins the
         loopback-only namespace when the provider doesn't block the network.
 
@@ -403,10 +446,10 @@ class SandboxBackend:
             TimeoutError: If the command exceeds *timeout* seconds.
         """
         prefix = self._offline if offline else ''
+        variables = ' '.join(shlex.quote(f'{key}={value}') for key, value in env.items())
         return self._sandbox.exec(
-            f'{prefix}/bin/bash -c {shlex.quote(command)}',
+            f'{prefix}/usr/bin/env -i {variables} /bin/bash -c {shlex.quote(command)}',
             cwd=self._workdir,
-            env=env,
             timeout=timeout,
         )
 

@@ -95,6 +95,7 @@ def test_rejects_an_invalid_task_toml(folder: str, message: str) -> None:
         ('[environment]\nos = "windows"\n', 'linux'),
         ('[verifier]\nnetwork_mode = "sometimes"\n', 'no-network'),
         ('[[steps]]\nname = "one"\n', 'multi-step'),
+        ('[verifier.env]\nKEY = "${HOST_SECRET}"\n', 'host variables'),
     ],
 )
 def test_rejects_unsupported_settings(tmp_path: Path, toml: str, message: str) -> None:

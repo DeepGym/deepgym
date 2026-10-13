@@ -165,7 +165,7 @@ def test_offline_tasks_run_their_tests_in_the_offline_namespace(tmp_path: Path) 
     public = HarborTask.from_dir(HELLO).model_copy(update={'verifier_network': 'public'})
     box = _box(_PASS, blocked=False)
     grade(box, public, _WORKSPACE, '/app')
-    assert box.commands[_index(box, _RUN_TESTS)].startswith('/bin/bash -c')
+    assert box.commands[_index(box, _RUN_TESTS)].startswith('/usr/bin/env -i ')
 
 
 def test_shell_syntax_in_the_workdir_is_always_quoted(tmp_path: Path) -> None:
@@ -197,9 +197,16 @@ class _EnvBox(FakeSandbox):
 def test_root_never_resolves_a_command_through_the_image_path() -> None:
     task = HarborTask.from_dir(HELLO)
     agent = _box(_ENCODED, blocked=False)
+    image = '//app/bin:/usr/bin:.:/opt/tools\0C.UTF-8\0\0xterm\0'
     grader = _EnvBox(
         network_blocked=False,
-        answers=[('useradd', f'{_IDS}\n/app'), ('printf %s', '/app/bin:/usr/bin:.'), _PASS],
+        answers=[
+            ('useradd', f'{_IDS}\n/app'),
+            ("printf '%s", image),
+            # How the grader resolves //app/bin, /usr/bin and /opt/tools (a link into /app).
+            ('realpath -e', '/app/bin\n/usr/bin\n/app/tools'),
+            _PASS,
+        ],
     )
 
     run = run_agent(agent, task, 'true')
@@ -208,13 +215,36 @@ def test_root_never_resolves_a_command_through_the_image_path() -> None:
     # Provider builtins aside, each command names its first program by absolute path, and
     # every harness command runs with an empty environment and the trusted PATH.
     for command in agent.commands + grader.commands:
-        if command in ('pwd', 'printf %s "$PATH"'):
+        if command == 'pwd' or command.startswith('printf ') or command == '/usr/bin/env -0':
             continue
         assert command.startswith('/'), command
-        if command.startswith('/usr/bin/env -i '):
+        if command.startswith('/usr/bin/env -i ') and _RUN_TESTS not in command:
             assert shlex.split(command)[2] == f'PATH={TRUSTED_PATH}', command
-    tests = _index(grader, _RUN_TESTS)
-    assert grader.envs[tests] == {'PATH': '/usr/bin'}
+    # The tests get only allowlisted variables, and PATH entries that resolve outside /app.
+    tests = shlex.split(grader.commands[_index(grader, _RUN_TESTS)])
+    start = tests.index('/usr/bin/env') + 2  # past `env -i`, after the nsenter prefix
+    assigned = dict(item.split('=', 1) for item in tests[start : tests.index('/bin/bash')])
+    assert assigned == {'LANG': 'C.UTF-8', 'TERM': 'xterm', 'HOME': '/root', 'PATH': '/usr/bin'}
+    assert grader.envs[_index(grader, _RUN_TESTS)] is None
+
+
+def test_backend_refuses_loader_variables_that_point_where_the_agent_writes() -> None:
+    for listing in ('LD_PRELOAD=/app/hook.so', 'LD_LIBRARY_PATH=/usr/lib:', 'GCONV_PATH=lib'):
+        box = _box(('/usr/bin/env -0', f'PATH=/usr/bin\0{listing}\0'), ('realpath -m', '/app/x'))
+        with pytest.raises(SandboxError, match='The image sets'):
+            SandboxBackend(box, '/app')
+        assert box.deleted
+
+    linked = _box(('/usr/bin/env -0', 'LD_LIBRARY_PATH=/opt/lib\0'), ('realpath -m', '/app/lib'))
+    with pytest.raises(SandboxError, match='resolves to /app/lib'):
+        SandboxBackend(linked, '/app')
+
+    fine = _box(
+        ('/usr/bin/env -0', 'LD_PRELOAD=libjemalloc.so.2\0LD_LIBRARY_PATH=/usr/local/cuda/lib64\0'),
+        ('realpath -m', '/usr/local/cuda/lib64'),
+    )
+    SandboxBackend(fine, '/app')
+    assert not fine.deleted
 
 
 def test_backend_owns_where_the_workdir_really_leads() -> None:

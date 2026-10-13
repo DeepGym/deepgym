@@ -7,8 +7,11 @@ default verifier user), then reads the reward with a separate command. Nothing t
 wrote can be in /tests or /logs/verifier, and none of its processes is alive.
 
 The harness's own commands here run with an empty environment and only root-owned
-folders on PATH. tests/test.sh gets the image's environment, minus PATH entries in the
-work directory, so files the agent left there can't stand in for commands the tests call.
+folders on PATH. tests/test.sh gets an allowlisted environment: the image's PATH entries
+that, resolved in the grader after the restore, lie outside the work directory; HOME;
+the image's locale and TERM; and the task's ``[verifier].env``. Nothing else from the
+image reaches it, so no startup variable (BASH_ENV, PYTHONSTARTUP, ...) can name a file
+the agent left in the work directory.
 
 Reward precedence follows Harbor: reward.json wins over reward.txt, and both must be
 written during this run, since the folder is emptied first. Tests usually run the agent's
@@ -21,7 +24,6 @@ from __future__ import annotations
 
 import json
 import math
-import posixpath
 import shlex
 import statistics
 from pathlib import PurePosixPath
@@ -38,6 +40,9 @@ REWARD_DIR = '/logs/verifier'
 _TESTS_ARCHIVE = f'{STAGING_DIR}/tests.tgz'
 # Characters of test output kept in the run result.
 _LOG_TAIL = 4000
+# Image variables tests/test.sh may see, read before the restore with shell builtins.
+_PASSED_ON = ('PATH', 'LANG', 'LC_ALL', 'TERM')
+_IMAGE_ENV = "printf '%s\\0' " + ' '.join(f'"${{{name}-}}"' for name in _PASSED_ON)
 
 
 def grade(sandbox: Sandbox, task: HarborTask, workspace: bytes, workdir: str) -> ExecutionResult:
@@ -59,7 +64,7 @@ def grade(sandbox: Sandbox, task: HarborTask, workspace: bytes, workdir: str) ->
     """
     backend = SandboxBackend(sandbox, workdir)  # deletes the sandbox if setup fails
     try:
-        image_path = sandbox.exec('printf %s "$PATH"', timeout=30).output
+        image = sandbox.exec(_IMAGE_ENV, timeout=30).output.split('\0')
         backend.restore_workdir(workspace)
         sandbox.upload(pack_files(task.tests), _TESTS_ARCHIVE)
         staged = backend.exec_trusted(
@@ -74,7 +79,7 @@ def grade(sandbox: Sandbox, task: HarborTask, workspace: bytes, workdir: str) ->
             f'{TESTS_DIR}/test.sh',
             math.ceil(task.verifier_timeout_sec),
             offline=task.verifier_network == 'no-network',
-            env={'PATH': outside_workdir(image_path, backend.workdir)},
+            env=_test_env(backend, task, dict(zip(_PASSED_ON, image, strict=False))),
         )
         listing = backend.exec_trusted(read_reward_command(REWARD_DIR), timeout=60)
         return ExecutionResult(
@@ -86,20 +91,39 @@ def grade(sandbox: Sandbox, task: HarborTask, workspace: bytes, workdir: str) ->
         backend.close()
 
 
-def outside_workdir(path: str, workdir: str) -> str:
-    """Return the PATH value *path* without entries in *workdir* or relative ones.
+def _test_env(backend: SandboxBackend, task: HarborTask, image: dict[str, str]) -> dict[str, str]:
+    """The only variables tests/test.sh gets (see the module docstring)."""
+    basics = {name: value for name, value in image.items() if value and name != 'PATH'}
+    return {
+        **basics,
+        'HOME': '/root',
+        **task.verifier_env,
+        'PATH': safe_path(backend, image.get('PATH', '')),
+    }
 
-    Example:
-        >>> outside_workdir('/app/bin:/usr/bin:.:/opt/conda/bin', '/app')
-        '/usr/bin:/opt/conda/bin'
+
+def safe_path(backend: SandboxBackend, path: str) -> str:
+    """Return the PATH value *path* with each entry resolved in the sandbox, keeping only
+    those that exist outside the work directory.
+
+    Resolving catches every spelling (``//app/bin``) and every link into the work directory,
+    which the agent filled; relative entries name the working folder, so they go too.
     """
-    entries = (entry for entry in path.split(':') if entry.startswith('/'))
+    entries = [entry for entry in path.split(':') if entry.startswith('/')]
+    if not entries:
+        return TRUSTED_PATH
+    resolved = backend.exec_trusted(
+        '; '.join(
+            f'realpath -e -- {shlex.quote(entry)} 2>/dev/null || echo -' for entry in entries
+        ),
+        timeout=30,
+    ).output.splitlines()
     kept = [
-        entry
-        for entry in entries
-        if not PurePosixPath(posixpath.normpath(entry)).is_relative_to(workdir)
+        real
+        for real in resolved
+        if real.startswith('/') and not PurePosixPath(real).is_relative_to(backend.workdir)
     ]
-    return ':'.join(kept) or TRUSTED_PATH
+    return ':'.join(dict.fromkeys(kept)) or TRUSTED_PATH
 
 
 def read_reward_command(directory: str) -> str:

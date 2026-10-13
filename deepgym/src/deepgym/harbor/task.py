@@ -78,6 +78,16 @@ class _VerifierTable(_Table):
     timeout_sec: float = Field(default=600, gt=0)
     network_mode: NetworkMode | None = None
     environment: _EnvironmentTable | None = None
+    env: dict[str, str] = Field(default_factory=dict)
+
+    @field_validator('env')
+    @classmethod
+    def no_host_variables(cls, value: dict[str, str]) -> dict[str, str]:
+        """Refuse ``${VAR}`` values: host variables never go into a sandbox."""
+        templated = sorted(name for name, text in value.items() if '${' in text)
+        if templated:
+            raise ValueError(f'[verifier].env reads host variables {templated}; not supported')
+        return value
 
 
 class _TaskToml(_Table):
@@ -133,6 +143,9 @@ class HarborTask(BaseModel):
 
     verifier_network: NetworkMode = 'public'
     """Network tests/test.sh may use."""
+
+    verifier_env: dict[str, str] = Field(default_factory=dict)
+    """Variables task.toml's ``[verifier].env`` gives tests/test.sh, on top of the basics."""
 
     tests: dict[str, bytes]
     """Files under tests/ by relative path, uploaded to /tests only for grading."""
@@ -199,6 +212,7 @@ class HarborTask(BaseModel):
                 agent_timeout_sec=config.agent.timeout_sec,
                 verifier_timeout_sec=config.verifier.timeout_sec,
                 verifier_network=config.verifier_network,
+                verifier_env=config.verifier.env,
                 tests=_read_tree(path, 'tests'),
                 solution=_read_tree(path, 'solution'),
             )

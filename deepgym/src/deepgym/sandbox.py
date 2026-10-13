@@ -197,9 +197,10 @@ def split_wrapped_output(output: str, marker: str) -> tuple[str, str]:
     if tag != marker:
         return output, ''
     try:
-        return stdout, base64.b64decode(encoded, validate=True).decode('utf-8', 'replace').strip()
+        decoded = base64.b64decode(encoded.strip(), validate=True)
     except binascii.Error:
         return output, ''
+    return stdout, decoded.decode('utf-8', 'replace').strip()
 
 
 def parse_wrapped_output(output: str, marker: str, exit_code: int) -> ExecutionResult:

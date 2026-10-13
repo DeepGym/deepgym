@@ -9,13 +9,20 @@ import json
 import shutil
 import subprocess
 import sys
+import time
 from pathlib import Path
 
 import pytest
 
 from deepgym import DeepGym
 from deepgym.adversarial import PATCH_TAMPERING_ATTACKS, new_files_diff
-from deepgym.benchmark_envs import PatchVerifier, RepoPatchEnvironment, SWEBenchProEnvironment
+from deepgym.benchmark_envs import (
+    _TESTS_STARTED,
+    PatchVerifier,
+    RepoPatchEnvironment,
+    SWEBenchProEnvironment,
+    _parse_runner_output,
+)
 from deepgym.exceptions import VerifierError
 from deepgym.models import VerifierResult, is_verdict
 from tests.conftest import RunnerSandbox
@@ -929,8 +936,9 @@ _PYTEST = f'PYTHONPATH=. "{sys.executable}" -m pytest -q'
         # Each would exit 127, 126 or 1 (no module) before running a test, whatever the patch.
         pytest.param('no-such-test-runner -q', id='runner-not-on-path'),
         pytest.param('cd tests && no-such-test-runner', id='runner-after-cd'),
-        pytest.param('if true; then no-such-test-runner; fi', id='runner-in-if'),
+        pytest.param('true | no-such-test-runner', id='runner-in-pipe'),
         pytest.param(f'"{sys.executable}" -m no_such_test_module', id='module-not-importable'),
+        pytest.param(f'"{sys.executable}" -u -m no_such_test_module', id='module-after-flags'),
         pytest.param('/opt/no-such-dir/runner', id='absolute-path-missing'),
         pytest.param('/dev/null', id='absolute-path-not-executable'),
     ],
@@ -960,6 +968,17 @@ def test_environment_that_cannot_run_the_tests_has_no_verdict(
         pytest.param(f'for f in tests; do echo "$f"; done; {_PYTEST} tests', id='loop'),
         pytest.param(f'PATH="./bin:$PATH" bin-runner 2>&-; {_PYTEST} tests', id='path-change'),
         pytest.param(f'./run.sh 2>/dev/null; {_PYTEST} tests/test_calc.py', id='repo-script'),
+        # Commands that may never run, and shell context a static lookup can't see (Codex review).
+        pytest.param(f'if false; then no-such-test-runner; fi; {_PYTEST} tests', id='branch'),
+        pytest.param(
+            f'if command -v opt-runner >/dev/null; then opt-runner; else {_PYTEST} tests; fi',
+            id='optional-runner',
+        ),
+        pytest.param(f'no-such-test-runner || {_PYTEST} tests', id='fallback'),
+        pytest.param(f'run_tests() {{ {_PYTEST} tests; }}; run_tests', id='function'),
+        pytest.param(f'export PYTHONPATH=.; "{sys.executable}" -m pytest -q tests', id='export'),
+        pytest.param(f'PYTHONPATH="$PWD" "{sys.executable}" -m pytest -q tests', id='computed'),
+        pytest.param(f'PYTHONPATH=. "{sys.executable}" -u -m pytest -q tests', id='python-flags'),
     ],
 )
 def test_preflight_passes_runnable_commands(
@@ -972,6 +991,43 @@ def test_preflight_passes_runnable_commands(
     result = sandbox_dg.run(env, _diff(Path(env.repo_dir), _FIX))
 
     assert (result.score, result.error_type) == (1.0, None)
+
+
+def test_preflight_runs_no_repo_code(tmp_path: Path, sandbox_dg: DeepGym) -> None:
+    # `python -m pkg.check` is looked up by its top-level package, never by importing pkg's
+    # __init__, where the bug the patch fixes may live (Codex review).
+    files = {'checkpkg/__init__.py': 'raise ImportError("the bug")\n', 'checkpkg/check.py': ''}
+    env = _env(tmp_path, files).model_copy(
+        update={'test_command': f'"{sys.executable}" -m checkpkg.check'}
+    )
+
+    result = sandbox_dg.run(env, _diff(Path(env.repo_dir), {'checkpkg/__init__.py': ''}))
+
+    assert (result.score, result.error_type) == (1.0, None)
+
+
+def test_timeout_kills_what_the_command_started(tmp_path: Path) -> None:
+    # A child the timed-out command left behind would otherwise run on into the next test
+    # command (Codex review).
+    flag = tmp_path / 'late'
+
+    proc = _runner()['_run'](f'(sleep 1.5; touch "{flag}") & sleep 30', cwd=tmp_path, timeout=1)
+
+    time.sleep(1)
+    assert proc.returncode == -9
+    assert not flag.exists()
+
+
+@pytest.mark.parametrize('verdict', ['', '{broken}', '{}', '{"score": 1.0, "passed": true}'])
+def test_runner_stopped_after_the_tests_started_scores_zero(verdict: str) -> None:
+    # After the tests-started line, anything but a valid verdict its exit code backs (here exit
+    # 1, which can't back a pass) is the patch's doing (Codex review).
+    output = f'{_TESTS_STARTED}\n{verdict}\nmark '
+
+    executed = _parse_runner_output(output, 'mark', 1)
+
+    assert executed.verifier_result.error_type == 'policy_sandbox_failure'
+    assert (executed.verifier_result.score, executed.exit_code) == (0.0, 1)
 
 
 @pytest.mark.parametrize(

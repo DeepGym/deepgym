@@ -15,15 +15,15 @@ from typing import TYPE_CHECKING, Any
 
 from pydantic import Field, PrivateAttr
 
-from deepgym.exceptions import DeepGymError
+from deepgym.exceptions import DeepGymError, VerifierError
 from deepgym.harbor import HarborEnvironment, HarborTask, load_tasks
 from deepgym.integrations.hf import _require_datasets
 from deepgym.judge import DEADLINE_GRACE_S
 from deepgym.models import Environment, RunResult, VerifierResult
 from deepgym.sandbox import (
     ExecutionResult,
-    _extract_json_line,
     build_run_result,
+    check_exit,
     parse_wrapped_output,
     split_wrapped_output,
     wrap_stderr,
@@ -182,25 +182,32 @@ def _parse_runner_output(output: str, marker: str, exit_code: int) -> ExecutionR
     """Parse a runner's verdict from its stdout alone, as the judges read theirs.
 
     The provider merges the streams, and a JSON line on stderr is no verdict. A runner that
-    stopped without a usable verdict (no JSON, or an exit code other than its 0 or 1) after
-    printing :data:`_TESTS_STARTED` was stopped by what the patch ran: the environment had
-    run every step before, so that is a judged 0, ``policy_sandbox_failure``.
+    printed :data:`_TESTS_STARTED` and then no valid verdict its exit code (0 or 1) backs was
+    stopped by what the patch ran: the environment had run every step before, so that is a
+    judged 0, ``policy_sandbox_failure``.
 
     Raises:
         VerifierError: If the runner stopped without a verdict before its tests ran.
     """
     stdout, stderr = split_wrapped_output(output, marker)
-    unusable = exit_code not in (0, 1) or _extract_json_line(stdout) is None
-    if unusable and _TESTS_STARTED in stdout.splitlines():
-        result = VerifierResult(
-            score=0.0,
-            passed=False,
-            details=f'The runner stopped without a verdict (exit {exit_code}) while running '
-            'the tests, so the patch scores 0.',
-            error_type='policy_sandbox_failure',
-        )
-        return ExecutionResult(result, stderr=stderr, exit_code=1)
-    return parse_wrapped_output(output, marker, exit_code)
+    if _TESTS_STARTED not in stdout.splitlines():
+        return parse_wrapped_output(output, marker, exit_code)
+    if exit_code in (0, 1):
+        try:
+            executed = parse_wrapped_output(output, marker, exit_code)
+            check_exit(exit_code, executed.verifier_result.score, executed.verifier_result.passed)
+        except VerifierError:
+            pass
+        else:
+            return executed
+    result = VerifierResult(
+        score=0.0,
+        passed=False,
+        details=f'The runner stopped without a valid verdict (exit {exit_code}) while running '
+        'the tests, so the patch scores 0.',
+        error_type='policy_sandbox_failure',
+    )
+    return ExecutionResult(result, stderr=stderr, exit_code=1)
 
 
 def _run_sandbox_runner(
@@ -334,6 +341,7 @@ class PatchVerifier:
             import re
             import shlex
             import shutil
+            import signal
             import subprocess
             import sys
             import tempfile
@@ -382,22 +390,36 @@ class PatchVerifier:
                 )
 
 
+            def _read_end(file, limit: int = 65536) -> str:
+                # The last *limit* bytes written to *file*, decoded as UTF-8 with replacements.
+                file.seek(max(0, file.seek(0, os.SEEK_END) - limit))
+                return file.read().decode('utf-8', 'replace')
+
+
             def _run(command: str, *, cwd: Path | None = None, timeout: int = 300) -> subprocess.CompletedProcess[str]:
-                # A command still running after *timeout* seconds is killed (SIGKILL) and reported
-                # as exit -9: a setup step then fails, and a test the patch made hang scores 0.
-                # Output that is not UTF-8 is decoded with replacements rather than crashing.
-                try:
-                    return subprocess.run(
+                # Run *command* in its own session, its output in files that nothing it leaves running
+                # can hold open. One still running after *timeout* seconds is killed with everything
+                # it started (SIGKILL) and reported as exit -9: a setup step then fails, and a test
+                # the patch made hang scores 0, without touching the next command.
+                with tempfile.TemporaryFile() as out, tempfile.TemporaryFile() as err:
+                    proc = subprocess.Popen(
                         command,
                         shell=True,
                         cwd=str(cwd) if cwd is not None else None,
-                        capture_output=True,
-                        encoding='utf-8',
-                        errors='replace',
-                        timeout=timeout,
+                        stdout=out,
+                        stderr=err,
+                        start_new_session=True,
                     )
-                except subprocess.TimeoutExpired:
-                    return subprocess.CompletedProcess(command, -9, '', f'timed out after {timeout}s')
+                    try:
+                        returncode, note = proc.wait(timeout=timeout), ''
+                    except subprocess.TimeoutExpired:
+                        try:
+                            os.killpg(proc.pid, signal.SIGKILL)
+                        except ProcessLookupError:
+                            pass
+                        proc.wait()
+                        returncode, note = -9, f'\\ntimed out after {timeout}s'
+                    return subprocess.CompletedProcess(command, returncode, _read_end(out), _read_end(err) + note)
 
 
             # Rustup's layout in the official rust images. An image flattened without its config
@@ -417,57 +439,86 @@ class PatchVerifier:
                 os.environ['PATH'] = _CARGO_HOME + '/bin' + os.pathsep + (os.environ.get('PATH') or os.defpath)
 
 
-            # Reserved words that come before a simple command's program, and ones whose simple
-            # command runs none (a loop header, a compound command's end). After `case` the
-            # patterns look like commands, so nothing more is checked.
-            _LEADERS = {'!', '{', 'if', 'then', 'else', 'elif', 'while', 'until', 'do'}
-            _NO_PROGRAM = {'for', 'in', 'fi', 'done', 'esac', '}', 'function'}
+            # Reserved words that open and close a compound command. What runs inside one may never
+            # run at all (a branch not taken, a loop over nothing), so it is not looked up.
+            _OPENERS = {'if', 'while', 'until', 'for', '{'}
+            _CLOSERS = {'fi', 'done', '}'}
             _IMPORTABLE = 'import importlib.util, sys; sys.exit(importlib.util.find_spec(sys.argv[1]) is None)'
 
 
-            def _preflight(command: str, cwd: Path, repo_root: Path) -> str | None:
-                # Why this environment cannot run test *command*, checked before the patch, or None.
-                # The program starting each simple command must be installed (on PATH, or an
-                # executable outside the repo), and the module a `python -m` names importable. It
-                # only looks up names, never runs the command (dash 0.5.10's `sh -n -c` runs it). A
-                # path in the repo is the repo's own (the hidden tests may add it), and nothing after
-                # a PATH change, a here-document or a `case` is looked up. Best effort: what a
-                # wrapper script runs is not seen, so its failure after the patch is scored.
+            def _top_level_commands(command: str) -> list:
+                # The simple commands of shell *command* that must run for it to pass, each as its
+                # words without redirections: none inside a compound command or subshell, in an
+                # and-or list with `||` (which handles a missing command), or calling a function
+                # *command* defines. It ends at a here-document, `case` (whose patterns look like
+                # commands) or `function`, and is empty if shlex, stricter than sh, can't split it.
                 lexer = shlex.shlex(command, posix=True, punctuation_chars='();<>|&\\n')
                 lexer.whitespace, lexer.whitespace_split = ' \\t\\r', True
                 try:
-                    tokens = iter(list(lexer))
-                except ValueError:  # shlex is stricter than sh; let the shell have its say
-                    return None
-                segments, words = [], []
+                    tokens = iter(list(lexer) + [';'])
+                except ValueError:
+                    return []
+                found, listed, words, depth, has_or, defined = [], [], [], 0, False, set()
                 for token in tokens:
-                    if token.startswith('<<'):
+                    if token.startswith('<<') or (not words and token in ('case', 'function')):
                         break
                     if set(token) <= set('<>&|') and set(token) & set('<>'):
                         if words and words[-1].isdigit():
                             words.pop()  # the redirected descriptor, as in 2>/dev/null
                         next(tokens, None)  # and the redirection's target
-                    elif set(token) <= set('();|&\\n'):
-                        segments.append(words)
-                        words = []
+                    elif not set(token) <= set('();|&\\n'):
+                        if words or token not in _OPENERS | _CLOSERS:
+                            words.append(token)
+                        else:
+                            depth += 1 if token in _OPENERS else -1
                     else:
-                        words.append(token)
-                segments.append(words)
+                        if token == '()' and len(words) == 1:
+                            defined.add(words[0])
+                        elif words and not depth and words[0] not in defined:
+                            listed.append(words)
+                        words, has_or = [], has_or or token == '||'
+                        if token not in ('&&', '||', '|', '|&'):  # the and-or list ends
+                            found += [] if has_or else listed
+                            listed, has_or = [], False
+                        depth += token.count('(') - token.count(')')
+                return found
+
+
+            def _python_module(program: str, args: list):
+                # (interpreter flags, module) when *program* is a python run as `-m module`, else None.
+                if not re.fullmatch(r'python[0-9.]*', posixpath.basename(program)):
+                    return None
+                flags = []
+                while args and args[0].startswith('-') and args[0] not in ('-', '-c', '-m'):
+                    take = 2 if args[0] in ('-W', '-X') else 1
+                    flags, args = flags + args[:take], args[take:]
+                return (flags, args[1]) if args[:1] == ['-m'] and args[1:2] else None
+
+
+            def _preflight(command: str, cwd: Path, repo_root: Path) -> str | None:
+                # Why this environment cannot run test *command*, checked before the patch, or None:
+                # a program that always runs (see _top_level_commands) is neither on PATH nor an
+                # executable outside the repo, or the package a `python -m` names can't be found
+                # (its top level only, found without running repo code). It never runs the command
+                # (dash 0.5.10's `sh -n -c` would). A path in the repo is the repo's own (the hidden
+                # tests may add it); nothing is looked up after a PATH change, `source` or `eval`,
+                # nor a module after `cd` or `export` or with a computed assignment. Best effort: what
+                # a wrapper script runs is not seen, so its failure after the patch is scored.
                 repo_dirs = {str(repo_root), str(cwd)}
-                names, modules = [], []
-                for words in segments:
+                names, modules, plain = [], [], True
+                for words in _top_level_commands(command):
                     if any(word.startswith('PATH=') for word in words):
                         break
+                    words = words[1:] if words[0] == '!' else words
                     assigned = {}
-                    while words and (words[0] in _LEADERS or re.match(r'[A-Za-z_][A-Za-z0-9_]*=', words[0])):
+                    while words and re.match(r'[A-Za-z_][A-Za-z0-9_]*=', words[0]):
                         name, _, value = words.pop(0).partition('=')
-                        if value and not re.search('[$`]', value):
-                            assigned[name] = value
-                    if words[:1] in (['.'], ['source'], ['case']):
-                        break
-                    if not words or words[0] in _NO_PROGRAM or re.search(r'[$`*?~\\[]', words[0]):
+                        assigned[name] = value
+                    if not words or re.search(r'[$`*?~\\[]', words[0]):
                         continue
                     program = words[0]
+                    if program in ('.', 'source', 'eval', 'alias'):
+                        break
                     if program.startswith('/'):
                         if any(program == base or program.startswith(base + '/') for base in repo_dirs):
                             continue
@@ -477,17 +528,19 @@ class PatchVerifier:
                         continue
                     else:
                         names.append(program)
-                    if re.fullmatch(r'python[0-9.]*', posixpath.basename(program)) and words[1:2] == ['-m'] and words[2:3]:
-                        modules.append((program, words[2], assigned))
+                    module = _python_module(program, words[1:])
+                    if module and plain and not any(re.search('[$`]', value) for value in assigned.values()):
+                        modules.append((program, *module, assigned))
+                    plain = plain and program not in ('cd', 'pushd', 'popd', 'export', 'unset')
                 if names:
                     lookup = 'for w; do command -v "$w" >/dev/null 2>&1 || echo "$w"; done'
                     found = subprocess.run(['/bin/sh', '-c', lookup, 'sh', *names], cwd=str(cwd), capture_output=True, text=True)
                     missing = found.stdout.split()
                     if missing:
                         return 'not found: ' + ', '.join(dict.fromkeys(missing))
-                for python, module, assigned in modules:
-                    env = dict(os.environ, **assigned)
-                    if subprocess.run([python, '-c', _IMPORTABLE, module], cwd=str(cwd), env=env, capture_output=True).returncode:
+                for python, flags, module, assigned in modules:
+                    probe = [python, *flags, '-c', _IMPORTABLE, module.split('.')[0]]
+                    if subprocess.run(probe, cwd=str(cwd), env=dict(os.environ, **assigned), capture_output=True).returncode:
                         return f'{python} cannot import {module}'
                 return None
 

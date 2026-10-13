@@ -50,7 +50,8 @@ from __future__ import annotations
 
 import asyncio
 import functools
-from collections.abc import Callable
+import inspect
+from collections.abc import Callable, Mapping
 from typing import TYPE_CHECKING, Any, Literal
 
 from verl.experimental.agent_loop.agent_loop import AgentLoopOutput, register
@@ -87,7 +88,7 @@ def exclude_unscored(output: AgentLoopOutput, trainer_config: DictConfig, why: s
 @functools.cache
 def _reward_function(
     trainer_config: DictConfig, mode: Literal['auto', 'daytona', 'local'] | Provider
-) -> Callable[..., dict[str, float]]:
+) -> Callable[..., object]:
     """Return the reward function verl is configured with, loaded once per trainer config.
 
     verl builds an agent loop for every sample, and loading a reward module from a file
@@ -117,24 +118,41 @@ class DeepGymSingleTurnAgentLoop(SingleTurnAgentLoop):
         """
         output = await super().run(sampling_params, **kwargs)
         try:
-            result = await asyncio.to_thread(self._score, output.response_ids, kwargs)
+            result = await self._score(output.response_ids, kwargs)
         except NoVerdictError as exc:
             _MASKED.record(masked=True)
             output.reward_score = 0.0
             output.extra_fields['reward_extra_info'] = {'score': 0.0, 'passed': 0.0, 'error': 1.0}
-            exclude_unscored(output, self.config, f'scoring {kwargs["data_source"]}: {exc}')
+            exclude_unscored(output, self.config, f'scoring {kwargs["data_source"]}: {exc.reason}')
             return output
         _MASKED.record(masked=False)
         output.reward_score = result['score']
         output.extra_fields['reward_extra_info'] = result
         return output
 
-    def _score(self, response_ids: list[int], row: dict[str, Any]) -> dict[str, float]:
-        """Decode the response and score it as verl's reward step would."""
+    async def _score(self, response_ids: list[int], row: dict[str, Any]) -> dict[str, float]:
+        """Decode the response and score it as verl's reward step would.
+
+        Returns:
+            The same keys for every sample, kept out or not, since verl batches
+            ``reward_extra_info`` by the first sample's keys: ``score``, ``passed`` (the
+            result's own, else whether the score is full) and ``error`` 0.0. A reward function
+            may return a float or a dict and may be async, as verl allows; other keys it
+            returns are dropped.
+        """
         response = self.tokenizer.decode(response_ids, skip_special_tokens=True)
-        return self.compute_score(
+        score = functools.partial(
+            self.compute_score,
             data_source=row['data_source'],
             solution_str=response,
             ground_truth=(row.get('reward_model') or {}).get('ground_truth'),
             extra_info=row.get('extra_info'),
         )
+        if inspect.iscoroutinefunction(self.compute_score):
+            result = await score()
+        else:
+            result = await asyncio.to_thread(score)
+        if not isinstance(result, Mapping):
+            result = {'score': result}
+        value = float(result['score'])
+        return {'score': value, 'passed': float(result.get('passed', value == 1.0)), 'error': 0.0}

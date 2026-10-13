@@ -99,6 +99,13 @@ def row_environment(data_source: str, extra_info: Mapping[str, Any] | None) -> E
     return _environment(info.get('environment') or data_source, int(info.get('variant') or 0))
 
 
+_NO_VERDICT_ADVICE = (
+    "verl's v1 trainer drops this sample. Its legacy trainer can't mask a sample a reward "
+    'function scored, so this stops training there: score with the deepgym_single_turn agent '
+    'loop instead (deepgym.integrations.verl_mask), which masks it.'
+)
+
+
 def _score_one(dg: DeepGym, env: Environment, response: str) -> RunResult:
     # run_batch turns verifier and sandbox errors into a result without a verdict.
     return dg.run_batch(env, [extract_code(response)], max_parallel=1).results[0]
@@ -111,7 +118,8 @@ def _reward(result: RunResult) -> dict[str, float]:
         NoVerdictError: If *result* got no verdict, so it has no reward to give.
     """
     if not result.has_verdict:
-        raise NoVerdictError(f'{result.error_type}: {result.output}')
+        reason = f'No verdict ({result.error_type}): {result.output}'
+        raise NoVerdictError(reason, _NO_VERDICT_ADVICE)
     return {'score': result.score, 'passed': float(result.passed), 'error': 0.0}
 
 

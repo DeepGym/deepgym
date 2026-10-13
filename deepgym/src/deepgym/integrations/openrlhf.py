@@ -30,9 +30,10 @@ prompt's whole group when the mean of its scores falls outside
 
 So the endpoint never fails a request over a run. A judged run gets its score, and a
 failure the model caused is judged and scores 0 (``RunResult.has_verdict`` says which).
-A run the sandbox provider or the network failed is run again after a short pause. One
-that still fails that way, or a query that doesn't contain its prompt, is rewarded the
-router's ``infra_failure_score``:
+A run the sandbox provider or the network failed is run again after a short pause, and
+no request waits on scoring past 150 s, so it answers inside the 180 s OpenRLHF gives it.
+A run that still fails that way, one still going at that point, or a query that doesn't
+contain its prompt is rewarded the router's ``infra_failure_score``:
 
 - ``'zero'`` (the default): 0.0, logged as a warning with its error type and counted
   toward the masked-rate warning (:class:`~deepgym.integrations.reward.MaskedRate`).
@@ -55,6 +56,7 @@ Sources:
 
 from __future__ import annotations
 
+import concurrent.futures
 import logging
 import math
 import time
@@ -80,16 +82,18 @@ PROMPT_MISMATCH = 'prompt_mismatch'
 """error_type of a query whose prompt couldn't be found: rather than risk scoring prompt
 text, such as a fenced example in the prompt, it gets the router's infra_failure_score."""
 
+DEADLINE_EXCEEDED = 'deadline_exceeded'
+"""error_type of a sample still being scored when its request had to answer; it gets the
+router's infra_failure_score (a run the model hangs ends at its own timeout, well before)."""
+
 _RETRYABLE = frozenset({'sandbox_error', 'unknown_error'})
 """error_type of a run the sandbox provider or the network failed (see error_type_for)."""
+_NOT_THE_MODELS = _RETRYABLE | {PROMPT_MISMATCH, DEADLINE_EXCEEDED}
+"""Why a sample may get no verdict without the model's output being the cause."""
 _RETRY_DELAYS_S = (1.0, 2.0)
-"""Pause before each re-run of such runs."""
+"""Pause before each re-run of a provider or network failure."""
 _REQUEST_BUDGET_S = 150.0
-"""Most time one request may take, inside the 180 s OpenRLHF gives each attempt."""
-_RUN_OVERHEAD_S = 30.0
-"""Time a run may take beyond its environment's timeout, mostly starting its sandbox."""
-_MAX_PARALLEL = 32
-"""Most runs one request has going at once."""
+"""Most time a request may take, inside the 180 s OpenRLHF gives each attempt."""
 
 MAX_TEXT_CHARS = 2_000_000
 """Longest query, prompt or output accepted (about 500k tokens); longer ones get a 422."""
@@ -172,33 +176,42 @@ class OpenRLHFRewardResponse(BaseModel):
     error_types: list[str | None] = Field(default_factory=list)
 
 
-def _score(dg: DeepGym, env: Environment, solutions: list[str]) -> list[RunResult]:
-    """Score *solutions*, one result each."""
-    if not solutions:
-        return []
-    batch = dg.run_batch(env, solutions, max_parallel=min(len(solutions), _MAX_PARALLEL))
-    return list(batch.results)
+def _score_by(
+    deadline: float, dg: DeepGym, env: Environment, solutions: list[str]
+) -> list[RunResult] | None:
+    """Score *solutions*, or stop waiting at *deadline* (``time.monotonic``) and return None.
+
+    Runs still going then finish in the background and delete their own sandboxes.
+    """
+    pool = concurrent.futures.ThreadPoolExecutor(max_workers=1)
+    batch = pool.submit(dg.run_batch, env, solutions, max_parallel=min(len(solutions), 32))
+    pool.shutdown(wait=False)
+    try:
+        return list(batch.result(timeout=max(0.0, deadline - time.monotonic())).results)
+    except concurrent.futures.TimeoutError:
+        return None
 
 
-def _score_retrying(dg: DeepGym, env: Environment, solutions: list[str]) -> list[RunResult]:
+def _score_retrying(dg: DeepGym, env: Environment, solutions: list[str]) -> list[RunResult | None]:
     """Score *solutions*, running again those the provider or the network left unjudged.
 
-    Each re-run waits its ``_RETRY_DELAYS_S`` pause, and starts only if it would end inside
-    ``_REQUEST_BUDGET_S`` even at its slowest (the environment's timeout plus
-    ``_RUN_OVERHEAD_S`` for each wave of runs), so retrying can't time the request out.
+    Each re-run waits its ``_RETRY_DELAYS_S`` pause. Nothing is waited for past
+    ``_REQUEST_BUDGET_S``, so the request always answers before OpenRLHF gives up on it; a
+    sample still being scored then is None.
     """
-    start = time.monotonic()
-    results = _score(dg, env, solutions)
-    for delay in _RETRY_DELAYS_S:
-        retry = [
-            i for i, r in enumerate(results) if not r.has_verdict and r.error_type in _RETRYABLE
-        ]
-        slowest = -(-len(retry) // _MAX_PARALLEL) * (env.timeout + _RUN_OVERHEAD_S)
-        if not retry or time.monotonic() - start + delay + slowest > _REQUEST_BUDGET_S:
+    deadline = time.monotonic() + _REQUEST_BUDGET_S
+    results: list[RunResult | None] = [None] * len(solutions)
+    pending = list(range(len(solutions)))
+    for delay in (0.0, *_RETRY_DELAYS_S):
+        if not pending or time.monotonic() + delay >= deadline:
             break
         time.sleep(delay)
-        for i, result in zip(retry, _score(dg, env, [solutions[i] for i in retry]), strict=True):
+        scored = _score_by(deadline, dg, env, [solutions[i] for i in pending])
+        if scored is None:
+            break
+        for i, result in zip(pending, scored, strict=True):
             results[i] = result
+        pending = [i for i in pending if results[i].error_type in _RETRYABLE]
     return results
 
 
@@ -237,10 +250,14 @@ def create_openrlhf_router(
                 rewards.append(result.score)
                 error_types.append(result.error_type)
                 continue
-            error_type = PROMPT_MISMATCH if result is None else result.error_type or 'no_verdict'
-            # Only a lasting provider or network failure, or a lost prompt, is surely not the
-            # model's doing; any other failure may be its output breaking the verifier.
-            infra = result is None or error_type in _RETRYABLE
+            if i not in results:
+                error_type = PROMPT_MISMATCH
+            elif result is None:
+                error_type = DEADLINE_EXCEEDED
+            else:
+                error_type = result.error_type or 'no_verdict'
+            # Any other failure may be the model's output breaking the verifier: it scores 0.
+            infra = error_type in _NOT_THE_MODELS
             masked.record(masked=infra)
             reward = fallback if infra else 0.0
             logger.warning(

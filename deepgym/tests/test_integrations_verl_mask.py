@@ -186,6 +186,33 @@ def test_the_loop_scores_with_the_configured_reward_function(
     assert reports == [False, True, True]
 
 
+async def _async_reward(**kwargs: object) -> dict:
+    return {'score': 1.0, 'passed': True}
+
+
+@pytest.mark.parametrize(
+    ('reward_fn', 'expected'),
+    [
+        (lambda **kwargs: 0.5, {'score': 0.5, 'passed': 0.0, 'error': 0.0}),
+        (lambda **kwargs: {'score': 1.0, 'acc': 1.0}, {'score': 1.0, 'passed': 1.0, 'error': 0.0}),
+        (_async_reward, {'score': 1.0, 'passed': 1.0, 'error': 0.0}),
+    ],
+    ids=['float', 'other_keys', 'async'],
+)
+def test_every_reward_function_verl_allows_gives_one_schema(
+    verl: types.ModuleType, reward_fn: Callable, expected: dict
+) -> None:
+    """verl takes a float or a dict with any keys, from a sync or async function.
+
+    It batches reward_extra_info by the first sample's keys, so a scored sample must have
+    exactly the keys a sample kept out of training gets.
+    """
+    output = _rollout(verl, 'anything', reward_fn=reward_fn)
+
+    assert output.reward_score == expected['score']
+    assert output.extra_fields['reward_extra_info'] == expected
+
+
 def test_generated_dapo_config_scores_with_this_loop(verl: types.ModuleType) -> None:
     """The DAPO config must pick the agent loop that masks, not verl's own reward step."""
     config = yaml.safe_load(generate_dapo_verl_config(train_files='train.parquet'))

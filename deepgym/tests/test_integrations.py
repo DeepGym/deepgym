@@ -171,10 +171,41 @@ class TestVerlIntegration:
         judged_zero = {'score': 0.0, 'passed': 0.0, 'error': 0.0}
         assert fixed('ds', 'wrong') == compute_score('ds', 'wrong') == judged_zero
         for score in (fixed, compute_score):
-            with pytest.raises(NoVerdictError, match='runtime_error'):
+            with pytest.raises(NoVerdictError, match='runtime_error') as raised:
                 score('ds', 'boom')
+            # verl's legacy trainer stops on the raise; the message says what to use instead.
+            assert 'deepgym_single_turn' in str(raised.value)
         batch = make_verl_reward_fn(MIXED, local_dg)({'responses': ['right', 'wrong', 'boom']})
         assert batch == [1.0, 0.0, None]
+
+    def test_a_solution_that_hangs_is_a_judged_zero(
+        self, local_dg: DeepGym, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A hang is the policy's fault, so the bare reward functions score it 0.
+
+        They raise only for a run without a verdict, which would stop verl's legacy
+        trainer; a policy must not be able to cause that by hanging.
+        """
+        hangs = Environment(
+            task='Return 42 from solve().',
+            verifier_code=(
+                'from deepgym_solution import load_solution\n\n'
+                'def verify(solution_path, test_cases_path=None):\n'
+                '    try:\n'
+                '        return float(load_solution(solution_path).solve() == 42)\n'
+                '    except Exception:  # the solution failed: here it ran out of time\n'
+                '        return 0.0\n'
+            ),
+            verifier_mode='verify_function',
+            case_timeout=1,
+        )
+        monkeypatch.setattr(verl_module, '_environment', lambda name, variant: hangs)
+        monkeypatch.setattr(verl_module, '_client', lambda mode: local_dg)
+        solution = 'def solve():\n    while True:\n        pass\n'
+        judged_zero = {'score': 0.0, 'passed': 0.0, 'error': 0.0}
+
+        assert compute_score('ds', solution) == judged_zero
+        assert make_verl_compute_score(hangs, local_dg)('ds', solution) == judged_zero
 
     def test_make_verl_reward_fn_returns_callable(self, env: Environment) -> None:
         fn = make_verl_reward_fn(env=env)
@@ -427,16 +458,19 @@ def _post(env: Environment, dg: DeepGym, payload: dict, **router_kwargs: str) ->
 class _FlakyDeepGym(DeepGym):
     """A client whose provider fails outputs marked 'outage' on its first *failing_calls* calls.
 
-    Other outputs are judged 1.0 if they say 'right', else 0.0, without running anything.
+    Other outputs are judged 1.0 if they say 'right', else 0.0, after *seconds*, without
+    running anything.
     """
 
-    def __init__(self, failing_calls: int) -> None:
+    def __init__(self, failing_calls: int, seconds: float = 0.0) -> None:
         super().__init__(mode='local')
         self.failing_calls = failing_calls
+        self.seconds = seconds
         self.calls: list[list[str]] = []
 
     def run_batch(self, env: Environment, outputs: list[str], **kwargs: object) -> object:
         self.calls.append(list(outputs))
+        time.sleep(self.seconds)
         outage = len(self.calls) <= self.failing_calls
         judged = [
             RunResult(
@@ -563,18 +597,20 @@ class TestOpenRLHFIntegration:
         assert data == {'rewards': [1.0, 0.0], 'error_types': [None, None]}
         assert dg.calls == [['right # outage', 'wrong'], ['right # outage']]
 
-    def test_no_rerun_that_could_outlast_openrlhfs_timeout(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        """OpenRLHF gives each attempt 180 s; a re-run that might take 150 s doesn't start."""
-        monkeypatch.setattr(openrlhf, '_RETRY_DELAYS_S', (0.0, 0.0))
-        dg = _FlakyDeepGym(failing_calls=99)
-        slow = MIXED.model_copy(update={'timeout': 150})
+    def test_the_request_answers_by_its_deadline(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """OpenRLHF gives up on a request after 180 s, so scoring is never waited on past it.
 
-        data = _post(slow, dg, {'prompts': ['p'], 'outputs': ['right # outage']})
+        A slow provider (here, a run that takes 2 s against a 0.2 s budget) gets the
+        fallback reward instead of timing the request out.
+        """
+        monkeypatch.setattr(openrlhf, '_REQUEST_BUDGET_S', 0.2)
+        dg = _FlakyDeepGym(failing_calls=0, seconds=2.0)
 
-        assert data == {'rewards': [0.0], 'error_types': ['sandbox_error']}
-        assert len(dg.calls) == 1
+        start = time.monotonic()
+        data = _post(MIXED, dg, {'prompts': ['p'], 'outputs': ['right']})
+
+        assert time.monotonic() - start < 1.5
+        assert data == {'rewards': [0.0], 'error_types': ['deadline_exceeded']}
 
     @pytest.mark.parametrize('infra_failure_score', ['zero', 'nan'])
     def test_a_lasting_provider_failure_gets_the_configured_reward(

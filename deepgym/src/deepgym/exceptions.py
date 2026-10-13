@@ -12,7 +12,16 @@ _TRANSPORT_ERRORS = (
     ('requests.exceptions', ('ConnectionError', 'Timeout')),
     ('aiohttp', ('ClientConnectionError',)),
     ('daytona', ('DaytonaConnectionError', 'DaytonaSpotEvictedError', 'DaytonaQueueTimeoutError')),
-    ('modal.exception', ('ConnectionError', 'InternalFailure', 'ServiceError')),
+    (
+        'modal.exception',
+        (
+            'ConnectionError',
+            'InternalError',
+            'InternalFailure',
+            'ResourceExhaustedError',
+            'ServiceError',
+        ),
+    ),
 )
 """Exception classes, by module, that mean the network or the sandbox provider failed.
 
@@ -45,7 +54,16 @@ class ActionError(DeepGymError):
 
 
 class NoVerdictError(DeepGymError):
-    """Raise when a run got no verdict (its sandbox or verifier failed), so it has no reward."""
+    """Raise when a run got no verdict (its sandbox or verifier failed), so it has no reward.
+
+    Args:
+        reason: What failed, kept as ``reason``.
+        advice: What the caller can do about it, added to the message.
+    """
+
+    def __init__(self, reason: str, advice: str = '') -> None:
+        super().__init__(f'{reason} {advice}'.strip())
+        self.reason = reason
 
 
 def error_type_for(exc: BaseException) -> str:

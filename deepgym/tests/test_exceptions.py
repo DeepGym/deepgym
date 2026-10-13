@@ -107,3 +107,14 @@ def test_daytona_errors_are_told_apart() -> None:
     assert is_infrastructure_failure(daytona.DaytonaError('down', status_code=500))
     assert not is_infrastructure_failure(daytona.DaytonaProcessExecutionTimeoutError('slow'))
     assert not is_infrastructure_failure(daytona.DaytonaNotFoundError('gone', status_code=404))
+
+
+def test_modal_errors_are_told_apart() -> None:
+    """Modal's server errors and quotas are its own; a sandbox it reports dead isn't."""
+    modal = pytest.importorskip('modal')
+
+    assert is_infrastructure_failure(modal.exception.InternalError('gRPC INTERNAL'))
+    assert is_infrastructure_failure(modal.exception.ResourceExhaustedError('rate limited'))
+    assert is_infrastructure_failure(modal.exception.ConnectionError('no route'))
+    assert not is_infrastructure_failure(modal.exception.SandboxTerminatedError('terminated'))
+    assert not is_infrastructure_failure(modal.exception.ExecTimeoutError('slow'))

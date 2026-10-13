@@ -425,20 +425,47 @@ class TestOpenRLHFIntegration:
     ) -> None:
         """A too-long prompt loses tokens from its front, but OpenRLHF sends the whole string.
 
-        The response starts after the prompt's tail; a query that doesn't contain its
-        prompt at all is not scored.
+        The response starts after the prompt's tail.
         """
         truncated = OPENRLHF_PROMPT[len(OPENRLHF_CONTEXT) // 2 :]
         queries = [
             truncated + 'No idea.<|im_end|>',
             truncated + f'```python\n{GOOD_SOLUTION}```<|im_end|>',
-            'A query that lost its prompt entirely. No idea.',
         ]
 
         data = _openrlhf_score(env, local_dg, queries)
 
-        assert data['rewards'] == [0.0, 1.0, 0.0]
-        assert data['error_types'] == [None, None, 'prompt_mismatch']
+        assert data == {'rewards': [0.0, 1.0], 'error_types': [None, None]}
+
+    @pytest.mark.parametrize(
+        ('payload', 'status', 'error_types'),
+        [
+            # The verifier crashes on 'boom': no verdict for that sample.
+            ({'prompts': ['p'] * 3, 'outputs': ['right', 'wrong', 'boom']}, 503,
+             [None, None, 'runtime_error']),
+            # A query that doesn't contain its prompt can't be split into a response.
+            ({'prompts': [OPENRLHF_PROMPT] * 2,
+              'query': [OPENRLHF_PROMPT + 'right', 'A query that lost its prompt.']}, 422,
+             [None, 'prompt_mismatch']),
+        ],
+        ids=['verifier_failed', 'prompt_mismatch'],
+    )  # fmt: skip
+    def test_a_sample_without_a_verdict_fails_the_whole_request(
+        self, local_dg: DeepGym, payload: dict, status: int, error_types: list
+    ) -> None:
+        """OpenRLHF can't skip a sample and trains on whatever ``rewards`` holds.
+
+        Its agent calls ``raise_for_status()``, retries, then leaves the rollout without a
+        reward, so a failure must be an HTTP error, never a 200 carrying a 0.
+        """
+        app = FastAPI()
+        app.include_router(create_openrlhf_router(MIXED, local_dg))
+
+        response = TestClient(app).post('/reward/score', json=payload)
+
+        assert response.status_code == status
+        assert 'rewards' not in response.json()
+        assert response.json()['detail']['error_types'] == error_types
 
     async def test_a_slow_verification_does_not_hold_up_other_requests(
         self, env: Environment

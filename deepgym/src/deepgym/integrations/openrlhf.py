@@ -21,12 +21,21 @@ Usage (custom app)::
 The last fenced code block of each response (or all of it, if none) is what runs,
 as in the verl and TRL adapters.
 
+OpenRLHF's reward API has no way to skip a sample: its agent trains on the ``rewards``
+the response carries (``scores`` only feed dynamic filtering and ``extra_logs`` the
+logs). So a request with a sample that got no verdict (its sandbox or verifier failed)
+fails with 503, and one whose query doesn't contain its prompt fails with 422, instead
+of sending a 0 that would train as a judged failure. OpenRLHF retries the request five
+times, then leaves the rollout without a reward, and building the training batch fails
+on it: a lasting outage stops the run instead of training on fake zeros.
+
 Note: This router is NOT automatically mounted by ``deepgym serve``.
 Create a custom FastAPI app to use it.
 
 Sources:
-    - https://github.com/OpenRLHF/OpenRLHF (openrlhf/utils/agent.py,
-      openrlhf/cli/serve_rm.py)
+    - https://github.com/OpenRLHF/OpenRLHF, 0.11.2 (openrlhf/utils/agent.py:
+      SingleTurnAgentExecutor; openrlhf/trainer/ppo_utils/samples_generator.py and
+      experience_maker.py)
 """
 
 from __future__ import annotations
@@ -35,7 +44,7 @@ import logging
 from typing import Annotated
 
 try:
-    from fastapi import APIRouter
+    from fastapi import APIRouter, HTTPException
 except ImportError as _exc:
     raise ImportError(
         'FastAPI is required for the OpenRLHF integration. '
@@ -50,8 +59,8 @@ from deepgym.models import Environment
 logger = logging.getLogger(__name__)
 
 PROMPT_MISMATCH = 'prompt_mismatch'
-"""error_type of a query whose prompt couldn't be found: it scores 0 instead of risking
-scoring prompt text, such as a fenced example in the prompt."""
+"""error_type of a query whose prompt couldn't be found: its request fails (422) rather
+than score prompt text, such as a fenced example in the prompt, or send a 0."""
 
 MAX_TEXT_CHARS = 2_000_000
 """Longest query, prompt or output accepted (about 500k tokens); longer ones get a 422."""
@@ -122,12 +131,25 @@ class OpenRLHFRewardRequest(BaseModel):
 class OpenRLHFRewardResponse(BaseModel):
     """Response format compatible with OpenRLHF's reward API.
 
-    OpenRLHF reads ``rewards``; ``error_types`` says, per sample, why there was no
-    verdict (None when there was one), so a caller can tell a real 0 from a failure.
+    OpenRLHF reads ``rewards``. Every sample in a response got a verdict; ``error_types``
+    names a judged failure that is the model's own (such as ``invalid_patch``), else None.
     """
 
     rewards: list[float]
     error_types: list[str | None] = Field(default_factory=list)
+
+
+def _no_rewards(status_code: int, reasons: list[str | None]) -> HTTPException:
+    """Log, and return the error for, a request in which some samples got no verdict.
+
+    Args:
+        status_code: 422 when a query lost its prompt, 503 when a sandbox or verifier failed.
+        reasons: Per sample, why it got no verdict; None for one that got a verdict.
+    """
+    failed = sum(reason is not None for reason in reasons)
+    message = f'{failed} of {len(reasons)} samples got no verdict, so there are no rewards'
+    logger.error('OpenRLHF: %s: %s', message, reasons)
+    return HTTPException(status_code, detail={'message': message, 'error_types': reasons})
 
 
 def create_openrlhf_router(env: Environment, dg: DeepGym) -> APIRouter:
@@ -141,28 +163,30 @@ def create_openrlhf_router(env: Environment, dg: DeepGym) -> APIRouter:
 
     @router.post('/score')
     def score(request: OpenRLHFRewardRequest) -> OpenRLHFRewardResponse:
-        """Score a batch of model responses and return rewards."""
+        """Score a batch of model responses and return rewards.
+
+        Raises:
+            HTTPException: 422 if a query doesn't contain its prompt, 503 if a sample's
+                sandbox or verifier failed; no sample gets a reward then (see the module
+                docstring).
+        """
         responses = request.responses
-        found = [response for response in responses if response is not None]
-        if len(found) < len(responses):
-            logger.warning(
-                'OpenRLHF: %d of %d queries do not contain their prompt; scored 0 (%s)',
-                len(responses) - len(found),
-                len(responses),
-                PROMPT_MISMATCH,
-            )
-        solutions = [extract_code(response) for response in found]
-        results = iter(
+        if None in responses:
+            raise _no_rewards(422, [PROMPT_MISMATCH if r is None else None for r in responses])
+        solutions = [extract_code(response) for response in responses]
+        results = (
             dg.run_batch(env, solutions, max_parallel=min(len(solutions), 32)).results
             if solutions
-            else ()
+            else []
         )
-        rewards: list[float] = []
-        error_types: list[str | None] = []
-        for response in responses:
-            result = None if response is None else next(results)
-            rewards.append(0.0 if result is None else result.score)
-            error_types.append(PROMPT_MISMATCH if result is None else result.error_type)
-        return OpenRLHFRewardResponse(rewards=rewards, error_types=error_types)
+        if not all(result.has_verdict for result in results):
+            raise _no_rewards(
+                503,
+                [None if r.has_verdict else r.error_type or 'verifier_error' for r in results],
+            )
+        return OpenRLHFRewardResponse(
+            rewards=[result.score for result in results],
+            error_types=[result.error_type for result in results],
+        )
 
     return router

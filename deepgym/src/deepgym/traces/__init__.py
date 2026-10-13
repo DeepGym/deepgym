@@ -7,6 +7,7 @@ turn traces into JSONL, Parquet, ATIF or SFT/RL rows.
 
 from deepgym.traces.atif import to_atif, write_atif
 from deepgym.traces.capture import TracedSession, is_trace_file, load_trace, traces_dir
+from deepgym.traces.copies import merge_copies
 from deepgym.traces.export import ExportReport, export_traces, rl_row, summary_row
 from deepgym.traces.schema import (
     TRACE_SCHEMA_VERSION,
@@ -16,7 +17,6 @@ from deepgym.traces.schema import (
     Trace,
     TraceMessage,
     TraceStep,
-    merge_copies,
 )
 
 __all__ = [

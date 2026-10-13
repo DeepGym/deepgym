@@ -30,7 +30,7 @@ from deepgym.sandboxes import PROVIDERS, Provider, Sandbox, check_provider, open
 from deepgym.sandboxes.daytona import DaytonaDesktop, DaytonaSandbox
 from deepgym.session import LocalBackend, SandboxBackend, Session, run_episode
 from deepgym.traces import AgentMeta, EnvFingerprint, Provenance, TracedSession
-from deepgym.traces.schema import deepgym_checkout
+from deepgym.traces.checkout import deepgym_checkout
 
 logger = logging.getLogger(__name__)
 

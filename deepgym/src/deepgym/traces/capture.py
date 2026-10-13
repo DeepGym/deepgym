@@ -26,7 +26,6 @@ from deepgym.models import Action, MultiTurnEnvironment, Observation, RunResult,
 from deepgym.session import Session, StepResult
 from deepgym.traces.schema import (
     TRACE_SCHEMA_VERSION,
-    UNFINISHED,
     Provenance,
     Trace,
     TraceMessage,
@@ -37,6 +36,8 @@ from deepgym.traces.schema import (
 _T = TypeVar('_T')
 
 logger = logging.getLogger(__name__)
+
+UNFINISHED = 'trace ended before the episode was closed (process crashed or was killed?)'
 
 
 def traces_dir() -> Path:

@@ -34,13 +34,8 @@ from deepgym.traces import (
     rl_row,
 )
 from deepgym.traces.capture import UNFINISHED
-from deepgym.traces.schema import (
-    NOT_RESOLVED,
-    deepgym_checkout,
-    environment_sha256,
-    git_checkout,
-    json_text,
-)
+from deepgym.traces.checkout import deepgym_checkout, git_checkout
+from deepgym.traces.schema import NOT_RESOLVED, environment_sha256, json_text
 from tests.trace_samples import ENV, crashed_trace, graded_trace, unjudged_trace
 
 SRC = Path(__file__).resolve().parent.parent / 'src'
@@ -232,6 +227,8 @@ class TestSchema:
             [graded, graded.model_copy(update={'task': 'other'})],
             [erred, graded],
             [erred, erred.model_copy(update={'error': 'VerifierError: timed out'})],
+            # Graded after the error, then crashed: the log's copy can't show the error.
+            [erred, graded.model_copy(update={**unfinished, 'error': UNFINISHED})],
         ):
             with pytest.raises(ValueError, match='trace0001'):
                 merge_copies(copies)

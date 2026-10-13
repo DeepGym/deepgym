@@ -13,6 +13,8 @@ from deepgym.sandboxes.protocol import ExecResult
 
 # PATH of the agent's xfce session, so of every app it starts.
 _SESSION_PATH = '/usr/local/bin:/usr/bin:/bin'
+# The X display Daytona runs the desktop on.
+_DISPLAY = ':0'
 
 # Daytona starts the xfce session by name, and no folder ahead of /usr/local/bin on its
 # PATH has one (the check after start proves the session is the agent's). The wrapper
@@ -67,10 +69,14 @@ fi
 rm -f /usr/local/bin/xfce4-session
 printf %s {wrapper} > /usr/local/bin/xfce4-session
 chmod 755 /usr/local/bin/xfce4-session
-# x11vnc reads ~/.x11vncrc, with the HOME Daytona's daemon (pid 1) runs with.
+# x11vnc reads ~/.x11vncrc, with the HOME Daytona's daemon (pid 1) runs with. It runs as
+# that home's owner, not root, so the file must be owned by and readable to that user, or
+# x11vnc silently skips it and none of the options below take effect.
 home=$(tr '\\0' '\\n' < /proc/1/environ | sed -n 's/^HOME=//p')
 [ -d "$home" ] || {{ echo "x11vnc has no home to read its options from: '$home'"; exit 1; }}
 printf %s {rc} > "$home/.x11vncrc"
+chown "$(stat -c %u:%g "$home")" "$home/.x11vncrc"
+chmod 600 "$home/.x11vncrc"
 mkdir -p /etc/chromium/policies/managed
 printf %s {policy} > /etc/chromium/policies/managed/deepgym.json
 if command -v chromium >/dev/null; then
@@ -105,9 +111,11 @@ for path in "$@"; do
 done
 """
 
-# Runs as root once Daytona has started the desktop: the session must be the agent's (so
-# the wrapper ran), and every x11vnc must run with allowed flags only and read the options
-# above.
+# Runs as root once Daytona has started the desktop: the session must be the agent's (so the
+# wrapper ran), the rc file must be the one x11vnc's own user can read, and remote control
+# must actually be off. The last check queries the running x11vnc instead of trusting its
+# argv, which x11vnc rewrites to hide flags like -passwd and -norc; the argv allowlist stays
+# as defense in depth for a flag it does show.
 _CHECK_STARTED = """set -eu
 agent=$(stat -c %u {home})
 owners= vnc=
@@ -125,9 +133,15 @@ for pid in $vnc; do
       echo "x11vnc runs with $arg, which is not an allowed flag"; exit 1;; esac;; esac
   done
   home=$(tr '\\0' '\\n' < /proc/$pid/environ | sed -n 's/^HOME=//p')
-  [ "$(cat "$home/.x11vncrc")" = "$(printf %s {rc})" ] || {{
+  rc="$home/.x11vncrc"
+  [ "$(stat -c %u "$rc" 2>/dev/null)" = "$(stat -c %u /proc/$pid)" ] || {{
+    echo "x11vnc cannot read $rc as the user it runs as"; exit 1; }}
+  [ "$(cat "$rc")" = "$(printf %s {rc_value})" ] || {{
     echo "x11vnc reads no lockdown options from $home"; exit 1; }}
 done
+if timeout 8 x11vnc -display {display} -Q ping 2>/dev/null | grep -q 'ans='; then
+  echo 'x11vnc still answers remote control, so -noremote did not take effect'; exit 1
+fi
 echo {marker}
 """
 
@@ -190,8 +204,9 @@ class DaytonaDesktop:
         except Exception as exc:
             raise SandboxError(f'Failed to start desktop: {exc}') from exc
         check = _CHECK_STARTED.format(
-            home=shlex.quote(home), flags=_X11VNC_FLAGS, rc=rc, marker=_LOCKED
-        )
+            home=shlex.quote(home), flags=_X11VNC_FLAGS, rc_value=rc, display=_DISPLAY,
+            marker=_LOCKED,
+        )  # fmt: skip
         _confirm('check', as_root(check, 60))
 
     def act(self, action: Action) -> None:

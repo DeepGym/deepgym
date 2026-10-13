@@ -249,10 +249,12 @@ verifier fails, DeepGym's raises `NoVerdictError` instead of returning a 0. verl
 trainer (`trainer.use_v1`, the default since verl 0.9) scores inside the sample's
 agent-loop session, so the raise drops the sample: verl records its prompt group as
 failed and computes the group's GRPO mean and std from the other samples (the async
-trainers replace the whole group). The legacy trainer can't drop a sample, so it stops.
-To keep training there, let DeepGym's single-turn agent loop score the rows: it calls
-the reward function above (`reward.custom_reward_function`, as verl would), verl skips
-its own reward step because the score is already set, and under the legacy trainer it
+trainers replace the whole group). verl's legacy trainer can't mask a sample a reward
+function scored, so there the raise stops training, and the error says so. With the
+legacy trainer, let DeepGym's single-turn agent loop score the rows (the generated DAPO
+config already does), so the sample is masked instead. The loop calls the reward
+function above (`reward.custom_reward_function`, as verl would), verl skips its own
+reward step because the score is already set, and under the legacy trainer the loop
 zeroes a failed sample's response mask and logs `error` 1.0. That sample gets no
 gradient and adds no tokens to the loss, but its 0 still counts toward its group's mean
 and std. Under v1 the loop drops the sample like the reward function does.
@@ -375,10 +377,11 @@ so a slow verification doesn't hold up the others.
 OpenRLHF can't skip a sample: it trains on whatever `rewards` holds, and a failed
 request would stop its training step, so the endpoint never fails one. A failure the
 model caused is judged and scores 0. A run the sandbox provider or the network failed is
-run again after a short pause. If it still fails that way, or a query doesn't contain its
-prompt, the sample gets the router's `infra_failure_score` (any other run without a
-verdict, such as a verifier failure or a timeout, may follow from the model's output, so
-it scores 0 either way):
+run again after a short pause, and no request waits on scoring past 150 s (OpenRLHF gives
+up at 180 s). If a run still fails that way or is still going then, or a query doesn't
+contain its prompt, the sample gets the router's `infra_failure_score` (any other run
+without a verdict, such as a verifier failure or a timeout, may follow from the model's
+output, so it scores 0 either way):
 
 - `'zero'` (the default): 0.0, logged as a warning with its error type. OpenRLHF trains
   on it as a failed answer; that is the limit of its API.

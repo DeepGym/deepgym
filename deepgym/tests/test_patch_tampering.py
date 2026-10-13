@@ -269,6 +269,24 @@ def test_data_fixture_in_test_dir_is_allowed(tmp_path: Path, sandbox_dg: DeepGym
     assert result.score == 1.0
 
 
+def test_config_comparison_needs_no_tomllib(tmp_path: Path, sandbox_dg: DeepGym) -> None:
+    # The runner executes in the task image's Python, where tomllib (3.11+) may be absent.
+    # The TOML comparison must be pure-stdlib so a 3.10 image does not wrongly refuse a
+    # legitimate pyproject edit. Guard against a regression that reintroduces the import.
+    from deepgym.benchmark_envs import PatchVerifier
+
+    assert 'import tomllib' not in PatchVerifier.build_runner_script()
+
+    env = _env(tmp_path, {'pyproject.toml': _PYPROJECT})
+    # A version bump outside the pytest section is allowed even with no TOML library present.
+    edit = {'pyproject.toml': _PYPROJECT.replace('"1.0"', '"2.0"'), **_FIX}
+
+    result = sandbox_dg.run(env, _diff(Path(env.repo_dir), edit))
+
+    assert result.error_type is None
+    assert result.score == 1.0
+
+
 def test_production_package_named_test_is_refused_known_false_positive(
     tmp_path: Path, sandbox_dg: DeepGym
 ) -> None:

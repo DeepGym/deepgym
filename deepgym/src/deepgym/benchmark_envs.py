@@ -400,28 +400,57 @@ class PatchVerifier:
                 return None
 
 
-            def _toml_tables(text: str) -> dict | None:
-                # Parse TOML to compare config semantically; None if this runtime can't parse it.
-                try:
-                    import tomllib
-                except ModuleNotFoundError:
-                    return None
-                try:
-                    return tomllib.loads(text)
-                except (ValueError, TypeError):
-                    return None
+            def _toml_header_path(header: str) -> tuple[str, ...]:
+                # The normalized dotted path of a TOML table header, with quotes stripped, so
+                # [tool."pytest".ini_options] and [tool.pytest.ini_options] compare equal.
+                segments, current, quote = [], '', ''
+                for char in header:
+                    if quote:
+                        if char == quote:
+                            quote = ''
+                        else:
+                            current += char
+                    elif char in '"\\'':
+                        quote = char
+                    elif char == '.':
+                        segments.append(current.strip())
+                        current = ''
+                    else:
+                        current += char
+                segments.append(current.strip())
+                return tuple(seg for seg in segments if seg)
 
 
-            def _table(value) -> dict:
-                # A TOML/JSON value as a dict, or {} if it is some other shape.
-                return value if isinstance(value, dict) else {}
+            def _toml_section_lines(text: str, prefixes: tuple[tuple[str, ...], ...]) -> list:
+                # The content lines grouped under any table whose normalized path starts with a
+                # prefix. A pure-text TOML reader, so it needs no tomllib (absent before Python
+                # 3.11, and the runner runs in the image's interpreter). Package-level keys
+                # (prefix of length 1 matching the table exactly) keep only auto*/build lines.
+                out, table = [], ()
+                for raw in text.splitlines():
+                    line = raw.strip()
+                    if not line or line.startswith('#'):
+                        continue
+                    if line.startswith('[['):
+                        table = _toml_header_path(line[2 : line.find(']]')])
+                    elif line.startswith('['):
+                        table = _toml_header_path(line[1 : line.find(']')])
+                    elif any(table[: len(prefix)] == prefix for prefix in prefixes):
+                        key = line.split('=', 1)[0].strip().strip('"\\'')
+                        if table == ('package',) and not key.startswith(('auto', 'build')):
+                            continue
+                        out.append((table, line))
+                return sorted(out)
 
 
             def _test_part_changed(name: str, old_text: str, new_text: str) -> bool:
-                # Whether the test-relevant part of a parsed config file changed. Raises on
-                # anything it cannot parse or compare; the caller turns that into tampering.
+                # Whether the test-relevant part of a config file changed. Raises on anything it
+                # cannot parse or compare; the caller turns that into tampering (fails closed).
                 if name == 'package.json':
-                    before, after = _table(json.loads(old_text or '{}')), _table(json.loads(new_text or '{}'))
+                    before = json.loads(old_text or '{}')
+                    after = json.loads(new_text or '{}')
+                    before = before if isinstance(before, dict) else {}
+                    after = after if isinstance(after, dict) else {}
                     return any(before.get(key) != after.get(key) for key in _PACKAGE_KEYS)
                 if name == 'setup.cfg':
                     import configparser
@@ -440,23 +469,17 @@ class PatchVerifier:
                         return {key: dict(cfg[key]) for key in cfg.sections() if key in keys}
 
                     return view(before) != view(after)
-                before, after = _toml_tables(old_text), _toml_tables(new_text)
-                if before is None or after is None:
-                    raise ValueError('no TOML parser in this runtime')
                 if name == 'cargo.toml':
-                    keys = ('lib', 'bin', 'test', 'bench', 'features', 'dependencies',
-                            'dev-dependencies', 'build-dependencies', 'workspace')
-                    if any(before.get(key) != after.get(key) for key in keys):
-                        return True
-                    # Package-level auto-discovery toggles which hidden targets cargo test runs.
-                    auto = ('autotests', 'autobenches', 'autobins', 'autoexamples', 'autolib', 'build')
-                    pkg_before, pkg_after = _table(before.get('package')), _table(after.get('package'))
-                    return any(pkg_before.get(key) != pkg_after.get(key) for key in auto)
-                tool_keys = ('pytest', 'coverage', 'tox', 'nose')
-                before_tool, after_tool = _table(before.get('tool')), _table(after.get('tool'))
-                return any(before_tool.get(key) != after_tool.get(key) for key in tool_keys) or (
-                    before.get('build-system') != after.get('build-system')
-                )
+                    # Target tables and workspace selection decide which tests cargo runs, and
+                    # [package] auto-discovery/build toggles do too.
+                    prefixes = (('lib',), ('bin',), ('test',), ('bench',), ('workspace',), ('package',))
+                else:
+                    # pyproject.toml: the pytest/coverage/tox/nose tool tables and the build system.
+                    prefixes = (
+                        ('tool', 'pytest'), ('tool', 'coverage'), ('tool', 'tox'),
+                        ('tool', 'nose'), ('build-system',),
+                    )
+                return _toml_section_lines(old_text, prefixes) != _toml_section_lines(new_text, prefixes)
 
 
             def _config_tampered(name: str, old: bytes | None, new: bytes | None) -> bool:

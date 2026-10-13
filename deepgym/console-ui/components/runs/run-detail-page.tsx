@@ -6,11 +6,12 @@ import { useRouter } from 'next/navigation';
 import { useState } from 'react';
 import { Button } from '@/components/base/buttons/button';
 import { type TaskRow, TaskRows } from '@/components/primitives/task-rows';
+import { ActionError } from '@/components/ui/action-error';
 import { Card } from '@/components/ui/card';
 import { EmptyState } from '@/components/ui/empty-state';
 import { PageHeader } from '@/components/ui/page-header';
 import { VerdictBanner } from '@/components/ui/verdict-banner';
-import { api, useApi } from '@/lib/api';
+import { api, errorText, useApi } from '@/lib/api';
 import { formatScore, timeAgo } from '@/lib/format';
 import type { RunDetail, RunSummary } from '@/lib/types';
 import { useQueryParam } from '@/lib/use-query-param';
@@ -55,6 +56,8 @@ export function RunDetailPage() {
   const [id] = useQueryParam('id');
   const { data: run, error } = useApi<RunDetail>(id ? `/runs/${id}` : null, 1500, isActive);
   const [rerunning, setRerunning] = useState(false);
+  // Kept with the run it was for, since the page stays mounted when ?id= changes.
+  const [rerunError, setRerunError] = useState<{ id: string; message: string }>();
 
   if (!id || error) {
     return (
@@ -67,6 +70,7 @@ export function RunDetailPage() {
 
   const rerun = async () => {
     setRerunning(true);
+    setRerunError(undefined);
     try {
       const body = {
         environments: [run.environment],
@@ -75,6 +79,8 @@ export function RunDetailPage() {
       };
       const [created] = await api<RunSummary[]>('/runs', { method: 'POST', body: JSON.stringify(body) });
       router.push(`/runs/detail/?id=${created.id}`);
+    } catch (caught) {
+      setRerunError({ id: run.id, message: errorText(caught) });
     } finally {
       setRerunning(false);
     }
@@ -111,6 +117,9 @@ export function RunDetailPage() {
           </>
         }
       />
+      {rerunError?.id === run.id && (
+        <ActionError className="mb-4">Could not run again: {rerunError.message}</ActionError>
+      )}
       <RunSummaryStrip run={run} />
       {isActive(run) && <RunProgress run={run} />}
       {run.error && (

@@ -37,7 +37,7 @@ _TASK_PATH = '/home/user/deepgym_task.json'
 _PATCH_PATH = '/home/user/deepgym_candidate.diff'
 _ARCHIVE_PATH = '/home/user/deepgym_task.tar.gz'
 # The patch runner prints this line, flushed, just before it runs the tests: the first time
-# anything the patch wrote executes, and in the runner's process group.
+# anything the patch wrote executes, as root, so it can stop the runner itself.
 _TESTS_STARTED = 'deepgym-runner: running the tests'
 
 _PATCH_BLOCK_RE = re.compile(r'```(?:diff|patch)?\s*\n(.*?)```', re.DOTALL | re.IGNORECASE)
@@ -396,7 +396,7 @@ class PatchVerifier:
                 return file.read().decode('utf-8', 'replace')
 
 
-            def _run(command: str, *, cwd: Path | None = None, timeout: int = 300) -> subprocess.CompletedProcess[str]:
+            def _run(command: str, *, cwd: Path | None = None, timeout: float = 300) -> subprocess.CompletedProcess[str]:
                 # Run *command* in its own session, its output in files that nothing it leaves running
                 # can hold open. One still running after *timeout* seconds is killed with everything
                 # it started (SIGKILL) and reported as exit -9: a setup step then fails, and a test
@@ -418,7 +418,7 @@ class PatchVerifier:
                         except ProcessLookupError:
                             pass
                         proc.wait()
-                        returncode, note = -9, f'\\ntimed out after {timeout}s'
+                        returncode, note = -9, f'\\ntimed out after {timeout:.1f}s'
                     return subprocess.CompletedProcess(command, returncode, _read_end(out), _read_end(err) + note)
 
 
@@ -446,38 +446,46 @@ class PatchVerifier:
             _IMPORTABLE = 'import importlib.util, sys; sys.exit(importlib.util.find_spec(sys.argv[1]) is None)'
 
 
+            _OPERATORS = set('();|&\\n')
+            _CONTINUE = ('&&', '||', '|', '|&')  # operators an and-or list goes on after
+
+
             def _top_level_commands(command: str) -> list:
                 # The simple commands of shell *command* that must run for it to pass, each as its
                 # words without redirections: none inside a compound command or subshell, in an
                 # and-or list with `||` (which handles a missing command), or calling a function
                 # *command* defines. It ends at a here-document, `case` (whose patterns look like
                 # commands) or `function`, and is empty if shlex, stricter than sh, can't split it.
-                lexer = shlex.shlex(command, posix=True, punctuation_chars='();<>|&\\n')
-                lexer.whitespace, lexer.whitespace_split = ' \\t\\r', True
+                lexer = shlex.shlex(command.replace('\\\\\\n', ''), posix=True, punctuation_chars='();<>|&\\n')
+                lexer.whitespace, lexer.whitespace_split, lexer.commenters = ' \\t\\r', True, ''
                 try:
                     tokens = iter(list(lexer) + [';'])
                 except ValueError:
                     return []
                 found, listed, words, depth, has_or, defined = [], [], [], 0, False, set()
                 for token in tokens:
+                    if token.startswith('#'):  # a comment runs to the end of its line
+                        token = next((t for t in tokens if t and '\\n' in t and set(t) <= _OPERATORS), ';')
                     if token.startswith('<<') or (not words and token in ('case', 'function')):
                         break
-                    if set(token) <= set('<>&|') and set(token) & set('<>'):
+                    if token and set(token) <= set('<>&|') and set(token) & set('<>'):
                         if words and words[-1].isdigit():
                             words.pop()  # the redirected descriptor, as in 2>/dev/null
                         next(tokens, None)  # and the redirection's target
-                    elif not set(token) <= set('();|&\\n'):
+                    elif not token or not set(token) <= _OPERATORS:
                         if words or token not in _OPENERS | _CLOSERS:
                             words.append(token)
                         else:
                             depth += 1 if token in _OPENERS else -1
                     else:
+                        if token.rstrip('\\n') in _CONTINUE:  # a newline after one continues it
+                            token = token.rstrip('\\n')
                         if token == '()' and len(words) == 1:
                             defined.add(words[0])
                         elif words and not depth and words[0] not in defined:
                             listed.append(words)
                         words, has_or = [], has_or or token == '||'
-                        if token not in ('&&', '||', '|', '|&'):  # the and-or list ends
+                        if token not in _CONTINUE:  # the and-or list ends
                             found += [] if has_or else listed
                             listed, has_or = [], False
                         depth += token.count('(') - token.count(')')
@@ -498,14 +506,17 @@ class PatchVerifier:
             def _preflight(command: str, cwd: Path, repo_root: Path) -> str | None:
                 # Why this environment cannot run test *command*, checked before the patch, or None:
                 # a program that always runs (see _top_level_commands) is neither on PATH nor an
-                # executable outside the repo, or the package a `python -m` names can't be found
-                # (its top level only, found without running repo code). It never runs the command
-                # (dash 0.5.10's `sh -n -c` would). A path in the repo is the repo's own (the hidden
-                # tests may add it); nothing is looked up after a PATH change, `source` or `eval`,
-                # nor a module after `cd` or `export` or with a computed assignment. Best effort: what
-                # a wrapper script runs is not seen, so its failure after the patch is scored.
+                # executable outside the repo, or the package a `python -m` names is neither in the
+                # repo (or its PYTHONPATH) nor importable by that python, asked without the repo on
+                # its path so no repo code runs. It never runs the command (dash 0.5.10's `sh -n -c`
+                # would). A path in the repo is the repo's own (the hidden tests may add it); nothing
+                # is looked up after a PATH change, `source` or `eval`, a PATH lookup after `cd` when
+                # PATH has relative entries, nor a module after `cd` or `export` or that the shell
+                # would expand. Best effort: what a wrapper script runs is not seen, so its failure
+                # after the patch is scored.
                 repo_dirs = {str(repo_root), str(cwd)}
-                names, modules, plain = [], [], True
+                relative = any(not entry.startswith('/') for entry in os.environ.get('PATH', '').split(os.pathsep))
+                names, modules, plain, moved = [], [], True, False
                 for words in _top_level_commands(command):
                     if any(word.startswith('PATH=') for word in words):
                         break
@@ -526,11 +537,13 @@ class PatchVerifier:
                             return f'{program} is not an executable file'
                     elif '/' in program:
                         continue
-                    else:
+                    elif not (moved and relative):
                         names.append(program)
                     module = _python_module(program, words[1:])
-                    if module and plain and not any(re.search('[$`]', value) for value in assigned.values()):
-                        modules.append((program, *module, assigned))
+                    computed = any(re.search('[$`]', text) for text in (*assigned.values(), module[1] if module else ''))
+                    if module and plain and not computed:
+                        modules.append((program, *module, assigned.get('PYTHONPATH', '')))
+                    moved = moved or program in ('cd', 'pushd', 'popd')
                     plain = plain and program not in ('cd', 'pushd', 'popd', 'export', 'unset')
                 if names:
                     lookup = 'for w; do command -v "$w" >/dev/null 2>&1 || echo "$w"; done'
@@ -538,9 +551,12 @@ class PatchVerifier:
                     missing = found.stdout.split()
                     if missing:
                         return 'not found: ' + ', '.join(dict.fromkeys(missing))
-                for python, flags, module, assigned in modules:
-                    probe = [python, *flags, '-c', _IMPORTABLE, module.split('.')[0]]
-                    if subprocess.run(probe, cwd=str(cwd), env=dict(os.environ, **assigned), capture_output=True).returncode:
+                for python, flags, module, pythonpath in modules:
+                    top = module.split('.')[0]
+                    dirs = [cwd, *(cwd / entry for entry in pythonpath.split(os.pathsep) if entry)]
+                    if any((folder / top).is_dir() or (folder / (top + '.py')).is_file() for folder in dirs):
+                        continue
+                    if subprocess.run([python, *flags, '-c', _IMPORTABLE, top], cwd='/', capture_output=True).returncode:
                         return f'{python} cannot import {module}'
                 return None
 
@@ -1319,7 +1335,7 @@ class PatchVerifier:
                                 1,
                             )
 
-                    if deadline - time.monotonic() < 1:
+                    if deadline <= time.monotonic():
                         # The steps before the tests used up the time: the harness's doing.
                         return _emit(
                             {
@@ -1335,17 +1351,21 @@ class PatchVerifier:
                             },
                             1,
                         )
-                    # From here on, code the patch wrote runs, in this process group: if it stops the
-                    # runner, this line tells the host the tests had started (a scored 0).
+                    # From here on, code the patch wrote runs, as root: if it stops the runner, this
+                    # line tells the host the tests had started (a scored 0).
                     print(_TESTS_STARTED, flush=True)
                     passed_count = 0
                     cases = []
                     for index, command in enumerate(test_commands):
                         # The preflight found the environment able to run this command before the
                         # patch, so whatever it does now (no tests collected, a crash, a kill) is
-                        # the patch's to own: every exit is scored.
-                        budget = max(1, int(deadline - time.monotonic()) // (len(test_commands) - index))
-                        proc = _run(command, cwd=repo_dir, timeout=budget)
+                        # the patch's to own: every exit is scored. Each gets its share of the time
+                        # left, and once that is gone the rest fail without starting.
+                        left = deadline - time.monotonic()
+                        if left > 0:
+                            proc = _run(command, cwd=repo_dir, timeout=left / (len(test_commands) - index))
+                        else:
+                            proc = subprocess.CompletedProcess(command, -9, '', 'not run: the time limit ran out')
                         passed = proc.returncode == 0
                         if passed:
                             passed_count += 1

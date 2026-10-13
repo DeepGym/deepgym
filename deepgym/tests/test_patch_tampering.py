@@ -5,11 +5,13 @@ and scores every outcome after the patch.
 Runs through the sandbox code path (``sandbox_dg``); local mode refuses patch tasks.
 """
 
+import itertools
 import json
 import shutil
 import subprocess
 import sys
 import time
+import types
 from pathlib import Path
 
 import pytest
@@ -937,6 +939,7 @@ _PYTEST = f'PYTHONPATH=. "{sys.executable}" -m pytest -q'
         pytest.param('no-such-test-runner -q', id='runner-not-on-path'),
         pytest.param('cd tests && no-such-test-runner', id='runner-after-cd'),
         pytest.param('true | no-such-test-runner', id='runner-in-pipe'),
+        pytest.param('true # setup\nno-such-test-runner', id='runner-after-a-comment'),
         pytest.param(f'"{sys.executable}" -m no_such_test_module', id='module-not-importable'),
         pytest.param(f'"{sys.executable}" -u -m no_such_test_module', id='module-after-flags'),
         pytest.param('/opt/no-such-dir/runner', id='absolute-path-missing'),
@@ -979,6 +982,12 @@ def test_environment_that_cannot_run_the_tests_has_no_verdict(
         pytest.param(f'export PYTHONPATH=.; "{sys.executable}" -m pytest -q tests', id='export'),
         pytest.param(f'PYTHONPATH="$PWD" "{sys.executable}" -m pytest -q tests', id='computed'),
         pytest.param(f'PYTHONPATH=. "{sys.executable}" -u -m pytest -q tests', id='python-flags'),
+        pytest.param(f'no-such-test-runner ||\n{_PYTEST} tests', id='fallback-on-next-line'),
+        pytest.param(f'{_PYTEST} -k "" tests', id='empty-argument'),
+        pytest.param(f'{_PYTEST} \\\n  tests', id='line-continuation'),
+        pytest.param(
+            f'PYTHONPATH=. "{sys.executable}" -m "$(printf pytest)" -q tests', id='computed-module'
+        ),
     ],
 )
 def test_preflight_passes_runnable_commands(
@@ -993,15 +1002,37 @@ def test_preflight_passes_runnable_commands(
     assert (result.score, result.error_type) == (1.0, None)
 
 
-def test_preflight_runs_no_repo_code(tmp_path: Path, sandbox_dg: DeepGym) -> None:
-    # `python -m pkg.check` is looked up by its top-level package, never by importing pkg's
-    # __init__, where the bug the patch fixes may live (Codex review).
-    files = {'checkpkg/__init__.py': 'raise ImportError("the bug")\n', 'checkpkg/check.py': ''}
-    env = _env(tmp_path, files).model_copy(
-        update={'test_command': f'"{sys.executable}" -m checkpkg.check'}
-    )
+_BROKEN_UNTIL_FIXED = 'import sys\nimport calc\nif calc.add(1, 2) != 3:\n    sys.exit(1)\n'
 
-    result = sandbox_dg.run(env, _diff(Path(env.repo_dir), {'checkpkg/__init__.py': ''}))
+
+@pytest.mark.parametrize(
+    ('files', 'command', 'fix'),
+    [
+        # `python -m pkg.check` is found by its top-level package, never by importing pkg's
+        # __init__, where the bug the patch fixes may live.
+        pytest.param(
+            {'checkpkg/__init__.py': _BROKEN_UNTIL_FIXED, 'checkpkg/check.py': ''},
+            f'PYTHONPATH=. "{sys.executable}" -m checkpkg.check',
+            _FIX,
+            id='package-init',
+        ),
+        # Nor is the repo put on the probing python's path, where its sitecustomize would run.
+        pytest.param(
+            {'sitecustomize.py': _BROKEN_UNTIL_FIXED},
+            f'{_PYTEST} tests',
+            _FIX,
+            id='sitecustomize',
+        ),
+    ],
+)
+def test_preflight_runs_no_repo_code(
+    tmp_path: Path, sandbox_dg: DeepGym, files: dict, command: str, fix: dict
+) -> None:
+    # Code the patch fixes must not run before it (Codex review): it would fail the preflight
+    # and mask every answer, right ones included.
+    env = _env(tmp_path, files).model_copy(update={'test_command': command})
+
+    result = sandbox_dg.run(env, _diff(Path(env.repo_dir), fix))
 
     assert (result.score, result.error_type) == (1.0, None)
 
@@ -1097,17 +1128,17 @@ def _run_main(
     [
         # A test the patch made hang: the runner kills it at the time limit, before the provider
         # would, and scores 0 (a hang used to crash the runner, which masked the sample).
-        pytest.param({'timeout': 3, 'test_commands': ['sleep 30']}, (None, True), id='test-hangs'),
-        # Setup that runs past the limit, or leaves the tests no time: the harness's doing.
+        pytest.param({'timeout': 3, 'test_commands': ['sleep 30']}, (None, 0.0), id='test-hangs'),
+        # Each command gets its share of the time, and none starts once it is gone; at 1s a
+        # command, eight ran past the provider's limit and were masked (Codex review).
+        pytest.param({'timeout': 2, 'test_commands': ['sleep 30'] * 8}, (None, 0.0), id='many'),
+        # Less than a second left is still time to run a quick test (Codex review).
+        pytest.param({'timeout': 1, 'test_commands': ['true']}, (None, 1.0), id='subsecond'),
+        # Setup that runs past the limit: the harness's doing, no verdict.
         pytest.param(
             {'timeout': 2, 'setup_commands': 'sleep 30', 'test_commands': ['true']},
-            ('setup_failed', False),
+            ('setup_failed', 0.0),
             id='setup-hangs',
-        ),
-        pytest.param(
-            {'timeout': 3, 'setup_commands': 'sleep 2.2', 'test_commands': ['true']},
-            ('validation_timeout', False),
-            id='no-time-left',
         ),
     ],
 )
@@ -1116,18 +1147,39 @@ def test_time_limit(
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture,
     task: dict,
-    outcome: tuple[str | None, bool],
+    outcome: tuple[str | None, float],
 ) -> None:
+    started = time.monotonic()
+
     exit_code, result = _run_main(tmp_path, monkeypatch, capsys, _runner(), task)
 
-    assert (result.error_type, is_verdict(exit_code, result.error_type)) == outcome
-    assert result.score == 0.0
+    assert (result.error_type, result.score) == outcome
+    assert is_verdict(exit_code, result.error_type) is (outcome[0] is None)
+    assert time.monotonic() - started < task['timeout'] + 2
+
+
+def test_no_time_left_for_the_tests_has_no_verdict(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture
+) -> None:
+    # The steps before the tests used up the time limit (a clock that jumps 10s a reading):
+    # the harness's doing, so no verdict.
+    runner = _runner()
+    runner['time'] = types.SimpleNamespace(monotonic=itertools.count(0, 10).__next__)
+
+    exit_code, result = _run_main(
+        tmp_path, monkeypatch, capsys, runner, {'timeout': 5, 'test_commands': ['true']}
+    )
+
+    assert (result.error_type, is_verdict(exit_code, result.error_type)) == (
+        'validation_timeout',
+        False,
+    )
 
 
 def test_runner_stopped_by_the_tests_is_scored(tmp_path: Path, sandbox_dg: DeepGym) -> None:
-    # Code the patch wrote runs in the runner's process group and can kill it, here the test
-    # command killing its parent. The runner had said the tests were running, so the patch
-    # scores 0 instead of the sample being masked.
+    # Code the patch wrote runs as root and can kill the runner, here the test command killing
+    # its parent. The runner had said the tests were running, so the patch scores 0 instead of
+    # the sample being masked.
     env = _env(tmp_path).model_copy(update={'test_command': 'kill -KILL $PPID'})
 
     result = sandbox_dg.run(env, _diff(Path(env.repo_dir), _FIX))

@@ -158,7 +158,5 @@ class RunnerSandbox:
 def sandbox_dg(monkeypatch: pytest.MonkeyPatch) -> DeepGym:
     """A sandbox-mode client whose benchmark runners run in a RunnerSandbox."""
     monkeypatch.setattr('deepgym.core.check_provider', lambda provider: None)
-    monkeypatch.setattr(
-        'deepgym.benchmark_envs.open_sandbox', lambda provider, image: RunnerSandbox()
-    )
+    monkeypatch.setattr('deepgym.core.open_sandbox', lambda provider, image: RunnerSandbox())
     return DeepGym(mode='docker')

@@ -18,12 +18,9 @@ from typing import TYPE_CHECKING, Any
 
 from pydantic import Field, PrivateAttr
 
-from deepgym.exceptions import SandboxError
 from deepgym.integrations.hf import _require_datasets
 from deepgym.models import Environment, RunResult, VerifierResult
 from deepgym.sandbox import _extract_json_line, build_run_result
-from deepgym.sandboxes import open_sandbox
-from deepgym.sandboxes.daytona import DaytonaSandbox
 
 if TYPE_CHECKING:
     from deepgym.core import DeepGym
@@ -243,9 +240,7 @@ def _run_sandbox_runner(
     timeout: int,
 ) -> tuple[VerifierResult, int, str]:
     """Run *script* as root in a fresh sandbox from *dg*'s provider, booted from *env*."""
-    sandbox = (
-        open_sandbox(dg._provider, env.image) if dg._provider else DaytonaSandbox(dg._daytona, env)
-    )
+    sandbox = dg.open_sandbox(env)
     try:
         sandbox.upload(script.encode('utf-8'), _RUNNER_PATH)
         sandbox.upload(json.dumps(payload, ensure_ascii=False).encode('utf-8'), _TASK_PATH)
@@ -283,11 +278,6 @@ def _execute_runner(
             patches and run commands and tests outside any judge isolation, so they
             only ever run inside a container or VM.
     """
-    if dg._local_executor is not None:
-        raise SandboxError(
-            f'{type(env).__name__} runs model-written code with no judge isolation, so it '
-            "needs a sandbox: use DeepGym(mode='docker'), 'apple', 'modal', 'e2b' or 'daytona'."
-        )
     start = time.perf_counter()
     result, exit_code, sandbox_id = _run_sandbox_runner(
         env,

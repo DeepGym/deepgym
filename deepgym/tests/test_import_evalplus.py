@@ -55,6 +55,14 @@ class TestEvalPlusScoring:
         assert result.score == pytest.approx(0.8)
         assert result.passed is False
 
+    def test_unsendable_entry_point_is_a_scored_failure(self) -> None:
+        env = _verifier_env('square', [[2]], [4])
+
+        result = DeepGym(mode='local').run(env, 'square = []\nsquare.append(square)\n')
+
+        assert result.score == 0.0
+        assert result.has_verdict is True
+
     def test_reference_errors_on_every_input_is_a_verifier_error(self) -> None:
         env = _verifier_env('f', [[1], [2]], ['__REFERENCE_ERROR__'] * 2)
 

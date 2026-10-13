@@ -62,6 +62,8 @@ _ROTATE_RIGHT = (
 _FORGOT_TO_DECODE = 'def decode_cyclic(s):\n    return s\n'
 _OWN_ENCODER = 'def encode_cyclic(s):\n    return s\n\n\ndef decode_cyclic(s):\n    return s\n'
 _EMPTY_RANGE = 'def range(*args):\n    return []\n\n\ndef decode_cyclic(s):\n    return s\n'
+# Fetching this entry point fails in the solution process (too deep to send to the judge).
+_UNSENDABLE = 'decode_cyclic = []\ndecode_cyclic.append(decode_cyclic)\n'
 
 
 @pytest.fixture(scope='module')
@@ -78,6 +80,7 @@ def dg() -> DeepGym:
         # Exporting a helper or a builtin used to replace the test's own: both passed.
         (_OWN_ENCODER, 0.0),
         (_EMPTY_RANGE, 0.0),
+        (_UNSENDABLE, 0.0),  # the solution's failure, not the judge's
     ],
 )
 def test_solution_cannot_supply_the_tests_helpers(dg: DeepGym, solution: str, score: float) -> None:

@@ -50,6 +50,7 @@ _FAKE_MATH = (
 _SPHERE = 'from math import pi\n\n\ndef volume_sphere(r):\n    return 4 / 3 * pi * r**3\n'
 _CLEAN = "def remove_dirty_chars(s, bad):\n    return ''.join(c for c in s if c not in bad)\n"
 _UNCLEANED = 'def remove_dirty_chars(s, bad):\n    return s\n'
+_UNSENDABLE = 'remove_dirty_chars = []\nremove_dirty_chars.append(remove_dirty_chars)\n'
 _GCD_DIVISORS = (
     'import builtins\nimport math\n\n\ndef sum(a, b):\n    g = math.gcd(a, b)\n'
     '    return builtins.sum(d for d in range(1, g + 1) if g % d == 0 and d < min(a, b))\n'
@@ -74,6 +75,7 @@ def dg() -> DeepGym:
         # A correct solution without the reference's first helper used to fail as "missing".
         (_DIRTY_TESTS, _DIRTY_REF, _CLEAN, 1.0),
         (_DIRTY_TESTS, _DIRTY_REF, _UNCLEANED, 0.0),
+        (_DIRTY_TESTS, _DIRTY_REF, _UNSENDABLE, 0.0),  # fetching it fails: still the solution's
         # The tested function itself may be named like a builtin.
         (_SUM_TESTS, _SUM_REF, _GCD_DIVISORS, 1.0),
     ],

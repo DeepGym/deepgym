@@ -167,10 +167,11 @@ def verify(solution_path):
         return {{"score": 0.0, "passed": False,
                 "details": f"Import error: {{type(e).__name__}}: {{e}}"}}
 
-    func = getattr(mod, ENTRY_POINT, None)
-    if func is None:
+    try:  # fetching it can run solution code, so a failure here is the solution's
+        func = getattr(mod, ENTRY_POINT)
+    except Exception as e:
         return {{"score": 0.0, "passed": False,
-                "details": f"Missing function: {{ENTRY_POINT}}"}}
+                "details": f"Missing function: {{ENTRY_POINT}} ({{type(e).__name__}})"}}
 
     passed = 0
     base_passed = 0

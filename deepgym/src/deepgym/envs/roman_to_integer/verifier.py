@@ -55,7 +55,7 @@ def verify(solution_path, test_cases_path=None):
             'details': f'Import error: {type(e).__name__}: {e}',
         }
 
-    if not hasattr(solution, 'roman_to_int'):
+    if 'roman_to_int' not in dir(solution):
         return {
             'schema_version': '1.0',
             'score': 0.0,

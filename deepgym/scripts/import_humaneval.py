@@ -48,17 +48,16 @@ def verify(solution_path):
     except Exception as e:
         return {{"score": 0.0, "passed": False, "details": f"Import error: {{type(e).__name__}}: {{e}}"}}
 
-    if not hasattr(mod, {entry_point!r}):
+    if {entry_point!r} not in dir(mod):
         return {{"score": 0.0, "passed": False, "details": "Missing function: {entry_point}"}}
-
-    candidate = getattr(mod, {entry_point!r})
 
     # Helpers come from the prompt; only the entry point comes from the solution.
     ns = {{}}
     exec(_PROMPT, ns)
-    ns[{entry_point!r}] = candidate
 
     try:
+        # Fetching the entry point can run solution code, so a failure there fails the run.
+        ns[{entry_point!r}] = candidate = getattr(mod, {entry_point!r})
         # Execute the test code (defines check(candidate)) in the solution namespace
         exec(_TEST_CODE, ns)
         # Call check with the candidate function

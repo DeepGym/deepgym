@@ -1,6 +1,7 @@
 """Built-in env rewards: independent correct solutions score 1.0, plausible wrong ones don't,
 and a failing judge reports a verifier error instead of a score."""
 
+import ast
 import random
 import runpy
 import sys
@@ -174,6 +175,26 @@ def test_judge_failure_is_a_verifier_error(
     assert exit_info.value.code == 2
     assert result.error_type == 'runtime_error'
     assert result.has_verdict is False
+
+
+_FUNCTION_ENVS = sorted(
+    path.parent
+    for path in ENVS_DIR.rglob('verifier.py')
+    if 'load_solution' in path.read_text(encoding='utf-8') and 'multi_turn' not in path.parts
+)
+
+
+@pytest.mark.parametrize('env_dir', _FUNCTION_ENVS, ids=lambda path: path.name)
+def test_unsendable_export_is_a_scored_failure(dg: DeepGym, env_dir: Path) -> None:
+    """Looking the entry point up runs solution code: its failure must stay the solution's."""
+    reference = ast.parse((env_dir / 'reference_solution.py').read_text(encoding='utf-8'))
+    name = next(node.name for node in reference.body if isinstance(node, ast.FunctionDef))
+    env = Environment(task='t', verifier_path=env_dir / 'verifier.py')
+
+    result = dg.run(env, f'{name} = []\n{name}.append({name})\n')  # too deep to send
+
+    assert result.has_verdict is True, result.output
+    assert result.score == 0.0
 
 
 def test_solution_import_error_is_still_a_scored_failure(

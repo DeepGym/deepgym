@@ -116,20 +116,20 @@ def verify(solution_path):
     except Exception as e:
         return {{"score": 0.0, "passed": False, "details": f"Import error: {{type(e).__name__}}: {{e}}"}}
 
-    missing = [name for name in _REQUIRED if not hasattr(mod, name)]
+    missing = [name for name in _REQUIRED if name not in dir(mod)]
     if missing:
         return {{"score": 0.0, "passed": False, "details": f"Missing function: {{', '.join(missing)}}"}}
 
     ns = {{}}
     exec(_IMPORTS, ns)
-    ns.update({{name: getattr(mod, name) for name in _REQUIRED}})
 
-    # Run optional test setup code
-    if _TEST_SETUP:
-        try:
-            exec(_TEST_SETUP, ns)
-        except Exception as e:
-            return {{"score": 0.0, "passed": False, "details": f"Setup error: {{type(e).__name__}}: {{e}}"}}
+    # Fetching the solution's names can run its code, so a failure there fails the run,
+    # as does the optional test setup code.
+    try:
+        ns.update({{name: getattr(mod, name) for name in _REQUIRED}})
+        exec(_TEST_SETUP, ns)
+    except Exception as e:
+        return {{"score": 0.0, "passed": False, "details": f"Setup error: {{type(e).__name__}}: {{e}}"}}
 
     passed = 0
     total = len(_TESTS)

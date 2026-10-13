@@ -34,7 +34,7 @@ def verify(solution_path, test_cases_path=None):
             'details': f'Import error: {type(e).__name__}: {e}',
         }
 
-    if not hasattr(solution, 'longest_consecutive'):
+    if 'longest_consecutive' not in dir(solution):
         return {
             'schema_version': '1.0',
             'score': 0.0,

@@ -65,7 +65,7 @@ from deepgym.sandbox import (
     split_wrapped_output,
     wrap_stderr,
 )
-from deepgym.sandboxes import TRUSTED_PATH, ExecResult, Sandbox, SandboxImage
+from deepgym.sandboxes import TRUSTED_PATH, ExecResult, Sandbox, SandboxImage, sealed_path
 from deepgym.verifier_template import guard_crashes
 
 if TYPE_CHECKING:
@@ -341,6 +341,9 @@ _HARDEN_DIR = (
     'chown 0:0 "$1"; chmod "$2" "$1"; }'
 )
 
+# Run in the sandbox at setup to prove only root can change what TRUSTED_PATH finds.
+_SEALED_PATH_CHECK = Path(sealed_path.__file__).read_text(encoding='utf-8')
+
 
 class SandboxBackend:
     """Run actions in a throwaway sandbox from any provider (see :mod:`deepgym.sandboxes`).
@@ -442,6 +445,18 @@ class SandboxBackend:
             )
             if owned.exit_code != 0:
                 raise SandboxError(f'Could not hand over {self._workdir}: {owned.output[-500:]}')
+            # Root and verifiers run what TRUSTED_PATH finds, so only root may change any of
+            # it. Checked once the agent owns its work directory, which no folder on it may
+            # lead into; anything but a clean pass refuses the sandbox.
+            sealed = sandbox.exec(
+                trusted(
+                    f'{self.python} -I -c {shlex.quote(_SEALED_PATH_CHECK)} '
+                    f'{shlex.join(TRUSTED_PATH.split(":"))}'
+                ),
+                timeout=60,
+            )
+            if sealed.exit_code != 0 or sealed.output.strip() != sealed_path.SEALED:
+                raise SandboxError(f'Refusing the sandbox: {sealed.output[-500:]}')
             self._as_agent = _drop_to(setpriv, agent_uid, agent_gid)
             self._as_verifier = _drop_to(
                 setpriv, verifier_uid, verifier_gid, allow_sudo=solver == '1'

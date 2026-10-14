@@ -36,17 +36,23 @@ from deepgym.sandbox import (
     split_wrapped_output,
 )
 from deepgym.sandboxes import (
+    TRUSTED_PATH,
     ExecResult,
     SandboxDiedError,
     SandboxImage,
     SandboxTimeoutError,
     open_sandbox,
+    sealed_path,
 )
 from deepgym.sandboxes.apple import AppleContainer
 from deepgym.sandboxes.cli import DEFAULT_IMAGE
 from deepgym.sandboxes.daytona import cleanup_sandbox, snapshot_digest
 from deepgym.sandboxes.docker import DockerContainer
-from deepgym.session import SandboxBackend
+from deepgym.session import _SEALED_PATH_CHECK, SandboxBackend
+
+# Fake sandboxes pass session setup's check that only root can change TRUSTED_PATH.
+_SEALED_NEEDLE = 'root would run what others can change'
+_SEALED = (_SEALED_NEEDLE, sealed_path.SEALED)
 
 
 class FakeSandbox:
@@ -55,7 +61,7 @@ class FakeSandbox:
     def __init__(self, network_blocked: bool, answers: list[tuple[str, str]]) -> None:
         self.id = 'fake'
         self.network_blocked = network_blocked
-        self.answers = answers
+        self.answers = [_SEALED, *answers]
         self.commands: list[str] = []
         self.uploads: list[str] = []
         self.deleted = False
@@ -88,7 +94,7 @@ class FakeDaytona:
     Daytona's default snapshot, and answer from a script of (substring, result) pairs."""
 
     def __init__(self, answers: list[tuple[str, str]]) -> None:
-        self.answers = answers
+        self.answers = [_SEALED, *answers]
         self.boxes: list[types.SimpleNamespace] = []
 
     def create(self, params: object, timeout: float = 60) -> types.SimpleNamespace:
@@ -659,6 +665,57 @@ def test_session_solver_rule_is_checked_installed_whole_and_pinned() -> None:
         '--regid=985', '--clear-groups', '--inh-caps=-all', '--bounding-set=-all',
         '--no-new-privs', '--',
     ]  # fmt: skip
+
+
+def test_session_proves_the_trusted_path_sealed_once_at_setup() -> None:
+    """Setup checks every folder on TRUSTED_PATH as root once the agent owns its work
+    directory, before the agent runs anything, and never again: a sealed path can't change
+    mid-episode, so nothing the agent does turns its episode into no verdict."""
+    box = FakeSandbox(network_blocked=False, answers=[_USERS])
+    backend = SandboxBackend(box)
+    backend.exec('chmod 777 /usr/local/bin', timeout=5)
+    backend.write_file('date', b'#!/bin/sh\n')
+    backend.verify('print(1)', timeout=5)
+    checks = [i for i, c in enumerate(box.commands) if _SEALED_NEEDLE in c]
+    handover = next(i for i, c in enumerate(box.commands) if 'chown -R dgagent:' in c)
+    as_agent = next(i for i, c in enumerate(box.commands) if '--reuid=997' in c)
+    assert len(checks) == 1 and handover < checks[0] < as_agent
+    folders = ' '.join(TRUSTED_PATH.split(':'))
+    assert shlex.split(box.commands[checks[0]])[-1] == (
+        f'python3 -I -c {shlex.quote(_SEALED_PATH_CHECK)} {folders}'
+    )
+
+
+@pytest.mark.parametrize(
+    ('exit_code', 'output'),
+    [
+        (1, 'root would run what others can change: /usr/local/bin is owned by uid 0'),
+        (127, 'python3: not found'),
+        (0, ''),
+        (0, 'sealed\nsealed'),
+        (0, 'unsealed'),
+    ],
+    ids=['unsealed', 'no-python', 'silent', 'garbled', 'other-word'],
+)
+def test_session_refuses_the_sandbox_unless_the_check_passes_cleanly(
+    exit_code: int, output: str
+) -> None:
+    """Anything but a clean pass refuses the sandbox at setup (no verdict, nothing run as
+    the agent), as the check failed or couldn't be read."""
+    box = FakeSandbox(network_blocked=True, answers=[_USERS])
+    answer = box.exec
+
+    def exec_(command: str, **kwargs: object) -> ExecResult:
+        if _SEALED_NEEDLE in command:
+            box.commands.append(command)
+            return ExecResult(exit_code, output)
+        return answer(command, **kwargs)
+
+    box.exec = exec_  # type: ignore[method-assign]
+    with pytest.raises(SandboxError, match='Refusing the sandbox'):
+        SandboxBackend(box)
+    assert box.deleted
+    assert not any('--reuid=997' in c for c in box.commands)
 
 
 def test_session_closes_sandbox_when_setup_fails() -> None:

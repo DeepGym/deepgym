@@ -26,7 +26,7 @@ from deepgym.sandboxes import TRUSTED_PATH, SandboxTimeoutError, build_image
 from deepgym.sandboxes.docker import DockerContainer
 from deepgym.session import SandboxBackend
 from tests.test_harbor import BUILT, HELLO
-from tests.test_sandboxes import FakeSandbox
+from tests.test_sandboxes import _SEALED_NEEDLE, FakeSandbox
 
 _IDS = '997 997 996 996 0 - - /usr/bin/setpriv /usr/bin/nsenter -'
 _WORKSPACE = pack_files({'hello.txt': b'hello\n'})
@@ -157,6 +157,8 @@ def test_grader_restores_then_uploads_tests_then_reads_the_reward_separately() -
     tests = _index(box, _RUN_TESTS)
     reward = _index(box, 'for name in reward.json')
     assert restored < staged < tests < reward
+    # The fresh grader's PATH is proven root's alone before the agent's work arrives.
+    assert _index(box, _SEALED_NEEDLE) < restored
     assert 'test.sh' not in box.commands[reward]
     assert not box.commands[tests].startswith('setpriv')
     assert box.uploads[-1] == '/opt/deepgym-harbor/tests.tgz'

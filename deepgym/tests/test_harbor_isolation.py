@@ -110,10 +110,43 @@ def test_agent_timeout_ends_the_script_not_the_run() -> None:
     assert run_agent(box, HarborTask.from_dir(HELLO), 'sleep 999').timed_out
 
 
-def test_a_corrupted_archive_is_a_sandbox_error() -> None:
+@pytest.mark.parametrize(
+    'archive', ['unreadable', 'refused', 'host_error', 'provider_outage', 'not_started']
+)
+def test_after_the_script_starts_only_a_failure_that_is_ours_for_certain_is_masked(
+    archive: str,
+) -> None:
+    """Fail closed: the agent can make its archive fail (fill the disk, unreadable files),
+    so any failure once its script started is its 0, unless it is certainly ours. A
+    failure before the script starts (its upload) stays ours."""
     box = _box(('base64 /opt', 'H4sI\nnot base64: warning from stderr\n'))
-    with pytest.raises(SandboxError, match='read the archive'):
-        run_agent(box, HarborTask.from_dir(HELLO), '')
+    real_exec = box.exec
+    errors = {
+        'refused': SandboxError('the provider refused the command'),
+        'host_error': OSError(5, 'Input/output error'),
+        'provider_outage': ConnectionError('provider unreachable'),
+    }
+
+    def exec_(command: str, **kwargs: object) -> object:
+        if '-czf' in command and archive in errors:
+            raise errors[archive]
+        return real_exec(command, **kwargs)
+
+    def upload(content: bytes, path: str) -> None:
+        raise SandboxError('script upload failed')
+
+    box.exec = exec_  # type: ignore[method-assign]
+    if archive == 'not_started':
+        box.upload = upload  # type: ignore[method-assign]
+        with pytest.raises(SandboxError, match='script upload failed'):
+            run_agent(box, HarborTask.from_dir(HELLO), '')
+        assert box.deleted
+        return
+    result = run_agent(box, HarborTask.from_dir(HELLO), '')
+
+    ours = archive == 'provider_outage'
+    assert (result.score, result.has_verdict) == (0.0, not ours)
+    assert result.error_type == ('unknown_error' if ours else 'policy_sandbox_failure')
     assert box.deleted
 
 

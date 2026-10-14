@@ -6,13 +6,7 @@ import math
 import time
 from typing import NamedTuple
 
-from deepgym.exceptions import (
-    ActionError,
-    DeepGymError,
-    SandboxDiedError,
-    SandboxExpiredError,
-    TimeoutError,
-)
+from deepgym.exceptions import DeepGymError, SandboxExpiredError, TimeoutError
 from deepgym.harbor.task import HARNESS_PATHS, STAGING_DIR, HarborTask
 from deepgym.models import RunResult
 from deepgym.sandboxes import Sandbox
@@ -46,10 +40,11 @@ def run_agent(sandbox: Sandbox, task: HarborTask, script: str) -> AgentRun | Run
     are killed before the archive is made. A timeout ends the script, not the run.
 
     Returns:
-        What the agent left behind; or its judged 0 (see
-        :func:`~deepgym.session.failure_result`) if its sandbox died, its work directory
-        can't be packed (moved, replaced by a link, too big) or takes too long to pack, or
-        its script took at least half the time before the provider's lifetime ran out.
+        What the agent left behind; or, once its script has started, the result of any
+        failure (see :func:`~deepgym.session.failure_result`): no verdict only if it is ours
+        for certain (or the provider's lifetime ran out before the script took half the
+        time), else the agent's judged 0 (its sandbox died, its work directory can't be
+        packed or read back, ...).
 
     Args:
         sandbox: A fresh sandbox from the task's image; deleted afterwards.
@@ -58,7 +53,7 @@ def run_agent(sandbox: Sandbox, task: HarborTask, script: str) -> AgentRun | Run
 
     Raises:
         DeepGymError: If the image's WORKDIR can't be the agent's (``/``, /root, /tmp ...).
-        SandboxError: If setting up the sandbox or archiving fails.
+        SandboxError: If setting up the sandbox or uploading the script fails.
     """
     opened = time.monotonic()
     workdir = task.workdir or _image_workdir(sandbox, task.name)
@@ -80,7 +75,8 @@ def run_agent(sandbox: Sandbox, task: HarborTask, script: str) -> AgentRun | Run
             acting_s = time.monotonic() - started if acting_s is None else acting_s
             exhausted = ran_out_the_clock(exc, acting_s, time.monotonic() - opened)
             return failure_result(exc, sandbox.id, exhausted=exhausted)
-        except (ActionError, SandboxDiedError, TimeoutError) as exc:
+        except Exception as exc:
+            # The script has started: only a failure that is ours for certain has no verdict.
             return failure_result(exc, sandbox.id)
         return AgentRun(workspace, backend.workdir, timed_out)
     finally:

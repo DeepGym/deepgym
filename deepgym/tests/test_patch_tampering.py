@@ -10,6 +10,7 @@ import json
 import shutil
 import subprocess
 import sys
+import sysconfig
 import time
 import types
 from pathlib import Path
@@ -1002,6 +1003,30 @@ def test_preflight_passes_runnable_commands(
     assert (result.score, result.error_type) == (1.0, None)
 
 
+@pytest.mark.parametrize(
+    'setup',
+    [
+        pytest.param('{venv} &&', id='and-list'),
+        pytest.param('{venv} || exit 1;', id='or-list'),
+        pytest.param('if true; then {venv}; fi;', id='compound'),
+    ],
+)
+def test_preflight_passes_a_runner_the_command_creates(
+    tmp_path: Path, sandbox_dg: DeepGym, setup: str
+) -> None:
+    # The venv's python does not exist until the command's own setup runs (Codex review), so
+    # only what runs before anything else must be found up front.
+    venv_dir = tmp_path / 'venv'
+    venv = f'"{sys.executable}" -m venv --without-pip "{venv_dir}"'
+    site = sysconfig.get_paths()['purelib']
+    tests = f'PYTHONPATH=".:{site}" "{venv_dir}/bin/python" -m pytest -q tests/test_calc.py'
+    env = _env(tmp_path).model_copy(update={'test_command': f'{setup.format(venv=venv)} {tests}'})
+
+    result = sandbox_dg.run(env, _diff(Path(env.repo_dir), _FIX))
+
+    assert (result.score, result.error_type) == (1.0, None)
+
+
 _BROKEN_UNTIL_FIXED = 'import sys\nimport calc\nif calc.add(1, 2) != 3:\n    sys.exit(1)\n'
 
 
@@ -1211,6 +1236,27 @@ def test_missing_repo_is_not_blamed_on_the_patch(tmp_path: Path, sandbox_dg: Dee
     result = sandbox_dg.run(env, patch)
 
     assert (result.error_type, result.has_verdict) == ('validation_error', False)
+
+
+def test_hidden_tests_are_restored_in_a_subdirectory_task(
+    tmp_path: Path, sandbox_dg: DeepGym
+) -> None:
+    # Git names a patch's paths from the repository top, not from repo_dir (Codex review): an
+    # answer that also edits the hidden test must not keep that edit and break the test patch.
+    env = _env(tmp_path, {'pkg/calc.py': _CALC, 'pkg/tests/test_calc.py': _BASE_TEST})
+    repo = Path(env.repo_dir)
+    env = env.model_copy(
+        update={
+            'repo_dir': str(repo / 'pkg'),
+            'test_command': f'{_PYTEST} tests/test_calc.py',
+            'test_patch': _diff(repo, {'pkg/tests/test_calc.py': _HIDDEN_TEST}),
+        }
+    )
+    edit = {'pkg/calc.py': _FIX['calc.py'], 'pkg/tests/test_calc.py': _BASE_TEST + '# edited\n'}
+
+    result = sandbox_dg.run(env, _diff(repo, edit))
+
+    assert (result.score, result.error_type) == (1.0, None)
 
 
 @pytest.mark.parametrize('command', ['', ' \n'])

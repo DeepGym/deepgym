@@ -443,6 +443,9 @@ class PatchVerifier:
             # run at all (a branch not taken, a loop over nothing), so it is not looked up.
             _OPENERS = {'if', 'while', 'until', 'for', '{'}
             _CLOSERS = {'fi', 'done', '}'}
+            # Builtins that write no files, so what follows them must exist up front. After any
+            # other command, what runs may be what it set up (a venv, an install): not checked.
+            _INERT = {'cd', 'pushd', 'popd', 'export', 'unset', 'set', 'true', ':'}
             _IMPORTABLE = 'import importlib.util, sys; sys.exit(importlib.util.find_spec(sys.argv[1]) is None)'
 
 
@@ -452,17 +455,18 @@ class PatchVerifier:
 
             def _top_level_commands(command: str) -> list:
                 # The simple commands of shell *command* that must run for it to pass, each as its
-                # words without redirections: none inside a compound command or subshell, in an
-                # and-or list with `||` (which handles a missing command), or calling a function
-                # *command* defines. It ends at a here-document, `case` (whose patterns look like
-                # commands) or `function`, and is empty if shlex, stricter than sh, can't split it.
+                # words without redirections, up to the first it can't follow: one inside a
+                # compound command or subshell, in an and-or list with `||` (which handles a
+                # missing command), or a function definition. What that runs may set up the rest.
+                # It also ends at a here-document, `case` (whose patterns look like commands) or
+                # `function`, and is empty if shlex, stricter than sh, can't split it.
                 lexer = shlex.shlex(command.replace('\\\\\\n', ''), posix=True, punctuation_chars='();<>|&\\n')
                 lexer.whitespace, lexer.whitespace_split, lexer.commenters = ' \\t\\r', True, ''
                 try:
                     tokens = iter(list(lexer) + [';'])
                 except ValueError:
                     return []
-                found, listed, words, depth, has_or, defined = [], [], [], 0, False, set()
+                found, listed, words, depth, has_or = [], [], [], 0, False
                 for token in tokens:
                     if token.startswith('#'):  # a comment runs to the end of its line
                         token = next((t for t in tokens if t and '\\n' in t and set(t) <= _OPERATORS), ';')
@@ -480,14 +484,15 @@ class PatchVerifier:
                     else:
                         if token.rstrip('\\n') in _CONTINUE:  # a newline after one continues it
                             token = token.rstrip('\\n')
-                        if token == '()' and len(words) == 1:
-                            defined.add(words[0])
-                        elif words and not depth and words[0] not in defined:
+                        if words and (depth or token == '()'):
+                            return found
+                        if words:
                             listed.append(words)
                         words, has_or = [], has_or or token == '||'
                         if token not in _CONTINUE:  # the and-or list ends
-                            found += [] if has_or else listed
-                            listed, has_or = [], False
+                            if has_or:
+                                return found
+                            found, listed = found + listed, []
                         depth += token.count('(') - token.count(')')
                 return found
 
@@ -505,26 +510,27 @@ class PatchVerifier:
 
             def _preflight(command: str, cwd: Path, repo_root: Path) -> str | None:
                 # Why this environment cannot run test *command*, checked before the patch, or None:
-                # a program that always runs (see _top_level_commands) is neither on PATH nor an
-                # executable outside the repo, or the package a `python -m` names is neither in the
-                # repo (or its PYTHONPATH) nor importable by that python, asked without the repo on
-                # its path so no repo code runs. It never runs the command (dash 0.5.10's `sh -n -c`
-                # would). A path in the repo is the repo's own (the hidden tests may add it); nothing
-                # is looked up after a PATH change, `source` or `eval`, a PATH lookup after `cd` when
-                # PATH has relative entries, nor a module after `cd` or `export` or that the shell
-                # would expand. Best effort: what a wrapper script runs is not seen, so its failure
-                # after the patch is scored.
+                # a program that runs before anything could set it up (see _top_level_commands and
+                # _INERT) is neither on PATH nor an executable outside the repo, or the package a
+                # `python -m` names is neither in the repo (or its PYTHONPATH) nor importable by that
+                # python, asked without the repo on its path so no repo code runs. It never runs the
+                # command (dash 0.5.10's `sh -n -c` would). A path in the repo is the repo's own (the
+                # hidden tests may add it); nothing is looked up after a PATH change, `source` or
+                # `eval`, a PATH lookup after `cd` when PATH has relative entries, nor a module after
+                # `cd` or `export` or that the shell would expand. Best effort: what a wrapper script
+                # runs is not seen, so its failure after the patch is scored.
                 repo_dirs = {str(repo_root), str(cwd)}
                 relative = any(not entry.startswith('/') for entry in os.environ.get('PATH', '').split(os.pathsep))
-                names, modules, plain, moved = [], [], True, False
+                names, modules, plain, moved, ran = [], [], True, False, False
                 for words in _top_level_commands(command):
-                    if any(word.startswith('PATH=') for word in words):
+                    if ran or any(word.startswith('PATH=') for word in words):
                         break
                     words = words[1:] if words[0] == '!' else words
                     assigned = {}
                     while words and re.match(r'[A-Za-z_][A-Za-z0-9_]*=', words[0]):
                         name, _, value = words.pop(0).partition('=')
                         assigned[name] = value
+                    ran = bool(words) and words[0] not in _INERT
                     if not words or re.search(r'[$`*?~\\[]', words[0]):
                         continue
                     program = words[0]
@@ -944,10 +950,10 @@ class PatchVerifier:
                 return list(dict.fromkeys(_normalize(path) or path for path in paths))
 
 
-            def _snapshot(repo_dir: Path, paths: list[str]) -> dict:
+            def _snapshot(repo_root: Path, paths: list[str]) -> dict:
                 saved = {}
                 for rel in paths:
-                    path = repo_dir / rel
+                    path = repo_root / rel
                     if path.is_symlink():
                         saved[rel] = ('link', os.readlink(path))
                     elif path.is_file():
@@ -957,14 +963,14 @@ class PatchVerifier:
                 return saved
 
 
-            def _restore(repo_dir: Path, saved: dict) -> str | None:
+            def _restore(repo_root: Path, saved: dict) -> str | None:
                 # Put each hidden path back as it was before the model's diff, whatever the
                 # diff did to it (edit, rename, delete, replace with a link or a directory).
                 try:
                     for rel, state in saved.items():
-                        path = repo_dir / rel
+                        path = repo_root / rel
                         for ancestor in list(Path(rel).parents)[:-1]:
-                            folder = repo_dir / ancestor
+                            folder = repo_root / ancestor
                             if folder.is_symlink() or (folder.exists() and not folder.is_dir()):
                                 return f'{ancestor} is no longer a directory'
                         if path.is_symlink() or path.is_file():
@@ -1186,7 +1192,7 @@ class PatchVerifier:
                                 },
                                 1,
                             )
-                    saved = _snapshot(repo_dir, hidden)
+                    saved = _snapshot(repo_root, hidden)
 
                     check = subprocess.run(
                         ['git', '-C', str(repo_dir), 'apply', '--check', str(patch_path)],
@@ -1296,7 +1302,7 @@ class PatchVerifier:
                         elif rel not in uncertain and _mentioned(rel, command_text):
                             uncertain[rel] = 'the test command mentions it'
 
-                    blocked = _restore(repo_dir, saved)
+                    blocked = _restore(repo_root, saved)
                     if blocked is not None:
                         return _emit(
                             {

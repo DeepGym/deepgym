@@ -9,8 +9,9 @@ from urllib.parse import unquote
 EXPECTED_IPS = {'203.0.113.42', '198.51.100.77'}
 EXPECTED_PAYLOADS = {'jndi:ldap', 'jndi:dns'}  # the two lookups in the log
 ACTION_TERMS = {'patch', 'block', 'search', 'logs'}
-# ponytail: keyword negation check, not language understanding. A negation voids
-# the action terms after it in the same sentence; use a judge model if this is gamed.
+# ponytail: keyword check, not language understanding. A clause (split at . ; : ! ?)
+# with any negation earns no action terms, so "patch, but don't wait" loses credit
+# rather than "patching is not needed" gaining it; use a judge model to do better.
 _NEGATION = re.compile(r"\b(?:not|no|never|avoid|without)\b|n['’]t\b")
 
 
@@ -46,10 +47,9 @@ def _string_set(value):
 
 def _affirmed_actions(text):
     found = set()
-    for sentence in re.split(r'[.;!?](?:\s|$)|\n', text):
-        negation = _NEGATION.search(sentence)
-        kept = sentence[: negation.start()] if negation else sentence
-        found |= {term for term in ACTION_TERMS if term in kept}
+    for clause in re.split(r'[.;:!?](?:\s|$)|\n', text):
+        if not _NEGATION.search(clause):
+            found |= {term for term in ACTION_TERMS if term in clause}
     return found
 
 

@@ -94,7 +94,9 @@ def test_log_triage_scores_the_answer_fields_not_keywords_elsewhere(dg: DeepGym)
     [
         ('Do not patch, block or search the logs.', 0.85),
         ("Don't patch Log4j; there is no need to block or search logs.", 0.85),
+        ('Patching Log4j, blocking the sources and searching logs are not needed.', 0.85),
         ('Patch Log4j, block both sources and search the logs. Do not expose JNDI.', 1.0),
+        ('Do not delay: patch Log4j, block both sources and search the logs.', 1.0),
     ],
 )
 def test_log_triage_negated_actions_earn_nothing(dg: DeepGym, action: str, score: float) -> None:

@@ -10,6 +10,7 @@ time by running the reference solution, then embedded in the verifier file.
 
 import copy
 import json
+import shutil
 import sys
 import traceback
 from pathlib import Path
@@ -259,6 +260,7 @@ def import_benchmark(name, data, output_dir):
             prompt, canonical, entry_point, all_inputs
         )
 
+        env_dir = output_dir / safe_id
         try:
             verifier_src = generate_evalplus_verifier(
                 task_id, entry_point, base_inputs, plus_inputs,
@@ -266,9 +268,10 @@ def import_benchmark(name, data, output_dir):
             )
         except ValueError as e:
             errors.append(f"  {safe_id}: not imported, {e}")
+            # An earlier import's copy would still load by name.
+            shutil.rmtree(env_dir, ignore_errors=True)
             continue
 
-        env_dir = output_dir / safe_id
         env_dir.mkdir(exist_ok=True)
 
         # task.md

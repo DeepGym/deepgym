@@ -80,6 +80,9 @@ class TestEvalPlusScoring:
             'plus_input': [],
         }
 
+        (tmp_path / 'T_0').mkdir()  # an earlier import's copy
+        (tmp_path / 'T_0' / 'verifier.py').write_text('')
+
         registry = import_benchmark('humaneval_plus', {'T/0': problem}, tmp_path)
 
         assert registry == []

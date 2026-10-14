@@ -87,9 +87,13 @@ import os
 from pathlib import Path
 
 root = Path(os.environ['PROJECT_DIR'])
-for name, heading in [('src', '# Source Code'), ('tests', '# Tests'), ('docs', '# Documentation')]:
+for name, readme in [
+    ('src', '# Source Code\\nMain application source files.'),
+    ('tests', '# Tests\\nUnit and integration tests.'),
+    ('docs', '# Documentation\\nProject documentation and guides.'),
+]:
     (root / name).mkdir(parents=True)
-    (root / name / 'README.md').write_text(heading + '\\n')
+    (root / name / 'README.md').write_text(readme + '\\n')
 print('done')
 """
 
@@ -105,6 +109,16 @@ def test_file_organizer_prompt_names_the_checked_directory(dg: DeepGym) -> None:
     assert '/tmp/project' not in env.task
     assert correct.score == 1.0, correct.output
     assert wrong.passed is False
+
+
+def test_file_organizer_readmes_need_their_descriptions(dg: DeepGym) -> None:
+    """Heading-only READMEs used to earn 1.0; the task asks for a description line too."""
+    headings_only = _ORGANIZE.replace('write_text(readme', 'write_text(readme.splitlines()[0]')
+
+    result = dg.run(load_environment('file_organizer'), headings_only)
+
+    assert result.passed is False
+    assert result.score < 1.0
 
 
 _FILTER = """

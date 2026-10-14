@@ -20,6 +20,7 @@ from pathlib import Path
 # Runs inside the isolated solution process: loads the solution, runs the
 # BigCodeBench unittest code against it, prints one JSON result line.
 _RUNNER_SOURCE = """
+import ast
 import importlib.util
 import io
 import json
@@ -36,6 +37,17 @@ def main():
     def report(score, passed, details, **extra):
         real_stdout.write(json.dumps({"score": score, "passed": passed, "details": details, **extra}) + "\\n")
         real_stdout.flush()
+
+    # The tests and their imports are trusted: check them before the solution runs,
+    # so a module the sandbox lacks is no verdict instead of the solution's 0.
+    # ponytail: only top-level imports are checked; imports inside test methods still
+    # fail as tests, since running other test code needs names the solution defines.
+    try:
+        tree = ast.parse(spec_data["test_code"])
+        imports = [node for node in tree.body if isinstance(node, (ast.Import, ast.ImportFrom))]
+        exec(compile(ast.Module(body=imports, type_ignores=[]), "<tests>", "exec"), {})
+    except Exception as e:
+        return report(0.0, False, f"Test setup error: {type(e).__name__}: {e}", error_type="test_setup_error")
 
     try:
         spec = importlib.util.spec_from_file_location("solution", sys.argv[2])

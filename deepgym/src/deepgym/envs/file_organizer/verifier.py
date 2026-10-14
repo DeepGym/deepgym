@@ -34,18 +34,20 @@ def verify(solution_path, test_cases_path=None):
         dirpath = os.path.join(project_dir, dirname)
         checks[f'{dirname}_dir_exists'] = os.path.isdir(dirpath)
 
-    # Check README files exist and have correct content.
+    # Check README files exist and hold the requested lines (blank lines and
+    # surrounding whitespace aside).
     expected_content = {
-        'src/README.md': '# Source Code',
-        'tests/README.md': '# Tests',
-        'docs/README.md': '# Documentation',
+        'src/README.md': ['# Source Code', 'Main application source files.'],
+        'tests/README.md': ['# Tests', 'Unit and integration tests.'],
+        'docs/README.md': ['# Documentation', 'Project documentation and guides.'],
     }
 
-    for filepath, expected_heading in expected_content.items():
+    for filepath, expected_lines in expected_content.items():
         try:
             content = read_output(os.path.join(project_dir, filepath), work_dir)
             checks[f'{filepath}_exists'] = True
-            checks[f'{filepath}_content'] = expected_heading in content
+            lines = [line.strip() for line in content.splitlines() if line.strip()]
+            checks[f'{filepath}_content'] = lines == expected_lines
         except (OSError, ValueError):  # missing, a symlink, or not UTF-8 text
             checks[f'{filepath}_exists'] = False
             checks[f'{filepath}_content'] = False

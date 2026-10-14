@@ -17,6 +17,7 @@ from import_evalplus import (  # noqa: E402
     _has_large_int,
     compute_expected_outputs,
     generate_evalplus_verifier,
+    import_benchmark,
 )
 
 
@@ -63,13 +64,26 @@ class TestEvalPlusScoring:
         assert result.score == 0.0
         assert result.has_verdict is True
 
-    def test_reference_errors_on_every_input_is_a_verifier_error(self) -> None:
-        env = _verifier_env('f', [[1], [2]], ['__REFERENCE_ERROR__'] * 2)
+    @pytest.mark.parametrize('outputs', [[1, '__REFERENCE_ERROR__'], ['__REFERENCE_ERROR__'] * 2])
+    def test_incomplete_reference_outputs_are_rejected(self, outputs: list) -> None:
+        with pytest.raises(ValueError, match='reference'):
+            _verifier_env('f', [[1], [2]], outputs)
 
-        result = DeepGym(mode='local').run(env, 'def f(x):\n    return x\n')
+    def test_task_with_a_reference_error_is_not_published(self, tmp_path: Path) -> None:
+        """A reference failing on input 1 used to drop that case, so answering 0 scored 1.0."""
+        canonical = 'def f(x):\n    if x == 1:\n        import no_such_module\n    return x\n'
+        problem = {
+            'entry_point': 'f',
+            'prompt': '',
+            'canonical_solution': canonical,
+            'base_input': [[0], [1]],
+            'plus_input': [],
+        }
 
-        assert result.exit_code == 2
-        assert result.has_verdict is False
+        registry = import_benchmark('humaneval_plus', {'T/0': problem}, tmp_path)
+
+        assert registry == []
+        assert not (tmp_path / 'T_0').exists()
 
 
 class TestEvalPlusLargeIntHandling:

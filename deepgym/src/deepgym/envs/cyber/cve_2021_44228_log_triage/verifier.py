@@ -4,10 +4,14 @@ import ast
 import json
 import re
 import sys
+from urllib.parse import unquote
 
 EXPECTED_IPS = {'203.0.113.42', '198.51.100.77'}
-REQUIRED_TERMS = {'cve-2021-44228', 'log4shell'}
-REQUIRED_PAYLOAD_TERMS = {'jndi', 'ldap', 'dns'}
+EXPECTED_PAYLOADS = {'jndi:ldap', 'jndi:dns'}  # the two lookups in the log
+ACTION_TERMS = {'patch', 'block', 'search', 'logs'}
+# ponytail: keyword negation check, not language understanding. A negation voids
+# the action terms after it in the same sentence; use a judge model if this is gamed.
+_NEGATION = re.compile(r"\b(?:not|no|never|avoid|without)\b|n['’]t\b")
 
 
 def _read_output(solution_path):
@@ -17,19 +21,19 @@ def _read_output(solution_path):
         text = re.sub(r'\s*```$', '', text)
     try:
         data = json.loads(text)
-        return (data if isinstance(data, dict) else {}), text
+        return data if isinstance(data, dict) else {}
     except json.JSONDecodeError:
         match = re.search(r'\{.*\}', text, re.DOTALL)
         if match:
             try:
-                return json.loads(match.group(0)), text
+                return json.loads(match.group(0))
             except json.JSONDecodeError:
                 pass
         try:
             parsed = ast.literal_eval(text)
         except Exception:
             parsed = None
-        return parsed if isinstance(parsed, dict) else {}, text
+        return parsed if isinstance(parsed, dict) else {}
 
 
 def _string_set(value):
@@ -40,12 +44,20 @@ def _string_set(value):
     return set()
 
 
+def _affirmed_actions(text):
+    found = set()
+    for sentence in re.split(r'[.;!?](?:\s|$)|\n', text):
+        negation = _NEGATION.search(sentence)
+        kept = sentence[: negation.start()] if negation else sentence
+        found |= {term for term in ACTION_TERMS if term in kept}
+    return found
+
+
 def verify(solution_path, test_cases_path=None):
-    data, raw = _read_output(solution_path)
-    raw_lower = raw.lower()
+    # Only the answer's own fields count: keywords elsewhere in the output earn nothing.
+    data = _read_output(solution_path)
     ips = _string_set(data.get('source_ips'))
-    indicators = ' '.join(_string_set(data.get('payload_indicators'))).lower()
-    cve_text = f'{data.get("cve", "")} {data.get("vulnerability", "")}'.lower()
+    indicators = unquote(' '.join(_string_set(data.get('payload_indicators')))).lower()
     action_text = str(data.get('recommended_action', '')).lower()
 
     cases = []
@@ -56,23 +68,19 @@ def verify(solution_path, test_cases_path=None):
     score += 0.4 * ip_score
     cases.append({'id': 'source_ips', 'passed': ip_score == 1.0, 'score': ip_score})
 
-    cve_score = (
-        1.0 if all(term in cve_text or term in raw_lower for term in REQUIRED_TERMS) else 0.0
-    )
+    cve_ok = str(data.get('cve', '')).strip().lower() == 'cve-2021-44228'
+    cve_score = 1.0 if cve_ok and 'log4shell' in str(data.get('vulnerability', '')).lower() else 0.0
     score += 0.2 * cve_score
     cases.append({'id': 'cve_identification', 'passed': cve_score == 1.0, 'score': cve_score})
 
-    payload_hits = sum(
-        1 for term in REQUIRED_PAYLOAD_TERMS if term in indicators or term in raw_lower
-    )
-    payload_score = payload_hits / len(REQUIRED_PAYLOAD_TERMS)
+    payload_hits = sum(1 for payload in EXPECTED_PAYLOADS if payload in indicators)
+    payload_score = payload_hits / len(EXPECTED_PAYLOADS)
     score += 0.25 * payload_score
     cases.append(
         {'id': 'payload_indicators', 'passed': payload_score == 1.0, 'score': payload_score}
     )
 
-    action_terms = {'patch', 'block', 'search', 'logs'}
-    action_score = min(1.0, sum(1 for term in action_terms if term in action_text) / 3)
+    action_score = min(1.0, len(_affirmed_actions(action_text)) / 3)
     score += 0.15 * action_score
     cases.append(
         {'id': 'recommended_action', 'passed': action_score >= 0.66, 'score': action_score}

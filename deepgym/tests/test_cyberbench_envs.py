@@ -69,3 +69,37 @@ def test_log_triage_penalizes_every_ip_that_did_not_probe(dg: DeepGym, extra_ip:
     assert correct.score == pytest.approx(1.0)
     assert wrong.passed is False
     assert wrong.score < correct.score
+
+
+def test_log_triage_scores_the_answer_fields_not_keywords_elsewhere(dg: DeepGym) -> None:
+    """Wrong fields padded with the right keywords used to earn 1.0."""
+    env = load_environment('cyber/cve_2021_44228_log_triage')
+    padded = {
+        'cve': 'CVE-2021-45046',
+        'vulnerability': 'SQL injection',
+        'source_ips': _TRIAGE['source_ips'],
+        'payload_indicators': [],
+        'notes': 'CVE-2021-44228 log4shell jndi ldap dns',
+        'recommended_action': 'Do not patch, block or search the logs.',
+    }
+
+    result = dg.run(env, json.dumps(padded))
+
+    assert result.passed is False
+    assert result.score == pytest.approx(0.4)  # the IPs, nothing else
+
+
+@pytest.mark.parametrize(
+    ('action', 'score'),
+    [
+        ('Do not patch, block or search the logs.', 0.85),
+        ("Don't patch Log4j; there is no need to block or search logs.", 0.85),
+        ('Patch Log4j, block both sources and search the logs. Do not expose JNDI.', 1.0),
+    ],
+)
+def test_log_triage_negated_actions_earn_nothing(dg: DeepGym, action: str, score: float) -> None:
+    env = load_environment('cyber/cve_2021_44228_log_triage')
+
+    result = dg.run(env, json.dumps({**_TRIAGE, 'recommended_action': action}))
+
+    assert result.score == pytest.approx(score)

@@ -46,7 +46,7 @@ def compute_expected_outputs(prompt, canonical_solution, entry_point, inputs):
 
     Returns a list of expected outputs (one per input). If the reference
     solution itself errors on an input, that entry is set to the sentinel
-    string '__REFERENCE_ERROR__' so the verifier can skip it.
+    string '__REFERENCE_ERROR__', and the verifier generator rejects the task.
     """
     ns = {}
     code = prompt + canonical_solution
@@ -82,7 +82,14 @@ def generate_evalplus_verifier(task_id, entry_point, base_inputs, plus_inputs,
 
     For tasks with very large data (huge integers), test data is stored as
     compressed pickle to keep verifier files manageable.
+
+    Raises ValueError when the reference failed on any input: dropping those
+    cases would publish a smaller suite than the benchmark's.
     """
+    errors = sum(1 for e in expected_outputs if e == "__REFERENCE_ERROR__")
+    if errors or not expected_outputs:
+        raise ValueError(f"the reference failed on {errors}/{len(expected_outputs)} inputs")
+
     import pickle as _pickle
     import zlib as _zlib
     import base64 as _base64
@@ -141,8 +148,6 @@ ENTRY_POINT = {entry_point!r}
 
 def _compare(result, expected, atol):
     """Compare result to expected, handling floats with tolerance."""
-    if expected == "__REFERENCE_ERROR__":
-        return True  # skip inputs where reference itself errored
     if isinstance(expected, float):
         return isinstance(result, (int, float)) and math.isclose(
             result, expected, abs_tol=atol if atol else 1e-6
@@ -177,13 +182,9 @@ def verify(solution_path):
     base_passed = 0
     plus_passed = 0
     total = len(TEST_INPUTS)
-    skipped = 0
     details = []
 
     for i, (inp, expected) in enumerate(zip(TEST_INPUTS, EXPECTED_OUTPUTS)):
-        if expected == "__REFERENCE_ERROR__":
-            skipped += 1
-            continue
         try:
             result = func(*inp)
             if _compare(result, expected, ATOL):
@@ -202,30 +203,19 @@ def verify(solution_path):
             if len(details) < 5:
                 details.append(f"Test {{i}}: {{type(e).__name__}}: {{e}}")
 
-    effective_total = total - skipped
-    if effective_total == 0:
-        raise RuntimeError("the reference errored on every input, so nothing can be scored")
-    score = passed / effective_total
-    effective_base = NUM_BASE - sum(
-        1 for e in EXPECTED_OUTPUTS[:NUM_BASE] if e == "__REFERENCE_ERROR__"
-    )
-    effective_plus = NUM_PLUS - sum(
-        1 for e in EXPECTED_OUTPUTS[NUM_BASE:] if e == "__REFERENCE_ERROR__"
-    )
-
-    # The score keeps partial credit; passing means every scored test passed.
+    # The score keeps partial credit; passing means every test passed.
     return {{
-        "score": score,
-        "passed": passed == effective_total,
+        "score": passed / total,
+        "passed": passed == total,
         "details": (
-            f"{{passed}}/{{effective_total}} passed "
-            f"(base: {{base_passed}}/{{effective_base}}, "
-            f"plus: {{plus_passed}}/{{effective_plus}}). "
+            f"{{passed}}/{{total}} passed "
+            f"(base: {{base_passed}}/{{NUM_BASE}}, "
+            f"plus: {{plus_passed}}/{{NUM_PLUS}}). "
             + "; ".join(details)
         ),
         "reward_components": {{
-            "base_score": base_passed / effective_base if effective_base > 0 else 0.0,
-            "plus_score": plus_passed / effective_plus if effective_plus > 0 else 0.0,
+            "base_score": base_passed / NUM_BASE if NUM_BASE > 0 else 0.0,
+            "plus_score": plus_passed / NUM_PLUS if NUM_PLUS > 0 else 0.0,
         }}
     }}
 
@@ -269,9 +259,14 @@ def import_benchmark(name, data, output_dir):
             prompt, canonical, entry_point, all_inputs
         )
 
-        ref_errors = sum(1 for o in expected_outputs if o == "__REFERENCE_ERROR__")
-        if ref_errors > 0:
-            errors.append(f"  {safe_id}: {ref_errors}/{len(all_inputs)} reference errors")
+        try:
+            verifier_src = generate_evalplus_verifier(
+                task_id, entry_point, base_inputs, plus_inputs,
+                expected_outputs, atol
+            )
+        except ValueError as e:
+            errors.append(f"  {safe_id}: not imported, {e}")
+            continue
 
         env_dir = output_dir / safe_id
         env_dir.mkdir(exist_ok=True)
@@ -288,10 +283,6 @@ def import_benchmark(name, data, output_dir):
         (env_dir / "reference_solution.py").write_text(ref_code, encoding="utf-8")
 
         # verifier.py
-        verifier_src = generate_evalplus_verifier(
-            task_id, entry_point, base_inputs, plus_inputs,
-            expected_outputs, atol
-        )
         (env_dir / "verifier.py").write_text(verifier_src, encoding="utf-8")
 
         # metadata.json
@@ -322,7 +313,7 @@ def import_benchmark(name, data, output_dir):
     )
 
     if errors:
-        print(f"  Reference errors in {len(errors)} tasks:")
+        print(f"  Skipped {len(errors)} tasks with reference errors:")
         for e in errors[:10]:
             print(e)
         if len(errors) > 10:

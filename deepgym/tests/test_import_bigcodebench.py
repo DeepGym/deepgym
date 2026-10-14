@@ -121,3 +121,14 @@ def test_hidden_test_cases_score_zero(env: Environment, dg: DeepGym) -> None:
 
     assert result.score == 0.0
     assert result.passed is False
+
+
+def test_missing_test_dependency_has_no_verdict(dg: DeepGym) -> None:
+    """A module the tests import but the sandbox lacks used to score a correct solution 0."""
+    tests = 'import deepgym_no_such_module\n' + _TESTS
+    env = Environment(task='t', verifier_code=generate_verifier('t', 'task_func', tests, []))
+
+    result = dg.run(env, 'def task_func(x):\n    return x ** 2\n')
+
+    assert result.exit_code == 2
+    assert result.has_verdict is False

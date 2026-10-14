@@ -120,23 +120,44 @@ def test_check_passes_only_what_root_alone_can_change(image: tuple[Path, dict], 
         check([str(folder) for folder in folders])
 
 
-def _run(*folders: str) -> subprocess.CompletedProcess[str]:
-    """Run the check as setup does, as a script given to ``python3 -I -c``."""
-    return subprocess.run(
-        [sys.executable, '-I', '-c', _SEALED_PATH_CHECK, *folders],
-        capture_output=True, text=True, timeout=60,
-    )  # fmt: skip
+@pytest.mark.parametrize('writable', [False, True], ids=['sealed', 'unsealed'])
+def test_script_prints_sealed_or_says_why(
+    image: tuple[Path, dict],
+    writable: bool,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture,
+) -> None:
+    """The source setup sends runs as ``__main__``: it prints exactly ``sealed`` and exits 0,
+    or says why not and exits 1. It sees the image through the same faked lstat."""
+    base, _ = image
+    bin_ = base / 'usr' / 'bin'
+    if writable:
+        bin_.chmod(0o777)
+    code = 0
+    with monkeypatch.context() as patched:
+        patched.setattr(os, 'lstat', sealed_path.lstat)  # what the script imports from os
+        patched.setattr(sys, 'argv', ['-c', str(bin_), str(base / 'usr' / 'sbin')])
+        try:
+            exec(compile(_SEALED_PATH_CHECK, '<setup>', 'exec'), {'__name__': '__main__'})
+        except SystemExit as exc:
+            code = exc.code
+    if writable:
+        why = f'{bin_} is owned by uid 0 with mode drwxrwxrwx'
+        expected = (1, f'root would run what others can change: {why}\n')
+    else:
+        expected = (0, f'{sealed_path.SEALED}\n')
+    assert (code, capsys.readouterr().out) == expected
 
 
-def test_script_prints_sealed_for_system_folders() -> None:
-    done = _run('/bin', '/no/such/folder')
-    assert (done.returncode, done.stdout, done.stderr) == (0, f'{sealed_path.SEALED}\n', '')
-
-
-def test_script_exits_1_and_says_why(tmp_path: Path) -> None:
+def test_python_runs_the_script_as_setup_does(tmp_path: Path) -> None:
+    """``python3 -I -c <source>`` runs it. A world-writable folder fails on any host,
+    whatever the folders above it are, so this holds wherever the tests run."""
     folder = tmp_path / 'bin'
     folder.mkdir()
     folder.chmod(0o777)
-    done = _run('/bin', str(folder))
-    assert done.returncode == 1
+    done = subprocess.run(
+        [sys.executable, '-I', '-c', _SEALED_PATH_CHECK, str(folder)],
+        capture_output=True, text=True, timeout=60,
+    )  # fmt: skip
+    assert (done.returncode, done.stderr) == (1, '')
     assert done.stdout.startswith('root would run what others can change: ')

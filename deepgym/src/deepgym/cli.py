@@ -4,8 +4,10 @@ from __future__ import annotations
 
 import argparse
 import contextlib
+import ipaddress
 import json
 import os
+import socket
 import sys
 import time
 from pathlib import Path
@@ -709,6 +711,30 @@ def _cmd_traces(args: argparse.Namespace) -> None:
         print(f'  {others} .jsonl files in the traces directories are not traces and were not read')
 
 
+def _loopback_hosts(host: str, netloc: str) -> list[str] | None:
+    """Host headers to accept for a console on *host* (shown in URLs as *netloc*), or None
+    if it doesn't listen on loopback. Every spelling counts by what it resolves to (``127.1``,
+    ``::ffff:127.0.0.1``), and its addresses are accepted as browsers write them. A host that
+    doesn't resolve is guarded too: that costs nothing."""
+    hosts = {'127.0.0.1', 'localhost', '[::1]', netloc}
+    try:
+        resolved = socket.getaddrinfo(host, None)
+    except OSError:
+        return sorted(hosts)
+    loopback = False
+    for *_, sockaddr in resolved:
+        address = ipaddress.ip_address(sockaddr[0])
+        mapped = getattr(address, 'ipv4_mapped', None)
+        if not (mapped or address).is_loopback:
+            continue
+        loopback = True
+        hosts.add(str(address) if address.version == 4 else f'[{address.compressed}]')
+        if mapped:  # browsers write the IPv4 part in hex, as Python before 3.13 did
+            high, low = divmod(int(mapped), 1 << 16)
+            hosts.add(f'[::ffff:{high:x}:{low:x}]')
+    return sorted(hosts) if loopback else None
+
+
 def _cmd_console(args: argparse.Namespace) -> None:
     try:
         import uvicorn
@@ -727,12 +753,13 @@ def _cmd_console(args: argparse.Namespace) -> None:
     allow_local = args.allow_local_exec or os.environ.get(
         'DEEPGYM_ALLOW_LOCAL_EXEC', ''
     ).lower() in ('true', '1', 'yes')
-    loopback = args.host in ('127.0.0.1', 'localhost')
+    # How a browser names the host in the URL and the Host header: IPv6 goes in brackets.
+    netloc = f'[{args.host}]' if ':' in args.host else args.host
     app = create_app(
         allow_local_exec=allow_local,
-        allowed_hosts=['127.0.0.1', 'localhost'] if loopback else None,
+        allowed_hosts=_loopback_hosts(args.host, netloc),
     )
-    print(f'DeepGym Console: http://{args.host}:{args.port}')
+    print(f'DeepGym Console: http://{netloc}:{args.port}')
     uvicorn.run(app, host=args.host, port=args.port)
 
 

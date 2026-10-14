@@ -7,6 +7,7 @@ from unittest.mock import patch
 
 import httpx
 import pytest
+from fastapi.testclient import TestClient
 
 import deepgym.qa
 from deepgym.cli import (
@@ -17,6 +18,7 @@ from deepgym.cli import (
     _read_file_or_string,
     main,
 )
+from deepgym.console.app import create_app
 from deepgym.core import build_batch_result, build_eval_result
 from deepgym.exceptions import SandboxError
 from deepgym.integrations.zai import ZaiChatClient
@@ -165,10 +167,42 @@ class TestConsoleCommand:
         ):
             main()
         create_app.assert_called_once_with(
-            allow_local_exec=True, allowed_hosts=['127.0.0.1', 'localhost']
+            allow_local_exec=True, allowed_hosts=['127.0.0.1', '[::1]', 'localhost']
         )
         run.assert_called_once_with(create_app.return_value, host='127.0.0.1', port=9191)
         assert 'http://127.0.0.1:9191' in capsys.readouterr().out
+
+    @pytest.mark.parametrize(
+        ('host', 'netloc', 'browser'),
+        [
+            ('localhost', 'localhost', 'localhost'),
+            ('::1', '[::1]', '[::1]'),
+            ('127.0.0.2', '127.0.0.2', '127.0.0.2'),
+            ('127.2', '127.2', '127.0.0.2'),
+            ('::ffff:127.0.0.1', '[::ffff:127.0.0.1]', '[::ffff:7f00:1]'),
+        ],
+    )
+    def test_guards_the_host_header_on_every_loopback_address(
+        self, host: str, netloc: str, browser: str, tmp_path: Path, capsys: pytest.CaptureFixture
+    ) -> None:
+        """The served HTML holds the launch token, so on any loopback bind a page on another
+        name (DNS rebinding) must be refused, while the printed URL still works, as typed
+        and as a browser normalizes it."""
+
+        def isolated(**kwargs: object) -> object:
+            return create_app(tmp_path / 'c.db', tmp_path / 'qa', **kwargs)
+
+        with (
+            patch.object(sys, 'argv', ['deepgym', 'console', '--host', host, '--port', '9191']),
+            patch('deepgym.console.app.create_app', side_effect=isolated),
+            patch('uvicorn.run') as run,
+        ):
+            main()
+        app = run.call_args.args[0]
+        assert TestClient(app, base_url='http://evil.example:9191').get('/').status_code == 400
+        for name in (netloc, browser):
+            assert TestClient(app, base_url=f'http://{name}:9191').get('/').status_code != 400
+        assert f'http://{netloc}:9191' in capsys.readouterr().out
 
     def test_warns_when_ui_is_not_built(self, capsys: pytest.CaptureFixture) -> None:
         with (

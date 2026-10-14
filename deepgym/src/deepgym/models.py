@@ -210,6 +210,8 @@ class EnvMetadata(BaseModel):
     timeout: int = Field(default=30, ge=1)
     case_timeout: int = Field(default=10, ge=1)
     image: str | None = None
+    snapshot: str | None = None
+    """Multi-turn and computer-use envs: the Daytona snapshot their sessions boot."""
     max_steps: int = Field(default=10, ge=1)
     timeout_per_step: int = Field(default=30, ge=1)
     repo_dir: str | None = None

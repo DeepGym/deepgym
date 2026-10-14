@@ -49,8 +49,8 @@ request per output; they don't call `/v1/run/batch` or `/v1/eval`.
 Registering an environment takes the same fields as an inline run. An invalid environment
 is a 422 before anything is queued. Environments sent to the run, batch, job and
 environment endpoints have no `image` or `snapshot` field, and one sent anyway is
-dropped. A session request whose inline environment sets an `image` gets 422; a
-`snapshot` is accepted.
+dropped. A session request whose inline environment sets an `image` or a `snapshot`
+gets 422.
 
 ## Limits
 

@@ -136,7 +136,7 @@ DELETE /v1/sessions/{id}
 ```
 
 - `environment` can also be an inline `MultiTurnEnvironment` spec; the API refuses one
-  that sets an `image` (a `snapshot` is accepted).
+  that sets an `image` or a `snapshot`.
 - At most 100 sessions run at once (429 above). Sessions idle for 30 minutes are closed
   by a sweep that runs every 60 seconds, and the server tries to close every session on
   shutdown.

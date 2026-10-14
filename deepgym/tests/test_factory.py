@@ -468,6 +468,40 @@ def test_check_rejects_invalid_reference_actions(tmp_path: Path, local_dg: DeepG
     assert check.details.startswith('reference_actions.json: ')
 
 
+def test_check_is_inconclusive_when_no_desktop_can_replay_the_reference(
+    local_dg: DeepGym,
+) -> None:
+    """A computer-use folder's reference episode drives a real desktop, so a local
+    session can't replay it: the run checks are inconclusive, never a pass."""
+    builtin = Path(__file__).resolve().parent.parent / 'src' / 'deepgym' / 'envs'
+    folder = builtin / 'computer_use' / 'signup_form'
+
+    checks = {check.name: check for check in check_env(folder, local_dg)}
+
+    assert checks['files'].status == 'pass'
+    assert checks['metadata'].status == 'pass'
+    assert checks['verifier_source'].status == 'pass'
+    assert checks['reference_passes'].status == 'inconclusive'
+    assert 'desktop' in checks['reference_passes'].details
+
+
+def test_check_requires_a_desktop_env_to_ship_its_reference_episode(
+    tmp_path: Path, local_dg: DeepGym
+) -> None:
+    """A desktop env needs reference_actions.json, not a reference_solution.*."""
+    (tmp_path / 'task.md').write_text('Do the thing.', encoding='utf-8')
+    (tmp_path / 'verifier.py').write_text('report(1.0, {})\n', encoding='utf-8')
+    (tmp_path / 'metadata.json').write_text(
+        '{"name": "calc_task", "type": "computer-use"}', encoding='utf-8'
+    )
+
+    checks = {check.name: check for check in check_env(tmp_path, local_dg)}
+
+    assert checks['files'].status == 'fail'
+    assert 'reference_actions.json is missing' in checks['files'].details
+    assert 'reference_solution' not in checks['files'].details
+
+
 def test_check_skips_image_based_repo_patch_folders(tmp_path: Path, local_dg: DeepGym) -> None:
     (tmp_path / 'test_patch.diff').write_text('', encoding='utf-8')
 

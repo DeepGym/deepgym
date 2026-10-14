@@ -65,6 +65,20 @@ def test_parses_a_prebuilt_image_task() -> None:
     assert task.solution['answer.txt'] == b'hello\n'
 
 
+def test_a_task_cannot_choose_a_snapshot(tmp_path: Path) -> None:
+    """task.toml has no snapshot field: one written there never reaches the sandbox."""
+    folder = _task_copy(tmp_path)
+    toml = folder / 'task.toml'
+    toml.write_text(
+        toml.read_text().replace('[environment]', '[environment]\nsnapshot = "attacker"', 1)
+    )
+
+    env = HarborEnvironment.from_dir(folder)
+
+    assert env.snapshot is None
+    assert env.image == 'python:3.12-slim'
+
+
 def test_parses_a_dockerfile_task_with_harbor_defaults() -> None:
     task = HarborTask.from_dir(BUILT)
 

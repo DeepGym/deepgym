@@ -209,12 +209,12 @@ class CreateSessionRequest(BaseModel):
 
     @field_validator('environment')
     @classmethod
-    def reject_image(
+    def reject_runtime(
         cls, v: str | MultiTurnEnvironment | ComputerUseEnvironment
     ) -> str | MultiTurnEnvironment | ComputerUseEnvironment:
-        """Refuse a caller-chosen image: root in the sandbox runs the image's binaries."""
-        if not isinstance(v, str) and v.image is not None:
-            raise ValueError('image cannot be set over the API')
+        """Refuse a caller-chosen image or snapshot: root in the sandbox runs its binaries."""
+        if not isinstance(v, str) and (v.image is not None or v.snapshot is not None):
+            raise ValueError('image and snapshot cannot be set over the API')
         return v
 
 

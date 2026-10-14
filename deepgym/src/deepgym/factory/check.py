@@ -59,6 +59,8 @@ def check_env(env_dir: Path, dg: DeepGym) -> list[QACheck]:
     Returns:
         files, metadata and verifier_source; then, if those pass, reference_passes,
         deterministic, empty_fails, stub_fails (single-turn) and protocol; then approval.
+        A desktop env off the Daytona backend reports a single inconclusive
+        reference_passes instead of the run checks: nothing here can replay it.
     """
     if (env_dir / 'task.toml').is_file():
         return [_harbor_check(env_dir), approval_check(env_dir)]
@@ -117,7 +119,7 @@ def _files_check(env_dir: Path, metadata: EnvMetadata | None) -> QACheck:
         problems.append('task.md is missing or empty (it is the prompt the model sees)')
     if not (env_dir / 'verifier.py').is_file():
         problems.append('verifier.py is missing (it scores every solution)')
-    if metadata is not None and metadata.type == 'multi-turn':
+    if metadata is not None and metadata.type in ('multi-turn', 'computer-use'):
         if not (env_dir / REFERENCE_ACTIONS).is_file():
             problems.append(f'{REFERENCE_ACTIONS} is missing (the episode that must score 1.0)')
     elif not any((env_dir / name).is_file() for name in REFERENCE_FILES):
@@ -162,7 +164,7 @@ def lint_env(env_dir: Path) -> list[str]:
         for rel in (metadata.support_files if metadata else [])
         if (env_dir / rel).is_file()
     }
-    prepended = metadata is not None and metadata.type == 'multi-turn'
+    prepended = metadata is not None and metadata.type in ('multi-turn', 'computer-use')
     try:
         return lint_verifier(path.read_text(encoding='utf-8'), support, prepended=prepended)
     except SyntaxError as exc:
@@ -170,7 +172,11 @@ def lint_env(env_dir: Path) -> list[str]:
 
 
 def _run_checks(env_dir: Path, dg: DeepGym) -> list[QACheck]:
-    """Run the reference, empty and stub solutions (or episodes) and judge them."""
+    """Run the reference, empty and stub solutions (or episodes) and judge them.
+
+    A desktop env off the Daytona backend reports a single inconclusive
+    ``reference_passes``: no local session can drive a desktop, so there is no evidence.
+    """
     try:
         env = load_environment_dir(env_dir)
     except (ValueError, OSError) as exc:
@@ -182,6 +188,9 @@ def _run_checks(env_dir: Path, dg: DeepGym) -> list[QACheck]:
         except SyntaxError as exc:
             details = f'verifier.py with its support files prepended: line {exc.lineno}: {exc.msg}'
             return [QACheck(name='load', status='fail', details=details)]
+        if env.desktop and dg.backend != 'daytona':
+            details = 'a computer-use env needs a desktop: run with --mode daytona'
+            return [QACheck(name='reference_passes', status='inconclusive', details=details)]
         results = episode_results(env, env.reference_actions or [], dg, _RERUNS)
         return [*run_verdicts(results, runs), protocol_check(results)]
     results = single_turn_results(env, env.reference_solution or '', dg, _RERUNS)

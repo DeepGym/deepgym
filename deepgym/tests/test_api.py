@@ -20,7 +20,7 @@ from deepgym.api import deps, routes
 from deepgym.api.app import app
 from deepgym.api.deps import ServerDeepGym, get_deepgym
 from deepgym.api.routes import _environments, _sessions
-from deepgym.api.schemas import RunRequest
+from deepgym.api.schemas import APIEnvironment, RunRequest
 from deepgym.async_core import AsyncDeepGym
 from deepgym.core import DeepGym
 from deepgym.exceptions import SandboxError
@@ -519,10 +519,22 @@ class TestSessions:
         resp = client.post('/v1/sessions', json={'environment': 'no_such_env_xyz'})
         assert resp.status_code == 404
 
-    def test_caller_chosen_image_is_refused(self, client: TestClient) -> None:
-        env = {**FILE_CHECK_ENV, 'image': 'attacker/image:latest'}
+    @pytest.mark.parametrize('field', ['image', 'snapshot'])
+    def test_caller_chosen_runtime_is_refused(self, client: TestClient, field: str) -> None:
+        env = {**FILE_CHECK_ENV, field: 'attacker-runtime'}
         resp = client.post('/v1/sessions', json={'environment': env})
         assert resp.status_code == 422
+
+    def test_run_requests_never_carry_an_image_or_snapshot(self) -> None:
+        """The run, batch, job and environment endpoints drop both fields."""
+        spec = {
+            'task': 't',
+            'verifier_code': 'return 1.0',
+            'image': 'attacker/image:latest',
+            'snapshot': 'attacker-snapshot',
+        }
+        env = APIEnvironment.model_validate(spec).to_environment()
+        assert (env.image, env.snapshot) == (None, None)
 
     def test_session_cap_counts_booting_and_live_sessions(
         self, client: TestClient, monkeypatch: pytest.MonkeyPatch

@@ -324,6 +324,18 @@ def _read_reference_actions(env_dir: Path, variant: int = 0) -> list[Action] | N
         raise ValueError(f'{REFERENCE_ACTIONS}: {exc}') from exc
 
 
+_SESSION_SETTINGS = (
+    'difficulty',
+    'domain',
+    'tags',
+    'max_steps',
+    'timeout_per_step',
+    'image',
+    'snapshot',
+)
+"""metadata.json keys a multi-turn or computer-use env takes as they are."""
+
+
 def _load_computer_use_env(env_dir: Path, metadata: dict, variant: int) -> ComputerUseEnvironment:
     """Build a ComputerUseEnvironment from task.md, verifier.py, setup.sh, and app files.
 
@@ -359,11 +371,7 @@ def _load_computer_use_env(env_dir: Path, metadata: dict, variant: int) -> Compu
         setup_script=setup_path.read_text(encoding='utf-8') if setup_path.exists() else '',
         files=files,
         reference_actions=_read_reference_actions(env_dir, variant),
-        **{
-            key: metadata[key]
-            for key in ('difficulty', 'domain', 'tags', 'max_steps', 'timeout_per_step', 'image')
-            if key in metadata
-        },
+        **{key: metadata[key] for key in _SESSION_SETTINGS if key in metadata},
     )
 
 
@@ -405,11 +413,7 @@ def _load_multi_turn_env(env_dir: Path, settings: dict) -> MultiTurnEnvironment:
         final_verifier_code=''.join(future for future, _ in parts)
         + '\n\n'.join(rest for _, rest in parts),
         reference_actions=_read_reference_actions(env_dir),
-        **{
-            key: settings[key]
-            for key in ('difficulty', 'domain', 'tags', 'max_steps', 'timeout_per_step', 'image')
-            if key in settings
-        },
+        **{key: settings[key] for key in _SESSION_SETTINGS if key in settings},
     )
 
 

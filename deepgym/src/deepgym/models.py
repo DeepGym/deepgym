@@ -67,13 +67,18 @@ def checked_score(value: object) -> float:
 
 
 def finite_components(components: dict[str, float] | None) -> dict[str, float] | None:
-    """Replace non-finite reward components with 0.0 so they never reach a trainer."""
-    if components is None:
-        return None
-    bad = [key for key, value in components.items() if not math.isfinite(value)]
+    """Return *components* if every one is finite.
+
+    A NaN or infinite component is a verifier bug, like an invalid score: zeroing it
+    would hand a trainer a fabricated 0 under an otherwise valid verdict.
+
+    Raises:
+        InvalidScoreError: If a component is NaN or infinite.
+    """
+    bad = [key for key, value in (components or {}).items() if not math.isfinite(value)]
     if bad:
-        logger.warning('Non-finite reward components %s set to 0.0', bad)
-    return {key: (0.0 if key in bad else value) for key, value in components.items()}
+        raise InvalidScoreError(f'Verifier returned non-finite reward components {bad}')
+    return components
 
 
 VerifierMode = Literal['auto', 'script', 'verify_function', 'body']
@@ -252,13 +257,15 @@ class CaseResult(BaseModel):
 
     @model_validator(mode='before')
     @classmethod
-    def zero_invalid_score(cls, data: object) -> object:
-        """Fail a case whose score is NaN, infinite, or out of range instead of crashing."""
+    def check_score(cls, data: object) -> object:
+        """Clamp float noise; reject a NaN, infinite or out-of-range score.
+
+        Raises:
+            InvalidScoreError: Never a 0: that would be a trainable reward the verifier
+                didn't give, under an otherwise valid verdict.
+        """
         if isinstance(data, dict) and 'score' in data:
-            try:
-                return {**data, 'score': checked_score(data['score'])}
-            except InvalidScoreError:
-                return {**data, 'score': 0.0, 'passed': False, 'error': 'invalid score'}
+            return {**data, 'score': checked_score(data['score'])}
         return data
 
     @model_validator(mode='after')
@@ -292,8 +299,8 @@ class VerifierResult(BaseModel):
 
     @field_validator('reward_components')
     @classmethod
-    def zero_non_finite_components(cls, value: dict[str, float] | None) -> dict[str, float] | None:
-        """Replace NaN/inf components with 0.0 before they reach a trainer."""
+    def check_components(cls, value: dict[str, float] | None) -> dict[str, float] | None:
+        """Reject NaN/inf components before they reach a trainer."""
         return finite_components(value)
 
     metrics: dict[str, Any] | None = None
@@ -341,8 +348,8 @@ class RunResult(BaseModel):
 
     @field_validator('reward_components')
     @classmethod
-    def zero_non_finite_components(cls, value: dict[str, float] | None) -> dict[str, float] | None:
-        """Replace NaN/inf components with 0.0 before they reach a trainer."""
+    def check_components(cls, value: dict[str, float] | None) -> dict[str, float] | None:
+        """Reject NaN/inf components before they reach a trainer."""
         return finite_components(value)
 
     metrics: dict[str, Any] | None = None

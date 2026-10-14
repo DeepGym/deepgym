@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import contextlib
 import hashlib
+from collections.abc import Iterator
 from pathlib import Path
 from typing import Literal
 
@@ -195,7 +197,7 @@ class RewardAuditor:
         db: ExploitDB | None = None,
     ) -> None:
         self._tester = AdversarialTester(dg, pass_threshold=pass_threshold)
-        self._db = db
+        self._db_given = db
 
     def audit(
         self,
@@ -208,18 +210,28 @@ class RewardAuditor:
         db_path: Path | None = None,
     ) -> VerifierAuditReport:
         """Run a verifier audit and return a structured QA report."""
-        report = self._tester.test(env, strategies=strategies)
         verifier_source = env.verifier_source
         resolved_verifier_id = verifier_id or env.task[:80]
         verifier_hash = fingerprint_verifier(verifier_source)
+        if persist:
+            # Before the retest, as the scanners do: a stored result for a changed verifier
+            # is dropped, or an inconclusive retest (never saved) would leave it standing.
+            with self._db(db_path) as db:
+                db.current(
+                    resolved_verifier_id,
+                    benchmark=benchmark,
+                    attack_type='white-box',
+                    verifier_hash=verifier_hash,
+                    attack_config='',
+                )
+        report = self._tester.test(env, strategies=strategies)
         patterns = classify_patterns(verifier_source, report)
         status = audit_status(report)
         risk_score = None if status == 'inconclusive' else compute_risk_score(patterns, report)
 
         stored = False
         if persist:
-            db, should_close = self._open_db(db_path)
-            try:
+            with self._db(db_path) as db:
                 # False for an inconclusive audit: it never judged the verifier.
                 stored = db.save(
                     build_exploit_record(
@@ -230,9 +242,6 @@ class RewardAuditor:
                         report=report,
                     )
                 )
-            finally:
-                if should_close:
-                    db.close()
 
         return VerifierAuditReport(
             verifier_id=resolved_verifier_id,
@@ -251,7 +260,14 @@ class RewardAuditor:
             stored=stored,
         )
 
-    def _open_db(self, db_path: Path | None) -> tuple[ExploitDB, bool]:
-        if self._db is not None:
-            return self._db, False
-        return ExploitDB(db_path=db_path), True
+    @contextlib.contextmanager
+    def _db(self, db_path: Path | None) -> Iterator[ExploitDB]:
+        """The auditor's database if it was given one, else one opened (and closed) here."""
+        if self._db_given is not None:
+            yield self._db_given
+            return
+        db = ExploitDB(db_path=db_path)
+        try:
+            yield db
+        finally:
+            db.close()

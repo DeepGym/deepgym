@@ -35,21 +35,21 @@ would stop its training step, so the endpoint never fails a well-formed request 
 run. A malformed or oversized body gets 422, and `prompts` is required even when the
 client sends `outputs`.
 
-- A failure the model caused is judged and scores 0, and so does any run without a
-  verdict that the model's output may have caused (a verifier failure, a timeout); those
-  are never run again.
+- A failure the model caused (a solution that crashed, hung or broke its sandbox) is
+  judged and scores 0.
 - A run the sandbox provider or the network failed
   (`deepgym.exceptions.is_infrastructure_failure`) is graded once more after a short
-  pause.
+  pause. Any other run without a verdict (a verifier that failed before judging, say) is
+  never run again.
 - Every run, first or second, takes one of the router's `max_parallel` slots (32 by
   default), and no request waits past 150 s (OpenRLHF gives up at 180 s). A first run
   still going then scores 0, since the model's code may be what slows it.
 
 ## Samples DeepGym can't grade
 
-If the second grading fails too or doesn't finish in time, the first one never got a slot
-in time, or a query doesn't contain its prompt, the sample gets the router's
-`infra_failure_score`, never a score from a run that didn't finish. It has no default:
+A sample left without a verdict (its grading failed, a second grading failed too or
+didn't finish in time, it never got a slot in time, or its query doesn't contain its
+prompt) gets the router's `infra_failure_score`, never a score from a run that didn't finish. It has no default:
 creating the router without it raises an error, so the choice is made at setup, where no
 policy can reach it.
 
@@ -61,6 +61,5 @@ policy can reach it.
   leak.
 
 Either way the sample is logged as a warning with its error type, and counts toward a
-warning logged when more than 5 samples in a block of 100 get `infra_failure_score`. Runs
-without a verdict that score 0 (above) aren't counted. See
+warning logged when more than 5 samples in a block of 100 get `infra_failure_score`. See
 [the reward contract](reward-contract.md).

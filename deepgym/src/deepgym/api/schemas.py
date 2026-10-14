@@ -7,6 +7,7 @@ from typing import Literal
 from pydantic import BaseModel, Field, field_validator, model_validator
 
 from deepgym import __version__
+from deepgym.adversarial import AttackStrategy
 from deepgym.benchmark_ops import BenchmarkAuditReport
 from deepgym.computer_use import ComputerUseEnvironment
 from deepgym.models import Environment, MultiTurnEnvironment, Observation, VerifierMode
@@ -168,7 +169,7 @@ class VerifierAuditRequest(BaseModel):
     environment: APIEnvironment
     verifier_id: str | None = Field(default=None, max_length=200)
     benchmark: str = Field(default='custom', max_length=200)
-    strategies: list[str] | None = Field(default=None, max_length=20)
+    strategies: list[AttackStrategy] | None = Field(default=None, max_length=20)
     persist: bool = False
 
 
@@ -177,7 +178,7 @@ class RegisteredVerifierAuditRequest(BaseModel):
 
     verifier_id: str | None = Field(default=None, max_length=200)
     benchmark: str = Field(default='registered', max_length=200)
-    strategies: list[str] | None = Field(default=None, max_length=20)
+    strategies: list[AttackStrategy] | None = Field(default=None, max_length=20)
     persist: bool = False
 
 

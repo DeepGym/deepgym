@@ -67,7 +67,7 @@ use this test.
 | verl `compute_score` | Raises `NoVerdictError`. verl's v1 trainer drops the sample; the legacy trainer stops, so use the `deepgym_single_turn` agent loop there. |
 | verl agent loops (`deepgym_single_turn`, `deepgym_agent`) | Dropped under verl's v1 trainer, masked under the legacy trainer, logged as `error` 1.0. |
 | verl `make_verl_reward_fn` (custom loops) | `None`. |
-| OpenRLHF endpoint | Graded once more if the provider or the network failed it, then the router's `infra_failure_score`. Other runs without a verdict score 0. |
+| OpenRLHF endpoint | Graded once more if the provider or the network failed it; any sample still without a verdict gets the router's `infra_failure_score`. |
 | lm-eval task | Left out of `deepgym_score` and `deepgym_pass`; `deepgym_verdict` is the share that got one. |
 | `DeepGymEnv` | `info.has_verdict` is false; mask the sample. `step` raises where `dg.run` does; `step_batch` returns those runs without a verdict. |
 

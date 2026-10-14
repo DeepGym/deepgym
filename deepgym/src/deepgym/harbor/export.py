@@ -84,9 +84,9 @@ def export_environment(env: Environment | MultiTurnEnvironment, out_dir: Path) -
         The new task folder.
 
     Raises:
-        DeepGymError: If *env* is multi-turn, unnamed, benchmark-backed or a Harbor task
-            already, if the folder exists, or if its reference solution contains the
-            heredoc marker.
+        DeepGymError: If *env* is multi-turn, unnamed, benchmark-backed, snapshot-backed
+            or a Harbor task already, if the folder exists, or if its reference solution
+            contains the heredoc marker.
     """
     if not isinstance(env, Environment):
         raise DeepGymError(f'{env.name} is multi-turn; only single-turn envs export')
@@ -94,6 +94,12 @@ def export_environment(env: Environment | MultiTurnEnvironment, out_dir: Path) -
         raise DeepGymError(f'{env.name} scores itself, so it has no verifier to export')
     if not env.name or PurePosixPath(env.name).name != env.name or env.name in ('.', '..'):
         raise DeepGymError(f'Cannot name a task folder {env.name!r}')
+    if env.snapshot:
+        raise DeepGymError(
+            f'{env.name} boots from the snapshot {env.snapshot!r}, which a Harbor task '
+            "can't carry; to export it, drop the snapshot and set an image that has its "
+            'dependencies'
+        )
     task_dir = out_dir / env.name
     if task_dir.exists():
         raise DeepGymError(f'{task_dir} already exists; remove it to export again')

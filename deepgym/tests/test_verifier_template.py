@@ -179,6 +179,26 @@ class TestScoreValidation:
         output, _ = _run_wrapped('return 1.0000000001\n', '# e\n')
         assert output['score'] == 1.0
 
+    @pytest.mark.parametrize(
+        'extra', ['"cases": [{"passed": True, "score": None}]', '"reward_components": {"c": "x"}']
+    )
+    def test_a_non_numeric_sub_score_is_an_invalid_score(self, extra: str) -> None:
+        output, code = _run_wrapped(f'return {{"score": 1.0, "passed": True, {extra}}}\n', '')
+        assert (output['score'], output['error_type'], code) == (0.0, 'invalid_score', 2)
+
+    def test_sub_scores_are_printed_as_the_numbers_checked(self) -> None:
+        """float() reads an Arabic-Indic one as 1.0; the host must get 1.0, not the text."""
+        body = (
+            'return {"score": 1.0, "passed": True, "reward_components": {"c": "١"}, '
+            '"cases": [{"passed": True, "score": "0.5"}]}\n'
+        )
+        output, code = _run_wrapped(body, '')
+        assert (output['reward_components'], output['cases'][0]['score'], code) == (
+            {'c': 1.0},
+            0.5,
+            0,
+        )
+
 
 def _crash_after(score: float, mode: str) -> str:
     """A verifier that prints *score* as a failed run, then crashes outside any handler."""
@@ -242,6 +262,41 @@ class TestCrashGuard:
                 assert not DeepGym(mode='local').run(env, 'x = 1\n').has_verdict
             return
         run = DeepGym(mode='local').run(env, 'x = 1\n')
+        assert (run.has_verdict, run.score, run.error_type) == (True, 0.0, 'solution_error')
+
+    @pytest.mark.parametrize('mode', ['body', 'verify_function'])
+    @pytest.mark.parametrize(
+        'extra',
+        [
+            '"cases": [{"passed": True, "score": value}]',
+            '"cases": [value]',
+            '"reward_components": {"style": value}',
+        ],
+        ids=['case_score', 'bare_case', 'component'],
+    )
+    @pytest.mark.parametrize('consulted', [False, True], ids=['own_constant', 'after_the_solution'])
+    def test_an_invalid_sub_score_is_the_solutions_once_it_ran(
+        self, mode: str, extra: str, consulted: bool
+    ) -> None:
+        """A NaN sub-score under a valid overall score can't mask the solution's 0."""
+        value = 'load_solution(solution_path).answer()' if consulted else 'float("nan")'
+        body = (
+            '    from deepgym_solution import load_solution\n'
+            f'    value = {value}\n'
+            f'    return {{"score": 1.0, "passed": True, {extra}}}\n'
+        )
+        if mode == 'verify_function':
+            body = f'def verify(solution_path, test_cases_path=None):\n{body}'
+        else:
+            body = body.replace('\n    ', '\n').removeprefix('    ')
+        env = Environment(task='t', verifier_code=body, verifier_mode=mode)
+        solution = 'def answer():\n    return float("nan")\n'
+
+        if not consulted:  # the verifier's own constant: no verdict
+            with pytest.raises(InvalidScoreError):
+                DeepGym(mode='local').run(env, solution)
+            return
+        run = DeepGym(mode='local').run(env, solution)
         assert (run.has_verdict, run.score, run.error_type) == (True, 0.0, 'solution_error')
 
     @pytest.mark.parametrize(

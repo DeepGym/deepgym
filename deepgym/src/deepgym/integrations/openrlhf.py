@@ -29,18 +29,19 @@ only way OpenRLHF drops samples is ``--algo.dynamic_filtering_enable``, which dr
 prompt's whole group when the mean of its scores falls outside
 ``--algo.dynamic_filtering_range``; a NaN always does.
 
-So the endpoint never fails a request over a run. A judged run gets its score. A run
-without a verdict for a reason the model may have caused (the verifier failed, the run
-timed out, the sandbox broke) scores 0 in either mode, with a warning, and is never run
-again. A run the sandbox provider or the network failed (see
+So the endpoint never fails a request over a run. A judged run gets its score, and the
+model's own failures (a solution that crashed, hung or broke its sandbox) are judged 0s.
+A run the sandbox provider or the network failed (see
 :func:`~deepgym.exceptions.is_infrastructure_failure`) is graded once more after a short
-pause. Every run, first or repeated, takes one of the router's ``max_parallel`` slots,
-and no request waits past 150 s, inside the 180 s OpenRLHF gives it; a first run still
-going then scores 0, since the model's code may be what slows it. If the second grading
-fails too, can't start in time or is still going then, or the first one never started,
-or a query doesn't contain its prompt, the sample is rewarded the router's
-``infra_failure_score``, never a score from a run that didn't finish. The router has no
-default for it, so the choice is made when it's set up, where no policy can reach it:
+pause; any other run without a verdict (a verifier that failed before judging, say) is
+never run again. Every run, first or repeated, takes one of the router's
+``max_parallel`` slots, and no request waits past 150 s, inside the 180 s OpenRLHF gives
+it; a first run still going then scores 0, since the model's code may be what slows it
+(a NaN would let slow code dodge its 0). A sample left without a verdict otherwise,
+because its grading failed or never started, or because its query doesn't contain its
+prompt, is rewarded the router's ``infra_failure_score``, never a score from a run that
+didn't finish. The router has no default for it, so the choice is made when it's set
+up, where no policy can reach it:
 
 - ``'nan'`` (recommended): NaN, so dynamic filtering drops the sample's group. It needs
   ``--algo.dynamic_filtering_enable``: without it OpenRLHF trains on the NaN and the run
@@ -190,9 +191,9 @@ def _grade(dg: DeepGym, env: Environment, code: str, deadline: float) -> RunResu
     A run the provider or the network failed (see
     :func:`~deepgym.exceptions.is_infrastructure_failure`), or one whose slot came after
     *deadline* (``time.monotonic``), which then doesn't start, comes back as its error_type:
-    there is no score to give. Anything else the model may have caused, so it comes back as
-    a result without a verdict, scored 0: a run that raised for any other reason, or one
-    that ended after *deadline* (the model's code may be what slowed it).
+    there is no score to give, but a second grading may give one. A run that raised for any
+    other reason comes back as a result without a verdict, and is never graded again; one
+    that ended after *deadline* comes back as :func:`_unfinished`.
     """
     if time.monotonic() >= deadline:
         return DEADLINE_EXCEEDED
@@ -255,8 +256,8 @@ def create_openrlhf_router(
     Args:
         env: The environment every response is scored with.
         dg: The DeepGym client that scores them.
-        infra_failure_score: Required. The reward of a sample DeepGym couldn't grade
-            through no fault of the model: ``'nan'`` (recommended, with OpenRLHF's dynamic
+        infra_failure_score: Required. The reward of a sample DeepGym couldn't grade,
+            one without a verdict: ``'nan'`` (recommended, with OpenRLHF's dynamic
             filtering) or ``'zero'`` (see the module docstring).
         max_parallel: Most runs going at once across every request, first gradings and
             second ones alike.
@@ -266,8 +267,8 @@ def create_openrlhf_router(
     """
     if infra_failure_score not in ('nan', 'zero'):
         raise ValueError(
-            "Choose infra_failure_score, the reward of a sample DeepGym couldn't grade because "
-            "the sandbox provider or the network failed (OpenRLHF can't skip a sample): 'nan' "
+            "Choose infra_failure_score, the reward of a sample DeepGym couldn't grade, one "
+            "without a verdict (OpenRLHF can't skip a sample): 'nan' "
             '(recommended) drops its prompt group, and needs --algo.dynamic_filtering_enable, '
             "without which the NaN breaks training; 'zero' trains on it as a failed answer, "
             'an accepted leak that is logged and counted toward the masked-rate warning.'
@@ -297,19 +298,16 @@ def create_openrlhf_router(
         error_types: list[str | None] = []
         for i in range(len(responses)):
             outcome = outcomes.get(i, PROMPT_MISMATCH)
-            masked.record(masked=isinstance(outcome, str))
-            if isinstance(outcome, str):
-                logger.warning('OpenRLHF: no verdict (%s); rewarded %s', outcome, fallback)
-                rewards.append(fallback)
-                error_types.append(outcome)
-                continue
-            if not outcome.has_verdict:
-                logger.warning(
-                    'OpenRLHF: no verdict (%s), maybe the model output; rewarded 0',
-                    outcome.error_type,
-                )
-            rewards.append(outcome.score if outcome.has_verdict else 0.0)
-            error_types.append(outcome.error_type)
+            error_type = outcome if isinstance(outcome, str) else outcome.error_type
+            judged = isinstance(outcome, RunResult) and outcome.has_verdict
+            # A run still going at the deadline scores 0: the model's code may be the cause.
+            unfinished = isinstance(outcome, RunResult) and error_type == DEADLINE_EXCEEDED
+            masked.record(masked=not (judged or unfinished))
+            reward = outcome.score if judged else 0.0 if unfinished else fallback
+            if not judged:
+                logger.warning('OpenRLHF: no verdict (%s); rewarded %s', error_type, reward)
+            rewards.append(reward)
+            error_types.append(error_type)
         body = OpenRLHFRewardResponse(rewards=rewards, error_types=error_types)
         # FastAPI's own rendering writes a NaN as null, or refuses it, by version.
         return Response(body.model_dump_json(), media_type='application/json')

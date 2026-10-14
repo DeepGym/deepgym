@@ -401,3 +401,12 @@ def test_no_attacks_is_never_robust() -> None:
     env = Environment(task='Anything', verifier_code='return 0.0\n')
 
     assert not AdversarialReport.from_results(env, []).is_robust
+
+
+def test_an_unknown_strategy_is_rejected_before_any_attack_runs(dg: DeepGym) -> None:
+    """A misspelt strategy used to run a no-op and report the verifier robust."""
+    tester = AdversarialTester(dg)
+    tester._execute_attack = lambda *args: pytest.fail('an attack ran')
+
+    with pytest.raises(ValueError, match='overlfow'):
+        tester.test(Environment(task='t', verifier_code=ROBUST_VERIFIER), ['empty', 'overlfow'])

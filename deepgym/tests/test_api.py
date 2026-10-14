@@ -262,6 +262,13 @@ class TestAuditEndpoints:
         assert data['verifier_id'] == env_id
         assert data['exploitable'] is True
 
+    def test_audit_rejects_an_unknown_strategy(self, client: TestClient) -> None:
+        payload = {
+            'environment': {'task': 'Do anything', 'verifier_code': STANDALONE_PASSING_VERIFIER},
+            'strategies': ['overlfow'],
+        }
+        assert client.post('/v1/audit/verifier', json=payload).status_code == 422
+
 
 class TestBenchmarkAuditEndpoint:
     """Test benchmark split leakage auditing for registered environments."""

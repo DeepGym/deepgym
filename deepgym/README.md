@@ -207,9 +207,9 @@ app.include_router(create_openrlhf_router(
 # OpenRLHF: --remote_rm_url http://localhost:8000/reward/score --algo.dynamic_filtering_enable
 ```
 
-OpenRLHF can't skip a sample, so `infra_failure_score` decides what a sample gets when the
-provider or the network failed it: `'nan'` (dynamic filtering then drops its group) or
-`'zero'`. Other runs without a verdict score 0. More in [OpenRLHF][openrlhf].
+OpenRLHF can't skip a sample, so `infra_failure_score` decides what a sample DeepGym
+couldn't grade gets: `'nan'` (dynamic filtering then drops its group) or `'zero'`. More in
+[OpenRLHF][openrlhf].
 
 ### Evaluate with lm-evaluation-harness
 

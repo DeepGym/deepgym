@@ -71,17 +71,27 @@ def test_float_noise_is_clamped(dg: DeepGym, make_env) -> None:
     assert result.score == 1.0
 
 
-def test_non_finite_reward_components_become_zero(dg: DeepGym) -> None:
-    env = _script('0.5', '{"good": 0.5, "nan": float("nan"), "inf": float("inf")}')
-    result = dg.run(env, '')
-    assert result.reward_components == {'good': 0.5, 'nan': 0.0, 'inf': 0.0}
-    shaped = make_dapo_shaped_reward_fn(env, dg, component='nan')
-    assert shaped(completions=['']) == [0.0]
+@pytest.mark.parametrize('bad', ['float("nan")', 'float("inf")'])
+def test_non_finite_reward_components_void_the_verdict(dg: DeepGym, bad: str) -> None:
+    """A valid overall score never vouches for a broken component: no trainable 0."""
+    env = _script('1.0', f'{{"good": 0.5, "bad": {bad}}}')
+    with pytest.raises(InvalidScoreError):
+        dg.run(env, '')
+    (result,) = dg.run_batch(env, ['']).results
+    assert (result.has_verdict, result.error_type) == (False, 'invalid_score')
+    assert make_dapo_shaped_reward_fn(env, dg, component='bad')(completions=['']) == [None]
 
 
-def test_invalid_case_score_fails_that_case() -> None:
-    case = CaseResult(id='c', passed=True, score=float('nan'))
-    assert (case.score, case.passed) == (0.0, False)
+@pytest.mark.parametrize('score', ['float("nan")', '-1', '7.5'])
+def test_invalid_case_scores_void_the_verdict(dg: DeepGym, score: str) -> None:
+    case = f'{{"passed": True, "score": {score}}}'
+    env = Environment(
+        task='t', verifier_code=f'return {{"score": 1.0, "passed": True, "cases": [{case}]}}\n'
+    )
+    with pytest.raises(InvalidScoreError):
+        dg.run(env, '')
+    with pytest.raises(InvalidScoreError):
+        CaseResult(id='c', passed=True, score=float('nan'))
 
 
 @pytest.mark.parametrize('value', [math.nan, math.inf, -math.inf, -1, 7.5, 'abc'])

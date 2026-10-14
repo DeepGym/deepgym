@@ -10,6 +10,7 @@ from pathlib import Path
 import pytest
 
 from deepgym.core import DeepGym
+from deepgym.exceptions import InvalidScoreError
 from deepgym.gym import DeepGymEnv, GymInfo
 from deepgym.integrations.reward import RewardFunction
 from deepgym.models import (
@@ -61,10 +62,10 @@ class TestCaseResultModel:
         assert tc.input_summary == 'coins=[1,5], amount=11'
 
     @pytest.mark.parametrize('score', [-0.1, 1.1, float('nan')])
-    def test_invalid_score_fails_the_case(self, score: float) -> None:
-        """An invalid case score marks the case failed with score 0 instead of crashing."""
-        case = CaseResult(passed=True, score=score)
-        assert (case.score, case.passed) == (0.0, False)
+    def test_invalid_score_is_rejected(self, score: float) -> None:
+        """An invalid case score is a verifier bug, never a trainable 0."""
+        with pytest.raises(InvalidScoreError):
+            CaseResult(passed=True, score=score)
 
     def test_failed_case_without_score_gets_no_credit(self) -> None:
         """A failed case scores 0 unless the verifier gave it an explicit partial score."""

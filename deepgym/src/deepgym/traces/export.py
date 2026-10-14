@@ -8,12 +8,14 @@ Row shapes (``rows=``):
 * ``rl``: one conversation per trace, for SFT and RL trainers. ``messages`` concatenates
   the model messages recorded at each step (TRL's conversational format, the
   ``messages`` key of verl's multi-turn SFT dataset), with token ids and logprobs where
-  recorded; ``reward`` and ``passed`` come from the final verifier; ``step_rewards``
-  are the step verifier's scores (null where none ran). ``steps`` holds every action in
-  order with what it produced (text, base64 PNG screenshot, done flag, exit code, or the
-  error if nothing), its step reward, and ``message_index``: where in ``messages`` the
-  reply that produced it is, shared by the actions of one turn. A trace with a turn that
-  has no model messages has no whole conversation to train on and is skipped.
+  recorded; ``initial_observation`` and ``initial_screenshot`` (base64 PNG) are what
+  the episode showed before the first action; ``reward`` and ``passed`` come from the
+  final verifier; ``step_rewards`` are the step verifier's scores (null where none
+  ran). ``steps`` holds every action in order with what it produced (text, base64 PNG
+  screenshot, done flag, exit code, or the error if nothing), its step reward, and
+  ``message_index``: where in ``messages`` the reply that produced it is, shared by the
+  actions of one turn. A trace with a turn that has no model messages has no whole
+  conversation to train on and is skipped.
 
 Every row carries ``has_verdict``, and its ``score``/``reward`` and ``passed`` are null
 without one, so a failed sandbox or verifier never reads as a scored 0. ``only_valid``
@@ -61,6 +63,7 @@ def rl_row(trace: Trace) -> Row | None:
         return None
     verdict = trace.result if trace.has_verdict else None
     provenance = trace.provenance
+    start = trace.initial_observation
     messages: list[JsonValue] = []
     steps: list[JsonValue] = []
     for step in trace.steps:
@@ -84,6 +87,8 @@ def rl_row(trace: Trace) -> Row | None:
         'agent': provenance.agent.name,
         'model': provenance.agent.model,
         'messages': messages,
+        'initial_observation': None if start is None else start.content,
+        'initial_screenshot': None if start is None else start.screenshot,
         'reward': None if verdict is None else verdict.score,
         'passed': None if verdict is None else verdict.passed,
         'step_rewards': [step.reward for step in trace.steps],
@@ -236,6 +241,8 @@ def _schema(rows: RowShape) -> pa.Schema:
         ('agent', pa.string()),
         ('model', pa.string()),
         ('messages', pa.list_(message)),
+        ('initial_observation', pa.string()),
+        ('initial_screenshot', pa.string()),
         ('reward', pa.float64()),
         ('passed', pa.bool_()),
         ('step_rewards', pa.list_(pa.float64())),

@@ -165,6 +165,16 @@ def test_export_refuses_envs_it_cannot_express(tmp_path: Path, env: Environment)
         export_environment(env, tmp_path)
 
 
+@pytest.mark.parametrize('image', [None, 'python:3.12-slim'])
+def test_export_refuses_a_snapshot_runtime(tmp_path: Path, image: str | None) -> None:
+    """Its dependencies would silently vanish from a plain image."""
+    env = load_environment('two_sum').model_copy(update={'snapshot': 'numpy-env', 'image': image})
+
+    with pytest.raises(DeepGymError, match='snapshot'):
+        export_environment(env, tmp_path)
+    assert not (tmp_path / 'two_sum').exists()
+
+
 def test_export_never_overwrites(tmp_path: Path) -> None:
     env = load_environment('two_sum')
     export_environment(env, tmp_path)

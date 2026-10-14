@@ -16,7 +16,7 @@ from fastapi.testclient import TestClient
 
 from deepgym.async_core import AsyncDeepGym
 from deepgym.core import DeepGym
-from deepgym.exceptions import NoVerdictError, SandboxError, VerifierError
+from deepgym.exceptions import InvalidScoreError, NoVerdictError, SandboxError, VerifierError
 from deepgym.exceptions import TimeoutError as DeepGymTimeout
 from deepgym.integrations import openrlhf
 from deepgym.integrations import verl as verl_module
@@ -469,7 +469,8 @@ def _post(
 class _ScriptedDeepGym(DeepGym):
     """A client that runs nothing: each run of an output does the next step of its script.
 
-    A step that is an exception is raised; a number is seconds to wait before judging.
+    A step that is an exception is raised, a RunResult returned; a number is seconds to
+    wait before judging.
     Every run first waits *seconds*. A judged output scores 1.0 if it says 'right', else
     0.0. The client records each run's output, the most runs going at once, and when the
     first run started.
@@ -498,6 +499,8 @@ class _ScriptedDeepGym(DeepGym):
             time.sleep(self.seconds)
             if isinstance(step, BaseException):
                 raise step
+            if isinstance(step, RunResult):
+                return step
             time.sleep(step)
             judged = 'right' in model_output
             return RunResult(
@@ -601,7 +604,8 @@ class TestOpenRLHFIntegration:
     def test_failures_the_model_triggers_never_fail_the_request(self, local_dg: DeepGym) -> None:
         """A failed request stops OpenRLHF's training step, so no output may cause one.
 
-        The verifier crashes on 'boom', and the last query lost its prompt: each scores 0.
+        The verifier reports its own error on 'boom', and the last query lost its prompt:
+        neither has a verdict, so each gets the infrastructure score (0 here).
         """
         payload = {
             'prompts': [OPENRLHF_PROMPT] * 3,
@@ -615,13 +619,59 @@ class TestOpenRLHFIntegration:
             'error_types': [None, 'runtime_error', 'prompt_mismatch'],
         }
 
-    def test_only_provider_failures_get_nan(self, local_dg: DeepGym) -> None:
-        """NaN drops the sample's group; a verifier the model's output broke must score 0."""
+    def test_a_verifier_error_gets_nan_not_a_trainable_zero(self, local_dg: DeepGym) -> None:
+        """No verdict is never a failed answer: NaN drops the sample's group."""
         payload = {'prompts': ['p'], 'outputs': ['boom']}
 
         data = _post(MIXED, local_dg, payload, infra_failure_score='nan')
 
-        assert data == {'rewards': [0.0], 'error_types': ['runtime_error']}
+        assert math.isnan(data['rewards'][0])
+        assert data['error_types'] == ['runtime_error']
+
+    def test_no_failure_is_rewarded_above_zero(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Every output says 'right', yet each run fails: none may earn more than 0.
+
+        Failures without a verdict (provider, invalid score, verifier) get NaN; the model's
+        own judged failure and a run still going at the deadline score 0.
+        """
+        monkeypatch.setattr(openrlhf, '_RETRY_DELAY_S', 0.0)
+        monkeypatch.setattr(openrlhf, '_REQUEST_BUDGET_S', 0.5)
+        fault = RunResult(
+            score=0.0,
+            passed=False,
+            output='',
+            stderr='',
+            exit_code=1,
+            execution_time_ms=0.0,
+            sandbox_id='fake',
+            error_type='solution_error',
+        )
+        script: dict[str, list[BaseException | float | RunResult]] = {
+            'right outage': [ConnectionError('down'), ConnectionError('down')],
+            'right invalid': [InvalidScoreError('score nan')],
+            'right verifier': [VerifierError('no JSON')],
+            'right fault': [fault],
+            'right slow': [2.0],
+        }
+        outputs = list(script)
+
+        data = _post(
+            MIXED, _ScriptedDeepGym(script), {'prompts': outputs, 'outputs': outputs}, 'nan'
+        )
+
+        rewards = dict(zip(outputs, data['rewards']))
+        assert not any(reward > 0 for reward in rewards.values())
+        assert [math.isnan(rewards[o]) for o in outputs] == [True, True, True, False, False]
+        assert (rewards['right fault'], rewards['right slow']) == (0.0, 0.0)
+
+    def test_a_judged_model_fault_scores_zero_even_with_nan(self, local_dg: DeepGym) -> None:
+        """The model's own failure has a verdict, so it can't dodge its 0 as a NaN."""
+        verdict = {'score': 0.0, 'passed': False, 'error_type': 'solution_error'}
+        env = Environment(task='t', verifier_code=f'return {verdict!r}\n')
+
+        data = _post(env, local_dg, {'prompts': ['p'], 'outputs': ['x']}, infra_failure_score='nan')
+
+        assert data == {'rewards': [0.0], 'error_types': ['solution_error']}
 
     @pytest.mark.parametrize(
         'failure',
@@ -654,10 +704,10 @@ class TestOpenRLHFIntegration:
         ],
         ids=['sandbox_killed', 'hung', 'verifier_failed', 'sdk_cancelled'],
     )
-    def test_a_failure_the_model_may_have_caused_is_never_graded_again(
+    def test_a_failure_other_than_the_providers_is_never_graded_again(
         self, monkeypatch: pytest.MonkeyPatch, failure: BaseException
     ) -> None:
-        """It scores 0, even with NaN asked for: a second grading could hand it a pass.
+        """It has no verdict, so NaN, never a trainable 0; a second grading could hand it a pass.
 
         So does asyncio's CancelledError, which a provider SDK running its own event loop can
         raise and which isn't an Exception: it never fails the request.
@@ -667,7 +717,7 @@ class TestOpenRLHFIntegration:
 
         data = _post(MIXED, dg, {'prompts': ['p'], 'outputs': ['right']}, infra_failure_score='nan')
 
-        assert data['rewards'] == [0.0]
+        assert math.isnan(data['rewards'][0])
         assert dg.calls == ['right']
 
     @pytest.mark.parametrize('infra_failure_score', ['zero', 'nan'])

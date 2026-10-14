@@ -29,13 +29,28 @@ ResolvedMode = Literal['script', 'verify_function', 'body']
 
 _REPORT = textwrap.dedent('''\
     import json as _dg_json
+    import math as _dg_math
     import os as _dg_os
     import sys as _dg_sys
     import traceback as _dg_traceback
 
 
     class _DgInvalidScore(ValueError):
-        """The verifier returned NaN, inf, or a score outside [0, 1]."""
+        """The verifier returned NaN, inf, or a score or case score outside [0, 1]."""
+
+
+    def _dg_sub_score(value, what, bounded):
+        """*value* as a float: a finite number, within [0, 1] (up to float noise) if *bounded*.
+
+        The float is what gets printed, so the host never reads the value differently.
+        """
+        try:
+            number = float(value)
+        except (TypeError, ValueError):
+            raise _DgInvalidScore(f"{what} {value!r} is not a number") from None
+        if not _dg_math.isfinite(number) or bounded and not -1e-6 <= number <= 1 + 1e-6:
+            raise _DgInvalidScore(f"invalid {what} {value!r}")
+        return number
 
 
     def _dg_report(run):
@@ -83,6 +98,18 @@ _REPORT = textwrap.dedent('''\
             # Clamp only float noise. NaN fails this check too; never turn it into reward.
             if not -1e-6 <= output["score"] <= 1 + 1e-6:
                 raise _DgInvalidScore(f"invalid score {output['score']!r}; must be in [0, 1]")
+            # Sub-scores too, as the host checks them, so one the solution's output made
+            # invalid is its judged 0 here rather than a run with no verdict there.
+            for case in output.get("cases") or ():
+                if not isinstance(case, dict):
+                    raise _DgInvalidScore(f"case {case!r} is not an object")
+                if "score" in case:
+                    case["score"] = _dg_sub_score(case["score"], "case score", True)
+            if output.get("reward_components") is not None:
+                output["reward_components"] = {
+                    name: _dg_sub_score(value, f"reward component {name!r}", False)
+                    for name, value in output["reward_components"].items()
+                }
             output["score"] = max(0.0, min(1.0, output["score"]))
             output.setdefault("truncated", False)
             # A line of its own, even after a partial line the verifier left unterminated.

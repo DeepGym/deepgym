@@ -9,7 +9,7 @@ from deepgym.core import DeepGym
 from deepgym.exploit_db import ExploitDB
 from deepgym.models import Environment
 from deepgym.reward_qa import RewardAuditor, fingerprint_verifier
-from tests.test_adversarial import CRASHING_VERIFIER
+from tests.test_adversarial import CRASHING_VERIFIER, ROBUST_VERIFIER
 
 STANDALONE_PASSING_VERIFIER = (
     'import sys, json\n'
@@ -70,6 +70,30 @@ class TestRewardAuditor:
         db = ExploitDB(db_path=db_path)
         try:
             assert (report.stored, db.get('flaky', benchmark='custom')) == (False, None)
+        finally:
+            db.close()
+
+    def test_an_inconclusive_retest_of_a_changed_verifier_drops_its_old_result(
+        self, tmp_path: Path, dg: DeepGym
+    ) -> None:
+        """The old verifier's robust result must not stand in for the changed one."""
+        db_path = tmp_path / 'audits.db'
+        auditor = RewardAuditor(dg)
+        reports = [
+            auditor.audit(
+                Environment(task='Write compute(a, b).', verifier_code=verifier),
+                verifier_id='v',
+                strategies=['empty'],
+                persist=True,
+                db_path=db_path,
+            )
+            for verifier in (ROBUST_VERIFIER, CRASHING_VERIFIER)
+        ]
+
+        assert [report.status for report in reports] == ['robust', 'inconclusive']
+        db = ExploitDB(db_path=db_path)
+        try:
+            assert db.get('v', benchmark='custom') is None
         finally:
             db.close()
 

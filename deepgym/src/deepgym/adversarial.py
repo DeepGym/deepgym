@@ -22,7 +22,7 @@ import logging
 import os
 import re
 import textwrap
-from typing import TYPE_CHECKING, Literal
+from typing import TYPE_CHECKING, Literal, get_args
 
 from pydantic import BaseModel, Field
 
@@ -38,7 +38,7 @@ logger = logging.getLogger(__name__)
 # Default attack strategies
 # ---------------------------------------------------------------------------
 
-DEFAULT_STRATEGIES: list[str] = [
+AttackStrategy = Literal[
     'empty',
     'hardcoded',
     'trivial',
@@ -47,6 +47,7 @@ DEFAULT_STRATEGIES: list[str] = [
     'patch_tampering',
     'llm_attack',
 ]
+DEFAULT_STRATEGIES: list[str] = list(get_args(AttackStrategy))
 
 PASS_THRESHOLD: float = 0.5  # score above this ⇒ exploit found
 
@@ -361,8 +362,16 @@ class AdversarialTester:
         Returns
         -------
         AdversarialReport
+
+        Raises
+        ------
+        ValueError
+            If a strategy isn't one of :data:`DEFAULT_STRATEGIES`; nothing runs.
         """
         strategies = strategies or list(DEFAULT_STRATEGIES)
+        # A misspelt strategy would run nothing and still read as robust.
+        if unknown := sorted(set(strategies) - set(DEFAULT_STRATEGIES)):
+            raise ValueError(f'Unknown attack strategies {unknown}; known: {DEFAULT_STRATEGIES}')
         results: list[AttackResult] = []
 
         for strategy in strategies:
@@ -417,7 +426,7 @@ class AdversarialTester:
         elif strategy == 'llm_attack':
             return self._attack_llm(env)
         else:
-            return f'# Unknown strategy: {strategy}\npass\n'
+            raise ValueError(f'Unknown attack strategy {strategy!r}')
         body = _ENTRY_POINT_BODIES[strategy]
         return code + ''.join(
             f'\n\ndef {name}(*args, **kwargs):\n    {body}\n' for name in entry_points(env)

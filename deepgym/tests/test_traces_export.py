@@ -184,6 +184,12 @@ class TestExporters:
         (row,) = _rows(tmp_path / f'rl.{fmt}', fmt)
         assert [step['screenshot'] for step in row['steps']] == [shot, None, None]
         assert [step['done'] for step in row['steps']] == [False, None, True]
+        # The screenshot the first action answered to.
+        start = trace.initial_observation
+        assert (row['initial_observation'], row['initial_screenshot']) == (
+            start.content,
+            start.screenshot,
+        )
 
     def test_only_valid_drops_unjudged_traces(self, tmp_path: Path) -> None:
         out = tmp_path / 'valid.jsonl'

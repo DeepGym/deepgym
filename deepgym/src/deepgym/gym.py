@@ -6,7 +6,7 @@ Provide the standard RL API that all training frameworks expect::
     obs = env.reset()
     obs, reward, done, info = env.step(action)
 
-Compatible with: OpenEnv, ARES, Gymnasium, TRL, Unsloth, verl, OpenRLHF.
+Compatible with: OpenEnv, ARES, Gymnasium, TRL, verl, OpenRLHF.
 """
 
 from __future__ import annotations

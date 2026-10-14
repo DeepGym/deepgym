@@ -69,9 +69,10 @@ provider such as `mode='docker'`; nothing else changes.
   flag, and optionally each test case with a reason. It reaches the answer only through
   the `deepgym_solution` helpers, which run it in a separate, isolated process with no
   network.
-- **Sandbox providers:** where answers run, picked with `mode`. In every sandbox mode the
-  answer runs as a separate Linux user with no network; Docker shares the host's kernel,
-  so it isolates less than the VM-based providers.
+- **Sandbox providers:** where answers run, picked with `mode`. In every sandbox mode, code
+  run through the `deepgym_solution` helpers and shell sessions runs as a separate Linux
+  user with no network; repo-patch tests run the patched code as root inside the sandbox.
+  Docker shares the host's kernel, so it isolates less than the VM-based providers.
 
   | `mode` | Runs on | Setup |
   |---|---|---|
@@ -110,8 +111,8 @@ More in [core concepts][concepts] and [the reward contract][reward-contract].
 - **Multi-turn sessions:** one live sandbox per episode, from Python (`dg.session()`) or
   HTTP (`/v1/sessions`) ([sessions][sessions]).
 - **QA gate:** `deepgym qa` checks that the reference passes, empty and stub answers earn
-  nothing, no reward-hack answer reaches 0.5 and no mutant of the reference passes
-  ([QA gate][qa-gate]).
+  nothing and no reward-hack answer reaches 0.5; with `--mutants` it also checks that no
+  mutant of the reference passes ([QA gate][qa-gate]).
 - **Environment authoring:** `deepgym new`, `deepgym check` and `deepgym qa --approve`,
   from an idea to an approved environment folder ([authoring][authoring],
   [approvals][approvals]).
@@ -206,9 +207,9 @@ app.include_router(create_openrlhf_router(
 # OpenRLHF: --remote_rm_url http://localhost:8000/reward/score --algo.dynamic_filtering_enable
 ```
 
-OpenRLHF can't skip a sample, so `infra_failure_score` decides what one DeepGym couldn't
-grade gets: `'nan'` (dynamic filtering then drops its group) or `'zero'`. More in
-[OpenRLHF][openrlhf].
+OpenRLHF can't skip a sample, so `infra_failure_score` decides what a sample gets when the
+provider or the network failed it: `'nan'` (dynamic filtering then drops its group) or
+`'zero'`. Other runs without a verdict score 0. More in [OpenRLHF][openrlhf].
 
 ### Evaluate with lm-evaluation-harness
 
@@ -409,7 +410,7 @@ verl loads DeepGym's reward function with one config line (see
 | What it is | RL training framework | RL environments and verifiable rewards |
 | Does the training | Yes: rollouts on vLLM/SGLang, updates on FSDP/Megatron, PPO, GRPO, DAPO and more | No, it plugs into verl, TRL, OpenRLHF or your own loop |
 | Tasks | You bring the dataset and write the reward function | 31 built-in environments; importers for HumanEval, MBPP, EvalPlus, BigCodeBench, SWE-bench Pro, MiMo, CyberGym and Harbor datasets such as Terminal-Bench 2.0 |
-| Running model code | Your reward function, or a remote code sandbox service | Every run in a sandbox: Daytona, Modal, E2B, Docker, Apple container, or locally under sandbox-exec/bwrap |
+| Running model code | Your reward function, or a remote code sandbox service | Daytona, Modal, E2B, Docker, Apple container, or locally under sandbox-exec/bwrap (without them, local runs get process separation and a warning) |
 | Reward hacking | Up to your reward function | The solution runs apart from the verifier with no network, so it can't read the expected answers or print a fake score; `deepgym qa` checks that empty and stub solutions earn nothing and reward-hack ones stay below 0.5 before you train |
 | Multi-turn agents | Agent loop and tool interface | One live sandbox per episode (shell or desktop), with a verl agent loop and session tool |
 | Computer use | Not built in | Desktop tasks, scored on the state the agent leaves behind |

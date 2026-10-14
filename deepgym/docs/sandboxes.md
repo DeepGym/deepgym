@@ -63,8 +63,10 @@ the VM-based providers (Apple container, E2B, Daytona).
 Every sandbox mode applies the boundaries below, for single runs and shell sessions. Use
 one for anything shared or untrusted.
 
-- **Single runs:** the answer runs as a separate Linux user that can't read the judge's
-  files, touch the judge's process, or write to its output, with no network. Only plain
+- **Single runs:** an answer run through the `deepgym_solution` helpers runs as a separate
+  Linux user that can't read the judge's files, touch the judge's process, or write to its
+  output, with no network. Repo-patch tests (SWE-bench Pro, MiMo) run the patched code as
+  root inside the sandbox. Only plain
   data crosses back to the verifier (see [verifiers](authoring/verifiers.md)).
 - **Sessions:** agent commands run as an unprivileged user in a loopback-only network
   namespace, and verifiers as another user, from a file only that user can read (see

@@ -30,7 +30,10 @@ Never import or run the solution yourself. Use the helpers in `deepgym_solution`
 
 - `load_solution(path)` starts it in a separate, isolated process and returns a proxy:
   `sol.add(2, 3)` runs there and returns plain data.
-- `run_solution(path, cwd=..., env=...)` runs it as a script, writing only inside `cwd`.
+- `run_solution(path, cwd=..., env=...)` runs it as a script and returns a
+  `subprocess.CompletedProcess`; check its `returncode`. Locally it can write only inside
+  `cwd`; in a sandbox it runs as the solver user, which can still write world-writable
+  paths.
   Pass `allow_subprocess=True` if the script needs to start other programs (macOS blocks
   forking otherwise), and `loopback_port=port` to let it reach a server the verifier runs
   on `127.0.0.1:port` (nothing else on the network).
@@ -41,8 +44,8 @@ Never import or run the solution yourself. Use the helpers in `deepgym_solution`
   `load_files(files, entry)` imports the result like `load_solution`. Together they score
   repo-patch answers.
 
-Whatever the solution does (raise, exit, hang, die, return garbage) reaches the verifier
-as a `deepgym_solution.SolutionError`, still of the builtin type the solution raised, so
+Whatever a `load_solution` call does (raise, exit, hang, die, return garbage) reaches the
+verifier as a `deepgym_solution.SolutionError`, still of the builtin type the solution raised, so
 `except ValueError` keeps working. If the verifier doesn't handle it, the run is a judged
 0 (`solution_error`, or `solution_timeout` for a hang past the time limit), not a verifier
 error, so a solution can't dodge its score by breaking the verifier. Load test data before
@@ -55,7 +58,9 @@ solution code has run, the same failure is the solution's (it may have used up t
 or processes) and reaches the verifier as a `SolutionError`.
 
 Each call is bounded by `case_timeout` (default 10 s) and by the run's `timeout` (default
-30 s), so a slow case fails on its own and the run still returns partial credit.
+30 s); loading the solution has its own 30 s limit. A slow case raises a `SolutionError`
+that is a `TimeoutError`: catch it per case to keep partial credit, since an uncaught one
+makes the whole run a judged 0.
 
 ## Isolation
 

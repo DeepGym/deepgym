@@ -91,8 +91,8 @@ that use these helpers; `deepgym check` warns about ones that don't, but can't p
 
 The verifier can report each test case with a reason (`cases`), which gives a trainer a
 denser signal than pass or fail; one that returns a bare float or bool reports none. Its
-exit code backs the result: 0 passed, 1 failed, 2 verifier error. Verifiers are seeded,
-so the same answer gets the same score, and `deepgym qa` checks that. See
+exit code backs the result: 0 passed, 1 failed, 2 verifier error. Built-in verifiers use
+fixed seeds, so the same answer gets the same score; seed your own verifiers the same way. See
 [writing verifiers](authoring/verifiers.md).
 
 ## Sandbox providers
@@ -106,8 +106,8 @@ otherwise local; it also falls back to local, with only a warning, if
 dg = DeepGym(mode='docker')   # same for AsyncDeepGym and dg.session()
 ```
 
-- In every sandbox mode, for single runs and shell sessions, the answer runs as a
-  separate Linux user that can't read the judge's files, touch its process or reach the
+- In every sandbox mode, for answers run through the `deepgym_solution` helpers and for
+  shell sessions, the answer runs as a separate Linux user that can't read the judge's files, touch its process or reach the
   network. Docker containers share the host's kernel, so Docker isolates less than the
   VM-based providers. Use a sandbox for anything shared or untrusted.
 - `local` runs a subprocess under `sandbox-exec` (macOS) or `bwrap` (Linux). It is for

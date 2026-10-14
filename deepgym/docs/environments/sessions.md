@@ -87,7 +87,8 @@ Session verifiers that grade the agent's code load it with `load_solution` too, 
 isolated from the verifier: locally in the same sandbox as single runs, and in sandbox
 images with sudo (Daytona's default has it) as a third user, `dgsolver`, with its groups
 cleared, no-new-privs and an empty capability bounding set. Images without sudo, such as
-the default `python:3.12-slim`, have no `deepgym_solution` in sessions.
+the default `python:3.12-slim`, have no `deepgym_solution` in sessions, and neither do
+Docker sessions: Docker runs them with no-new-privileges, which blocks sudo.
 
 ## Step rewards and verdicts
 

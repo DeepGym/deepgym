@@ -97,6 +97,8 @@ class HarborEnvironment(Environment):
         start = time.perf_counter()
         env = self if self.image else self.model_copy(update={'image': self._built_image(dg)})
         agent = run_agent(dg.open_sandbox(env), self.harbor_task, model_output)
+        if isinstance(agent, RunResult):  # the agent broke its own sandbox or work directory
+            return agent
         grader = dg.open_sandbox(env)
         result = grade(grader, self.harbor_task, agent.workspace, agent.workdir)
         return build_run_result(

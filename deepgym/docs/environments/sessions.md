@@ -98,12 +98,22 @@ Docker sessions: Docker runs them with no-new-privileges, which blocks sudo.
 - A step that fails after its action may have run ends the episode: `step()` raises, the
   action stays on the trajectory with no step reward (so `step_rewards` is one shorter
   than `steps`), and `score()` returns the result that failure fixed instead of running
-  the final verifier. A provider or network failure, or a failed step verifier (bad
-  output, a timeout, exit 2, or an `error_type` that isn't the model's fault), has no
-  verdict; a failed step verifier reports `verifier_error`, or `invalid_score` for a NaN
-  or out-of-range score. Anything else follows from the agent's actions (its sandbox
-  died, a write failed, its files blocked the step's output) and scores 0 with
+  the final verifier. Only a failure that is ours for certain has no verdict
+  (`deepgym.session.failure_result`): a provider, network or auth failure, a step
+  verifier that couldn't run or failed (bad output, exit 2, an `error_type` that isn't the
+  model's fault, or a timeout before it read the agent's output), or the provider retiring
+  the sandbox at the end of its lifetime, unless the agent's own actions took at least half
+  the session's time. A failed step verifier reports `verifier_error`, or `invalid_score`
+  for a NaN or out-of-range score. Anything else follows from the agent's actions (its
+  sandbox died, a write failed, even with a disk or I/O error, since the agent can fill
+  the disk or plant a link, its files blocked the step's output) and scores 0 with
   `error_type='policy_sandbox_failure'`.
+- A step or final verifier that times out after reading the agent's output (it opened a
+  file, listed a folder or started a program in the work directory or on a file there, or
+  started the agent's code) is a judged 0 with `error_type='solution_timeout'`; for a step
+  verifier that is the step's reward, and the episode goes on. One that is killed, or
+  gives no verdict, after reading it is a judged 0 with `solution_error` (unless the
+  agent's code failed to launch), and so is a timeout whose output was lost.
 - A rejected action (not allowed, or the agent's own files in the way of a `write_file`)
   raises `ActionError` and the episode goes on.
 - `run_episode` returns the result a failed step fixed instead of raising.

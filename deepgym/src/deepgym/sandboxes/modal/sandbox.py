@@ -13,12 +13,12 @@ from collections.abc import Mapping
 
 import modal
 
-from deepgym.exceptions import SandboxDiedError
 from deepgym.sandboxes.protocol import (
     TRUSTED_PATH,
     ExecResult,
     SandboxImage,
     SandboxTimeoutError,
+    stopped_error,
 )
 
 logger = logging.getLogger(__name__)
@@ -36,6 +36,7 @@ class ModalSandbox:
     def __init__(self, image: str | None = None) -> None:
         self._image = image
         app = modal.App.lookup(APP_NAME, create_if_missing=True)
+        self._expires_at = time.monotonic() + LIFETIME_S
         self._sandbox = modal.Sandbox.create(
             'sleep', 'infinity',
             app=app,
@@ -70,6 +71,8 @@ class ModalSandbox:
         Raises:
             SandboxTimeoutError: If the command outruns *timeout* seconds.
             SandboxDiedError: If Modal terminated the sandbox during the command.
+            SandboxExpiredError: If Modal retired it at the end of its lifetime (see
+                :func:`~deepgym.sandboxes.protocol.stopped_error`).
         """
         start = time.monotonic()
         try:
@@ -82,11 +85,12 @@ class ModalSandbox:
         except modal.exception.Error as exc:
             # Modal words a stopped sandbox several ways (terminated, not found); poll() tells.
             if isinstance(exc, modal.exception.SandboxTerminatedError) or self._stopped():
-                raise SandboxDiedError(f'Modal sandbox {self.id} was terminated: {exc}') from exc
+                message = f'Modal sandbox {self.id} was terminated: {exc}'
+                raise stopped_error(message, self._expires_at) from exc
             raise
         if exit_code != 0 and self._stopped():
             message = f'Modal sandbox {self.id} was terminated: {output[-500:]}'
-            raise SandboxDiedError(message, output)
+            raise stopped_error(message, self._expires_at, output)
         # Modal kills an exec at its timeout and reports only a failed exit.
         if timeout and exit_code != 0 and time.monotonic() - start >= timeout:
             raise SandboxTimeoutError(f'command exceeded {timeout}s', output)

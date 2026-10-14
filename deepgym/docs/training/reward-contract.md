@@ -53,11 +53,18 @@ agent's work directory.
   sandbox that dies on Daytona, or in an E2B or Modal call that raises, since those
   return nothing the judge printed.
 
-In agent episodes, `deepgym.exceptions.is_infrastructure_failure(exc)` draws the line: a
-connection or transport error, a provider call timing out, a provider HTTP 5xx or 429, or
-the provider evicting the sandbox is infrastructure. A `SandboxDiedError` (the sandbox
-itself stopped) never is. Sessions, verl's multi-turn agent loop and the OpenRLHF endpoint
-use this test.
+In agent episodes, `deepgym.session.failure_result(exc, sandbox_id)` draws the line once the
+agent has acted. Only a failure that is ours for certain has no verdict: what
+`deepgym.exceptions.is_infrastructure_failure(exc)` calls infrastructure (a connection or
+transport error, a provider call timing out, a provider HTTP 5xx or 429, the provider
+refusing our credentials with 401 or 403, or the provider evicting the sandbox), a
+verifier that couldn't run or timed out before it read the agent's output, or the
+provider retiring the sandbox at the end of its lifetime (`SandboxExpiredError`), unless the
+agent's own actions took at least half the session's time. Anything else, a
+`SandboxDiedError` or a failed write included, is the agent's 0, and so is a failure the
+rule can't read. Sessions, verl's
+multi-turn agent loop and Harbor's agent phase use this rule; the OpenRLHF endpoint
+grades once more what `is_infrastructure_failure` calls infrastructure.
 
 ## What each trainer receives
 

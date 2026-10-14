@@ -17,10 +17,11 @@ refuses to run if the sandbox can't make one.
 
 from __future__ import annotations
 
+import time
 from collections.abc import Mapping
 from typing import NamedTuple, Protocol
 
-from deepgym.exceptions import TimeoutError
+from deepgym.exceptions import SandboxDiedError, SandboxError, SandboxExpiredError, TimeoutError
 
 TRUSTED_PATH = '/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin'
 """Root-owned system folders only; no agent work directory may hold or sit in them."""
@@ -62,6 +63,24 @@ class SandboxTimeoutError(TimeoutError):
         self.output = output
 
 
+def stopped_error(message: str, expires_at: float, output: str = '') -> SandboxError:
+    """Return the error for a sandbox its provider reports stopped.
+
+    From *expires_at* on (``time.monotonic()``, taken before the sandbox was created, so
+    never after the provider's own deadline), the provider retired it at the end of its
+    lifetime, whatever ran in it: :class:`~deepgym.exceptions.SandboxExpiredError`. Before
+    then something in it stopped it: :class:`SandboxDiedError`.
+
+    Args:
+        message: What happened.
+        expires_at: When the provider's lifetime for the sandbox runs out.
+        output: What the command printed first, for :class:`SandboxDiedError`.
+    """
+    if time.monotonic() >= expires_at:
+        return SandboxExpiredError(f'{message} (its provider lifetime was up)')
+    return SandboxDiedError(message, output)
+
+
 class Sandbox(Protocol):
     """A running sandbox, deleted by :meth:`delete`."""
 
@@ -92,7 +111,11 @@ class Sandbox(Protocol):
         ...
 
     def upload(self, content: bytes, path: str) -> None:
-        """Write *content* to the absolute *path* as root, creating parent directories."""
+        """Write *content* to the absolute *path* as root, creating parent directories.
+
+        Raises:
+            SandboxDiedError: If the sandbox itself has stopped.
+        """
         ...
 
     def delete(self) -> bool:

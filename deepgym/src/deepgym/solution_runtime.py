@@ -481,7 +481,10 @@ def _announce() -> None:
     mark = os.environ.get('DEEPGYM_CONSULTED')
     if mark and not _announced:
         _announced = True
-        print(f'\n{mark}', flush=True)
+        # Straight to the stdout file, past any capture of sys.stdout, after what was printed.
+        with contextlib.suppress(AttributeError, OSError, ValueError):
+            sys.__stdout__.flush()
+        os.write(1, f'\n{mark}\n'.encode())
 
 
 def consulted() -> bool:
@@ -680,8 +683,10 @@ def run_solution(
             )
             try:
                 _watch_group(proc.pid)
-                release()
+                # The mark goes out first: a solution that dies or hangs the moment it is
+                # released must not beat it and pass for one that never started.
                 _announce()
+                release()
             except BaseException:
                 _kill(proc)  # held until released, so no solution code ran
                 raise

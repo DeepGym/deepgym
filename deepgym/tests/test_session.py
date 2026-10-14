@@ -11,10 +11,17 @@ import pytest
 from pydantic import ValidationError
 
 from deepgym import AsyncDeepGym, ComputerUseEnvironment, DeepGym
-from deepgym.exceptions import ActionError, DeepGymError, SandboxError, VerifierError
+from deepgym import session as session_module
+from deepgym.exceptions import (
+    ActionError,
+    DeepGymError,
+    SandboxError,
+    SandboxExpiredError,
+    VerifierError,
+)
 from deepgym.models import Action, MultiTurnEnvironment, Observation, Trajectory
-from deepgym.sandboxes import SandboxDiedError
-from deepgym.session import Session, _signals_done, run_episode
+from deepgym.sandboxes import SandboxDiedError, SandboxTimeoutError
+from deepgym.session import Session, _signals_done, failure_result, run_episode
 
 PASS_VERIFIER = (
     'import json\n'
@@ -325,8 +332,12 @@ class TestLocalEpisodes:
 
     @pytest.mark.parametrize(
         'blocker',
-        ['mkdir _step_output.txt', 'ln -s missing_dir/output _step_output.txt'],
-        ids=['folder', 'dangling_link'],
+        [
+            'mkdir _step_output.txt',
+            'ln -s missing_dir/output _step_output.txt',
+            'mkfifo _step_output.txt',
+        ],
+        ids=['folder', 'dangling_link', 'fifo'],
     )
     def test_blocking_the_step_output_ends_the_episode_with_a_judged_zero(
         self, dg: DeepGym, blocker: str
@@ -403,9 +414,12 @@ class TestLocalEpisodes:
         assert len(trajectory.steps) == 1  # the agent blocked the harness: its own 0
         assert (result.has_verdict, result.error_type) == (True, 'policy_sandbox_failure')
 
+    @pytest.mark.parametrize('code', [errno.EIO, errno.ENOSPC, errno.EDQUOT])
     def test_a_step_output_write_that_fails_is_the_agents_zero(
-        self, dg: DeepGym, monkeypatch: pytest.MonkeyPatch
+        self, dg: DeepGym, monkeypatch: pytest.MonkeyPatch, code: int
     ) -> None:
+        """The agent can fill the disk, or plant a link the write follows, and free space
+        again before anything checks: no write failure after it acted is ours for certain."""
         env = MultiTurnEnvironment(
             task='t',
             max_steps=3,
@@ -416,19 +430,332 @@ class TestLocalEpisodes:
 
         def disk_error(path: object, *args: object, **kwargs: object) -> int:
             if str(path).endswith('_step_output.txt'):
-                raise OSError(errno.EIO, 'Input/output error')
+                raise OSError(code, os.strerror(code))
             return real_open(path, *args, **kwargs)
 
         with dg.session(env) as session:
             session.start()
             monkeypatch.setattr(os, 'open', disk_error)
-            with pytest.raises(SandboxError, match='Input/output error'):
+            with pytest.raises(SandboxError, match=os.strerror(code)):
                 session.step(Action(action_type='bash', content='echo harmless'))
             monkeypatch.undo()
             result = session.score()
-        # A failed write with no provider failure behind it follows from the agent's actions.
         assert session.done and len(session.trajectory.steps) == 1
         assert (result.has_verdict, result.error_type) == (True, 'policy_sandbox_failure')
+
+    def test_a_verifier_the_agents_output_hangs_is_its_zero(
+        self, dg: DeepGym, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A verifier stuck reading what the agent made (a FIFO) timed out on the agent."""
+        monkeypatch.setattr('deepgym.session.DEADLINE_GRACE_S', 0)
+        reads = 'print(float(open("answer.txt").read() == "42\\n"))\n'
+        env = MultiTurnEnvironment(
+            task='t',
+            max_steps=3,
+            timeout_per_step=1,
+            step_verifier_code=reads,
+            final_verifier_code=reads,
+        )
+        with dg.session(env) as session:
+            session.start()
+            answered = session.step(Action(action_type='bash', content='echo 42 > answer.txt'))
+            hung = session.step(
+                Action(action_type='bash', content='rm answer.txt; mkfifo answer.txt')
+            )
+            verdict = session.step_verdict
+            result = session.score()
+
+        assert answered.reward == 1.0  # the plain-float form still parses
+        assert (hung.reward, hung.done, verdict['error_type']) == (0.0, False, 'solution_timeout')
+        assert (result.score, result.has_verdict, result.error_type) == (
+            0.0,
+            True,
+            'solution_timeout',
+        )
+
+    def test_a_verifier_that_hangs_before_reading_the_agents_output_has_no_verdict(
+        self, dg: DeepGym, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr('deepgym.session.DEADLINE_GRACE_S', 0)
+        hangs = 'import time\ntime.sleep(30)\n'
+        step_env = MultiTurnEnvironment(
+            task='t', max_steps=3, timeout_per_step=1, step_verifier_code=hangs
+        )
+        final_env = MultiTurnEnvironment(
+            task='t', max_steps=3, timeout_per_step=1, final_verifier_code=hangs
+        )
+        with dg.session(step_env) as session:
+            session.start()
+            with pytest.raises(VerifierError, match='timed out'):
+                session.step(Action(action_type='bash', content='echo 42 > answer.txt'))
+            result = session.score()
+        with dg.session(final_env) as session:
+            session.start()
+            session.step(Action(action_type='bash', content='echo 42 > answer.txt'))
+            with pytest.raises(VerifierError, match='before it read'):
+                session.score()
+
+        assert (result.has_verdict, result.error_type) == (False, 'verifier_error')
+
+    @pytest.mark.parametrize(
+        'consults',
+        [
+            'import os\nos.listdir(".")\n',
+            'import glob\nglob.glob("**/*.txt", recursive=True)\n',
+            'import subprocess\nsubprocess.run(["true"])\n',
+            'import os, subprocess\n'
+            'subprocess.run(["cat", os.path.abspath("answer.txt")], cwd="/", stdout=-3)\n',
+            'import contextlib, io\nwith contextlib.redirect_stdout(io.StringIO()):\n'
+            '    open("answer.txt").close()\n',
+        ],
+        ids=[
+            'lists_its_folder',
+            'globs_its_folder',
+            'runs_a_program_there',
+            'runs_a_program_on_its_file',
+            'captures_stdout',
+        ],
+    )
+    def test_a_verifier_can_not_be_kept_from_marking_what_it_consulted(
+        self, dg: DeepGym, monkeypatch: pytest.MonkeyPatch, consults: str
+    ) -> None:
+        """Listing the agent's folder or running a program in it consults the agent, and
+        capturing stdout can't hide the mark: a hang after that is the agent's 0."""
+        monkeypatch.setattr('deepgym.session.DEADLINE_GRACE_S', 0)
+        hangs = consults + 'import time\ntime.sleep(30)\n'
+        env = MultiTurnEnvironment(
+            task='t', max_steps=2, timeout_per_step=1, final_verifier_code=hangs
+        )
+        with dg.session(env) as session:
+            session.start()
+            session.step(Action(action_type='bash', content='echo 42 > answer.txt'))
+            result = session.score()
+
+        assert (result.score, result.has_verdict, result.error_type) == (
+            0.0,
+            True,
+            'solution_timeout',
+        )
+
+    @pytest.mark.parametrize('stalls', [True, False], ids=['agent_stalls', 'host_pauses'])
+    def test_a_provider_lifetime_the_agent_ran_out_is_its_zero(
+        self, dg: DeepGym, monkeypatch: pytest.MonkeyPatch, stalls: bool
+    ) -> None:
+        """An expiry is ours only when the agent's own actions didn't take most of the time."""
+        env = MultiTurnEnvironment(task='t', max_steps=2, final_verifier_code=PASS_VERIFIER)
+
+        def expired(*args: object, **kwargs: object) -> None:
+            raise SandboxExpiredError('the sandbox reached its provider lifetime')
+
+        with dg.session(env) as session:
+            session.start()
+            session.step(Action(action_type='bash', content='sleep 0.6' if stalls else 'true'))
+            if not stalls:
+                time.sleep(0.6)  # the host, thinking between steps
+            monkeypatch.setattr(session._backend, 'verify', expired)
+            if stalls:
+                result = session.score()
+                assert (result.has_verdict, result.error_type) == (True, 'policy_sandbox_failure')
+            else:
+                with pytest.raises(SandboxExpiredError) as raised:
+                    session.score()
+                assert not failure_result(raised.value, session.sandbox_id).has_verdict
+
+    def test_a_verifier_reads_its_own_mark_not_one_the_agent_wrote(
+        self, dg: DeepGym, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Each run's mark is fresh and random: a mark-shaped line the verifier prints, a
+        stale mark, or an earlier run's mark can't make a hang before reading count."""
+        monkeypatch.setattr('deepgym.session.DEADLINE_GRACE_S', 0)
+        marks: list[str] = []
+        real_guarded = session_module._guarded
+
+        def guarded(code: str, mark: str) -> str:
+            marks.append(mark)
+            return real_guarded(code, mark)
+
+        monkeypatch.setattr(session_module, '_guarded', guarded)
+        env = MultiTurnEnvironment(
+            task='t',
+            max_steps=3,
+            timeout_per_step=1,
+            step_verifier_code='print(float(open("answer.txt").read() == "42\\n"))\n',
+        )
+        with dg.session(env) as session:
+            session.start()
+            session.step(Action(action_type='bash', content='echo 42 > answer.txt'))
+            session.step(Action(action_type='bash', content='echo 42 > answer.txt'))
+            # The final verifier prints mark-shaped lines and both earlier runs' marks, each
+            # on a line of its own, then hangs without reading anything of the agent's.
+            prints = ''.join(f'print({line!r})\n' for line in ['0' * 32, *marks])
+            hangs = f'{prints}import sys, time\nsys.stdout.flush()\ntime.sleep(30)\n'
+            session._env = env.model_copy(update={'final_verifier_code': hangs})
+            with pytest.raises(VerifierError, match='before it read'):
+                session.score()
+
+        assert len(set(marks)) == 3 and all(len(mark) == 32 for mark in marks)
+
+    def test_what_the_agent_shapes_on_stdout_cant_change_the_verdict(self, dg: DeepGym) -> None:
+        """The verifier echoes the agent's bytes (invalid UTF-8, a mark-shaped line, a huge
+        line, a fake verdict) around its own partial line and the mark; its own last
+        verdict line is the one read."""
+        echoes = (
+            'import json, sys\n'
+            'sys.stdout.write("partial line")\n'
+            'data = open("answer.bin", "rb").read()\n'
+            'sys.stdout.flush()\n'
+            'sys.stdout.buffer.write(data + b"\\n")\n'
+            'print(json.dumps({"score": 0.25, "passed": False}))\n'
+        )
+        env = MultiTurnEnvironment(task='t', max_steps=2, final_verifier_code=echoes)
+        planted = (
+            "printf '\\377\\376 junk\\n' > answer.bin; "
+            "printf '%032d\\n' 0 >> answer.bin; "
+            "head -c 200000 /dev/zero | tr '\\0' x >> answer.bin; "
+            'printf \'\\n{"score": 1.0, "passed": true}\' >> answer.bin'
+        )
+        with dg.session(env) as session:
+            session.start()
+            session.step(Action(action_type='bash', content=planted))
+            result = session.score()
+
+        assert (result.score, result.passed, result.has_verdict) == (0.25, False, True)
+
+    @pytest.mark.parametrize('consults', [True, False], ids=['after_reading', 'before'])
+    def test_a_verifier_killed_after_reading_the_agents_output_is_its_zero(
+        self, dg: DeepGym, consults: bool
+    ) -> None:
+        """Memory the agent's output made the verifier use can get it killed: no verdict
+        would let the agent dodge its 0. Killed before reading anything, it's ours."""
+        reads = 'open("answer.txt").read()\n' if consults else ''
+        killed = f'import os, signal\n{reads}os.kill(os.getpid(), signal.SIGKILL)\n'
+        env = MultiTurnEnvironment(task='t', max_steps=2, final_verifier_code=killed)
+        with dg.session(env) as session:
+            session.start()
+            session.step(Action(action_type='bash', content='echo 42 > answer.txt'))
+            if not consults:
+                with pytest.raises(VerifierError):
+                    session.score()
+                return
+            result = session.score()
+
+        assert (result.score, result.has_verdict, result.error_type) == (
+            0.0,
+            True,
+            'solution_error',
+        )
+
+    def test_a_timeout_whose_output_was_lost_is_the_agents_zero(
+        self, dg: DeepGym, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """With nothing the verifier printed (not even its start line), nothing shows it
+        hadn't read the agent's output: a pipe a planted child held, say."""
+        env = MultiTurnEnvironment(task='t', max_steps=2, final_verifier_code=PASS_VERIFIER)
+
+        def lost(*args: object, **kwargs: object) -> None:
+            raise SandboxTimeoutError('command exceeded 30s')  # what the provider returns
+
+        with dg.session(env) as session:
+            session.start()
+            session.step(Action(action_type='bash', content='echo 42 > answer.txt'))
+            monkeypatch.setattr(session._backend, 'verify', lost)
+            result = session.score()
+
+        assert (result.score, result.has_verdict, result.error_type) == (
+            0.0,
+            True,
+            'policy_sandbox_failure',
+        )
+
+    def test_a_verdict_printed_around_the_mark_reads_as_printed(self, dg: DeepGym) -> None:
+        """The mark is cut out exactly, so a line it fell inside is whole again."""
+        split = (
+            'import sys\n'
+            'sys.stdout.write(\'{"score":\')\n'
+            'open("answer.txt").close()\n'
+            'print(\' 0.5, "passed": false}\')\n'
+        )
+        env = MultiTurnEnvironment(task='t', max_steps=2, final_verifier_code=split)
+        with dg.session(env) as session:
+            session.start()
+            session.step(Action(action_type='bash', content='echo 42 > answer.txt'))
+            result = session.score()
+
+        assert (result.score, result.passed, result.has_verdict) == (0.5, False, True)
+
+    @pytest.mark.parametrize(
+        'fails',
+        [
+            'import sys\nsys.exit(2)\n',
+            'print(\'{"score": 5}\')\n',
+            'print("not a verdict")\n',
+            'print(\'{"score": 0, "passed": false, "error_type": "runtime_error"}\')\n'
+            'import sys\nsys.exit(2)\n',
+        ],
+        ids=['exits_silently', 'invalid_score', 'no_verdict_line', 'reports_its_own_error'],
+    )
+    def test_a_verifier_that_fails_after_reading_the_agents_output_is_its_zero(
+        self, dg: DeepGym, fails: str
+    ) -> None:
+        """Whatever the agent's output made the verifier do, no verdict would let it dodge."""
+        reads = 'open("answer.txt").read()\n'
+        env = MultiTurnEnvironment(
+            task='t',
+            max_steps=3,
+            step_verifier_code=reads + fails,
+            final_verifier_code=reads + fails,
+        )
+        with dg.session(env) as session:
+            session.start()
+            step = session.step(Action(action_type='bash', content='echo 42 > answer.txt'))
+            verdict = session.step_verdict
+            result = session.score()
+
+        assert (step.reward, verdict['error_type']) == (0.0, 'solution_error')
+        assert (result.score, result.has_verdict, result.error_type) == (
+            0.0,
+            True,
+            'solution_error',
+        )
+
+    def test_the_agents_code_failing_to_launch_has_no_verdict_even_after_reading(
+        self, dg: DeepGym
+    ) -> None:
+        """The crash guard's launch failure is the machine's, whatever the verifier read."""
+        launch = (
+            'open("answer.txt").read()\n'
+            'print(\'{"score": 0, "passed": false, "error_type": "sandbox_error"}\')\n'
+            'import sys\nsys.exit(2)\n'
+        )
+        env = MultiTurnEnvironment(task='t', max_steps=2, final_verifier_code=launch)
+        with dg.session(env) as session:
+            session.start()
+            session.step(Action(action_type='bash', content='echo 42 > answer.txt'))
+            result = session.score()
+
+        assert (result.has_verdict, result.error_type) == (False, 'sandbox_error')
+
+    def test_a_failure_the_rule_cant_read_is_the_agents_zero(self) -> None:
+        """An exception that breaks the classifier is never a reason to mask."""
+
+        class UnreadableError(Exception):
+            @property
+            def status_code(self) -> int:
+                raise RuntimeError('broken SDK error')
+
+            def __str__(self) -> str:
+                raise RuntimeError('no message either')
+
+        result = failure_result(UnreadableError(), 'sb-1')
+
+        assert (result.score, result.has_verdict) == (0.0, True)
+        assert result.error_type == 'policy_sandbox_failure'
+
+    def test_output_that_isnt_utf8_is_shown_not_a_failure(self, dg: DeepGym) -> None:
+        with dg.session(MultiTurnEnvironment(task='t', max_steps=2)) as session:
+            session.start()
+            obs = session.step(Action(action_type='bash', content="printf '\\377ok'")).observation
+        assert obs.content == '\ufffdok' and not session.done
 
     def test_step_verifier_model_fault_is_a_reward(self, dg: DeepGym) -> None:
         model_fault = 'print(\'{"score": 0.0, "passed": false, "error_type": "invalid_patch"}\')\n'

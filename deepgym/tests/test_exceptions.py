@@ -47,6 +47,8 @@ class _SdkError(Exception):
         _status(502),
         _SdkError(503),
         _SdkError(429),
+        _status(401),  # our credentials
+        _SdkError(403),
         # DeepGym wraps provider errors; the cause decides.
         _caused_by(SandboxError('click failed'), ConnectionRefusedError()),
     ],
@@ -58,6 +60,8 @@ class _SdkError(Exception):
         '502',
         'sdk_503',
         'rate_limit',
+        'unauthorized',
+        'forbidden',
         'wrapped',
     ],
 )

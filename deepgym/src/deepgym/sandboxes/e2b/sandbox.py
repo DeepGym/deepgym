@@ -19,12 +19,13 @@ from e2b import (
 )
 from e2b import Sandbox as E2BClient
 
-from deepgym.exceptions import SandboxDiedError, SandboxError
+from deepgym.exceptions import SandboxError
 from deepgym.sandboxes.protocol import (
     TIMEOUT_EXIT_CODES,
     ExecResult,
     SandboxImage,
     SandboxTimeoutError,
+    stopped_error,
 )
 
 logger = logging.getLogger(__name__)
@@ -42,6 +43,7 @@ class E2BSandbox:
 
     def __init__(self, template: str | None = None) -> None:
         self._template = template
+        self._expires_at = time.monotonic() + LIFETIME_S
         self._sandbox = E2BClient.create(
             template=template, timeout=LIFETIME_S, allow_internet_access=False
         )
@@ -69,6 +71,8 @@ class E2BSandbox:
         Raises:
             SandboxTimeoutError: If the command outruns *timeout* seconds.
             SandboxDiedError: If the sandbox stopped running during the command.
+            SandboxExpiredError: If E2B retired it at the end of its lifetime (see
+                :func:`~deepgym.sandboxes.protocol.stopped_error`).
             SandboxError: If E2B can't reach the sandbox.
         """
         if timeout:
@@ -87,7 +91,7 @@ class E2BSandbox:
             result = exc
         # Both subclass TimeoutException, but mean the sandbox stopped or can't be reached.
         except SandboxNotRunningException as exc:
-            raise SandboxDiedError(f'E2B sandbox {self.id} stopped running: {exc}') from exc
+            raise self._stopped(exc) from exc
         except SandboxUnreachableException as exc:
             raise SandboxError(f'E2B sandbox {self.id} is not reachable: {exc}') from exc
         except TimeoutException as exc:
@@ -99,8 +103,20 @@ class E2BSandbox:
         return ExecResult(result.exit_code, result.stdout + result.stderr)
 
     def upload(self, content: bytes, path: str) -> None:
-        """Write *content* to *path* as root (E2B creates parent directories)."""
-        self._sandbox.files.write(path, content, user='root')
+        """Write *content* to *path* as root (E2B creates parent directories).
+
+        Raises:
+            SandboxDiedError: If the sandbox has stopped running.
+            SandboxExpiredError: If E2B retired it at the end of its lifetime.
+        """
+        try:
+            self._sandbox.files.write(path, content, user='root')
+        except SandboxNotRunningException as exc:
+            raise self._stopped(exc) from exc
+
+    def _stopped(self, exc: SandboxNotRunningException) -> SandboxError:
+        """Return what E2B reporting the sandbox stopped (*exc*) means."""
+        return stopped_error(f'E2B sandbox {self.id} stopped running: {exc}', self._expires_at)
 
     def delete(self) -> bool:
         """Kill the sandbox; errors are logged. Return False if E2B reported a failure.

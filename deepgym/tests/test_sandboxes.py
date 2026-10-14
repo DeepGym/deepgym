@@ -18,12 +18,14 @@ import types
 from collections.abc import Mapping
 from pathlib import Path
 
+import httpx
 import pytest
 
 from deepgym import ComputerUseEnvironment, DeepGym
 from deepgym.exceptions import (
     DeepGymError,
     SandboxError,
+    SandboxExpiredError,
     VerifierError,
     is_infrastructure_failure,
 )
@@ -42,13 +44,14 @@ from deepgym.sandboxes import (
     SandboxImage,
     SandboxTimeoutError,
     open_sandbox,
+    protocol,
     sealed_path,
 )
 from deepgym.sandboxes.apple import AppleContainer
 from deepgym.sandboxes.cli import DEFAULT_IMAGE
 from deepgym.sandboxes.daytona import cleanup_sandbox, snapshot_digest
 from deepgym.sandboxes.docker import DockerContainer
-from deepgym.session import _SEALED_PATH_CHECK, SandboxBackend
+from deepgym.session import _SEALED_PATH_CHECK, SandboxBackend, Session
 
 # Fake sandboxes pass session setup's check that only root can change TRUSTED_PATH.
 _SEALED_NEEDLE = 'root would run what others can change'
@@ -615,6 +618,30 @@ def test_session_write_file_is_staged_then_written_as_agent() -> None:
     assert f'< {staged}' in box.commands[-1] and '/tmp/deepgym/a/b.py' in box.commands[-1]
 
 
+@pytest.mark.parametrize('status', [401, 403])
+def test_a_step_verifier_upload_the_provider_refuses_has_no_verdict(status: int) -> None:
+    """Our credentials failing while we upload trusted verifier code is never the agent's."""
+    box = FakeSandbox(network_blocked=True, answers=[_USERS])
+    env = MultiTurnEnvironment(task='t', max_steps=3, step_verifier_code='print(1.0)')
+    session = Session(env, SandboxBackend(box))
+    session.start()
+    request = httpx.Request('PUT', 'https://provider.test/files')
+    refused = httpx.HTTPStatusError(
+        'refused', request=request, response=httpx.Response(status, request=request)
+    )
+
+    def upload(content: bytes, path: str) -> None:
+        if path.startswith('/opt/deepgym-verifier/'):
+            raise refused
+
+    box.upload = upload  # type: ignore[method-assign]
+    with pytest.raises(VerifierError, match='Could not upload the verifier'):
+        session.step(Action(action_type='bash', content='echo hi'))
+
+    result = session.score()
+    assert session.done and (result.score, result.has_verdict) == (0.0, False)
+
+
 @pytest.mark.parametrize('ids', ['0 997 996 996', '997 997 996 0'], ids=['agent', 'group'])
 def test_session_refuses_root_ids_for_its_users(ids: str) -> None:
     output = f'{ids} 0 - - /usr/bin/setpriv /usr/bin/nsenter /usr/bin/sudo\n/tmp/deepgym'
@@ -1156,6 +1183,190 @@ def test_daytona_sandbox_that_dies(phase: str) -> None:
     assert _judged(lambda: run_judge_in_sandbox(box, _JOB)) == 'no_verdict'
 
 
+def _past_lifetime(monkeypatch: pytest.MonkeyPatch, lifetime: int) -> None:
+    """Move the clock that decides a stopped sandbox's cause past *lifetime* seconds."""
+    real = time.monotonic
+    monkeypatch.setattr(
+        protocol, 'time', types.SimpleNamespace(monotonic=lambda: real() + lifetime)
+    )
+
+
+def test_e2b_sandbox_stopped_past_its_lifetime_expired_rather_than_died(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """E2B kills every sandbox an hour after creation, whatever runs in it: ours, no verdict."""
+
+    class NotRunningError(Exception):
+        pass
+
+    def gone(*args: object, **kwargs: object) -> None:
+        raise NotRunningError('the sandbox was not found')
+
+    class Client:
+        sandbox_id = 'e2b-old'
+        commands = types.SimpleNamespace(run=gone)
+        files = types.SimpleNamespace(write=gone)
+
+        @staticmethod
+        def create(**kwargs: object) -> 'Client':
+            return Client()
+
+    _install(monkeypatch, 'e2b', {
+        'Sandbox': Client,
+        'CommandExitException': type('ExitError', (Exception,), {}),
+        'TimeoutException': type('SlowError', (Exception,), {}),
+        'SandboxNotRunningException': NotRunningError,
+        'SandboxUnreachableException': type('UnreachableError', (Exception,), {}),
+    })  # fmt: skip
+    monkeypatch.delitem(sys.modules, 'deepgym.sandboxes.e2b.sandbox', raising=False)
+    module = importlib.import_module('deepgym.sandboxes.e2b.sandbox')
+    box = module.E2BSandbox()
+    calls = (lambda: box.exec('ls', timeout=5), lambda: box.upload(b'x', '/opt/x'))
+
+    for call in calls:
+        with pytest.raises(SandboxDiedError):
+            call()
+    _past_lifetime(monkeypatch, module.LIFETIME_S)
+    for call in calls:
+        with pytest.raises(SandboxExpiredError, match='lifetime'):
+            call()
+
+
+@pytest.mark.parametrize('report', ['terminated', 'failed_exit'])
+def test_modal_sandbox_stopped_past_its_lifetime_expired_rather_than_died(
+    monkeypatch: pytest.MonkeyPatch, report: str
+) -> None:
+    box = _dying_modal_box(monkeypatch, 'gone', report, '')
+    _past_lifetime(monkeypatch, sys.modules['deepgym.sandboxes.modal.sandbox'].LIFETIME_S)
+
+    with pytest.raises(SandboxExpiredError, match='lifetime'):
+        box.exec('gone')
+
+
+def test_a_daytona_timeout_keeps_what_the_command_printed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The sandbox enforces the deadline, so the consulted mark printed first comes back."""
+    pytest.importorskip('daytona')
+    from deepgym.sandboxes.daytona import DaytonaSandbox
+
+    box = _dying_daytona_box('never runs', RuntimeError('unused'))
+    calls: list[tuple[str, object]] = []
+    real_exec = box.process.exec
+
+    def exec_(command: str, **kwargs: object) -> types.SimpleNamespace:
+        calls.append((command, kwargs['timeout']))
+        if 'slow' in command:
+            return types.SimpleNamespace(exit_code=124, result='printed first\n')
+        return real_exec(command, **kwargs)
+
+    box.process = types.SimpleNamespace(exec=exec_)
+    daytona = types.SimpleNamespace(create=lambda params, timeout: box, delete=print)
+    sandbox = DaytonaSandbox(daytona, Environment(task='t', verifier_code='return 1.0'))
+    clock = iter([0.0, 10.0])
+    monkeypatch.setattr('deepgym.sandboxes.daytona.sandbox.time.monotonic', lambda: next(clock))
+
+    with pytest.raises(SandboxTimeoutError) as raised:
+        sandbox.exec('slow', timeout=5)
+
+    assert raised.value.output == 'printed first\n'
+    command, waited = calls[-1]
+    assert '/usr/bin/timeout --kill-after=2 5 /bin/sh -c slow' in command and waited > 5
+
+
+def test_the_consulted_mark_is_in_the_private_script_never_on_a_command_line() -> None:
+    """Any process in the sandbox can list command lines; only the verifier user reads its
+    script. So the agent never learns the mark, and only the harness prints it."""
+    box = FakeSandbox(network_blocked=True, answers=[_USERS])
+    scripts: list[bytes] = []
+    box.upload = lambda content, path: scripts.append(content)  # type: ignore[method-assign]
+    env = MultiTurnEnvironment(task='t', final_verifier_code='print(1.0)')
+    session = Session(env, SandboxBackend(box))
+    session.start()
+    with contextlib.suppress(VerifierError):
+        session.score()
+
+    mark = re.search(rb'DEEPGYM_CONSULTED"\] = \'([0-9a-f]{32})\'', scripts[-1])
+    assert mark is not None
+    assert not any(mark[1].decode() in command for command in box.commands)
+    assert not any('DEEPGYM_CONSULTED' in command for command in box.commands)
+
+
+def test_only_uploading_the_verifier_is_ours_whatever_the_provider_says() -> None:
+    """Its code to its own folder is ours alone. Its launch is not: it runs in the agent's
+    work directory, which the agent can move away."""
+    box = FakeSandbox(network_blocked=True, answers=[_USERS])
+    backend = SandboxBackend(box)
+    real_upload, real_exec = box.upload, box.exec
+
+    def upload(content: bytes, path: str) -> None:
+        raise _ProviderError('HTTP 400: bad request')
+
+    box.upload = upload  # type: ignore[method-assign]
+    with pytest.raises(VerifierError, match='Could not upload the verifier'):
+        backend.verify('print(1)', timeout=5)
+
+    def exec_(command: str, **kwargs: object) -> ExecResult:
+        if '/opt/deepgym-verifier/' in command:
+            raise _ProviderError('HTTP 400: no such working directory')
+        return real_exec(command, **kwargs)
+
+    box.upload, box.exec = real_upload, exec_  # type: ignore[method-assign]
+    with pytest.raises(_ProviderError):
+        backend.verify('print(1)', timeout=5)
+
+    # Docker and Apple report an ordinary failed upload as a SandboxError: still ours. A
+    # sandbox found stopped is not.
+    for error, raised in (
+        (SandboxError('Failed to upload: no space left'), VerifierError),
+        (SandboxDiedError('the container stopped'), SandboxDiedError),
+    ):
+
+        def upload_fails(content: bytes, path: str, error: Exception = error) -> None:
+            raise error
+
+        box.upload = upload_fails  # type: ignore[method-assign]
+        with pytest.raises(raised):
+            backend.verify('print(1)', timeout=5)
+
+
+class _ProviderError(Exception):
+    """An SDK error carrying an HTTP status, as Daytona's do."""
+
+    status_code = 400
+
+
+def test_daytona_upload_to_a_stopped_sandbox_is_a_death() -> None:
+    daytona_sdk = pytest.importorskip('daytona')
+    from deepgym.sandboxes.daytona import DaytonaSandbox
+
+    stopping = _dying_daytona_box('never runs', daytona_sdk.DaytonaError('unused'))
+
+    def upload_file(data: bytes, path: str) -> None:
+        stopping.state = 'stopped'
+        raise daytona_sdk.DaytonaError('sandbox is not running')
+
+    stopping.fs = types.SimpleNamespace(upload_file=upload_file)
+    daytona = types.SimpleNamespace(create=lambda params, timeout: stopping, delete=print)
+    box = DaytonaSandbox(daytona, Environment(task='t', verifier_code='return 1.0'))
+
+    with pytest.raises(SandboxDiedError):
+        box.upload(b'x', '/opt/x')
+
+
+def test_cli_upload_to_a_stopped_container_is_a_death(monkeypatch: pytest.MonkeyPatch) -> None:
+    def fake_run(argv: list[str], **kwargs: object) -> subprocess.CompletedProcess:
+        code = 1 if argv[1:3] == ['exec', '--interactive'] else 0
+        return subprocess.CompletedProcess(argv, code, b'', b'no such container')
+
+    monkeypatch.setattr(subprocess, 'run', fake_run)
+    box = DockerContainer()
+    monkeypatch.setattr(box, 'running', lambda: [])
+
+    with pytest.raises(SandboxDiedError):
+        box.upload(b'x', '/opt/x')
+
+
 @pytest.mark.parametrize('reported_by', ['the_error', 'a_queue_timeout', 'the_sandbox_record'])
 def test_daytona_evicting_a_sandbox_is_not_the_solutions_doing(reported_by: str) -> None:
     daytona_sdk = pytest.importorskip('daytona')
@@ -1261,7 +1472,9 @@ def test_daytona_desktop_runs_as_the_agent_and_is_locked_down(
     before = ' '.join(events[:started])
     assert '/usr/local/bin/xfce4-session' in before, 'the desktop must not run as the sudoer'
     prepare = next(c for c in events[:started] if '/usr/local/bin/xfce4-session' in c)
-    assert prepare.startswith("/usr/bin/sudo -n -E /bin/sh -c '/usr/bin/env -i ")
+    assert (
+        prepare.startswith('/usr/bin/sudo -n -E /bin/sh -c ') and '/usr/bin/env -i -- ' in prepare
+    )
     assert '--reuid=997' in prepare and '/opt/deepgym-netns' in prepare
     for blocked in ('thunar-uca', 'Thunar/uca.xml', 'gio-launch-desktop', 'xfce4-terminal', 'idle'):
         assert blocked in prepare, f'{blocked} must be locked down before the desktop starts'

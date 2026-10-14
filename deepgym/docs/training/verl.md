@@ -99,17 +99,20 @@ tools:
 - Written against verl 0.9.1. CI runs the loop against a stand-in for verl's; it was also
   run on Daytona sandboxes through verl 0.9.1's own `ToolAgentLoop._call_tool`.
 
-Only failures that aren't the policy's doing get no verdict and are kept out of training
-the same way (`error` 1.0): a sandbox that fails to start, a provider or network failure
-during an action or the final verifier (`deepgym.exceptions.is_infrastructure_failure`),
-and a step or final verifier that fails before it runs the agent's code. Everything that
-follows from the policy's own actions is scored:
+Only failures that are ours for certain get no verdict and are kept out of training the
+same way (`error` 1.0): a sandbox that fails to start, a provider, network or auth
+failure, a provider lifetime that ran out, and a step or final verifier that couldn't
+run or timed out before it read the agent's output (`deepgym.session.failure_result`);
+an expiry only if the policy's own actions didn't take most of the time. Everything else
+is scored:
 
 - An invalid or disallowed action comes back to the model as text, and the rollout goes
   on.
 - Any other failed action (a failed write, a sandbox the policy killed) comes back as an
   error and ends the episode with a 0, `error_type` `policy_sandbox_failure`, as does a
   final verifier that can't run in a sandbox the policy killed or hung.
+- A verifier that times out after reading the agent's output scores 0 with
+  `solution_timeout`.
 - A rollout where the model never calls the tool scores 0.
 
 This loop also warns when more than 5 samples in a block of 100 are kept out.

@@ -34,6 +34,7 @@ from deepgym.exceptions import (
     DeepGymError,
     SandboxDiedError,
     SandboxError,
+    SandboxExpiredError,
     TimeoutError,
     VerifierError,
     is_infrastructure_failure,
@@ -57,15 +58,25 @@ from deepgym.models import (
     is_verdict,
 )
 from deepgym.sandbox import (
+    ExecutionResult,
     _extract_json_line,
+    _judged_zero,
     build_run_result,
     check_exit,
     error_result,
     parse_verifier_output,
+    solution_timeout,
     split_wrapped_output,
     wrap_stderr,
 )
-from deepgym.sandboxes import TRUSTED_PATH, ExecResult, Sandbox, SandboxImage, sealed_path
+from deepgym.sandboxes import (
+    TRUSTED_PATH,
+    ExecResult,
+    Sandbox,
+    SandboxImage,
+    SandboxTimeoutError,
+    sealed_path,
+)
 from deepgym.verifier_template import guard_crashes
 
 if TYPE_CHECKING:
@@ -112,16 +123,21 @@ _AGENT_KEEP = ('LANG', 'LC_ALL', 'LC_CTYPE', 'TERM', 'TZ')
 _DISPLAY = ':0'
 _STEP_OUTPUT = '_step_output.txt'
 # errno names for a write the agent's own files block (a folder where the file goes, a file
-# where a folder goes, a link or mode it set, a name too long), raised before any byte is
-# written. Any other write failure is the sandbox's. Names, as the numbers vary by platform.
-_BLOCKED_ERRNOS = ('EACCES', 'EEXIST', 'EISDIR', 'ELOOP', 'ENAMETOOLONG', 'ENOTDIR', 'EPERM')
+# where a folder goes, a link or mode it set, a name too long, a FIFO with no reader), raised
+# before any byte is written. Any other write failure is the sandbox's. Names, as the
+# numbers vary by platform.
+_BLOCKED_ERRNOS = (
+    'EACCES', 'EEXIST', 'EISDIR', 'ELOOP', 'ENAMETOOLONG', 'ENOTDIR', 'ENXIO', 'EPERM',
+)  # fmt: skip
+# Opens a write target without blocking on a FIFO the agent left there (ENXIO instead).
+_WRITE_FLAGS = os.O_WRONLY | os.O_CREAT | os.O_TRUNC | os.O_NONBLOCK
 # Run as the session user to write stdin to argv[1]: exits 3 if the agent's files block it,
 # including a link it planted at the path, whatever the error following that link.
 _WRITE_AS_AGENT = f"""
 import errno, os, sys
 try:
     os.makedirs(os.path.dirname(sys.argv[1]), exist_ok=True)
-    fd = os.open(sys.argv[1], os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o666)
+    fd = os.open(sys.argv[1], os.O_WRONLY | os.O_CREAT | os.O_TRUNC | os.O_NONBLOCK, 0o666)
 except OSError as exc:
     print(exc, file=sys.stderr)
     blocked = exc.errno in {{getattr(errno, n) for n in {_BLOCKED_ERRNOS}}}
@@ -221,7 +237,7 @@ class LocalBackend:
         """Run *command* with bash in the temp directory, keeping stdout and stderr apart.
 
         Raises:
-            TimeoutError: If the command exceeds *timeout* seconds.
+            SandboxTimeoutError: If the command exceeds *timeout* seconds, with its stdout.
         """
         proc_env = {'PATH': '/usr/bin:/bin:/usr/sbin:/sbin:/usr/local/bin', **(env or {})}
         # Own process group, so background children die with the command or the session.
@@ -230,6 +246,7 @@ class LocalBackend:
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             text=True,
+            errors='replace',
             cwd=self._dir,
             env=proc_env,
             start_new_session=True,
@@ -239,8 +256,8 @@ class LocalBackend:
             stdout, stderr = proc.communicate(timeout=timeout)
         except subprocess.TimeoutExpired as exc:
             _kill_group(proc.pid)
-            proc.communicate()
-            raise TimeoutError(f'Command exceeded {timeout}s timeout') from exc
+            stdout, _ = proc.communicate()
+            raise SandboxTimeoutError(f'Command exceeded {timeout}s timeout', stdout) from exc
         return VerifierOutput(proc.returncode, stdout, stderr)
 
     def write_file(self, path: str, content: bytes) -> None:
@@ -253,7 +270,7 @@ class LocalBackend:
         target = self._dir / path
         try:
             target.parent.mkdir(parents=True, exist_ok=True)
-            fd = os.open(target, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o666)
+            fd = os.open(target, _WRITE_FLAGS, 0o666)
         except OSError as exc:
             if errno.errorcode.get(exc.errno) in _BLOCKED_ERRNOS or target.is_symlink():
                 raise ActionError(f'Failed to write {path}: {exc}') from exc
@@ -580,7 +597,9 @@ class SandboxBackend:
         Symlinks inside are stored as links, never followed.
 
         Raises:
-            SandboxError: If packing fails.
+            ActionError: If the agent's work directory can't be packed (it was moved or
+                replaced by a link, is over the size cap, or the disk is full): its doing.
+            SandboxError: If reading the archive back fails.
         """
         staged = f'{_STAGING_DIR}/{uuid4().hex}.tgz'
         quoted = shlex.quote(self._workdir)
@@ -600,7 +619,7 @@ class SandboxBackend:
             timeout=_TRANSFER_TIMEOUT_S,
         )
         if packed.exit_code != 0:
-            raise SandboxError(f'Failed to archive {self._workdir}: {packed.output[-500:]}')
+            raise ActionError(f'Failed to archive {self._workdir}: {packed.output[-500:]}')
         encoded = self._sandbox.exec(
             trusted(f'base64 {staged}; status=$?; rm -f {staged}; exit $status'),
             env=self._clear,
@@ -677,14 +696,23 @@ class SandboxBackend:
 
         Raises:
             TimeoutError: If the verifier exceeds *timeout* seconds.
+            SandboxError: If the sandbox stopped (see :class:`~deepgym.sandboxes.Sandbox`).
+            VerifierError: If the provider fails to take the verifier's code, which is ours
+                alone. A failed launch isn't: it runs in the agent's work directory.
         """
         script = f'{_VERIFIER_DIR}/{uuid4().hex}.py'
-        self._sandbox.upload(code.encode('utf-8'), script)
         command, marker = wrap_stderr(
             f'{self._offline}{self._as_verifier} {self.python} -I {script}'
         )
         # The deadline is set by the sandbox's own clock, as the judge's is.
         deadline = f'export DEEPGYM_DEADLINE=$(( $(date +%s) + {timeout} ))'
+        try:
+            self._sandbox.upload(code.encode('utf-8'), script)
+        except (SandboxDiedError, SandboxExpiredError):
+            raise
+        except Exception as exc:
+            # Our code to our own folder: the provider refusing it is never the agent's.
+            raise VerifierError(f'Could not upload the verifier: {exc}') from exc
         done = self._sandbox.exec(
             trusted(
                 f'{deadline}; {command}; status=$?; rm -f {script}; exit $status',
@@ -859,6 +887,9 @@ class Session:
         self._step_verdict: dict[str, object] | None = None
         # The episode's result, once a failed step fixed it (see step()).
         self._failed_result: RunResult | None = None
+        # The session's start, and the seconds spent applying the agent's actions since.
+        self._opened = time.monotonic()
+        self._acting_s = 0.0
         # One sandbox, one actor at a time: concurrent step/score/close calls queue up.
         self._lock = threading.Lock()
 
@@ -881,6 +912,11 @@ class Session:
         ``exit_code`` is the verifier's exit code, in place of any key it printed by that name.
         """
         return self._step_verdict
+
+    @property
+    def failed_result(self) -> RunResult | None:
+        """The result a failed step fixed (see :meth:`step`); None while no step failed."""
+        return self._failed_result
 
     @property
     def sandbox_id(self) -> str:
@@ -926,16 +962,18 @@ class Session:
         and the step is recorded only once both are in. A step that fails any other way
         than a rejected action ends the episode: the action may have changed the sandbox, so
         it stays on the record, with no step reward and no retry. :meth:`score` then reports
-        no verdict for a network or provider failure or a failed step verifier; anything
-        else follows from the agent's actions (its sandbox died, its files blocked the
-        step's output file): a judged 0 (``policy_sandbox_failure``).
+        what :func:`failure_result` makes of the failure: no verdict only where it is
+        ours for certain and the agent didn't use the sandbox up, else a judged 0. A step
+        verifier that times out after reading the agent's output gives the step a judged 0
+        (``solution_timeout``) instead, and the episode goes on.
 
         Raises:
             DeepGymError: If the session is not running.
             ActionError: If the action is not allowed here, the desktop rejects it, or the
                 agent's own files are in the way of a write (the episode goes on, unless
                 they blocked the step's output file).
-            VerifierError: If the step verifier fails or gives no verdict.
+            VerifierError: If the step verifier fails, gives no verdict, or times out before
+                it reads the agent's output.
             SandboxError: If the sandbox fails to apply the action, take the screenshot or
                 run the step verifier.
         """
@@ -979,12 +1017,16 @@ class Session:
         An episode that a failed step ended (see :meth:`step`) keeps the result that step
         fixed, with the failure as its ``error_type``; the final verifier doesn't run. A
         sandbox that dies under the final verifier is the agent's doing once it has acted
-        (a judged 0); before any action, it has no verdict.
+        (a judged 0); before any action, it has no verdict. So is a verifier that times out
+        after reading the agent's output (``solution_timeout``), and a provider lifetime the
+        agent's own actions ran out (see :meth:`_ran_out_the_clock`).
 
         Raises:
-            VerifierError: If the verifier output is not valid protocol JSON, or the
-                verifier was killed after printing it.
-            TimeoutError: If the verifier exceeds the per-step timeout.
+            VerifierError: If, before it read the agent's output, the verifier timed out or
+                its output is not valid protocol JSON or isn't backed by its exit code; or its
+                code couldn't be uploaded. After, any of these is the agent's judged 0
+                (``solution_error``), but for the agent's code failing to launch.
+            TimeoutError: If the verifier timed out and the provider returned nothing.
         """
         with self._lock:
             if self._failed_result is not None:
@@ -1001,20 +1043,32 @@ class Session:
                     error_type='no_verifier',
                 )
             start = time.perf_counter()
+            acted = bool(self._trajectory.steps)
             try:
-                exit_code, stdout, stderr = self._backend.verify(
-                    _guarded(self._env.final_verifier_code), self._env.timeout_per_step
-                )
+                (exit_code, stdout, stderr), consulted = self._verify(self._env.final_verifier_code)
             except SandboxDiedError as exc:
-                if not self._trajectory.steps:
+                if not acted:
                     return error_result(exc, self.sandbox_id)
-                return _failure_result(exc, self.sandbox_id)
+                return failure_result(exc, self.sandbox_id)
+            except Exception as exc:
+                if acted and self._ran_out_the_clock(exc):
+                    return failure_result(exc, self.sandbox_id, exhausted=True)
+                raise
             stderr = stderr.strip()
-            result = parse_verifier_output(stdout, f'exit_code={exit_code} stderr: {stderr!r}')
             elapsed_ms = (time.perf_counter() - start) * 1000
-            return build_run_result(
-                result, elapsed_ms, self.sandbox_id, stderr=stderr, exit_code=exit_code
-            )
+            try:
+                verdict = parse_verifier_output(stdout, f'exit_code={exit_code} stderr: {stderr!r}')
+                result = build_run_result(
+                    verdict, elapsed_ms, self.sandbox_id, stderr=stderr, exit_code=exit_code
+                )
+            except VerifierError as exc:
+                if not consulted or _launch_failed(stdout):
+                    raise
+                result = _failed_after_reading(exc, elapsed_ms, self.sandbox_id, stderr)
+            if consulted and not result.has_verdict and result.error_type != 'sandbox_error':
+                detail = VerifierError(f'{result.error_type}: {result.output}')
+                return _failed_after_reading(detail, elapsed_ms, self.sandbox_id, stderr)
+            return result
 
     def close(self) -> None:
         """Release the backend, waiting for any in-flight step to finish."""
@@ -1037,28 +1091,35 @@ class Session:
             )
 
     def _apply(self, action: Action) -> tuple[str, int | None]:
-        """Execute *action*; return its text output and exit code (None if not a command)."""
+        """Execute *action*; return its text output and exit code (None if not a command).
+
+        Its time, however it ends, counts as the agent's (see :meth:`_ran_out_the_clock`).
+        """
         timeout = self._env.timeout_per_step
+        started = time.monotonic()
         try:
-            match action.action_type:
-                case 'code':
-                    exit_code, output = self._run_python('_step.py', action.content)
-                    return output, exit_code
-                case 'bash':
-                    exit_code, output = self._backend.exec(action.content, timeout)
-                    return output, exit_code
-                case 'write_file':
-                    self._backend.write_file(str(action.path), action.content.encode('utf-8'))
-                    return f'wrote {action.path}', None
-                case 'wait':
-                    time.sleep(min(action.amount, timeout))
-                    return '', None
-                case 'done' | 'screenshot':
-                    return '', None
-        except TimeoutError:
-            return f'[timed out after {timeout}s]', None
-        self._backend.act(action)
-        return '', None
+            try:
+                match action.action_type:
+                    case 'code':
+                        exit_code, output = self._run_python('_step.py', action.content)
+                        return output, exit_code
+                    case 'bash':
+                        exit_code, output = self._backend.exec(action.content, timeout)
+                        return output, exit_code
+                    case 'write_file':
+                        self._backend.write_file(str(action.path), action.content.encode('utf-8'))
+                        return f'wrote {action.path}', None
+                    case 'wait':
+                        time.sleep(min(action.amount, timeout))
+                        return '', None
+                    case 'done' | 'screenshot':
+                        return '', None
+            except TimeoutError:
+                return f'[timed out after {timeout}s]', None
+            self._backend.act(action)
+            return '', None
+        finally:
+            self._acting_s += time.monotonic() - started
 
     def _run_python(self, filename: str, code: str, timeout: int | None = None) -> ExecResult:
         self._backend.write_file(filename, code.encode('utf-8'))
@@ -1067,12 +1128,13 @@ class Session:
         )
 
     def _end(self, action: Action, observation: Observation | None, exc: BaseException) -> None:
-        """End the episode after *action*'s step failed with *exc* (see :func:`_failure_result`).
+        """End the episode after *action*'s step failed with *exc* (see :func:`failure_result`).
 
         The action may have changed the sandbox, so it is recorded, with no step reward.
         *observation* is the one taken after the action, if any.
         """
-        self._failed_result = _failure_result(exc, self.sandbox_id)
+        exhausted = self._ran_out_the_clock(exc)
+        self._failed_result = failure_result(exc, self.sandbox_id, exhausted=exhausted)
         if observation is not None:
             observation = observation.model_copy(update={'done': True})
         self._record(action, observation, reward=None, done=True)
@@ -1117,21 +1179,33 @@ class Session:
 
         Raises:
             InvalidScoreError: If the score is NaN, infinite, or outside [0, 1].
-            VerifierError: If the step verifier times out, prints neither a float nor
-                JSON with a score, doesn't exit cleanly (see :func:`check_exit`), or
-                reports its own failure (exit 2, or an ``error_type`` that isn't the
-                model's fault; see :func:`~deepgym.models.is_verdict`).
+            VerifierError: If, before it read the agent's output, the step verifier times
+                out, prints neither a float nor JSON with a score, doesn't exit cleanly (see
+                :func:`check_exit`), or reports its own failure (exit 2, or an
+                ``error_type`` that isn't the model's fault; see
+                :func:`~deepgym.models.is_verdict`). After, any of these is the step's judged
+                0 (``solution_error``), but for the agent's code failing to launch.
         """
         self._backend.write_file(_STEP_OUTPUT, output.encode('utf-8'))
         try:
-            exit_code, stdout, _ = self._backend.verify(
-                _guarded(self._env.step_verifier_code),
-                self._env.timeout_per_step,
-                env={'STEP_OUTPUT_PATH': _STEP_OUTPUT, 'STEP_NUMBER': str(self._step)},
+            (exit_code, stdout, _), consulted = self._verify(
+                self._env.step_verifier_code,
+                {'STEP_OUTPUT_PATH': _STEP_OUTPUT, 'STEP_NUMBER': str(self._step)},
             )
         except TimeoutError as exc:
             raise VerifierError(f'Step verifier timed out at step {self._step}') from exc
-        stdout = stdout.strip()
+        try:
+            return self._step_score(exit_code, stdout.strip())
+        except VerifierError as exc:
+            if not consulted or _launch_failed(stdout):
+                raise
+            details = f"The step verifier failed after reading the agent's output: {exc}"
+            verdict = _judged_zero(details, 'solution_error').verifier_result
+            self._step_verdict = {**verdict.model_dump(), 'exit_code': 1}
+            return 0.0
+
+    def _step_score(self, exit_code: int, stdout: str) -> float:
+        """Return the score in the step verifier's *stdout* (see :meth:`_step_reward`)."""
         json_str = _extract_json_line(stdout)
         try:
             data = json.loads(json_str) if json_str else {'score': float(stdout)}
@@ -1150,6 +1224,53 @@ class Session:
             )
         self._step_verdict = {**data, 'exit_code': exit_code}
         return score
+
+    def _verify(self, code: str, env: dict[str, str] | None = None) -> tuple[VerifierOutput, bool]:
+        """Run session verifier *code* against the sandbox as it stands.
+
+        It gets a fresh ``DEEPGYM_CONSULTED`` mark in its code (see :func:`_guarded`). It
+        prints the mark plus ``:start`` before any of its code runs, and the mark itself once
+        the agent's output is in play (it read the agent's work directory, ran a program there
+        or on the agent's files, or started the agent's code, see
+        :func:`~deepgym.verifier_template.guard_crashes`). Both come as ``\\n<line>\\n`` and
+        are cut from its stdout exactly, so what it printed reads as if they weren't there.
+        After the mark, a timeout is the agent's judged 0 (``solution_timeout``, as in a single
+        run, see :func:`~deepgym.sandbox.solution_timeout`), and so is the verifier being
+        killed (``solution_error``). So is a timeout whose output the backend lost (no start
+        line), since nothing then shows the verifier hadn't read the agent's output. A judged
+        0 comes back as if the verifier had printed it.
+
+        Returns:
+            What the verifier printed, and whether it read the agent's output.
+
+        Raises:
+            VerifierError: If the verifier timed out before the mark.
+        """
+        mark = uuid4().hex
+        consulted, started = f'\n{mark}\n', f'\n{mark}:start\n'
+        timeout = self._env.timeout_per_step
+        try:
+            exit_code, stdout, stderr = self._backend.verify(_guarded(code, mark), timeout, env)
+        except SandboxTimeoutError as exc:
+            if consulted in exc.output:
+                return _reported(solution_timeout(timeout)), True
+            if started not in exc.output:
+                details = f'The verifier timed out and nothing it printed came back: {exc}'
+                return _reported(_judged_zero(details, 'policy_sandbox_failure')), True
+            raise VerifierError(
+                f"The verifier timed out before it read the agent's output: {exc}"
+            ) from exc
+        read = consulted in stdout
+        if read and not 0 <= exit_code < 128:
+            details = f"The verifier was killed (exit {exit_code}) handling the agent's output"
+            return _reported(_judged_zero(details, 'solution_error')), True
+        stdout = stdout.replace(consulted, '').replace(started, '')
+        return VerifierOutput(exit_code, stdout, stderr), read
+
+    def _ran_out_the_clock(self, exc: BaseException) -> bool:
+        """Whether *exc* is a provider lifetime the agent's actions ran out (see
+        :func:`ran_out_the_clock`)."""
+        return ran_out_the_clock(exc, self._acting_s, time.monotonic() - self._opened)
 
 
 def run_episode(
@@ -1176,18 +1297,48 @@ def run_episode(
         return session.trajectory, session.score()
 
 
-def _failure_result(exc: BaseException, sandbox_id: str) -> RunResult:
+def ran_out_the_clock(exc: BaseException, acting_s: float, elapsed_s: float) -> bool:
+    """Whether *exc* is the provider retiring the sandbox at the end of its lifetime after
+    the agent's own actions took at least half of the *elapsed_s* seconds (*acting_s*): then
+    the agent ran the clock out (stalling with sleeps or waits, say), not the host.
+
+    ponytail: half is a line, not a measure of fault; an agent that stalls for less needs
+    the host to have spent as long (inference, say) for the lifetime to run out.
+    """
+    return isinstance(exc, SandboxExpiredError) and 2 * acting_s >= elapsed_s
+
+
+def failure_result(exc: BaseException, sandbox_id: str, *, exhausted: bool = False) -> RunResult:
     """Return the result of an episode that *exc* ended once the agent had acted.
 
-    A network or provider failure (see :func:`~deepgym.exceptions.is_infrastructure_failure`),
-    a step verifier that failed, or an interrupt has no verdict. Anything else follows from
-    the agent's actions (its sandbox died or hung, a write failed, its files blocked a
-    harness write): a judged 0 (``policy_sandbox_failure``), or breaking the sandbox would
-    dodge the score.
+    The rule for sessions, shared with :mod:`deepgym.integrations.verl_tool` and Harbor's
+    agent phase. Only a failure that is ours for certain has no verdict:
+
+    * a network or provider failure, or the provider refusing our credentials (see
+      :func:`~deepgym.exceptions.is_infrastructure_failure`);
+    * a verifier that couldn't run (its upload or launch failed), failed, or timed out
+      before it read the agent's output (:class:`~deepgym.exceptions.VerifierError`; after,
+      the verifier reports the agent's 0 itself, see :meth:`Session._verify`);
+    * the provider retiring the sandbox at the end of its lifetime
+      (:class:`~deepgym.exceptions.SandboxExpiredError`), unless *exhausted*: the agent's
+      own actions ran the clock out (see :meth:`Session._ran_out_the_clock`);
+    * an interrupt.
+
+    Anything else follows from the agent's actions (its sandbox died, its files blocked a
+    harness write, a write failed on a disk it fills or a path it controls, a command that
+    hung): a judged 0 (``policy_sandbox_failure``), or breaking the sandbox would dodge the
+    score. So is a failure the rule can't read.
     """
-    result = error_result(exc, sandbox_id)
-    unjudged = isinstance(exc, VerifierError) or not isinstance(exc, Exception)
-    if unjudged or is_infrastructure_failure(exc):
+    if not isinstance(exc, Exception):
+        return error_result(exc, sandbox_id)
+    try:
+        ours = isinstance(exc, VerifierError | SandboxExpiredError) and not exhausted
+        ours = ours or is_infrastructure_failure(exc)
+        result = error_result(exc, sandbox_id)
+    except Exception:  # an exception that breaks the rule is never a reason to mask it
+        ours = False
+        result = error_result(SandboxError(type(exc).__name__), sandbox_id)
+    if ours:
         return result
     return result.model_copy(update={'error_type': 'policy_sandbox_failure'})
 
@@ -1216,10 +1367,44 @@ if 'DEEPGYM_RUNTIME' in _dg_os.environ:
 """
 
 
-def _guarded(code: str) -> str:
-    """Return session verifier *code* with deepgym_solution on its path, exiting 2 on a crash
-    (see :func:`~deepgym.verifier_template.guard_crashes`) so it never counts as a failed run."""
-    return guard_crashes(code, _RUNTIME_ON_PATH)
+def _guarded(code: str, mark: str) -> str:
+    """Return session verifier *code* with deepgym_solution on its path and *mark* as its
+    DEEPGYM_CONSULTED, exiting 2 on a crash (see
+    :func:`~deepgym.verifier_template.guard_crashes`) so it never counts as a failed run.
+
+    The mark goes in the code, which only the verifier user reads, not in a variable on a
+    command line any process in the sandbox can list.
+    """
+    prelude = (
+        f'{_RUNTIME_ON_PATH}_dg_os.environ["DEEPGYM_CONSULTED"] = {mark!r}\n'
+        f'_dg_os.write(1, b"\\n{mark}:start\\n")\n'
+    )
+    return guard_crashes(code, prelude)
+
+
+def _launch_failed(stdout: str) -> bool:
+    """Whether a verifier's last protocol line reports that the agent's code couldn't be
+    launched (the crash guard's ``sandbox_error``): the machine's failure, even after the
+    verifier read the agent's output."""
+    try:
+        report = json.loads(_extract_json_line(stdout) or 'null')
+    except ValueError:
+        return False
+    return isinstance(report, dict) and report.get('error_type') == 'sandbox_error'
+
+
+def _failed_after_reading(
+    exc: BaseException, elapsed_ms: float, sandbox_id: str, stderr: str
+) -> RunResult:
+    """Return the judged 0 of a verifier that failed after reading the agent's output."""
+    details = f"The verifier failed after reading the agent's output: {exc}"
+    verdict = _judged_zero(details, 'solution_error').verifier_result
+    return build_run_result(verdict, elapsed_ms, sandbox_id, stderr=stderr, exit_code=1)
+
+
+def _reported(executed: ExecutionResult) -> VerifierOutput:
+    """Return *executed*, a judged 0, as the verifier would have printed it."""
+    return VerifierOutput(executed.exit_code, executed.verifier_result.model_dump_json(), '')
 
 
 def _inline_python(python: str, code: str) -> str:

@@ -4,6 +4,7 @@ Runs locally. File-isolation checks need sandbox-exec (macOS) or bwrap (Linux)
 and are skipped where neither works.
 """
 
+import contextlib
 import errno
 import json
 import os
@@ -13,6 +14,7 @@ import subprocess
 import sys
 import tempfile
 import time
+from collections.abc import Iterator
 from pathlib import Path
 
 import pytest
@@ -198,6 +200,29 @@ def test_no_start_signal_goes_through_sudo(monkeypatch: pytest.MonkeyPatch) -> N
     with solution_runtime._start_signal() as (prefix, fds, started, release):
         release()
         assert (prefix, fds, started()) == ([], (), True)  # sudo would close the pipe
+
+
+def test_the_consulted_mark_is_out_before_the_solution_is_released(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A solution that kills its sandbox the moment it starts can't beat the mark out."""
+    from deepgym import solution_runtime
+
+    script = tmp_path / 'solution.py'
+    script.write_text('print("hi")\n', encoding='utf-8')
+    events: list[str] = []
+    real_signal = solution_runtime._start_signal
+
+    @contextlib.contextmanager
+    def recorded_signal() -> Iterator[tuple]:
+        with real_signal() as (prefix, fds, started, release):
+            yield prefix, fds, started, lambda: (events.append('release'), release())
+
+    monkeypatch.setattr(solution_runtime, '_start_signal', recorded_signal)
+    monkeypatch.setattr(solution_runtime, '_announce', lambda: events.append('announce'))
+
+    assert solution_runtime.run_solution(str(script)).stdout == 'hi\n'
+    assert events == ['announce', 'release']
 
 
 def test_a_reader_that_cannot_start_is_a_launch_failure(

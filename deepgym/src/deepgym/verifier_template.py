@@ -181,7 +181,9 @@ import sys as _dg_sys
 import traceback as _dg_traceback
 
 # Where the policy's output lives (the solution, a session's work directory): opening a
-# file there counts as consulting it, as starting the solution through deepgym_solution does.
+# file there, listing a folder there or starting a program there (a session verifier's own
+# working folder is the agent's) counts as consulting it, as starting the solution through
+# deepgym_solution does.
 _dg_policy = tuple(
     _dg_os.path.join(path, "")
     for entry in _dg_os.environ.get("DEEPGYM_POLICY_DIR", "").split(_dg_os.pathsep)
@@ -189,25 +191,71 @@ _dg_policy = tuple(
     for path in {entry, _dg_os.path.realpath(entry)}
 )
 _dg_touched = False
+# Audit events that read the path in their first argument (None: the working folder).
+_dg_reads = {"open", "os.listdir", "os.scandir", "glob.glob", "glob.glob/2"}
+# Audit events that start a program, which works in the working folder (subprocess.Popen's
+# cwd argument when given), with where its program and argument list are (os.system has none).
+_dg_starts = {
+    "subprocess.Popen": (0, 1),
+    "os.system": (),
+    "os.posix_spawn": (0, 1),
+    "os.exec": (0, 1),
+    "os.spawn": (1, 2),
+}
 
 
 def _dg_announce():
-    """Tell the host on stdout that the policy's output is in play (DEEPGYM_CONSULTED)."""
+    """Tell the host on stdout that the policy's output is in play (DEEPGYM_CONSULTED).
+
+    Written to the stdout file itself, so a verifier that captures sys.stdout can't hide it,
+    on a line of its own after whatever the verifier printed before.
+    """
     mark = _dg_os.environ.get("DEEPGYM_CONSULTED")
     if mark:
-        print("\\n" + mark, flush=True)
+        try:
+            if _dg_sys.__stdout__ is not None:
+                _dg_sys.__stdout__.flush()
+            _dg_os.write(1, ("\\n" + mark + "\\n").encode())
+        except (OSError, ValueError):
+            pass  # an audit hook that raises would fail the verifier's own call
+
+
+def _dg_inside(target):
+    """Whether *target* (a path; None for the working folder) is in the policy's folders."""
+    try:
+        path = _dg_os.path.abspath(_dg_os.fsdecode("." if target is None else target))
+    except (TypeError, ValueError):
+        return False  # a file descriptor, say
+    return _dg_os.path.join(path, "").startswith(_dg_policy)
 
 
 def _dg_audit(event, args):
-    """Count opening one of the policy's files as consulting it."""
+    """Count reading one of the policy's files or folders, or starting a program in one or
+    on one (an absolute path of the policy's among its program and arguments), as
+    consulting it."""
     global _dg_touched
-    if _dg_touched or event != "open" or not _dg_policy:
+    if _dg_touched or not _dg_policy:
         return
-    try:
-        path = _dg_os.path.join(_dg_os.path.abspath(_dg_os.fsdecode(args[0])), "")
-    except (TypeError, ValueError):
-        return  # a file descriptor, say
-    if path.startswith(_dg_policy):
+    if event in _dg_reads:
+        hit = _dg_inside(args[2] if event == "glob.glob/2" and args[2] is not None else args[0])
+    elif event in _dg_starts:
+        named = []
+        for index in _dg_starts[event]:
+            value = args[index]
+            named += value if isinstance(value, (list, tuple)) else [value]
+        absolute = []
+        for arg in named:
+            try:
+                text = _dg_os.fsdecode(arg)  # a str, bytes or path object
+            except TypeError:
+                continue
+            if text.startswith("/"):
+                absolute.append(text)
+        cwd = args[2] if event == "subprocess.Popen" else None
+        hit = _dg_inside(cwd) or any(_dg_inside(arg) for arg in absolute)
+    else:
+        return
+    if hit:
         _dg_touched = True
         _dg_announce()
 

@@ -9,6 +9,7 @@ State must still carry across calls within one rollout. Sessions are real (local
 import asyncio
 import importlib
 import logging
+import re
 import sys
 import types
 from typing import Any
@@ -17,7 +18,8 @@ import pytest
 
 from deepgym.exceptions import DeepGymError, SandboxError
 from deepgym.exceptions import TimeoutError as DeepGymTimeout
-from deepgym.models import MultiTurnEnvironment
+from deepgym.models import MODEL_FAULT_ERRORS, MultiTurnEnvironment
+from deepgym.sandboxes import SandboxTimeoutError
 from deepgym.session import LocalBackend, Session
 
 WRITES_HELLO = (
@@ -316,26 +318,53 @@ def test_an_action_the_policy_broke_is_scored(
     assert masked == [False]
 
 
+class _RefusedError(Exception):
+    """A provider refusing our credentials, as its SDK reports it."""
+
+    status_code = 401
+
+
 @pytest.mark.parametrize(
-    ('failure', 'kept_out'),
+    ('failure', 'error_type'),
     [
-        (ConnectionError('provider unavailable'), True),
-        (SandboxError('Sandbox local-session is not running'), False),  # the policy killed it
-        (DeepGymTimeout('Verifier exceeded 30s'), False),  # the policy left it hanging
+        (lambda mark: ConnectionError('provider unavailable'), 'unknown_error'),
+        (lambda mark: _RefusedError('HTTP 401'), 'unknown_error'),
+        # It timed out before it printed the consulted mark: it never read the policy's output.
+        (
+            lambda mark: SandboxTimeoutError('exceeded 30s', f'\n{mark}:start\nloading fixtures'),
+            'verifier_error',
+        ),
+        # Nothing it printed came back, so nothing shows it hadn't read the policy's output.
+        (lambda mark: SandboxTimeoutError('exceeded 30s'), 'policy_sandbox_failure'),
+        (lambda mark: SandboxTimeoutError('exceeded 30s', f'\n{mark}\n'), 'solution_timeout'),
+        (
+            lambda mark: SandboxError('Sandbox local-session is not running'),
+            'policy_sandbox_failure',
+        ),
+        (lambda mark: DeepGymTimeout('Verifier exceeded 30s'), 'policy_sandbox_failure'),
     ],
-    ids=['provider_outage', 'sandbox_killed', 'sandbox_hung'],
+    ids=[
+        'provider_outage',
+        'auth',
+        'timed_out_before_reading',
+        'timed_out_with_output_lost',
+        'timed_out_reading',
+        'sandbox_broken',
+        'sandbox_hung',
+    ],
 )
 def test_a_final_verifier_that_cannot_run(
     verl: types.ModuleType,
     monkeypatch: pytest.MonkeyPatch,
     masked: list[bool],
-    failure: Exception,
-    kept_out: bool,
+    failure: Any,
+    error_type: str,
 ) -> None:
-    """Only a provider failure keeps the rollout out; a sandbox the policy broke scores 0."""
+    """Only a failure that is ours for certain keeps the rollout out; the rest scores 0."""
+    kept_out = error_type not in MODEL_FAULT_ERRORS
 
     def verify(backend: LocalBackend, code: str, timeout: int, env: Any = None) -> Any:
-        raise failure
+        raise failure(re.search(r'DEEPGYM_CONSULTED"\] = \'(\w+)\'', code)[1])
 
     monkeypatch.setattr(LocalBackend, 'verify', verify)
     real_finish = verl.DeepGymSessionTool.finish
@@ -353,7 +382,7 @@ def test_a_final_verifier_that_cannot_run(
     assert output.extra_fields['reward_extra_info']['error'] == float(kept_out)
     assert output.response_mask == ([0, 0, 0] if kept_out else [1, 1, 1])
     assert results[0].has_verdict is not kept_out
-    assert results[0].error_type == ('unknown_error' if kept_out else 'policy_sandbox_failure')
+    assert results[0].error_type == error_type
     assert masked == [kept_out]
 
 

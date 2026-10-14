@@ -203,7 +203,8 @@ class CliContainer:
         """Write *content* to *path* inside the container, creating parent directories.
 
         Raises:
-            SandboxError: If the write fails.
+            SandboxDiedError: If the container has stopped.
+            SandboxError: If the write fails any other way.
         """
         script = f'PATH={TRUSTED_PATH}; mkdir -p "$(dirname "$1")" && cat > "$1"'
         try:
@@ -214,7 +215,8 @@ class CliContainer:
         except subprocess.TimeoutExpired as exc:
             raise SandboxError(f'Upload of {path} timed out') from exc
         if done.returncode != 0:
-            raise SandboxError(f'Failed to upload {path}: {done.stderr.decode()[-500:]}')
+            message = f'Failed to upload {path}: {done.stderr.decode()[-500:]}'
+            raise SandboxDiedError(message) if self._gone() else SandboxError(message)
 
     def delete(self) -> bool:
         """Stop and remove the container; never raises, and a failure is logged.

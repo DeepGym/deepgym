@@ -74,6 +74,12 @@ class SandboxDiedError(SandboxError):
         self.output = output
 
 
+class SandboxExpiredError(SandboxError):
+    """Raise when the provider retired the sandbox at the end of its lifetime, whatever ran
+    in it. Not the policy's doing unless its own actions ran the clock out (see
+    :func:`deepgym.session.failure_result`)."""
+
+
 class TimeoutError(DeepGymError):
     """Raise when execution exceeds the configured timeout."""
 
@@ -112,8 +118,9 @@ def is_infrastructure_failure(exc: BaseException) -> bool:
     """Return True if *exc* is a failure of the network or the sandbox provider.
 
     That is a connection or transport error, a provider call timing out, a provider HTTP
-    5xx or 429, or the provider evicting the sandbox, anywhere along the exception's
-    ``__cause__`` chain. Such a run got no verdict, and trainers keep it out of training.
+    5xx or 429, the provider refusing our credentials (401, 403), or the provider evicting
+    the sandbox, anywhere along the exception's ``__cause__`` chain. Such a run got no
+    verdict, and trainers keep it out of training.
 
     Anything else is the policy's doing and is scored: a command or verifier that ran out
     of time, a sandbox the provider reports gone or stopped after the policy acted, a
@@ -132,7 +139,7 @@ def is_infrastructure_failure(exc: BaseException) -> bool:
         if isinstance(exc, (ConnectionError, builtins.TimeoutError, *transport)):
             return True
         status = _status_code(exc)
-        if status is not None and (status >= 500 or status == 429):
+        if status is not None and (status >= 500 or status in (401, 403, 429)):
             return True
         exc = exc.__cause__
     return False

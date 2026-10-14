@@ -12,6 +12,7 @@ import logging
 import posixpath
 import re
 import shlex
+import time
 from collections.abc import Mapping
 from types import ModuleType
 from typing import TYPE_CHECKING
@@ -20,6 +21,7 @@ from uuid import uuid4
 from deepgym.exceptions import SandboxDiedError, SandboxError
 from deepgym.models import Environment, MultiTurnEnvironment
 from deepgym.sandboxes.protocol import (
+    TIMEOUT_EXIT_CODES,
     TRUSTED_PATH,
     ExecResult,
     SandboxImage,
@@ -36,6 +38,9 @@ if TYPE_CHECKING:
     from daytona._sync.computer_use import ComputerUse
 
 logger = logging.getLogger(__name__)
+
+# How much longer than the command's own deadline Daytona waits for it to end.
+_WAIT_GRACE_S = 15
 
 
 def _sdk() -> ModuleType:
@@ -239,22 +244,32 @@ class DaytonaSandbox:
     ) -> ExecResult:
         """Run *command* with sh as root.
 
+        The deadline is enforced in the sandbox by coreutils ``timeout``, as on E2B, so a
+        command that outruns it still returns what it printed (Daytona's own timeout
+        returns nothing); Daytona waits a little longer.
+
         Raises:
             SandboxTimeoutError: If the command outruns *timeout* seconds.
             SandboxDiedError: If the sandbox stopped during the command.
         """
+        if timeout:
+            command = f'/usr/bin/timeout --kill-after=2 {timeout} /bin/sh -c {shlex.quote(command)}'
+        start = time.monotonic()
         try:
             response = self._sandbox.process.exec(
                 f'{self._sudo}/bin/sh -c {shlex.quote(command)}',
                 cwd=cwd,
                 env=dict(env) if env else None,
-                timeout=timeout,
+                timeout=timeout + _WAIT_GRACE_S if timeout else None,
             )
         except Exception as exc:
             if is_timeout(exc):
                 raise SandboxTimeoutError(f'command exceeded {timeout}s') from exc
             self._raise_if_stopped(exc)
             raise
+        if timeout and response.exit_code in TIMEOUT_EXIT_CODES:
+            if time.monotonic() - start >= timeout:
+                raise SandboxTimeoutError(f'command exceeded {timeout}s', response.result)
         return ExecResult(response.exit_code, response.result)
 
     def _raise_if_stopped(self, exc: Exception) -> None:
@@ -281,13 +296,17 @@ class DaytonaSandbox:
         """Write *content* to *path* as root, creating parent directories.
 
         Raises:
+            SandboxDiedError: If the sandbox has stopped.
             SandboxError: If root can't move the staged file into place.
         """
+        staged = f'{self._stage}/{uuid4().hex}' if self._stage else path
+        try:
+            self._sandbox.fs.upload_file(content, staged)
+        except Exception as exc:
+            self._raise_if_stopped(exc)
+            raise
         if not self._stage:
-            self._sandbox.fs.upload_file(content, path)
             return
-        staged = f'{self._stage}/{uuid4().hex}'
-        self._sandbox.fs.upload_file(content, staged)
         src, dst = shlex.quote(staged), shlex.quote(path)
         moved = self.exec(
             f'PATH={TRUSTED_PATH}; mkdir -p {shlex.quote(posixpath.dirname(path))} && '

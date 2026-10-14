@@ -11,10 +11,12 @@ or ATIF.
 behind the action:
 
 ```python
+from deepgym import load_environment
 from deepgym.traces import AgentMeta
 
 agent = AgentMeta(name='react-shell', model='Qwen/Qwen3-8B', sampling={'temperature': 0.7})
-with dg.trace(env, agent, variant=3) as tr:
+env = load_environment('todo_list', variant=3)
+with dg.trace(env, agent, variant=3) as tr:   # variant here only labels the provenance
     obs = tr.start()
     while not tr.done:
         action, messages = my_agent(obs)   # messages: this turn's new TraceMessages
@@ -29,8 +31,8 @@ print(tr.trace.has_verdict)
   messages with the first only; the others belong to the same turn (`trace.turns`).
 - A traced episode refuses actions after `score()`, so its verdict always matches the
   state it ends in.
-- `variant`, `seed` and `reference` (the reference solution's source) go into the
-  provenance.
+- `variant`, `seed` and `reference` (the reference solution's source) only go into the
+  provenance; load the environment with the same variant yourself.
 
 ## What a trace holds
 
@@ -55,7 +57,7 @@ backend give a `digest_unavailable` reason instead.
 Each event is appended to `~/.deepgym/traces/<trace_id>.jsonl` (or
 `$DEEPGYM_TRACES_DIR`) and flushed as it happens, so an exception or a killed process
 keeps the steps taken so far, and a trace that was never scored is `incomplete`.
-`deepgym.traces.load_trace(path)` reads one back.
+`deepgym.traces.load_trace(path)` reads one back; `path` is a `pathlib.Path`.
 
 `record_episode(tr.trace)` from `deepgym.console` also stores it in the
 [console](console.md), where episodes can be replayed step by step.
@@ -71,8 +73,10 @@ deepgym traces export --format atif --out atif/ --only-valid        # ATIF docum
 - Export reads the console database and the traces directory, or the sources named with
   `--db` and `--traces`. A trace stored in both is exported once, and refused if the
   copies disagree.
-- A trace without a verdict is exported with `has_verdict: false` and a null reward, or
-  left out with `--only-valid`.
+- A trace without a verdict is exported with `has_verdict: false`, or left out with
+  `--only-valid`. `--rows rl` rows and trace-shaped Parquet rows give it a null reward;
+  whole-trace JSONL and ATIF (under `extra.deepgym`) keep the result as recorded, with
+  its placeholder score of 0.0.
 - `--rows rl` writes one conversation per trace: `messages`, `reward`, `step_rewards`,
   and `steps` (every action with its observation text and screenshot, done flag, exit
   code, error, step reward and the index of the reply that produced it). It skips traces
@@ -85,4 +89,4 @@ deepgym traces export --format atif --out atif/ --only-valid        # ATIF docum
 - Parquet needs `pip install "deepgym[traces]"`.
 
 From Python, `deepgym.traces.export_traces(traces, fmt, out, rows=..., only_valid=...)`
-does the same for a list of traces.
+does the same for a list of traces; `out` is a `pathlib.Path`.

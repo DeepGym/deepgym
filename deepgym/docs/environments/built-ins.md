@@ -35,15 +35,17 @@ Multi-turn desktop tasks on Daytona, each with 8 seeded variants: `signup_form`,
 ## Cyber (2)
 
 `cyber/cve_2021_44228_log_triage` (Log4Shell log triage) and
-`cyber/web_path_traversal_toy` (a synthetic CTF-style path traversal). Both are
-local-only; see [CyberBench](../cyberbench.md) for the rules new cyber tasks follow.
+`cyber/web_path_traversal_toy` (a synthetic CTF-style path traversal). Both use local
+synthetic targets only and run in any mode, `local` included; see
+[CyberBench](../cyberbench.md) for the rules new cyber tasks follow.
 
 ## Suites
 
 `load_suite(name)` and `deepgym eval --suite NAME` take a difficulty (`easy`, `medium`,
 `hard`), a type (`coding`, `computer-use`, `tool-use`), `all`, or a family name such as
-`dynamic-programming`. Computer-use environments need an agent, so they only appear in
-the `computer-use` suite.
+`dynamic-programming`. The `coding` suite also holds the two cyber tasks (24 in all), and
+no built-in is `hard`. Computer-use environments need an agent, so they only appear in
+the `computer-use` suite, which `deepgym eval` can't run.
 
 ```bash
 # one solution file per environment, named after it: solutions/coin_change.py, ...
@@ -52,13 +54,14 @@ deepgym eval --suite dynamic-programming --solutions-dir solutions/
 
 ## Where they live
 
-Each built-in is a folder in `src/deepgym/envs/` with `task.md`, `verifier.py`,
-`reference_solution.py` and `metadata.json`, listed in `src/deepgym/envs/registry.json`.
-Computer-use tasks add `setup.sh`, `variants.json`, an `app/` folder and a
-`reference_actions.json` with one scripted episode per variant.
+Each built-in is a folder in `src/deepgym/envs/` with `task.md`, `verifier.py` and
+`metadata.json`, listed in `src/deepgym/envs/registry.json`. Single-turn tasks add
+`reference_solution.py`. Computer-use tasks add `setup.sh`, `variants.json` and a
+`reference_actions.json` with one scripted episode per variant, and all but `file_manager`
+an `app/` folder.
 
 The test suite runs every single-turn built-in through the
-[QA gate](../authoring/qa-gate.md): the reference scores 1.0 on every run, and empty, stub
-and reward-hack answers earn nothing. The computer-use built-ins are checked with
-`deepgym qa --mode daytona`, since they need a desktop. To add an environment, see
-[authoring](../authoring/new-check-qa.md).
+[QA gate](../authoring/qa-gate.md): the reference scores 1.0 on every run, empty and stub
+answers earn nothing, and no reward-hack answer reaches 0.5. The computer-use built-ins
+are checked with `deepgym qa --mode daytona`, since they need a desktop. To add an
+environment, see [authoring](../authoring/new-check-qa.md).

@@ -5,7 +5,7 @@ folder passed, what the file holds, and how `deepgym check` tells when the folde
 changed since.
 
 ```bash
-deepgym qa ./word_stats --mutants --approve --by "Jane Doe"
+deepgym qa ./word_stats --mutants --mode docker --approve --by "Jane Doe"
 deepgym check ./word_stats   # fails once the files no longer match the approval
 ```
 
@@ -21,8 +21,9 @@ tested. The folder must be self-contained: no symlinks, and no support files out
 ## What it holds
 
 - The full QA report.
-- A sha256 and the permission bits of every file and directory in the folder, hidden ones
-  too, so even a `.DS_Store` Finder adds makes it stale.
+- A sha256 and the permission bits of every file in the folder, and the permission bits
+  of every directory, hidden ones too, so even a `.DS_Store` Finder adds makes it stale.
+  `approval.json` itself and the folder's top-level `.git` are left out.
 - The deepgym version and the time.
 - The lint warnings from `deepgym check`, under `lint` and marked `"advisory": true`:
   information for the reader, never evidence that the verifier isolates the solution.
@@ -32,5 +33,5 @@ It is written once, read-only. Delete it to approve again.
 ## Checking an approved folder
 
 `deepgym check` fails when the files no longer match the approval, Harbor task folders
-included. So an environment pack carries proof of exactly what was tested, and anyone can
-confirm the files they received are those files.
+included. `approval.json` is unsigned: it records what was tested, and `check` confirms
+the files still match that record, not who wrote it.

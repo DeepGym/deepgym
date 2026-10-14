@@ -27,9 +27,10 @@ trainer.train()
 - It runs the last fenced code block of each completion, or all of it if there is none.
   Completions can be plain text or conversations (lists of message dicts, including
   tool-calling turns); for a conversation, the last assistant turn is the answer.
-- A completion whose sandbox or verifier failed gets `None`, not 0.0. TRL 1.6+ leaves it
-  out of its group's baseline and gives it no advantage, so an outage neither penalizes
-  it nor shifts its siblings' advantages. Older TRL treats the `None` as 0.0. See
+- A completion whose sandbox or verifier failed gets `None`, not 0.0. When every reward
+  function returns `None` for a completion, TRL 1.6+ leaves it out of its group's
+  baseline and gives it no advantage, so an outage neither penalizes it nor shifts its
+  siblings' advantages. Older TRL treats the `None` as 0.0. See
   [the reward contract](reward-contract.md).
 - `max_parallel` (default 32) caps the sandbox runs at once.
 - `component='correctness'` returns one reward component instead of the score (a result
@@ -37,7 +38,9 @@ trainer.train()
 - `make_trl_async_reward_fn(env)` is the async version.
 
 Without a client, the reward function uses `DeepGym(mode='auto')`: Daytona when
-`DAYTONA_API_KEY` is set, otherwise local. Pass a client to pick the provider.
+`DAYTONA_API_KEY` is set, otherwise local. If the key is set but `deepgym[daytona]` isn't
+installed, it runs locally with only a warning. Pass a client to pick the provider, such
+as `DeepGym(mode='daytona')`.
 
 ## DAPO
 

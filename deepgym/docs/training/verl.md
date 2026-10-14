@@ -66,8 +66,8 @@ rows are the same `verl_rows`.
   fault, so it scores 0 and is trained on.
 
 A policy that learns to trigger failures escapes their penalty either way, so keep
-watching `error` and the failed samples; the loop logs a warning when more than 5% of a
-batch is kept out. See [the reward contract](reward-contract.md).
+watching `error` and the failed samples; the loop logs a warning when more than 5
+samples in a block of 100 are kept out. See [the reward contract](reward-contract.md).
 
 ## Multi-turn agents
 
@@ -102,16 +102,17 @@ tools:
 Only failures that aren't the policy's doing get no verdict and are kept out of training
 the same way (`error` 1.0): a sandbox that fails to start, a provider or network failure
 during an action or the final verifier (`deepgym.exceptions.is_infrastructure_failure`),
-and a step or final verifier that fails. Everything that follows from the policy's own
-actions is scored:
+and a step or final verifier that fails before it runs the agent's code. Everything that
+follows from the policy's own actions is scored:
 
-- An invalid or disallowed action comes back to the model as text, and any other failed
-  action as an error, while the rollout goes on.
-- If the final verifier can't run in a sandbox the policy killed or hung, the rollout
-  scores 0 with `error_type` `policy_sandbox_failure`.
+- An invalid or disallowed action comes back to the model as text, and the rollout goes
+  on.
+- Any other failed action (a failed write, a sandbox the policy killed) comes back as an
+  error and ends the episode with a 0, `error_type` `policy_sandbox_failure`, as does a
+  final verifier that can't run in a sandbox the policy killed or hung.
 - A rollout where the model never calls the tool scores 0.
 
-This loop also warns when more than 5% of a batch is kept out.
+This loop also warns when more than 5 samples in a block of 100 are kept out.
 
 ## DAPO
 

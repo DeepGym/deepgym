@@ -7,10 +7,10 @@
 **RL environments with verifiable rewards you can trust.**
 
 DeepGym runs a model's answer (code, a patch, shell commands or desktop actions) in a
-sandbox and scores it with a verifier kept apart from that answer. When a sandbox or
-verifier fails, the run gets no verdict and stays out of training instead of counting as
-a 0. It's for teams training and evaluating coding and computer-use agents with verl,
-TRL, OpenRLHF, Axolotl or their own GRPO loop.
+sandbox and scores it with a verifier kept apart from that answer. When the infrastructure
+fails instead of judging the answer, the run gets no verdict and can be kept out of
+training instead of counting as a 0. It's for teams training and evaluating coding and
+computer-use agents with verl, TRL, OpenRLHF, Axolotl or their own GRPO loop.
 
 ## Install
 
@@ -66,28 +66,31 @@ provider such as `mode='docker'`; nothing else changes.
   computer use (a desktop). Load one by name with `load_environment`, or scaffold your
   own with `deepgym new`.
 - **Verifier:** Python that scores an answer and prints JSON: a score in [0, 1], a pass
-  flag, and every test case with a reason. It reaches the answer only through the
-  `deepgym_solution` helpers, which run it in a separate, isolated process with no
+  flag, and optionally each test case with a reason. It reaches the answer only through
+  the `deepgym_solution` helpers, which run it in a separate, isolated process with no
   network.
-- **Sandbox providers:** where answers run, picked with `mode`. Every sandbox mode gives
-  the same isolation.
+- **Sandbox providers:** where answers run, picked with `mode`. In every sandbox mode the
+  answer runs as a separate Linux user with no network; Docker shares the host's kernel,
+  so it isolates less than the VM-based providers.
 
   | `mode` | Runs on | Setup |
   |---|---|---|
-  | `local` | This machine, under `sandbox-exec` (macOS) or `bwrap` (Linux) | None; for development only, and repo, terminal and cyber tasks refuse it |
+  | `local` | This machine, under `sandbox-exec` (macOS) or `bwrap` (Linux) | None; for development only, and repo-patch, Harbor and CyberGym tasks refuse it |
   | `docker` | A throwaway container with no network | A running Docker daemon |
   | `apple` | A throwaway Linux VM from Apple's `container` CLI (macOS) | `brew install container`, then `container system start` |
   | `daytona` | A Daytona sandbox, cloud or self-hosted; desktops need it | `deepgym[daytona]` and `DAYTONA_API_KEY` (self-hosted: also `DAYTONA_API_URL`) |
   | `modal` | A Modal sandbox | `deepgym[modal]`, then `modal token set` |
   | `e2b` | An E2B sandbox | `deepgym[e2b]` and `E2B_API_KEY` |
-  | `auto` (default) | Daytona when `DAYTONA_API_KEY` is set, otherwise `local` | |
+  | `auto` (default) | Daytona when `DAYTONA_API_KEY` is set, otherwise `local`; also `local`, with a warning, if `deepgym[daytona]` isn't installed | |
 
 - **Reward contract:**
-  - *Infrastructure failures give no verdict.* When the sandbox, the provider or the
-    verifier fails instead of judging, `result.has_verdict` is false, and every trainer
-    integration keeps that sample out of training instead of training on a 0.
-  - *Failures caused by the policy are scored.* Failing tests, a malformed patch or a
-    patch that touches test infrastructure is a real 0.
+  - *Infrastructure failures give no verdict.* When the sandbox or verifier fails before
+    the answer is in play, or the provider or network fails, `result.has_verdict` is
+    false, and trainer integrations keep that sample out of training where the trainer
+    allows it.
+  - *Failures caused by the policy are scored.* Failing tests, a malformed patch, a patch
+    that touches test infrastructure, a solution that crashes or hangs the verifier, or a
+    sandbox the policy killed is a real 0. A score printed before a crash is never kept.
   - *Headline totals stay conservative.* Batch and eval totals count a run without a
     verdict as a failed 0, and judged-only numbers sit beside them.
 - **Traces:** `dg.trace()` records an episode with its provenance as it runs, and
@@ -106,8 +109,9 @@ More in [core concepts][concepts] and [the reward contract][reward-contract].
   keyboard out, scored on the state the agent leaves ([computer use][computer-use]).
 - **Multi-turn sessions:** one live sandbox per episode, from Python (`dg.session()`) or
   HTTP (`/v1/sessions`) ([sessions][sessions]).
-- **QA gate:** `deepgym qa` checks that the reference passes and that empty, stub,
-  reward-hack and mutated answers earn nothing ([QA gate][qa-gate]).
+- **QA gate:** `deepgym qa` checks that the reference passes, empty and stub answers earn
+  nothing, no reward-hack answer reaches 0.5 and no mutant of the reference passes
+  ([QA gate][qa-gate]).
 - **Environment authoring:** `deepgym new`, `deepgym check` and `deepgym qa --approve`,
   from an idea to an approved environment folder ([authoring][authoring],
   [approvals][approvals]).
@@ -159,8 +163,9 @@ trainer.train()
 ```
 
 The reward function runs the last fenced code block of each completion, plain text or
-conversation, and returns `None` for a completion whose sandbox or verifier failed, which
-TRL 1.6+ leaves out of the group's baseline. More in [TRL][trl].
+conversation, and returns `None` for a completion whose sandbox or verifier failed. TRL
+1.6+ leaves a completion out of the group's baseline when every reward function returned
+`None` for it. More in [TRL][trl].
 
 ### Train with verl
 
@@ -218,8 +223,9 @@ results = lm_eval.simple_evaluate(
 )
 ```
 
-`deepgym_score` and `deepgym_pass` average the environments that got a verdict, and
-`deepgym_verdict` is the share that did. More in [lm-eval][lm-eval].
+Each environment is one task with one document: `deepgym_score` and `deepgym_pass` are
+NaN without a verdict, and `deepgym_verdict` says whether it got one. Average across tasks
+skipping NaN. More in [lm-eval][lm-eval].
 
 ### Run a multi-turn session
 
@@ -332,8 +338,8 @@ print(result.score)   # 1.0
 ```
 
 `load_solution` runs the answer in a separate, isolated process and only plain data comes
-back, so it can't read the expected answers, print a fake score or patch the verifier.
-More in [verifiers][verifiers].
+back, so in a sandbox, or locally under `sandbox-exec` or `bwrap`, it can't read the
+expected answers, print a fake score or patch the verifier. More in [verifiers][verifiers].
 
 ### Import a code benchmark
 
@@ -368,8 +374,7 @@ result = dg.run(
     repo='owner/repo',
     base_commit='abc123',
     test_patch='diff --git ...',
-    fail_to_pass=['tests/test_bug.py::test_fix'],
-    pass_to_pass=['tests/test_smoke.py::test_smoke'],
+    test_commands=['pytest -q tests/test_bug.py', 'pytest -q tests/test_smoke.py'],
 )
 ```
 
@@ -390,8 +395,8 @@ deepgym harbor import harborframework/terminal-bench-2.0 --limit 5   # or a data
 ```
 
 The script runs as an unprivileged user with no network, and a fresh sandbox from the same
-image grades a copy of its work directory, so nothing the agent writes reaches the tests
-or the reward file. More in [importers][importers-harbor].
+image grades a copy of its work directory, so nothing the agent leaves in its sandbox is in
+the tests or the reward folder. More in [importers][importers-harbor].
 
 ## DeepGym and verl
 
@@ -405,7 +410,7 @@ verl loads DeepGym's reward function with one config line (see
 | Does the training | Yes: rollouts on vLLM/SGLang, updates on FSDP/Megatron, PPO, GRPO, DAPO and more | No, it plugs into verl, TRL, OpenRLHF or your own loop |
 | Tasks | You bring the dataset and write the reward function | 31 built-in environments; importers for HumanEval, MBPP, EvalPlus, BigCodeBench, SWE-bench Pro, MiMo, CyberGym and Harbor datasets such as Terminal-Bench 2.0 |
 | Running model code | Your reward function, or a remote code sandbox service | Every run in a sandbox: Daytona, Modal, E2B, Docker, Apple container, or locally under sandbox-exec/bwrap |
-| Reward hacking | Up to your reward function | The solution runs apart from the verifier with no network, so it can't read the expected answers or print a fake score; `deepgym qa` checks that empty, stub and reward-hack solutions earn nothing before you train |
+| Reward hacking | Up to your reward function | The solution runs apart from the verifier with no network, so it can't read the expected answers or print a fake score; `deepgym qa` checks that empty and stub solutions earn nothing and reward-hack ones stay below 0.5 before you train |
 | Multi-turn agents | Agent loop and tool interface | One live sandbox per episode (shell or desktop), with a verl agent loop and session tool |
 | Computer use | Not built in | Desktop tasks, scored on the state the agent leaves behind |
 | Failed runs | A reward function returns a score; it can't mark a sample as unscored | A run whose sandbox or verifier failed has no verdict: verl's v1 trainer drops the sample, and DeepGym's agent loops drop or mask it |
@@ -441,7 +446,7 @@ deepgym run --task task.md --verifier verifier.py --solution solution.py
 DEEPGYM_NO_AUTH=true deepgym serve --host 127.0.0.1 --port 8000 --allow-local-exec
 
 # Production server
-DEEPGYM_API_KEY=your-key DAYTONA_API_KEY=your-key deepgym serve --port 8000
+DEEPGYM_API_KEY=your-key DAYTONA_API_KEY=your-key deepgym serve --host 0.0.0.0 --port 8000
 ```
 
 The server won't start without auth configured: set `DEEPGYM_API_KEY` for production or

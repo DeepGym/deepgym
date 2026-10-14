@@ -12,7 +12,7 @@ pip install "deepgym[server]"
 DEEPGYM_NO_AUTH=true deepgym serve --host 127.0.0.1 --port 8000 --allow-local-exec
 
 # Production server
-DEEPGYM_API_KEY=your-key DAYTONA_API_KEY=your-key deepgym serve --port 8000
+DEEPGYM_API_KEY=your-key DAYTONA_API_KEY=your-key deepgym serve --host 0.0.0.0 --port 8000
 ```
 
 - The server won't start without auth configured: set `DEEPGYM_API_KEY` for production,
@@ -21,10 +21,13 @@ DEEPGYM_API_KEY=your-key DAYTONA_API_KEY=your-key deepgym serve --port 8000
 - It runs code on Daytona when `DAYTONA_API_KEY` is set; a Daytona that fails to start is
   fatal rather than a silent fall back. Without a key it runs code on the host, so it needs
   `--allow-local-exec` (or `DEEPGYM_ALLOW_LOCAL_EXEC=true`).
-- `GET /health` needs no key. The OpenAPI schema is served at `/docs`.
+- `--host` defaults to `127.0.0.1`; bind `0.0.0.0` to serve other machines.
+- `GET /health` needs no key. Interactive docs are at `/docs` and the OpenAPI schema at
+  `/openapi.json`.
 
-From Python, `AsyncDeepGym(api_url='http://host:8000', api_key=...)` sends its `run`,
-`run_batch` and `eval` calls to the server.
+From Python, `AsyncDeepGym(api_url='http://host:8000', api_key=...)` sends each run to
+the server as one `POST /v1/run`. Its `run_batch` and `eval` fan out on the client, one
+request per output; they don't call `/v1/run/batch` or `/v1/eval`.
 
 ## Endpoints
 
@@ -44,11 +47,15 @@ From Python, `AsyncDeepGym(api_url='http://host:8000', api_key=...)` sends its `
 | `POST /v1/sessions` and `/v1/sessions/{id}/step`, `/score`, `DELETE /v1/sessions/{id}` | Live multi-turn sessions; see [sessions](environments/sessions.md) |
 
 Registering an environment takes the same fields as an inline run. An invalid environment
-is a 422 before anything is queued, and the API refuses caller-chosen images.
+is a 422 before anything is queued. Environments sent to the run, batch, job and
+environment endpoints have no `image` or `snapshot` field, and one sent anyway is
+dropped. A session request whose inline environment sets an `image` gets 422; a
+`snapshot` is accepted.
 
 ## Limits
 
-- Request bodies over 32 MiB get 413 before they are read.
+- Request bodies over 32 MiB get 413: before they are read when `Content-Length` says so,
+  else once the first 32 MiB have been read.
 - All requests and jobs share one limit of 100 concurrent runs, so `max_parallel` in a
   request splits the server's slots and never adds to them.
 - Jobs are `queued` until a job thread is free, then `running`. They count against the
@@ -58,5 +65,5 @@ is a 422 before anything is queued, and the API refuses caller-chosen images.
 - A cancelled job stays cancelled: a queued one is dropped, a cancelled batch starts none
   of its remaining outputs, and runs already going finish within their timeout with their
   results dropped.
-- At most 100 sessions run at once; idle ones close after 30 minutes, and every session
-  closes on shutdown.
+- At most 100 sessions run at once; idle ones close after 30 minutes, and the server
+  tries to close every session on shutdown.

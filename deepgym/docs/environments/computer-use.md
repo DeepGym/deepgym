@@ -67,13 +67,16 @@ action or act at random, each of which must earn nothing. See the
 
 ## Isolation and lockdown
 
-- The desktop and every app on it run as an unprivileged user with no network and no
-  sudo, separate from the verifier's user, so anything the agent starts from the GUI
-  can't reach root, the internet or the score. Setup scripts don't get sudo either.
-- The desktop is locked down before setup runs: no terminal, run dialog, browser
-  devtools, Thunar custom actions, or "Open With" launches (custom commands included).
-  Chromium runs under a root-owned managed policy that turns DevTools off and blocks
-  `chrome://`, `file://` and similar URLs.
+- The desktop session and every app it starts run as an unprivileged user with no
+  network and no sudo, separate from the verifier's user, so anything the agent starts
+  from the GUI can't reach root, the internet or the score. Only Xvfb, x11vnc and
+  Daytona's input relay stay with Daytona's sudoer; none of them runs commands for X
+  clients. Setup scripts don't get sudo either.
+- Before setup runs, the lockdown removes the known ways out of the GUI: terminals, run
+  dialogs, browser devtools, Thunar custom actions and "Open With" launches (custom
+  commands included). That list can't be complete, so it is defense in depth; the
+  boundaries above don't depend on it. Chromium runs under a root-owned managed policy
+  that turns DevTools off and blocks `chrome://`, `file://` and similar URLs.
 - Every lockdown step is checked once applied and again once the desktop runs. A missing
   helper, a desktop already running, or a session that would start as Daytona's sudoer
   raises `SandboxError` instead of handing the agent an open desktop.

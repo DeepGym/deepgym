@@ -28,12 +28,15 @@ results = lm_eval.simple_evaluate(
 
 ## Metrics
 
+Each task has one document, so its metrics describe one run:
+
 | Metric | Meaning |
 |---|---|
-| `deepgym_score` | Mean score (0.0 to 1.0) over the environments that got a verdict. |
-| `deepgym_pass` | Share of those that passed. |
-| `deepgym_verdict` | Share of environments that got a verdict at all. |
+| `deepgym_score` | The score (0.0 to 1.0), or NaN without a verdict. |
+| `deepgym_pass` | 1.0 if it passed, 0.0 if not, NaN without a verdict. |
+| `deepgym_verdict` | 1.0 if it got a verdict, else 0.0. |
 
-A sandbox or verifier failure counts in neither score nor pass, so it doesn't read as a
-wrong answer; it lowers `deepgym_verdict` instead. See
+For a number across environments, average each metric over the tasks, skipping NaN. A
+sandbox or verifier failure then counts in neither score nor pass, so it doesn't read as
+a wrong answer; it lowers the mean `deepgym_verdict` instead. See
 [the reward contract](reward-contract.md).

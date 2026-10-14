@@ -51,8 +51,8 @@ def _build_parser() -> argparse.ArgumentParser:
         '--suite',
         required=True,
         help=(
-            'Evaluation suite name: easy, medium, hard (difficulty), '
-            'coding, computer-use, tool-use (type), all, '
+            'Evaluation suite name: easy, medium (difficulty), '
+            'coding, tool-use (type), all, '
             'or a family name like dynamic-programming'
         ),
     )

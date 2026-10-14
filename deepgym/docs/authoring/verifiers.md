@@ -41,9 +41,18 @@ Never import or run the solution yourself. Use the helpers in `deepgym_solution`
   `load_files(files, entry)` imports the result like `load_solution`. Together they score
   repo-patch answers.
 
-When the machine can't start the solution at all (out of processes, say), these raise
-`LaunchError`. Let it propagate: the run ends as a verifier error with no verdict, instead
-of scoring the solution 0.
+Whatever the solution does (raise, exit, hang, die, return garbage) reaches the verifier
+as a `deepgym_solution.SolutionError`, still of the builtin type the solution raised, so
+`except ValueError` keeps working. If the verifier doesn't handle it, the run is a judged
+0 (`solution_error`, or `solution_timeout` for a hang past the time limit), not a verifier
+error, so a solution can't dodge its score by breaking the verifier. Load test data before
+starting the solution: a verifier that crashes after that scores 0 too.
+
+When the machine can't start the solution before any solution code has run (out of
+processes, say), these raise `LaunchError`. It isn't an `Exception`, so `except Exception`
+doesn't catch it. Let it propagate: the run ends with `sandbox_error` and no verdict. Once
+solution code has run, the same failure is the solution's (it may have used up the disk
+or processes) and reaches the verifier as a `SolutionError`.
 
 Each call is bounded by `case_timeout` (default 10 s) and by the run's `timeout` (default
 30 s), so a slow case fails on its own and the run still returns partial credit.
@@ -73,9 +82,10 @@ Detected by parsing, or set explicitly with `verifier_mode`:
 - `body` (the example above): the body of that function.
 
 Return a float, bool or dict; the wrapper turns it into the protocol. Any other return
-value, or a `passed` or `truncated` that isn't a real bool (wrap numpy bools in `bool()`),
-is a verifier error (exit 2). A NaN, infinite or out-of-range score is a verifier error
-too, never reward. `from __future__` imports are fine in any mode.
+value, a `passed` or `truncated` that isn't a real bool (wrap numpy bools in `bool()`), or
+a NaN, infinite or out-of-range score is never reward: it is a verifier error (exit 2), or
+a judged 0 (`solution_error`) once the solution's output is in play. `from __future__`
+imports are fine in any mode.
 
 Shared helper code goes in `support_files` (name to content). These files sit next to the
 verifier, are importable by it, and are hidden from the solution. In a registry env, list
@@ -104,8 +114,11 @@ Verifiers print JSON to stdout:
 - `cases` tells you which tests passed and failed, so your training loop gets a denser
   signal than 0 or 1. A failed case without an explicit `score` counts 0.
 - Exit codes back the result: 0 passed, 1 failed (it keeps its partial score but can't
-  claim a pass), 2 verifier error. Any other exit (killed, timed out, crashed) means the
-  verifier never finished, whatever it printed first.
+  claim a pass), 2 verifier error. Any other exit (killed by a signal, say) has no
+  verdict, whatever it printed first.
+- An uncaught exception overrides anything printed before it, in every verifier shape:
+  before the solution's output is in play it is a verifier error with no verdict (such
+  as `runtime_error`), after it a judged 0 (`solution_error`).
 - Only stdout counts, so a JSON line on stderr can't replace the verdict; stderr is kept
   in `RunResult.stderr`.
 

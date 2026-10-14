@@ -50,7 +50,7 @@ The console has no login, so other websites can't drive it:
   `X-DeepGym-Token`.
 - Writes from other origins are refused, and so are write bodies that aren't JSON.
 - Bound to `127.0.0.1` or `localhost` (the default), it only answers requests addressed to
-  localhost.
+  localhost. Bound to any other host, it doesn't check the Host header.
 
 ## Building the UI
 

@@ -38,7 +38,7 @@ env = load_environment('humaneval_plus/HumanEval_0')
   isolated process, and a determined model can forge that result.
 - Re-run the import scripts after upgrading DeepGym to pick up verifier fixes.
 
-## Repo, terminal and cyber tasks need a sandbox
+## Repo, terminal and CyberGym tasks need a sandbox
 
 These tasks apply the model's patch, or run its commands, and then run tests, all outside
 the judge isolation that `deepgym_solution` gives single-file solutions. So they only run
@@ -62,14 +62,15 @@ result = dg.run(
     repo='owner/repo',
     base_commit='abc123',
     test_patch='diff --git ...',
-    fail_to_pass=['tests/test_bug.py::test_fix'],
-    pass_to_pass=['tests/test_smoke.py::test_smoke'],
+    test_commands=['pytest -q tests/test_bug.py', 'pytest -q tests/test_smoke.py'],
 )
 print(result.score)
 ```
 
 Pass `instance_id=...` instead of the row fields to load that task from the SWE-bench Pro
-dataset on the Hugging Face Hub (needs `deepgym[hf]`).
+dataset on the Hugging Face Hub (needs `deepgym[hf]`). `fail_to_pass` and `pass_to_pass`
+never become test commands: the tests that run are `test_commands`, or else the row's
+`selected_test_files_to_run` under pytest (Python) or `npm test` (JS/TS).
 
 - The model's diff goes first. Every path the hidden test patch touches is put back to its
   state before the diff, and the test patch goes last, so a diff can't edit the hidden
@@ -77,28 +78,32 @@ dataset on the Hugging Face Hub (needs `deepgym[hf]`).
 - A patch that applies scores 0.3, plus 0.7 times the share of the task's test commands
   that pass; `passed` needs all of them. A diff that is missing (`invalid_patch`) or
   doesn't apply (`patch_apply_failed`) scores 0.
-- A task with no test runner (no `test_commands`, and a language other than Python or
-  JS/TS) gets `error_type='unsupported_runner'`: no verdict, so trainers mask it.
+- A task with no test runner (no `test_commands`, and either no
+  `selected_test_files_to_run` or a language other than Python or JS/TS) gets
+  `error_type='unsupported_runner'`: no verdict, so trainers mask it.
 
 ### Test infrastructure guard
 
 SWE-bench Pro and MiMo tasks check every other path the diff touches before running the
 tests. A diff that touches a test or its helper code, conftest, ini or runner config, the
 test sections of `pyproject.toml`, `setup.cfg`, `package.json` or Cargo files, build
-files that run code (`Makefile`, `pom.xml`, `build.gradle`, `build.rs`), the installed
-harness (`node_modules`, `site-packages`, `vendor`, virtualenvs, `.cargo`), or that creates
-a symlink or an unusual file mode, scores 0 with `error_type='test_infra_tampering'`. That
-is the model's fault, so trainers train on it.
+files that run code (`setup.py`, `Makefile`, `pom.xml`, `build.gradle`, `build.rs`), the
+installed harness (`node_modules`, `site-packages`, `vendor`, virtualenvs, `.cargo`), or
+that creates a symlink or an unusual file mode, scores 0 with
+`error_type='test_infra_tampering'`. That is the model's fault, so trainers train on it.
 
-- So that a correct fix never gets a false 0, the guard allows data fixtures under a test
+- To keep false zeros on correct fixes rare, the guard allows data fixtures under a test
   directory, dependency and version edits, lockfiles, and ordinary files that only share
-  a word with a test name.
-- An edit the guard can't classify still runs the tests. A failure is the normal 0; a pass
-  gets `error_type='validation_uncertain'` with no verdict, so trainers mask it.
+  a word with a test name. A correct fix that edits a file it refuses still scores 0.
+- An edit the guard can't classify still runs the tests. If any test command passes, the
+  run gets `error_type='validation_uncertain'` with no verdict, so trainers mask it; if
+  all fail, it is scored as usual (0.3 for SWE-bench Pro, whose applied patch earns that,
+  0 for MiMo).
   `validation_timeout` and `validation_error` (git couldn't list the paths in time, or
   couldn't find the repository) have no verdict either.
-- The guard is a denylist, so it can't be exhaustive, and a diff to the code under test
-  can still force the test command to exit 0. The reward is only as strong as the tests.
+- The guard is a stopgap denylist, so it can't be exhaustive, and a diff to the code
+  under test can still force the test command to exit 0. The reward is only as strong as
+  the tests.
 
 `deepgym qa` runs a `patch_tampering` attack on self-contained patch tasks such as
 `mimo_code`.
@@ -193,11 +198,13 @@ result = DeepGym(mode='apple').run(env, 'echo hello > /app/hello.txt')
 The script runs as an unprivileged user with no network, in a sandbox from the task's
 image. The grader is a fresh sandbox from the same image that gets only a copy of the
 work directory; `tests/` is uploaded there at grading time and the reward is read from its
-`/logs/verifier/` after `test.sh` exits. Nothing the agent writes can reach the tests or
-the reward file. This holds on every provider.
+`/logs/verifier/` after `test.sh` exits, so nothing the agent leaves in its sandbox is in
+the tests or the reward folder. Tests that run the agent's code as root can still let that
+code write the reward (see below).
 
-- Docker and Apple container also build `environment/Dockerfile` tasks; Modal, E2B and
-  Daytona need a prebuilt `docker_image`.
+- Docker and Apple container also build `environment/Dockerfile` tasks; Modal and Daytona
+  need a prebuilt `docker_image`, and E2B needs an E2B template id there, since it boots
+  templates, not Docker images.
 - Tests get the network unless the task says `no-network`, but Docker, Modal and E2B
   sandboxes never have one.
 - On Apple container and Daytona the image needs python3 and util-linux to cut the agent
@@ -211,8 +218,6 @@ the reward file. This holds on every provider.
   `[verifier].env` from task.toml. The agent keeps the image PATH and locale but no loader
   variable. As in Harbor, `reward.json` wins over `reward.txt`; tests that run the agent's
   code as root trust it.
-- `mode='local'` runs on your machine without isolation, for tasks that use relative
-  paths only.
 
 Export built-in environments as Harbor tasks. The agent writes `/app/solution.py` as a
 non-root user and a separate offline verifier runs the DeepGym verifier on it:
@@ -298,8 +303,10 @@ environment its metadata names. See [TRL](../training/trl.md#mixed-benchmarks).
 Push an environment to a Hub dataset and load it back:
 
 ```python
+from deepgym import load_environment
 from deepgym.integrations.hf import load_environment_from_hub, push_environment_to_hub
 
+env = load_environment('coin_change')
 revision = push_environment_to_hub(
     env, repo_id='your-org/deepgym-coin-change', env_name='coin_change'
 )
@@ -314,9 +321,9 @@ environment needs an `env_name` of its own: a push refuses a blank one, and load
 name or loading all refuses a dataset with a blank or repeated name rather than drop an
 environment. Needs `pip install "deepgym[hf]"`.
 
-A Hub dataset is untrusted, so pushes and loads run the same checks and a row can't
-change how its environment runs: fields must be known and of the right type, the verifier
-is inlined (no host path), there are no `env_vars` (they reach the verifier and the
-solution, and may hold credentials), `verifier_mode` must match the verifier, support file
-names are plain relative paths, and a custom `image` or `snapshot` loads only with
-`trust_image=True`.
+A Hub dataset is untrusted, so pushes and loads run the same checks. A row still supplies
+the verifier, test cases and timeouts, but it can't change the sandbox the environment
+runs in: fields must be known and of the right type, the verifier is inlined (no host
+path), there are no `env_vars` (they reach the verifier and the solution, and may hold
+credentials), `verifier_mode` must match the verifier, support file names are plain
+relative paths, and a custom `image` or `snapshot` loads only with `trust_image=True`.

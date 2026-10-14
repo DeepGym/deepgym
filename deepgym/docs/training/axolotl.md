@@ -14,10 +14,13 @@ Save `verl_rows` as JSON lines and point `trl.reward_funcs` at
 it names:
 
 ```python
+from pathlib import Path
+
 import pandas as pd
 from deepgym.integrations.axolotl import generate_axolotl_config
 from deepgym.integrations.verl import verl_rows
 
+Path('data').mkdir(exist_ok=True)
 rows = pd.DataFrame(verl_rows(['coin_change', 'two_sum']) * 64)
 rows.to_json('data/train.jsonl', orient='records', lines=True)
 config = generate_axolotl_config(base_model='Qwen/Qwen2.5-Coder-7B-Instruct')
@@ -26,7 +29,9 @@ config = generate_axolotl_config(base_model='Qwen/Qwen2.5-Coder-7B-Instruct')
 
 - The environment of a row is `extra_info['environment']` (with optional `variant`), else
   its `data_source`.
-- `row_reward_fn` scores in Daytona when `DAYTONA_API_KEY` is set, otherwise locally.
+- `row_reward_fn` scores in Daytona when `DAYTONA_API_KEY` is set, otherwise locally. If
+  the key is set but `deepgym[daytona]` isn't installed, it scores locally with only a
+  warning.
 - The generated config sets `eval_batch_size: 8`, so each eval batch holds whole groups of
   TRL's 8 generations per prompt on any number of GPUs.
 - `generate_axolotl_config` also takes `dataset_path`, `sequence_len`,
@@ -35,6 +40,7 @@ config = generate_axolotl_config(base_model='Qwen/Qwen2.5-Coder-7B-Instruct')
 ## Process reward models
 
 `generate_axolotl_config(method='prm')` writes a process reward model config for a
-`stepwise_supervised` dataset (prompt, completions, labels) that you provide. Real
-step-level rewards from multi-turn episodes come out of
-[`deepgym traces export --rows rl`](../traces.md#export) as `step_rewards`.
+`stepwise_supervised` dataset (prompt, completions, labels) that you provide. DeepGym
+doesn't write that format: [`deepgym traces export --rows rl`](../traces.md#export) gives
+real step rewards from multi-turn episodes as `step_rewards`, but turning them into
+labels is up to you.

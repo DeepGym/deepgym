@@ -31,7 +31,9 @@ OpenRLHF sends one request per rollout, all at once. A request waits for its run
 holding a thread, so a slow verification doesn't hold up the others.
 
 OpenRLHF can't skip a sample: it trains on whatever `rewards` holds, and a failed request
-would stop its training step, so the endpoint never fails one.
+would stop its training step, so the endpoint never fails a well-formed request over a
+run. A malformed or oversized body gets 422, and `prompts` is required even when the
+client sends `outputs`.
 
 - A failure the model caused is judged and scores 0, and so does any run without a
   verdict that the model's output may have caused (a verifier failure, a timeout); those
@@ -59,5 +61,6 @@ policy can reach it.
   leak.
 
 Either way the sample is logged as a warning with its error type, and counts toward a
-warning logged when more than 5% of a batch gets no verdict. See
+warning logged when more than 5 samples in a block of 100 get `infra_failure_score`. Runs
+without a verdict that score 0 (above) aren't counted. See
 [the reward contract](reward-contract.md).

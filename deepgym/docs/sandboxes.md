@@ -1,7 +1,7 @@
 # Sandboxes
 
 This page covers where DeepGym runs answers: the providers, how to set each one up, the
-isolation every sandbox mode gives, and per-environment images.
+isolation the sandbox modes give, and per-environment images.
 
 ## Providers
 
@@ -24,8 +24,11 @@ dg = DeepGym(mode='docker')
 | `e2b` | An E2B sandbox with no network | `pip install "deepgym[e2b]"`, then `E2B_API_KEY` |
 | `auto` (default) | Daytona when `DAYTONA_API_KEY` is set, otherwise `local` | |
 
-- `local` is for development. Repo, terminal and cyber tasks refuse it and raise
-  `SandboxError`, and a local session runs the agent's actions without isolation.
+- `auto` also falls back to `local`, with only a warning, if `DAYTONA_API_KEY` is set but
+  `deepgym[daytona]` isn't installed. Pass `mode='daytona'` to make that an error.
+- `local` is for development. Repo-patch, Harbor (terminal) and CyberGym artifact tasks
+  refuse it and raise `SandboxError`, and a local session runs the agent's actions without
+  isolation.
 - Desktop (computer-use) environments need Daytona.
 - A provider that isn't ready fails fast: the Docker or Apple CLI not running, or the
   provider's SDK not installed.
@@ -46,7 +49,8 @@ docker compose -f docker/docker-compose.yaml up -d
 ### Docker and Apple container
 
 Each run or session gets a throwaway container (Docker) or Linux VM (Apple container),
-with the same isolation as the cloud sandboxes and no API key.
+with no API key. Docker containers share the host's kernel, so Docker isolates less than
+the VM-based providers (Apple container, E2B, Daytona).
 
 - The default image is `python:3.12-slim`; override it with `DEEPGYM_CONTAINER_IMAGE` or
   per environment (below).
@@ -56,8 +60,8 @@ with the same isolation as the cloud sandboxes and no API key.
 
 ## Isolation
 
-Every sandbox mode gives the same isolation, for single runs and shell sessions. Use one
-for anything shared or untrusted.
+Every sandbox mode applies the boundaries below, for single runs and shell sessions. Use
+one for anything shared or untrusted.
 
 - **Single runs:** the answer runs as a separate Linux user that can't read the judge's
   files, touch the judge's process, or write to its output, with no network. Only plain
@@ -65,20 +69,23 @@ for anything shared or untrusted.
 - **Sessions:** agent commands run as an unprivileged user in a loopback-only network
   namespace, and verifiers as another user, from a file only that user can read (see
   [sessions](environments/sessions.md)).
-- **Network:** Docker, Modal and E2B take the whole sandbox offline. Apple container and
-  Daytona don't block egress at the provider, so DeepGym gives untrusted code its own
-  offline network namespace; that needs util-linux in the image, and a judge run fails
+- **Network:** Docker, Modal and E2B take the whole sandbox offline. Apple container
+  doesn't block egress, and Daytona, though it blocks the network, serves its toolbox API
+  (run any command as its sudoer) on loopback, so on both DeepGym gives untrusted code its
+  own offline network namespace; that needs util-linux in the image, and a judge run fails
   rather than run online without it.
 - **Locally:** the answer runs under `sandbox-exec` (macOS) or `bwrap` (Linux), with the
   judge directory, the deepgym package, your home directory and `/run` (daemon sockets)
   hidden. If neither is available, you still get process separation and a warning.
   `DeepGym(mode='local', confine_local_judge=True)` also runs each whole judge inside the
   local sandbox, for verifiers that might run code in-process; `deepgym qa --mutants`
-  uses it.
+  uses it. Sandboxes don't nest, so the answer then runs as plain child processes that
+  can read the judge's files: use it only for code that isn't adversarial, such as
+  mutants of a reference.
 
 Each provider is one folder in `src/deepgym/sandboxes/` implementing a small `Sandbox`
-protocol (run a command as root, upload a file, delete), so adding a provider means adding
-a folder.
+protocol (run a command as root, upload a file, delete). Adding one also means
+registering it in `src/deepgym/sandboxes/__init__.py` and the console's `RunMode`.
 
 ## Per-environment images
 
@@ -94,8 +101,9 @@ env = Environment(task=..., verifier_code=..., image='python:3.11-slim')
 - Docker, Apple container, Modal and Daytona pull it from a registry; E2B treats it as a
   template id. On Daytona a `snapshot` wins.
 - The image must run as root and have python3, bash, useradd and util-linux (setpriv,
-  unshare, nsenter, mount). Debian and Ubuntu images do; Alpine doesn't.
-- Root in the sandbox runs the image's binaries, so only use images you trust. The HTTP
-  API refuses caller-chosen images.
+  unshare, nsenter, mount). The official `python` images do; plain `debian` and `ubuntu`
+  images lack python3, and Alpine lacks more.
+- Root in the sandbox runs the image's binaries, so only use images you trust. What the
+  HTTP API accepts is in [the API server](api-server.md) docs.
 - Docker and Apple container can also build a Dockerfile, as Harbor tasks with an
   `environment/Dockerfile` use (see [importers](environments/importers.md#harbor-tasks)).

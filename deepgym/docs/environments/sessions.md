@@ -77,25 +77,37 @@ for agents you trust.
 
 Verifiers print protocol JSON, as single-turn ones do (see
 [verifiers](../authoring/verifiers.md)). A score only counts if the verifier exits
-cleanly (0, or 1 for a failed run); printing a score and then crashing or being killed is
-a verifier error. Only stdout counts, so a JSON line on stderr can't replace the verdict;
-stderr is kept in `RunResult.stderr`.
+cleanly (0, or 1 for a failed run), and a score printed before a crash is never kept. A
+verifier that crashes before it opens a file in the agent's work directory or starts the
+agent's code has no verdict; after that the crash came from handling the agent's work, so
+it scores 0 (`solution_error`). One killed by a signal has no verdict. Only stdout counts,
+so a JSON line on stderr can't replace the verdict; stderr is kept in `RunResult.stderr`.
 
 Session verifiers that grade the agent's code load it with `load_solution` too, so it runs
 isolated from the verifier: locally in the same sandbox as single runs, and in sandbox
 images with sudo (Daytona's default has it) as a third user, `dgsolver`, with its groups
-cleared, no-new-privs and an empty capability bounding set.
+cleared, no-new-privs and an empty capability bounding set. Images without sudo, such as
+the default `python:3.12-slim`, have no `deepgym_solution` in sessions.
 
 ## Step rewards and verdicts
 
 - A step verifier gets the step's output in the file named by `STEP_OUTPUT_PATH` and the
   step number in `STEP_NUMBER`, and prints a float or protocol JSON. `session.step_verdict`
   holds its last output and exit code.
-- A step verifier that fails (bad output, a timeout, exit 2, or an `error_type` that isn't
-  the model's fault) raises `VerifierError` and ends the episode. That step gets no
-  reward, so `step_rewards` is one shorter than `steps`, and `score()` returns a result
-  without a verdict (`error_type='verifier_error'`) instead of running the final
-  verifier.
+- A step that fails after its action may have run ends the episode: `step()` raises, the
+  action stays on the trajectory with no step reward (so `step_rewards` is one shorter
+  than `steps`), and `score()` returns the result that failure fixed instead of running
+  the final verifier. A provider or network failure, or a failed step verifier (bad
+  output, a timeout, exit 2, or an `error_type` that isn't the model's fault), has no
+  verdict; a failed step verifier reports `verifier_error`, or `invalid_score` for a NaN
+  or out-of-range score. Anything else follows from the agent's actions (its sandbox
+  died, a write failed, its files blocked the step's output) and scores 0 with
+  `error_type='policy_sandbox_failure'`.
+- A rejected action (not allowed, or the agent's own files in the way of a `write_file`)
+  raises `ActionError` and the episode goes on.
+- `run_episode` returns the result a failed step fixed instead of raising.
+- A sandbox that dies under the final verifier scores 0 (`policy_sandbox_failure`) once the
+  agent has acted.
 - An environment with no `final_verifier_code` has no verdict: `score()` returns
   `error_type='no_verifier'`, so trainers mask the episode.
 
@@ -113,9 +125,10 @@ DELETE /v1/sessions/{id}
 ```
 
 - `environment` can also be an inline `MultiTurnEnvironment` spec; the API refuses one
-  that sets an `image`.
+  that sets an `image` (a `snapshot` is accepted).
 - At most 100 sessions run at once (429 above). Sessions idle for 30 minutes are closed
-  by a sweep that runs every 60 seconds, and every session is closed on shutdown.
+  by a sweep that runs every 60 seconds, and the server tries to close every session on
+  shutdown.
 - If deleting a session's sandbox fails, `DELETE` answers 502 and the session keeps its
   id and slot, so the delete can be retried; the sweep retries it too, up to 10 attempts.
   After that its sandbox id is logged as an error, the slot is freed, and `/health`

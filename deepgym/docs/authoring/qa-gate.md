@@ -33,8 +33,8 @@ Each single-turn environment must pass:
   rejects every attack as a malformed answer (a repo-patch env takes diffs) was never
   attacked. Self-contained patch tasks such as `mimo_code` get `patch_tampering`
   attacks instead.
-- `mutants_killed` (with `--mutants`): every mutant of the reference scores below the
-  pass threshold (see below).
+- `mutants_killed` (with `--mutants`): no mutant of the reference passes or scores full
+  marks (see below).
 - `difficulty` (with `--model`): see below.
 
 A skipped check counts neither way, and the report lists it under `not_run`. Harbor tasks
@@ -61,9 +61,10 @@ neither passed nor failed.
 
 `--mutants` edits the reference one small step at a time with the `ast` module (an
 integer off by one, `<` for `<=`, a computed return replaced by a constant, an if/else
-swapped, a statement dropped) and runs each mutant like a model solution. Every mutant
-must score below the pass threshold; one that passes points at behavior the verifier
-never checks. The report gives the mutation score and each survivor by line. A mutant
+swapped, a statement dropped) and runs each mutant like a model solution. A mutant
+survives if it passes or scores full marks, and one survivor fails the check: it points at
+behavior the verifier never checks. The report gives the mutation score and the first 8
+survivors by line, then how many more. A mutant
 that behaves exactly like the reference (a redundant guard dropped, say) can't fail; mark
 its line `# pragma: no mutate`.
 
@@ -99,8 +100,8 @@ sandboxed mode instead.
 ## Statuses, exit codes and reports
 
 Each check and each environment gets a `status`: `pass`, `fail`, `inconclusive` or
-`skip`. An environment fails if any check fails, is inconclusive if any check is, and
-passes otherwise; skipped checks don't count either way. Every report lists the checks
+`skip`. An environment fails if any check fails, is inconclusive if any check is, is
+`skip` if every check was skipped, and passes otherwise. Every report lists the checks
 that `ran` and those `not_run`.
 
 The command exits 0 when the checked environments pass (skipped ones alongside are fine),

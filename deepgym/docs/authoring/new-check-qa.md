@@ -10,7 +10,7 @@ deepgym check word_stats                 # passes as generated
 # edit word_stats/: task.md, the reference, expected() in verifier.py, variants.py
 deepgym check word_stats
 deepgym qa word_stats --mutants          # adds reward-hack attacks and mutation testing
-deepgym qa word_stats --mutants --approve --by "Jane Doe"
+deepgym qa word_stats --mutants --mode docker --approve --by "Jane Doe"
 ```
 
 `deepgym new` writes a working example (the longest strictly increasing run in a list)
@@ -86,8 +86,9 @@ approval (see [approvals](approvals.md)).
 ## deepgym qa
 
 `deepgym qa` takes environment folders as well as registered names. It runs the reference
-several times, checks that empty, stub and reward-hack answers earn nothing, and with
-`--mutants` checks that every small mutation of the reference fails. Multi-turn folders
+several times, checks that empty and stub answers earn nothing and that no reward-hack
+answer reaches 0.5, and with `--mutants` checks that no small mutation of the reference
+passes or scores full marks. Multi-turn folders
 replay `reference_actions.json` and run scripted agents that must earn nothing. Every check
 is described in [the QA gate](qa-gate.md).
 

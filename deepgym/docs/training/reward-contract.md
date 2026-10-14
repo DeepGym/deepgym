@@ -9,16 +9,19 @@ conservative.
 Every `RunResult` either has a verdict or it doesn't:
 
 ```python
-result = dg.run(env, model_output)
-if result.has_verdict:
-    reward = result.score
-else:
-    reward = None   # the sandbox, provider or verifier failed; result.error_type says how
+batch = dg.run_batch(env, outputs)
+rewards = [r.score if r.has_verdict else None for r in batch.results]   # None: leave it out
 ```
 
 A run has no verdict when its `error_type` is anything but a model fault, or the verifier
-exited 2 (verifier error). Its score is then 0.0, but that 0 means nothing about the
-answer, so training on it would punish the policy for an outage.
+exited 2 (verifier error). Its score means nothing about the answer, so training on it
+would punish the policy for an outage.
+
+`dg.run` returns such a result when the verifier reports its own failure. It raises
+instead (`SandboxError`, `TimeoutError`, `VerifierError`) when the provider fails, when
+the sandbox dies or the time limit runs out before the answer is in play, or when the
+verifier prints no result. `run_batch` and `eval` turn each raise into a result without a
+verdict, so use them in training loops.
 
 Some failures are the model's own doing, and they are verdicts: a real 0 to learn from.
 They are listed in `deepgym.models.MODEL_FAULT_ERRORS`:
@@ -28,40 +31,54 @@ They are listed in `deepgym.models.MODEL_FAULT_ERRORS`:
 | `invalid_patch` | The answer contains no unified diff. |
 | `patch_apply_failed` | The diff doesn't apply. |
 | `test_infra_tampering` | The diff touches tests or test infrastructure. |
-| `policy_sandbox_failure` | The policy broke its own grading: code its patch added stopped the test run, or, in verl's multi-turn agent loop, the agent killed or hung the sandbox the final verifier needs. |
+| `solution_error` | The verifier crashed, or returned a result it can't report, after the solution's output came into play. |
+| `solution_timeout` | The solution, or the verifier handling its output, ran past the time limit. |
+| `policy_sandbox_failure` | The policy broke its own grading: code its patch added stopped the test run, the sandbox died after the solution started, or a session's agent broke its sandbox or a step. |
 
-Everything else that carries an `error_type`, such as `sandbox_error`, `verifier_error`,
-`timeout` or `invalid_score`, has no verdict. A verifier that returns NaN, infinity or a
-score outside [0, 1] is a verifier error, never reward.
+Everything else that carries an `error_type`, such as `sandbox_error`, `runtime_error`,
+`verifier_error`, `timeout` or `invalid_score`, has no verdict. A NaN, infinite or
+out-of-range score is never reward.
 
 ## Infrastructure or policy
 
-In agent episodes, a failure can be the policy's doing (it killed its sandbox, filled the
-disk, ran a command into a timeout) or the infrastructure's.
-`deepgym.exceptions.is_infrastructure_failure(exc)` draws the line: a connection or
-transport error, a provider call timing out, a provider HTTP 5xx or 429, or the provider
-evicting the sandbox is infrastructure. Anything else is the policy's and is scored.
-verl's multi-turn agent loop and the OpenRLHF endpoint use this test.
+A failure is dated by when the policy's output comes into play: a solution process
+starts, the verifier opens the solution's file, or a session verifier opens a file in the
+agent's work directory.
+
+- Before that, a verifier crash, a timeout or a dead sandbox has no verdict.
+- After it, the same failure came from handling the policy's output, so it is a judged 0:
+  `solution_error`, `solution_timeout` or `policy_sandbox_failure`. A score the verifier
+  printed before crashing is never kept.
+- A provider or network failure has no verdict at any point. In a single run, so does a
+  sandbox that dies on Daytona, or in an E2B or Modal call that raises, since those
+  return nothing the judge printed.
+
+In agent episodes, `deepgym.exceptions.is_infrastructure_failure(exc)` draws the line: a
+connection or transport error, a provider call timing out, a provider HTTP 5xx or 429, or
+the provider evicting the sandbox is infrastructure. A `SandboxDiedError` (the sandbox
+itself stopped) never is. Sessions, verl's multi-turn agent loop and the OpenRLHF endpoint
+use this test.
 
 ## What each trainer receives
 
 | Integration | A run without a verdict |
 |---|---|
-| TRL, Axolotl and DAPO reward functions, `RewardFunction` | `None`. TRL 1.6+ leaves it out of its group's baseline and gives it no advantage. |
+| TRL, Axolotl and DAPO reward functions, `RewardFunction` | `None`. TRL 1.6+ leaves a completion out of its group's baseline when every reward function returned `None` for it. |
 | verl `compute_score` | Raises `NoVerdictError`. verl's v1 trainer drops the sample; the legacy trainer stops, so use the `deepgym_single_turn` agent loop there. |
 | verl agent loops (`deepgym_single_turn`, `deepgym_agent`) | Dropped under verl's v1 trainer, masked under the legacy trainer, logged as `error` 1.0. |
 | verl `make_verl_reward_fn` (custom loops) | `None`. |
 | OpenRLHF endpoint | Graded once more if the provider or the network failed it, then the router's `infra_failure_score`. Other runs without a verdict score 0. |
 | lm-eval task | Left out of `deepgym_score` and `deepgym_pass`; `deepgym_verdict` is the share that got one. |
-| `DeepGymEnv` | `info.has_verdict` is false; mask the sample. |
+| `DeepGymEnv` | `info.has_verdict` is false; mask the sample. `step` raises where `dg.run` does; `step_batch` returns those runs without a verdict. |
 
 Details are on each trainer's page: [verl](verl.md), [TRL](trl.md),
 [OpenRLHF](openrlhf.md), [lm-eval](lm-eval.md) and [Axolotl](axolotl.md).
 
 A policy that learns to trigger failures that get masked escapes their penalty. The verl
-agent loops and the OpenRLHF endpoint log a warning when more than 5% of the last 100
-samples got no verdict (`deepgym.integrations.reward.MaskedRate`). A rate that climbs
-means a provider outage, or a policy that found such a failure.
+agent loops and the OpenRLHF endpoint log a warning when more than 5 samples in a block of
+100 got no verdict (`deepgym.integrations.reward.MaskedRate`); the OpenRLHF endpoint counts
+only the samples it gave `infra_failure_score`. A rate that climbs means a provider
+outage, or a policy that found such a failure.
 
 ## Totals
 
@@ -81,7 +98,7 @@ Beside them sit the judged-only numbers:
 
 `EvalResult.env_names` names the environment of each result, in suite order.
 
-The CLI prints both, for example `Pass Rate: 62.00% (judged 70.00%, 12.00% no verdict)`,
+The CLI prints both, for example `Pass Rate: 63.00% (judged 70.00%, 10.00% no verdict)`,
 and shows a run without a verdict as `ERROR (<error_type>)` with its cause. The console
 keeps no score for such a run and shows a "No verdict" count with the judged pass rate
 and score beside the headline ones.

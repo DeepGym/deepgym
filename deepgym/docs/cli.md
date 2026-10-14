@@ -13,7 +13,7 @@ a file path or the text itself. `run`, `run-batch` and `eval` use the default cl
 |---|---|---|
 | `deepgym run` | Score one solution against a task and verifier | `--task`, `--verifier`, `--solution` (required); `--timeout` (default 30 s), `--snapshot` |
 | `deepgym run-batch` | Score every `.py` file in a folder | `--task`, `--verifier`, `--solutions-dir` (required); `--max-parallel` (default 10), `--timeout`, `--snapshot` |
-| `deepgym eval` | Score solutions against a suite of built-in environments | `--suite` (`easy`, `medium`, `hard`, `coding`, `computer-use`, `tool-use`, `all` or a family), `--solutions-dir` with one `<env>.py` per environment; `--max-parallel` (default 100) |
+| `deepgym eval` | Score solutions against a suite of built-in environments | `--suite` (`easy`, `medium`, `coding`, `tool-use`, `all` or a family), `--solutions-dir` with one `<env>.py` per environment; `--max-parallel` (default 100) |
 
 ```bash
 deepgym run --task task.md --verifier verifier.py --solution solution.py
@@ -22,7 +22,7 @@ deepgym eval --suite dynamic-programming --solutions-dir solutions/
 
 A run without a verdict prints as `ERROR (<error_type>)` with its cause, and totals show
 the judged numbers beside the headline ones, for example
-`Pass Rate: 62.00% (judged 70.00%, 12.00% no verdict)`.
+`Pass Rate: 63.00% (judged 70.00%, 10.00% no verdict)`.
 
 ## Environments
 

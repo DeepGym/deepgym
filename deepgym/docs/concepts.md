@@ -23,9 +23,9 @@ reward function hands to your trainer.
 from deepgym import DeepGym, load_environment
 
 dg = DeepGym(mode='local')
-env = load_environment('two_sum')
+env = load_environment('coin_change')
 
-result = dg.run(env, model_output='def two_sum(nums, target): ...')
+result = dg.run(env, model_output='def coin_change(coins, amount): ...')
 print(result.score, result.passed, result.has_verdict, result.cases)
 ```
 
@@ -54,7 +54,7 @@ from deepgym import list_environments, load_environment, load_suite
 
 env = load_environment('coin_change')
 desktop = load_environment('todo_list', variant=3)   # computer-use tasks have 8 variants
-coding = load_suite('coding')   # also easy, medium, hard, tool-use, all, or a family
+coding = load_suite('coding')   # also easy, medium, tool-use, all, or a family
 print(len(list_environments()))
 ```
 
@@ -76,37 +76,42 @@ env = Environment(task=..., verifier_code=..., image='python:3.11-slim')
 - Docker, Apple container, Modal and Daytona pull it from a registry; E2B treats it as a
   template id. On Daytona a `snapshot` wins.
 - The image must run as root and have python3, bash, useradd and util-linux (setpriv,
-  unshare, nsenter, mount). Debian and Ubuntu images do; Alpine doesn't.
-- Root in the sandbox runs the image's binaries, so only use images you trust. The HTTP
-  API refuses caller-chosen images.
+  unshare, nsenter, mount). The official `python` images do; plain `debian` and `ubuntu`
+  images lack python3, and Alpine lacks more.
+- Root in the sandbox runs the image's binaries, so only use images you trust.
 
 ## Verifiers
 
 A verifier is Python that scores one answer. It never imports or runs the answer itself:
 the helpers in `deepgym_solution` (`load_solution`, `run_solution` and a few more) start
 it in a separate, isolated process with no network, and only plain data crosses back. So
-the answer can't read the expected outputs, print a fake score or patch the verifier.
+in a sandbox, or locally under `sandbox-exec` or `bwrap`, the answer can't read the
+expected outputs, print a fake score or patch the verifier. That holds only for verifiers
+that use these helpers; `deepgym check` warns about ones that don't, but can't prove it.
 
-The verifier reports every test case with a reason, which gives a trainer a denser signal
-than pass or fail. Its exit code backs the result: 0 passed, 1 failed, 2 verifier error.
-Verifiers are seeded, so the same answer gets the same score, and `deepgym qa` checks
-that. See [writing verifiers](authoring/verifiers.md).
+The verifier can report each test case with a reason (`cases`), which gives a trainer a
+denser signal than pass or fail; one that returns a bare float or bool reports none. Its
+exit code backs the result: 0 passed, 1 failed, 2 verifier error. Verifiers are seeded,
+so the same answer gets the same score, and `deepgym qa` checks that. See
+[writing verifiers](authoring/verifiers.md).
 
 ## Sandbox providers
 
 The `mode` you give `DeepGym` picks where answers run: `local`, `docker`, `apple`,
 `daytona`, `modal`, `e2b`, or `auto` (the default: Daytona when `DAYTONA_API_KEY` is set,
-otherwise local).
+otherwise local; it also falls back to local, with only a warning, if
+`deepgym[daytona]` isn't installed).
 
 ```python
 dg = DeepGym(mode='docker')   # same for AsyncDeepGym and dg.session()
 ```
 
-- Every sandbox mode gives the same isolation, for single runs and shell sessions: the
-  answer runs as a separate Linux user that can't read the judge's files, touch its
-  process or reach the network. Use one for anything shared or untrusted.
+- In every sandbox mode, for single runs and shell sessions, the answer runs as a
+  separate Linux user that can't read the judge's files, touch its process or reach the
+  network. Docker containers share the host's kernel, so Docker isolates less than the
+  VM-based providers. Use a sandbox for anything shared or untrusted.
 - `local` runs a subprocess under `sandbox-exec` (macOS) or `bwrap` (Linux). It is for
-  development, and repo, terminal and cyber tasks refuse it.
+  development, and repo-patch, Harbor (terminal) and CyberGym artifact tasks refuse it.
 - Docker and Apple container give each run a throwaway container or Linux VM, with no
   API key. The default image is `python:3.12-slim` (override with
   `DEEPGYM_CONTAINER_IMAGE` or per environment), and sessions run offline while servers
@@ -114,8 +119,7 @@ dg = DeepGym(mode='docker')   # same for AsyncDeepGym and dg.session()
   `container system stop`.
 - Desktop (computer-use) environments need Daytona.
 - Each provider is one folder in `src/deepgym/sandboxes/` that implements a small
-  `Sandbox` protocol (run a command as root, upload a file, delete), so adding a provider
-  means adding a folder.
+  `Sandbox` protocol (run a command as root, upload a file, delete).
 
 Setup for each provider is in [sandboxes](sandboxes.md).
 
@@ -123,12 +127,15 @@ Setup for each provider is in [sandboxes](sandboxes.md).
 
 A run either has a verdict or it doesn't (`result.has_verdict`):
 
-- **Infrastructure failures give no verdict.** When the sandbox, the provider or the
-  verifier fails instead of judging the answer, the result's score is a placeholder 0.0.
-  Every trainer integration keeps such a sample out of training instead of training on
-  the 0.
-- **Failures caused by the policy are scored.** Failing tests, a malformed patch or a
-  patch that touches test infrastructure is a real 0 to learn from.
+- **Infrastructure failures give no verdict.** A sandbox or verifier that fails before
+  the answer is in play, or a provider or network failure at any point, leaves the
+  result's score a placeholder 0.0. `dg.run` and `DeepGymEnv.step` raise on sandbox,
+  provider and timeout failures; `run_batch` and `eval` return them as results without a
+  verdict. What each trainer integration does with such a sample is in the reward
+  contract.
+- **Failures caused by the policy are scored.** Failing tests, a malformed patch, a patch
+  that touches test infrastructure, a solution that crashes or hangs the verifier, or a
+  sandbox the policy killed is a real 0 to learn from.
 - **Headline totals stay conservative.** `passed`, `avg_score` and `pass_rate` count a
   run without a verdict as a failed 0, so a broken run can only lower them. The
   `judged_*` fields beside them count only the runs that got a verdict.
@@ -138,7 +145,8 @@ See [the reward contract](training/reward-contract.md).
 ## Traces
 
 `dg.trace()` records a multi-turn episode while it runs: provenance (environment hashes,
-image digest, deepgym version and commit, agent and sampling config), every action with
+image and its digest where the provider reports one, deepgym version and commit, agent
+and sampling config), every action with
 the model messages behind it, every step reward, and the final verdict. Each event is
 appended to disk as it happens, so a crash keeps the steps taken so far.
 `deepgym traces export` turns traces into JSONL, Parquet rows for verl and TRL, or ATIF
@@ -158,3 +166,5 @@ results = env.step_batch(outputs)   # one (obs, reward, done, info) per output
 ```
 
 When `info.has_verdict` is false, the reward is a placeholder 0.0: mask that sample.
+`step` raises on sandbox, provider and timeout failures, as `dg.run` does; `step_batch`
+returns them without a verdict.

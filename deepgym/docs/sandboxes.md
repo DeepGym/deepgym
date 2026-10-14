@@ -70,7 +70,9 @@ one for anything shared or untrusted.
   data crosses back to the verifier (see [verifiers](authoring/verifiers.md)).
 - **Sessions:** agent commands run as an unprivileged user in a loopback-only network
   namespace, and verifiers as another user, from a file only that user can read (see
-  [sessions](environments/sessions.md)).
+  [sessions](environments/sessions.md)). Setup refuses an image where anyone but root can
+  change a folder on root's PATH (`/usr/local/sbin` to `/bin`), a folder above one, or a
+  program in one.
 - **Network:** Docker, Modal and E2B take the whole sandbox offline. Apple container
   doesn't block egress, and Daytona, though it blocks the network, serves its toolbox API
   (run any command as its sudoer) on loopback, so on both DeepGym gives untrusted code its

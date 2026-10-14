@@ -69,7 +69,10 @@ class TestEvalPlusScoring:
         with pytest.raises(ValueError, match='reference'):
             _verifier_env('f', [[1], [2]], outputs)
 
-    def test_task_with_a_reference_error_is_not_published(self, tmp_path: Path) -> None:
+    @pytest.mark.parametrize('linked', [False, True])
+    def test_task_with_a_reference_error_is_not_published(
+        self, tmp_path: Path, linked: bool
+    ) -> None:
         """A reference failing on input 1 used to drop that case, so answering 0 scored 1.0."""
         canonical = 'def f(x):\n    if x == 1:\n        import no_such_module\n    return x\n'
         problem = {
@@ -79,14 +82,19 @@ class TestEvalPlusScoring:
             'base_input': [[0], [1]],
             'plus_input': [],
         }
+        out = tmp_path / 'out'
+        old = tmp_path / 'old' if linked else out / 'T_0'  # an earlier import's copy
+        old.mkdir(parents=True)
+        (old / 'verifier.py').write_text('')
+        if linked:
+            out.mkdir()
+            (out / 'T_0').symlink_to(old)
 
-        (tmp_path / 'T_0').mkdir()  # an earlier import's copy
-        (tmp_path / 'T_0' / 'verifier.py').write_text('')
-
-        registry = import_benchmark('humaneval_plus', {'T/0': problem}, tmp_path)
+        registry = import_benchmark('humaneval_plus', {'T/0': problem}, out)
 
         assert registry == []
-        assert not (tmp_path / 'T_0').exists()
+        assert not (out / 'T_0').exists()
+        assert not (out / 'T_0').is_symlink()
 
 
 class TestEvalPlusLargeIntHandling:

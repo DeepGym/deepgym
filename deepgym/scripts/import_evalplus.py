@@ -269,7 +269,10 @@ def import_benchmark(name, data, output_dir):
         except ValueError as e:
             errors.append(f"  {safe_id}: not imported, {e}")
             # An earlier import's copy would still load by name.
-            shutil.rmtree(env_dir, ignore_errors=True)
+            if env_dir.is_symlink():
+                env_dir.unlink()
+            elif env_dir.exists():
+                shutil.rmtree(env_dir)
             continue
 
         env_dir.mkdir(exist_ok=True)

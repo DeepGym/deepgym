@@ -1009,6 +1009,8 @@ def test_preflight_passes_runnable_commands(
         pytest.param('{venv} &&', id='and-list'),
         pytest.param('{venv} || exit 1;', id='or-list'),
         pytest.param('if true; then {venv}; fi;', id='compound'),
+        pytest.param(': "$({venv})" &&', id='substitution-in-builtin'),
+        pytest.param('LOG="$({venv})";', id='substitution-in-assignment'),
     ],
 )
 def test_preflight_passes_a_runner_the_command_creates(

@@ -530,7 +530,9 @@ class PatchVerifier:
                     while words and re.match(r'[A-Za-z_][A-Za-z0-9_]*=', words[0]):
                         name, _, value = words.pop(0).partition('=')
                         assigned[name] = value
-                    ran = bool(words) and words[0] not in _INERT
+                    ran = (bool(words) and words[0] not in _INERT) or any(
+                        '$(' in text or '`' in text for text in (*assigned.values(), *words)
+                    )  # a command substitution runs a command too
                     if not words or re.search(r'[$`*?~\\[]', words[0]):
                         continue
                     program = words[0]

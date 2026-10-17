@@ -280,7 +280,7 @@ class DaytonaDesktop:
         )  # fmt: skip
         _confirm('check', as_root(check, 60))
 
-    def act(self, action: Action) -> None:
+    def act(self, action: Action, *, timeout: float | None = None) -> None:
         """Apply a GUI action through Daytona computer use.
 
         Raises:
@@ -288,7 +288,7 @@ class DaytonaDesktop:
             SandboxError: If the Daytona computer-use call fails for any other reason.
         """
         try:
-            self._dispatch(action)
+            self._dispatch(action, timeout=timeout)
         except Exception as exc:
             # ponytail: Daytona reports bad input as a generic daemon 500, so match its wording.
             message = str(exc).lower()
@@ -296,10 +296,12 @@ class DaytonaDesktop:
                 raise ActionError(f'{action.action_type} rejected: {exc}') from exc
             raise SandboxError(f'{action.action_type} failed: {exc}') from exc
 
-    def _dispatch(self, action: Action) -> None:
+    def _dispatch(self, action: Action, *, timeout: float | None = None) -> None:
         mouse = self._box.computer_use.mouse
         keyboard = self._box.computer_use.keyboard
-        deadline = self._action_timeout
+        deadline = (
+            min(timeout, self._action_timeout) if timeout is not None else self._action_timeout
+        )
         match action.action_type:
             case 'click':
                 mouse.click(action.x, action.y, request_timeout=deadline)
@@ -320,7 +322,7 @@ class DaytonaDesktop:
             case 'key':
                 keyboard.hotkey(action.content, request_timeout=deadline)
 
-    def screenshot(self) -> str:
+    def screenshot(self, *, timeout: float | None = None) -> str:
         """Return a full-resolution PNG so pixel coordinates match click targets.
 
         Raises:
@@ -328,9 +330,12 @@ class DaytonaDesktop:
         """
         from daytona import ScreenshotOptions
 
+        deadline = (
+            min(timeout, self._action_timeout) if timeout is not None else self._action_timeout
+        )
         try:
             shot = self._box.computer_use.screenshot.take_compressed(
-                ScreenshotOptions(fmt='png', scale=1.0), request_timeout=self._action_timeout
+                ScreenshotOptions(fmt='png', scale=1.0), request_timeout=deadline
             )
         except Exception as exc:
             raise SandboxError(f'Failed to take screenshot: {exc}') from exc

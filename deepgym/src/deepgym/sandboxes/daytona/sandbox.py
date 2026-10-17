@@ -9,6 +9,7 @@ that needs Daytona's full API (SWE-bench Pro).
 from __future__ import annotations
 
 import logging
+import math
 import posixpath
 import re
 import shlex
@@ -77,15 +78,16 @@ def create_params(
 def _session_params(
     env: MultiTurnEnvironment,
 ) -> CreateSandboxFromSnapshotParams | CreateSandboxFromImageParams:
-    """Return params for an ephemeral, network-blocked session sandbox: ``env.image``
+    """Return params for an ephemeral session sandbox, network-blocked by default: ``env.image``
     unless a snapshot is set, else ``env.snapshot`` or Daytona's default snapshot (the
-    one with a desktop).
+    one with a desktop). Only explicit CLI provider egress unblocks the trusted root
+    proxy; SandboxBackend still isolates agent, service and verifier networking.
 
     Raises:
         SandboxError: If the daytona SDK is missing.
     """
     sdk = _sdk()
-    options = {'ephemeral': True, 'network_block_all': True}
+    options = {'ephemeral': True, 'network_block_all': not env.cli_provider_egress}
     if env.image and not env.snapshot:
         return sdk.CreateSandboxFromImageParams(image=sdk.Image.base(env.image), **options)
     return sdk.CreateSandboxFromSnapshotParams(snapshot=env.snapshot, **options)
@@ -172,7 +174,8 @@ class DaytonaSandbox:
 
         A single run gets :func:`create_params`. A live session (a multi-turn *env*)
         gets its image or Daytona's default snapshot, which has the desktop, with the
-        network blocked and ``setup_timeout`` to boot; deleting it waits until Daytona
+        network blocked unless CLI provider egress is requested, and ``setup_timeout``
+        to boot; deleting it waits until Daytona
         confirms it is gone, because the HTTP API frees a session slot on close.
 
         Raises:
@@ -240,7 +243,7 @@ class DaytonaSandbox:
         *,
         cwd: str | None = None,
         env: Mapping[str, str] | None = None,
-        timeout: int | None = None,
+        timeout: float | None = None,
     ) -> ExecResult:
         """Run *command* with sh as root.
 
@@ -260,7 +263,7 @@ class DaytonaSandbox:
                 f'{self._sudo}/bin/sh -c {shlex.quote(command)}',
                 cwd=cwd,
                 env=dict(env) if env else None,
-                timeout=timeout + _WAIT_GRACE_S if timeout else None,
+                timeout=math.ceil(timeout + _WAIT_GRACE_S) if timeout else None,
             )
         except Exception as exc:
             if is_timeout(exc):

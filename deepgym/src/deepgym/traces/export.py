@@ -15,7 +15,8 @@ Row shapes (``rows=``):
   screenshot, done flag, exit code, or the error if nothing), its step reward, and
   ``message_index``: where in ``messages`` the reply that produced it is, shared by the
   actions of one turn. A trace with a turn that has no model messages has no whole
-  conversation to train on and is skipped.
+  conversation to train on and is skipped. In RL Parquet, ``action.events`` is a
+  list of JSON strings, preserving arbitrary nested CLI event shapes.
 
 Every row carries ``has_verdict``, and its ``score``/``reward`` and ``passed`` are null
 without one, so a failed sandbox or verifier never reads as a scored 0. ``only_valid``
@@ -185,6 +186,23 @@ def _write_parquet(records: Sequence[Row], out: Path, rows: RowShape) -> None:
         import pyarrow.parquet as pq
     except ImportError as exc:
         raise DeepGymError("Parquet export needs pyarrow: pip install 'deepgym[traces]'") from exc
+    if rows == 'rl':
+        records = [
+            {
+                **record,
+                'steps': [
+                    {
+                        **step,
+                        'action': {
+                            **step['action'],
+                            'events': [json_text(event) for event in step['action']['events']],
+                        },
+                    }
+                    for step in record['steps']
+                ],
+            }
+            for record in records
+        ]
     out.parent.mkdir(parents=True, exist_ok=True)
     pq.write_table(pa.Table.from_pylist(list(records), schema=_schema(rows)), out)
 
@@ -224,6 +242,7 @@ def _schema(rows: RowShape) -> pa.Schema:
         ('to_y', pa.int64()),
         ('path', pa.string()),
         ('amount', pa.int64()),
+        ('events', pa.list_(pa.string())),
     ])  # fmt: skip
     step = pa.struct([
         ('message_index', pa.int64()),

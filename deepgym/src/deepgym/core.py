@@ -8,7 +8,7 @@ import time
 from collections.abc import Callable, Sequence
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timezone
-from typing import Literal
+from typing import TYPE_CHECKING, Literal, overload
 
 from deepgym import __version__
 from deepgym.benchmark_envs import _infer_environment_name, build_run_requests, route_single_run
@@ -33,6 +33,9 @@ from deepgym.traces import AgentMeta, EnvFingerprint, Provenance, TracedSession
 from deepgym.traces.checkout import deepgym_checkout
 
 logger = logging.getLogger(__name__)
+
+if TYPE_CHECKING:
+    from deepgym.agents.base import Agent, AgentResult, Budget
 
 
 class DeepGym:
@@ -206,18 +209,47 @@ class DeepGym:
         desktop = DaytonaDesktop(box, env.timeout_per_step, env.setup_timeout)
         return Session(env, SandboxBackend(box, desktop=desktop if env.desktop else None))
 
+    @overload
     def run_episode(
         self, env: MultiTurnEnvironment, agent: Callable[[Observation], Action]
-    ) -> tuple[Trajectory, RunResult]:
+    ) -> tuple[Trajectory, RunResult]: ...
+
+    @overload
+    def run_episode(
+        self, env: MultiTurnEnvironment, agent: Agent, *, budget: Budget | None = None
+    ) -> tuple[AgentResult, RunResult]: ...
+
+    def run_episode(
+        self,
+        env: MultiTurnEnvironment,
+        agent: Callable[[Observation], Action] | Agent,
+        *,
+        budget: Budget | None = None,
+    ) -> tuple[Trajectory | AgentResult, RunResult]:
         """Run one full episode of *env* driven by *agent* and score it.
 
         Args:
             env: The multi-turn or computer-use environment.
-            agent: Callable mapping an observation to the next action.
+            agent: An agent harness, or a callable mapping observations to actions.
+            budget: Harness limits; omitted uses Budget defaults.
 
         Returns:
-            Tuple of (trajectory, final_result).
+            Tuple of (AgentResult, final_result) for a harness, or
+            (trajectory, final_result) for a legacy callable. The grade describes
+            final state independently of the harness termination reason.
+
+        Raises:
+            ValueError: If a budget is supplied to a legacy callable.
         """
+        from deepgym.agents.base import Agent, Budget
+
+        if isinstance(agent, Agent):
+            with self.session(env) as session:
+                initial = session.start()
+                result = agent.run(session, initial, task=env.task, budget=budget or Budget())
+                return result, session.score()
+        if budget is not None:
+            raise ValueError('budget requires an Agent harness with a run method')
         return run_episode(self.session(env), agent)
 
     def trace(

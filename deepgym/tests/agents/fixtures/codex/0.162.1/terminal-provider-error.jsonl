@@ -1,0 +1,4 @@
+{"type":"thread.started","thread_id":"provider-failure-fixture"}
+{"type":"turn.started"}
+{"type":"error","willRetry":false,"error":{"message":"Opaque diagnostic","codexErrorInfo":{"responseTooManyFailedAttempts":{"httpStatusCode":503}}}}
+{"type":"turn.failed","error":{"message":"Opaque terminal diagnostic","codexErrorInfo":{"responseTooManyFailedAttempts":{"httpStatusCode":503}}}}

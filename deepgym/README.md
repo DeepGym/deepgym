@@ -258,6 +258,9 @@ Agents act with `code`, `bash`, `write_file` and `done`; an optional step verifi
 each step. `dg.run_episode(env, agent)` runs a whole episode in one call. More in
 [sessions][sessions].
 
+For Claude Code, Codex, and provider computer-use loops, see the
+[agent harnesses and budget/isolation limits](docs/agents.md).
+
 ### Drive a desktop
 
 Computer-use tasks boot a locked-down desktop on Daytona and score what the agent changed,

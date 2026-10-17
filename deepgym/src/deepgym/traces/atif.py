@@ -20,6 +20,8 @@ Mapping, one ATIF document per trace:
   fields), in order, each with its own observation result: what the action produced, or
   the error if it produced nothing. Exit code, done flag, ``applied``, error, step
   reward and step verifier output go in that result's ``extra``.
+* CLI launches remain one tool call; their raw nested events are preserved in the
+  observation result's ``extra.cli_events``, never translated into executable actions.
 * Assistant token ids and logprobs become ``metrics.completion_token_ids`` and
   ``metrics.logprobs``; token data on other roles has no ATIF field and is dropped.
 * Screenshots are PNG files under ``images/<trace_id>/`` next to the document, referenced
@@ -141,7 +143,7 @@ def _turn(
             'tool_call_id': call_id,
             'function_name': step.action.action_type,
             'arguments': step.action.model_dump(
-                mode='json', exclude={'action_type'}, exclude_defaults=True
+                mode='json', exclude={'action_type', 'events'}, exclude_defaults=True
             ),
         })  # fmt: skip
         observed = (
@@ -156,6 +158,7 @@ def _turn(
             'error': step.error,
             'reward': step.reward,
             'step_verifier': step.step_verifier,
+            'cli_events': list(step.action.events) if step.action.action_type == 'cli' else None,
         })))  # fmt: skip
     action = _compact({
         'timestamp': steps[0].timestamp.isoformat(),

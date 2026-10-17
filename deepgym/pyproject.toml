@@ -39,6 +39,8 @@ e2b = ["e2b>=2.55"]
 hf = ["datasets>=2.16", "huggingface_hub>=0.20"]
 lm_eval = ["lm_eval>=0.4.9"]
 traces = ["pyarrow>=14"]
+anthropic = ["anthropic>=0.68"]
+openai = ["openai>=2"]
 dev = ["pytest", "pytest-asyncio", "pytest-xdist", "ruff", "fastapi>=0.100", "uvicorn[standard]>=0.20", "pyarrow>=14"]
 all = ["daytona>=0.223", "modal>=1.6", "e2b>=2.55", "fastapi>=0.100", "uvicorn[standard]>=0.20", "datasets>=2.16", "huggingface_hub>=0.20", "pyarrow>=14", "pytest", "pytest-asyncio", "ruff"]
 
@@ -86,3 +88,4 @@ inline-quotes = "single"
 asyncio_mode = "auto"
 testpaths = ["tests"]
 pythonpath = ["src"]
+markers = ["live_agents: explicitly opted-in provider and sandbox integration test"]

@@ -51,5 +51,6 @@ tells you if it works. Also check that an obviously wrong solution scores below 
 3. Run `pytest` and `ruff`.
 4. Open a PR that says what changed and how you tested it.
 
-By opening a PR you agree that your contribution is licensed to DeepGym under the
-MIT License, so it can ship under both the noncommercial and the commercial license.
+Before we can merge your first PR, you'll need to sign our
+[Contributor Assignment Agreement](CLA.md). A bot comments on your PR with a link.
+Signing takes a minute and covers all your PRs.

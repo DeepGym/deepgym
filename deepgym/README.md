@@ -422,8 +422,9 @@ verl loads DeepGym's reward function with one config line (see
 DeepGym is free for personal, research and other noncommercial use. Commercial use,
 including inside a company or in a product you sell, needs a commercial license. We also
 build private environments and verifiers for your tasks, deploy DeepGym privately or
-self-hosted, and help set up and run RL training. Email
-[contact@deepgym.io](mailto:contact@deepgym.io) or visit [deepgym.io](https://deepgym.io).
+self-hosted, and help set up and run RL training. For DeepGym Pro access or a custom RL
+environment, email [contact@deepgym.io](mailto:contact@deepgym.io) or visit
+[deepgym.io](https://deepgym.io).
 
 ## CLI
 

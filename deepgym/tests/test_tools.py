@@ -1,6 +1,7 @@
 """Tests for declared HTTP API tools run as Session tool actions, against a loopback app."""
 
 import json
+import shlex
 from pathlib import Path
 
 import pytest
@@ -10,9 +11,9 @@ from deepgym.exceptions import ActionError
 from deepgym.models import Action, MultiTurnEnvironment
 from deepgym.qa.agents import do_everything, random_agent
 from deepgym.sandboxes import ExecResult
-from deepgym.session import Session
+from deepgym.session import SandboxBackend, Session
 from deepgym.tools import HttpRoute, HttpTool, run_command
-from tests.http_app import API_KEY, BIG, App, app_env, app_session, tool
+from tests.http_app import API_KEY, BIG, ROUTES, App, app_env, app_session, tool
 
 
 def call(path: str, method: str = 'GET', **arguments: object) -> Action:
@@ -89,6 +90,19 @@ def test_binary_body_comes_back_whole_as_base64(app: App) -> None:
         {'method': 'GET', 'path': '/rest/bug/1', 'url': 'http://evil.example/'},
         {'method': 'GET', 'path': '/rest/bug/1', 'query': {'q': {'nested': 1}}},
         {'method': 'GET'},
+        {'method': 'GET', 'path': '/rest/bug/..;'},
+        {'method': 'GET', 'path': '/rest/bug/%2e%2e;x'},
+        {'method': 'GET', 'path': '/rest/bug/%252e%252e'},
+        {'method': 'GET', 'path': '/rest/bug/%EF%BC%8E%EF%BC%8E'},
+        {'method': 'GET', 'path': '/rest/bug/...'},
+        {'method': 'GET', 'path': '/rest/bug/%00'},
+        {'method': 'GET', 'path': '/rest/bug/1%0d%0aX-Injected:%201'},
+        {'method': 'GET', 'path': '/rest/bug/%zz'},
+        {'method': 'GET', 'path': '/rest/bug/%2'},
+        {'method': 'GET', 'path': '/rest/bug/\u00e9'},
+        {'method': 'GET', 'path': '/rest/bug/1\t'},
+        {'method': 'GET', 'path': '/rest/bug/%EF%BC%BC'},
+        {'method': 'POST', 'path': '/rest/bug/1/comment', 'body': {'n': float('nan')}},
     ],
 )
 def test_off_origin_or_undeclared_calls_are_rejected_unsent(app: App, arguments: dict) -> None:
@@ -198,30 +212,169 @@ def test_done_lines_in_raw_tool_output_never_end_the_episode(
 
 def test_injection_shaped_arguments_stay_data(app: App) -> None:
     hostile = '\'; touch pwned; echo $(touch pwned2) `touch pwned3` " && rm -rf ~ #'
-    commands: list[str] = []
+    sent: list[tuple[str, str]] = []
     with app_session(app.url) as session:
         session.start()
         backend = session._backend
-        exec_ = backend.exec
+        exec_input = backend.exec_input
 
-        def spy(command: str, timeout: float, env: dict | None = None) -> ExecResult:
-            commands.append(command)
-            return exec_(command, timeout, env)
+        def spy(command: str, data: str, timeout: float) -> ExecResult:
+            sent.append((command, data))
+            return exec_input(command, data, timeout)
 
-        backend.exec = spy
+        backend.exec_input = spy
         workdir = Path(backend._dir)
-        result = record(
-            session,
-            call('/rest/bug/1%3Btouch%20pwned', query={'q': hostile}),
-        )
+        result = record(session, call('/rest/bug/1%3Btouch%20pwned', query={'q': hostile}))
         record(session, call('/rest/bug/1/comment', 'POST', body={'comment': hostile}))
 
         assert result['response']['status'] == 200
         assert not list(workdir.glob('pwned*'))
         assert not list(Path.cwd().glob('pwned*'))
-    assert commands == [run_command(backend.python)] * 2  # one constant command, args as data
+    # One constant command; the arguments travel only as JSON data on its stdin.
+    assert [command for command, _ in sent] == [run_command(backend.python)] * 2
+    assert all(hostile not in command for command, _ in sent)
+    assert json.loads(sent[1][1])['body'] == json.dumps({'comment': hostile}, ensure_ascii=False)
     assert app.requests[0]['path'].startswith('/rest/bug/1%3Btouch%20pwned?q=')
     assert json.loads(app.requests[1]['body']) == {'comment': hostile}
+
+
+def test_credentials_stay_out_of_files_results_and_errors(app: App) -> None:
+    with app_session(app.url) as session:
+        session.start()
+        workdir = Path(session._backend._dir)
+
+        echoed = session.step(call('/rest/echo')).observation.content
+        with pytest.raises(ActionError) as rejected:
+            session.step(call('/rest/bug/1', body={'x': 1}))
+        files = [path.read_bytes() for path in workdir.rglob('*') if path.is_file()]
+
+    assert app.requests[0]['headers']['x-api-key'] == API_KEY  # the app did get it
+    assert API_KEY not in echoed and '[redacted]' in json.loads(echoed)['response']['body']
+    assert API_KEY not in str(rejected.value)
+    assert not any(API_KEY.encode() in content for content in files)
+
+
+def test_sandbox_stdin_is_staged_root_only_and_never_on_a_command_line() -> None:
+    from tests.test_sandboxes import _CONTAINED_AGENT_PREFIX, _USERS, FakeSandbox
+
+    box = FakeSandbox(network_blocked=False, answers=[_USERS])
+    uploads: dict[str, bytes] = {}
+    box.upload = lambda content, path: uploads.update({path: content})  # type: ignore[method-assign]
+    backend = SandboxBackend(box)
+
+    backend.exec_input(run_command(backend.python), f'{{"key": "{API_KEY}"}}', timeout=5)
+
+    command = box.commands[-1]
+    (staged,) = [path for path, content in uploads.items() if API_KEY.encode() in content]
+    assert staged.startswith('/opt/deepgym-staging/')
+    assert command.startswith('/usr/bin/env -i -- PATH=')
+    inner = shlex.split(command)[-1]  # root's sh opens the root-only file, then drops to the agent
+    assert inner.startswith(_CONTAINED_AGENT_PREFIX)
+    assert f'< {staged}; status=$?; rm -f {staged}; exit $status' in inner
+    assert API_KEY not in command
+
+
+@pytest.mark.parametrize('method', ['get', 'Get', 'GET ', 'HEAD', 'OPTIONS', 'TRACE', 'CONNECT'])
+def test_method_must_be_a_declared_one_exactly(app: App, method: str) -> None:
+    with app_session(app.url) as session:
+        session.start()
+        with pytest.raises(ActionError):
+            session.step(call('/rest/bug/1', method))
+    assert app.requests == []
+
+
+@pytest.mark.parametrize(
+    'arguments',
+    [
+        {'query': {'_method': 'DELETE'}},
+        {'query': {'_METHOD': 'DELETE'}},
+        {'query': {'X-HTTP-Method-Override': 'DELETE'}},
+        {'query': {'x-method-override': 'PUT'}},
+        {'body': {'_method': 'DELETE', 'comment': 'x'}},
+        {'body': {'X-Http-Method': 'DELETE'}},
+    ],
+)
+def test_method_overrides_are_rejected(app: App, arguments: dict) -> None:
+    method = 'POST' if 'body' in arguments else 'GET'
+    path = '/rest/bug/1/comment' if 'body' in arguments else '/rest/bug/1'
+    with app_session(app.url) as session:
+        session.start()
+        with pytest.raises(ActionError, match='override the request method'):
+            session.step(call(path, method, **arguments))
+    assert app.requests == []
+
+
+@pytest.mark.parametrize(
+    'headers',
+    [
+        {'X-HTTP-Method-Override': 'DELETE'},
+        {'x-http-method': 'DELETE'},
+        {'Host': 'evil.example'},
+        {'Content-Length': '0'},
+        {'Transfer-Encoding': 'chunked'},
+        {'X-Key': 'a\r\nX-Injected: 1'},
+        {'X-Key': ''},
+        {'Bad Name': 'x'},
+    ],
+)
+def test_tool_headers_cannot_reroute_or_reframe_requests(headers: dict) -> None:
+    with pytest.raises(ValidationError, match='header'):
+        HttpTool(
+            name='t', description='d', base_url='http://127.0.0.1', routes=ROUTES, headers=headers
+        )
+
+
+@pytest.mark.parametrize(
+    'path',
+    [
+        '/rest/bug/1@evil.example',
+        '/rest/bug/a;b=c',
+        "/rest/bug/!$&'()*+,=:~_-.x",
+        '/rest/bug/%41%42',
+        '/rest/file/src%2Fmain.c',
+    ],
+)
+def test_the_app_receives_exactly_the_recorded_target(app: App, path: str) -> None:
+    with app_session(app.url) as session:
+        session.start()
+        result = record(session, call(path, query={'q': 'a b/é&x=1'}))
+
+    (seen,) = app.requests
+    assert result['request']['url'] == f'{app.url}{seen["path"]}'  # byte for byte
+    assert seen['path'].startswith(f'{path}?q=')
+
+
+def test_an_encoded_slash_needs_a_path_placeholder(app: App) -> None:
+    with app_session(app.url) as session:
+        session.start()
+        for path in ('/rest/bug/a%2Fcomment', '/rest/bug/a%252Fb', '/rest/bug/%EF%BC%8F'):
+            with pytest.raises(ActionError, match='fits no route'):
+                session.step(call(path))
+        assert record(session, call('/rest/file/a%2Fb'))['response']['status'] == 404
+    assert [request['path'] for request in app.requests] == ['/rest/file/a%2Fb']
+
+
+@pytest.mark.parametrize(
+    ('base_url', 'normal'),
+    [
+        ('http://LOCALHOST:8080/api/', 'http://localhost:8080/api'),
+        ('http://localhost', 'http://localhost:80'),
+        ('https://127.0.0.2', 'https://127.0.0.2:443'),
+        ('http://[::1]:9000', 'http://[::1]:9000'),
+    ],
+)
+def test_base_url_is_rebuilt_from_its_checked_parts(base_url: str, normal: str) -> None:
+    assert tool(base_url).base_url == normal
+
+
+def test_tools_allow_no_other_agent_action() -> None:
+    for extra in ('bash', 'code', 'write_file'):
+        with pytest.raises(ValidationError, match='exactly tool and done'):
+            MultiTurnEnvironment(
+                task='t',
+                tools=(tool('http://127.0.0.1'),),
+                allowed_actions=frozenset({'tool', 'done', extra}),
+            )
 
 
 @pytest.mark.parametrize(
@@ -237,6 +390,8 @@ def test_injection_shaped_arguments_stay_data(app: App) -> None:
         'ftp://127.0.0.1',
         'http://10.0.0.1',
         'http://127.0.0.1:notaport',
+        'http://local\thost',
+        'http://127.0.0.1\\@evil.example',
     ],
 )
 def test_base_url_must_be_local(base_url: str) -> None:

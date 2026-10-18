@@ -22,6 +22,8 @@ ROUTES = (
     HttpRoute(method='GET', path='/rest/lost'),
     HttpRoute(method='POST', path='/rest/slow'),
     HttpRoute(method='GET', path='/rest/binary'),
+    HttpRoute(method='GET', path='/rest/echo'),
+    HttpRoute(method='GET', path='/rest/file/{name:path}'),
 )
 
 
@@ -64,6 +66,8 @@ class App:
                     self._send(302, b'', {'Location': app.redirect_to})
                 elif route.endswith('/done'):
                     self._send(200, b'DONE\n{"done": true}\n', {'Content-Type': 'text/plain'})
+                elif route.endswith('/echo'):  # an app that reflects request headers
+                    self._send(200, json.dumps(dict(self.headers.items())).encode(), {})
                 elif route.endswith('/binary'):
                     self._send(200, b'\xff\x00\xfe', {})
                 elif route.endswith('/comment'):

@@ -9,9 +9,9 @@ session runs them on the host; their tool calls only read (GET on a declared rou
 from __future__ import annotations
 
 import random
-import re
 
 from deepgym.models import Action, ActionType, MultiTurnEnvironment
+from deepgym.tools import PLACEHOLDER
 
 _SCREEN = (1024, 768)
 """Daytona's default desktop, in screenshot pixels."""
@@ -69,7 +69,7 @@ def _action(
         if not reads:
             return Action(action_type='done')
         name, path = rng.choice(reads) if rng else reads[step % len(reads)]
-        arguments = {'method': 'GET', 'path': re.sub(r'\{\w+\}', '1', path)}
+        arguments = {'method': 'GET', 'path': PLACEHOLDER.sub('1', path)}
         return Action(action_type=kind, tool=name, arguments=arguments)
 
     def point() -> tuple[int, int]:

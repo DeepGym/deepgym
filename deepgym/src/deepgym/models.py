@@ -572,8 +572,9 @@ class MultiTurnEnvironment(BaseModel):
     tools: tuple[HttpTool, ...] = ()
     """API tools that tool actions call, run in the sandbox's offline namespace (see
     :mod:`deepgym.tools`). Trusted environment configuration only; never accept from an agent.
-    Declaring any needs ``tool`` and ``done`` in allowed_actions: a tool-calling agent ends
-    the episode only by an explicit ``done``."""
+    Declaring any needs allowed_actions to be exactly ``tool`` and ``done``: a tool-calling
+    agent ends the episode only by an explicit ``done``, and no shell, file or GUI action
+    runs as the agent user beside the tool runner, which holds the tools' credentials."""
 
     desktop: bool = False
     """Start a desktop (Xvfb + xfce) and return screenshots. Needs the Daytona backend."""
@@ -611,12 +612,16 @@ class MultiTurnEnvironment(BaseModel):
 
     @model_validator(mode='after')
     def check_tools(self) -> MultiTurnEnvironment:
-        """Require unique tool names, and tools exactly when tool actions are allowed."""
+        """Require unique tool names, tools exactly when tool actions are allowed, and
+        no other action beside them but done."""
         names = [tool.name for tool in self.tools]
         if len(set(names)) != len(names):
             raise ValueError(f'tool names must be unique, got {names}')
-        if self.tools and not {'tool', 'done'} <= self.allowed_actions:
-            raise ValueError('tools need tool and done in allowed_actions')
+        if self.tools and self.allowed_actions != {'tool', 'done'}:
+            raise ValueError(
+                'tools need allowed_actions to be exactly tool and done: no other action may '
+                'run beside the tool runner and its credentials'
+            )
         if 'tool' in self.allowed_actions and not self.tools:
             raise ValueError('tool actions need declared tools')
         return self

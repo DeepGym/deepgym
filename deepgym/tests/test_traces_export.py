@@ -120,7 +120,10 @@ def _rl_records(row: dict) -> list[tuple]:
 
 def _decoded(action: dict) -> dict:
     arguments = action['arguments']
-    return {**action, 'arguments': json.loads(arguments) if isinstance(arguments, str) else arguments}
+    return {
+        **action,
+        'arguments': json.loads(arguments) if isinstance(arguments, str) else arguments,
+    }
 
 
 def _atif_records(document: dict) -> list[tuple]:

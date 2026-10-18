@@ -81,7 +81,7 @@ from deepgym.sandboxes import (
     SandboxTimeoutError,
     sealed_path,
 )
-from deepgym.tools import REQUEST_FILE, HttpTool, lost_response, run_command
+from deepgym.tools import HttpTool, lost_response, run_command
 from deepgym.verifier_template import guard_crashes
 
 if TYPE_CHECKING:
@@ -178,6 +178,11 @@ class SessionBackend(Protocol):
         """Run a bash command in the work directory."""
         ...
 
+    def exec_input(self, command: str, data: str, timeout: float) -> ExecResult:
+        """Run a bash command as exec does, with *data* on its stdin; where the backend
+        isolates the agent, *data* is never in a file the session user can read."""
+        ...
+
     def write_file(self, path: str, content: bytes) -> None:
         """Write a file relative to the work directory.
 
@@ -235,10 +240,19 @@ class LocalBackend:
         Raises:
             TimeoutError: If the command exceeds *timeout* seconds.
         """
-        exit_code, stdout, stderr = self._run(command, timeout, env)
-        return ExecResult(exit_code, stdout + ('\n' + stderr if stderr else ''))
+        return _joined(self._run(command, timeout, env))
 
-    def _run(self, command: str, timeout: int, env: dict[str, str] | None) -> VerifierOutput:
+    def exec_input(self, command: str, data: str, timeout: float) -> ExecResult:
+        """Run *command* as :meth:`exec` does, with *data* on its stdin.
+
+        Raises:
+            TimeoutError: If the command exceeds *timeout* seconds.
+        """
+        return _joined(self._run(command, timeout, None, data))
+
+    def _run(
+        self, command: str, timeout: float, env: dict[str, str] | None, data: str | None = None
+    ) -> VerifierOutput:
         """Run *command* with bash in the temp directory, keeping stdout and stderr apart.
 
         Raises:
@@ -248,6 +262,7 @@ class LocalBackend:
         # Own process group, so background children die with the command or the session.
         proc = subprocess.Popen(
             ['bash', '-c', command],
+            stdin=None if data is None else subprocess.PIPE,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             text=True,
@@ -258,7 +273,7 @@ class LocalBackend:
         )
         self._groups.add(proc.pid)
         try:
-            stdout, stderr = proc.communicate(timeout=timeout)
+            stdout, stderr = proc.communicate(data, timeout=timeout)
         except subprocess.TimeoutExpired as exc:
             _kill_group(proc.pid)
             stdout, _ = proc.communicate()
@@ -593,6 +608,29 @@ class SandboxBackend:
             f'{self._offline}{self._as_agent} bash -c {shlex.quote(command)}',
             cwd=self._workdir,
             env={**self._clear, **self._agent_env, **(env or {})},
+            timeout=timeout,
+        )
+
+    def exec_input(self, command: str, data: str, timeout: float) -> ExecResult:
+        """Run *command* as the session user, offline, with *data* on its stdin.
+
+        Root uploads *data* to its private staging directory and opens it for the command,
+        so the session user gets the bytes but never a path to them, and deletes it after (a
+        command the timeout stops can leave it there, still root-only). The command gets
+        only :data:`~deepgym.sandboxes.TRUSTED_PATH`, never the image's environment.
+
+        Raises:
+            TimeoutError: If the command exceeds *timeout* seconds.
+        """
+        staged = f'{_STAGING_DIR}/{uuid4().hex}'
+        self._sandbox.upload(data.encode('utf-8'), staged)
+        return self._sandbox.exec(
+            trusted(
+                f'{self._offline}{self._as_agent} {command} < {staged}; '
+                f'status=$?; rm -f {staged}; exit $status'
+            ),
+            cwd=self._workdir,
+            env=self._clear,
             timeout=timeout,
         )
 
@@ -1084,14 +1122,12 @@ class Session:
                 and not isinstance(self._backend, SandboxBackend)
             ):
                 raise ActionError('Desktop deadline overrides require SandboxBackend')
-            request = self._tool_request(action) if action.action_type == 'tool' else None
+            call = self._tool_call(action) if action.action_type == 'tool' else None
 
             self._step += 1
             self._step_verdict = None
             try:
-                output, exit_code = self._apply(
-                    action, timeout=_remaining(deadline), request=request
-                )
+                output, exit_code = self._apply(action, timeout=_remaining(deadline), call=call)
             except ActionError:
                 raise
             except BaseException as exc:
@@ -1295,12 +1331,12 @@ class Session:
         action: Action,
         *,
         timeout: float | None = None,
-        request: Mapping[str, JsonValue] | None = None,
+        call: tuple[HttpTool, dict[str, JsonValue]] | None = None,
     ) -> tuple[str, int | None]:
         """Execute *action*; return its text output and exit code (None if not a command).
 
-        A tool action sends *request*, from :meth:`_tool_request`. Its time, however it
-        ends, counts as the agent's (see :meth:`_ran_out_the_clock`).
+        A tool action sends *call*, from :meth:`_tool_call`. Its time, however it ends,
+        counts as the agent's (see :meth:`_ran_out_the_clock`).
         """
         bounded = timeout is not None
         timeout = (
@@ -1322,8 +1358,8 @@ class Session:
                         self._backend.write_file(str(action.path), action.content.encode('utf-8'))
                         return f'wrote {action.path}', None
                     case 'tool':
-                        assert request is not None
-                        return self._call_tool(request, timeout)
+                        assert call is not None
+                        return self._send(*call, timeout)
                     case 'wait':
                         time.sleep(min(action.amount, timeout))
                         return '', None
@@ -1339,8 +1375,8 @@ class Session:
         finally:
             self._acting_s += time.monotonic() - started
 
-    def _tool_request(self, action: Action) -> dict[str, JsonValue]:
-        """Return the request *action* sends with its declared tool (see HttpTool.prepare).
+    def _tool_call(self, action: Action) -> tuple[HttpTool, dict[str, JsonValue]]:
+        """Return *action*'s declared tool and the request it sends (see HttpTool.prepare).
 
         Raises:
             ActionError: If no declared tool has its name, or the tool rejects its arguments.
@@ -1350,25 +1386,26 @@ class Session:
             names = sorted(tool.name for tool in self._env.tools)
             raise ActionError(f'No tool named {action.tool!r}. Declared: {names}')
         try:
-            return tool.prepare(action.arguments)
+            return tool, tool.prepare(action.arguments)
         except ValueError as exc:
             raise ActionError(f'Tool {tool.name!r} rejected the call: {exc}') from exc
 
-    def _call_tool(
-        self, request: Mapping[str, JsonValue], timeout: float
+    def _send(
+        self, tool: HttpTool, request: Mapping[str, JsonValue], timeout: float
     ) -> tuple[str, int | None]:
         """Send *request* from the sandbox; return the runner's record of it and its exit code.
 
-        The request is data in a file the constant runner command reads. It is never
-        retried: a runner stopped by the timeout reports no response, and a mutation it
-        may have sent is recorded as uncertain.
+        The request reaches the constant runner command as data on its stdin, never through
+        a file or argument the agent user could read or change, and the tool's header values
+        are redacted from what comes back. It is never retried: a runner the timeout stops
+        reports no response, and a mutation it may have sent is recorded as uncertain.
         """
-        self._backend.write_file(REQUEST_FILE, json.dumps(request).encode('utf-8'))
+        command = run_command(self._backend.python)
         try:
-            exit_code, output = self._backend.exec(run_command(self._backend.python), timeout)
+            exit_code, output = self._backend.exec_input(command, json.dumps(request), timeout)
         except TimeoutError:
             return lost_response(request, f'the request was stopped after {timeout}s'), None
-        return output, exit_code
+        return tool.redact(output), exit_code
 
     def _run_python(self, filename: str, code: str, timeout: float | None = None) -> ExecResult:
         self._backend.write_file(filename, code.encode('utf-8'))
@@ -1607,6 +1644,12 @@ def failure_result(exc: BaseException, sandbox_id: str, *, exhausted: bool = Fal
     if ours:
         return result
     return result.model_copy(update={'error_type': 'policy_sandbox_failure'})
+
+
+def _joined(output: VerifierOutput) -> ExecResult:
+    """Return a command's *output* as one text: stdout, then stderr."""
+    exit_code, stdout, stderr = output
+    return ExecResult(exit_code, stdout + ('\n' + stderr if stderr else ''))
 
 
 def _kill_group(group: int) -> None:

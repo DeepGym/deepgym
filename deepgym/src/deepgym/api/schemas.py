@@ -219,6 +219,8 @@ class CreateSessionRequest(BaseModel):
             raise ValueError('root_service_start cannot be set over the API')
         if not isinstance(v, str) and v.cli_provider_egress:
             raise ValueError('cli_provider_egress cannot be set over the API')
+        if not isinstance(v, str) and v.volumes:
+            raise ValueError('volumes cannot be set over the API')
         return v
 
 

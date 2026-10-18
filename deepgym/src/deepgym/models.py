@@ -491,6 +491,15 @@ class Trajectory(BaseModel):
     without one, so a failed episode has one reward fewer than steps."""
 
 
+class VolumeMount(BaseModel):
+    """One provider volume mounted at an absolute path inside the sandbox."""
+
+    model_config = ConfigDict(frozen=True, extra='forbid')
+    volume_id: str = Field(min_length=1)
+    mount_path: str = Field(pattern=r'^/')
+    subpath: str | None = None
+
+
 class MultiTurnEnvironment(BaseModel):
     """Define a multi-turn environment where agents take multiple steps.
 
@@ -515,6 +524,10 @@ class MultiTurnEnvironment(BaseModel):
     Uses setup_timeout. Only SandboxBackend supports it; never accept this from an agent.
     The command must start the service itself and exit non-zero if readiness fails.
     """
+
+    volumes: tuple[VolumeMount, ...] = ()
+    """Provider volumes mounted into the sandbox (Daytona), for evidence too large for the image,
+    such as attachment files. Trusted environment configuration only; never accept from an agent."""
 
     cli_provider_egress: bool = Field(default=False, strict=True)
     """Opt in to sandbox-level egress for the trusted CLI provider proxy (Daytona).

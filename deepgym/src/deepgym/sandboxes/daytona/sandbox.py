@@ -88,6 +88,11 @@ def _session_params(
     """
     sdk = _sdk()
     options = {'ephemeral': True, 'network_block_all': not env.cli_provider_egress}
+    if env.volumes:
+        options['volumes'] = [
+            sdk.VolumeMount(volume_id=v.volume_id, mount_path=v.mount_path, subpath=v.subpath)
+            for v in env.volumes
+        ]
     if env.image and not env.snapshot:
         return sdk.CreateSandboxFromImageParams(image=sdk.Image.base(env.image), **options)
     return sdk.CreateSandboxFromSnapshotParams(snapshot=env.snapshot, **options)

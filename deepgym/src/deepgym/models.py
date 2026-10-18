@@ -13,6 +13,7 @@ from typing import Any, Literal, get_args
 from pydantic import BaseModel, ConfigDict, Field, JsonValue, field_validator, model_validator
 
 from deepgym.exceptions import InvalidScoreError
+from deepgym.tools import HttpTool
 
 logger = logging.getLogger(__name__)
 
@@ -411,7 +412,7 @@ GuiActionType = Literal[
     'screenshot',
     'wait',
 ]
-ActionType = Literal[ShellActionType, GuiActionType, 'done', 'cli']
+ActionType = Literal[ShellActionType, GuiActionType, 'done', 'cli', 'tool']
 
 GUI_ACTIONS: frozenset[GuiActionType] = frozenset(get_args(GuiActionType))
 
@@ -425,6 +426,7 @@ class Action(BaseModel):
 
     Shell actions (code, bash, write_file) run in the session work directory.
     GUI actions drive the desktop; coordinates are screenshot pixels.
+    Tool actions call one of the environment's declared API tools (see :mod:`deepgym.tools`).
     """
 
     action_type: ActionType = 'code'
@@ -455,6 +457,12 @@ class Action(BaseModel):
     amount: int = Field(default=1, ge=1, le=60)
     """Scroll clicks, or seconds for wait."""
 
+    tool: str | None = None
+    """Name of the declared tool a tool action calls."""
+
+    arguments: dict[str, JsonValue] = Field(default_factory=dict)
+    """A tool action's arguments; the session checks them against the tool's routes."""
+
     @model_validator(mode='after')
     def check_arguments(self) -> Action:
         """Reject actions missing the arguments their type needs."""
@@ -467,6 +475,8 @@ class Action(BaseModel):
             raise ValueError(f'scroll content must be one of {sorted(_SCROLL_DIRECTIONS)}')
         if kind in _TEXT_ACTIONS and not self.content:
             raise ValueError(f'{kind} needs content')
+        if kind == 'tool' and not self.tool:
+            raise ValueError('tool needs the name of a declared tool')
         if kind == 'write_file':
             rel = PurePosixPath(self.path or '')
             if not rel.parts or rel.is_absolute() or '..' in rel.parts:
@@ -559,6 +569,12 @@ class MultiTurnEnvironment(BaseModel):
     allowed_actions: frozenset[ActionType] = frozenset({'code', 'bash', 'write_file', 'done'})
     """Action types the agent may use. Anything else is rejected."""
 
+    tools: tuple[HttpTool, ...] = ()
+    """API tools that tool actions call, run in the sandbox's offline namespace (see
+    :mod:`deepgym.tools`). Trusted environment configuration only; never accept from an agent.
+    Declaring any needs ``tool`` and ``done`` in allowed_actions: a tool-calling agent ends
+    the episode only by an explicit ``done``."""
+
     desktop: bool = False
     """Start a desktop (Xvfb + xfce) and return screenshots. Needs the Daytona backend."""
 
@@ -591,6 +607,18 @@ class MultiTurnEnvironment(BaseModel):
             raise ValueError('GUI actions need desktop=True')
         if self.cli_provider_egress and not self.allowed_actions & {'bash', 'cli'}:
             raise ValueError('cli_provider_egress requires bash or cli in allowed_actions')
+        return self
+
+    @model_validator(mode='after')
+    def check_tools(self) -> MultiTurnEnvironment:
+        """Require unique tool names, and tools exactly when tool actions are allowed."""
+        names = [tool.name for tool in self.tools]
+        if len(set(names)) != len(names):
+            raise ValueError(f'tool names must be unique, got {names}')
+        if self.tools and not {'tool', 'done'} <= self.allowed_actions:
+            raise ValueError('tools need tool and done in allowed_actions')
+        if 'tool' in self.allowed_actions and not self.tools:
+            raise ValueError('tool actions need declared tools')
         return self
 
 

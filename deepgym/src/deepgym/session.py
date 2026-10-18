@@ -81,6 +81,7 @@ from deepgym.sandboxes import (
     SandboxTimeoutError,
     sealed_path,
 )
+from deepgym.tools import REQUEST_FILE, HttpTool, lost_response, run_command
 from deepgym.verifier_template import guard_crashes
 
 if TYPE_CHECKING:
@@ -965,6 +966,11 @@ class Session:
         return self._trajectory
 
     @property
+    def tools(self) -> tuple[HttpTool, ...]:
+        """The API tools the environment declares, for tool-calling agents."""
+        return self._env.tools
+
+    @property
     def step_verdict(self) -> dict[str, object] | None:
         """The step verifier output of the last step (score, passed, details, ...).
 
@@ -1040,15 +1046,20 @@ class Session:
         verifier that times out after reading the agent's output gives the step a judged 0
         (``solution_timeout``) instead, and the episode goes on.
 
+        A tool action's arguments are checked against its declared tool before it counts
+        as a step. Only an explicit ``done`` ends an episode of tool actions: their output
+        is the app's, so a DONE line in it never does.
+
         ``timeout`` bounds agent execution and the following screenshot by one remaining
         wall-time deadline. Desktop overrides require SandboxBackend. Verifier time is
         separate; provider transport can take its own cleanup grace after a deadline.
 
         Raises:
             DeepGymError: If the session is not running.
-            ActionError: If the action is not allowed here, the desktop rejects it, or the
-                agent's own files are in the way of a write (the episode goes on, unless
-                they blocked the step's output file).
+            ActionError: If the action is not allowed here, names no declared tool or has
+                arguments its tool rejects, the desktop rejects it, or the agent's own files
+                are in the way of a write (the episode goes on, unless they blocked the
+                step's output file).
             VerifierError: If the step verifier fails, gives no verdict, or times out before
                 it reads the agent's output.
             SandboxError: If the sandbox fails to apply the action, take the screenshot or
@@ -1073,11 +1084,14 @@ class Session:
                 and not isinstance(self._backend, SandboxBackend)
             ):
                 raise ActionError('Desktop deadline overrides require SandboxBackend')
+            request = self._tool_request(action) if action.action_type == 'tool' else None
 
             self._step += 1
             self._step_verdict = None
             try:
-                output, exit_code = self._apply(action, timeout=_remaining(deadline))
+                output, exit_code = self._apply(
+                    action, timeout=_remaining(deadline), request=request
+                )
             except ActionError:
                 raise
             except BaseException as exc:
@@ -1085,7 +1099,7 @@ class Session:
                 raise
             done = (
                 action.action_type == 'done'
-                or _signals_done(output)
+                or (action.action_type != 'tool' and _signals_done(output))
                 or (self._env.max_steps is not None and self._step >= self._env.max_steps)
             )
             observation: Observation | None = None
@@ -1276,10 +1290,17 @@ class Session:
                 'Could not delete sandbox %s; it may still exist', self.sandbox_id, exc_info=True
             )
 
-    def _apply(self, action: Action, *, timeout: float | None = None) -> tuple[str, int | None]:
+    def _apply(
+        self,
+        action: Action,
+        *,
+        timeout: float | None = None,
+        request: Mapping[str, JsonValue] | None = None,
+    ) -> tuple[str, int | None]:
         """Execute *action*; return its text output and exit code (None if not a command).
 
-        Its time, however it ends, counts as the agent's (see :meth:`_ran_out_the_clock`).
+        A tool action sends *request*, from :meth:`_tool_request`. Its time, however it
+        ends, counts as the agent's (see :meth:`_ran_out_the_clock`).
         """
         bounded = timeout is not None
         timeout = (
@@ -1300,6 +1321,9 @@ class Session:
                     case 'write_file':
                         self._backend.write_file(str(action.path), action.content.encode('utf-8'))
                         return f'wrote {action.path}', None
+                    case 'tool':
+                        assert request is not None
+                        return self._call_tool(request, timeout)
                     case 'wait':
                         time.sleep(min(action.amount, timeout))
                         return '', None
@@ -1314,6 +1338,37 @@ class Session:
             return '', None
         finally:
             self._acting_s += time.monotonic() - started
+
+    def _tool_request(self, action: Action) -> dict[str, JsonValue]:
+        """Return the request *action* sends with its declared tool (see HttpTool.prepare).
+
+        Raises:
+            ActionError: If no declared tool has its name, or the tool rejects its arguments.
+        """
+        tool = next((tool for tool in self._env.tools if tool.name == action.tool), None)
+        if tool is None:
+            names = sorted(tool.name for tool in self._env.tools)
+            raise ActionError(f'No tool named {action.tool!r}. Declared: {names}')
+        try:
+            return tool.prepare(action.arguments)
+        except ValueError as exc:
+            raise ActionError(f'Tool {tool.name!r} rejected the call: {exc}') from exc
+
+    def _call_tool(
+        self, request: Mapping[str, JsonValue], timeout: float
+    ) -> tuple[str, int | None]:
+        """Send *request* from the sandbox; return the runner's record of it and its exit code.
+
+        The request is data in a file the constant runner command reads. It is never
+        retried: a runner stopped by the timeout reports no response, and a mutation it
+        may have sent is recorded as uncertain.
+        """
+        self._backend.write_file(REQUEST_FILE, json.dumps(request).encode('utf-8'))
+        try:
+            exit_code, output = self._backend.exec(run_command(self._backend.python), timeout)
+        except TimeoutError:
+            return lost_response(request, f'the request was stopped after {timeout}s'), None
+        return output, exit_code
 
     def _run_python(self, filename: str, code: str, timeout: float | None = None) -> ExecResult:
         self._backend.write_file(filename, code.encode('utf-8'))

@@ -212,7 +212,7 @@ class EnvMetadata(BaseModel):
     image: str | None = None
     snapshot: str | None = None
     """Multi-turn and computer-use envs: the Daytona snapshot their sessions boot."""
-    max_steps: int = Field(default=10, ge=1)
+    max_steps: int | None = Field(default=10, ge=1)  # None: no step limit
     timeout_per_step: int = Field(default=30, ge=1)
     repo_dir: str | None = None
     """Image-based repo patch envs (test_patch.diff): where the repo lives in the image."""
@@ -531,7 +531,7 @@ class MultiTurnEnvironment(BaseModel):
     final_verifier_code: str = ''
     """Verifier run at the end to compute final score."""
 
-    max_steps: int = Field(default=10, ge=1)
+    max_steps: int | None = Field(default=10, ge=1)  # None: no step limit
     """Maximum number of steps before forced termination."""
 
     timeout_per_step: int = Field(default=30, ge=1)

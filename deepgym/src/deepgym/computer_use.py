@@ -26,5 +26,5 @@ class ComputerUseEnvironment(MultiTurnEnvironment):
     allowed_actions: frozenset[ActionType] = frozenset({*GUI_ACTIONS, 'done'})
     """GUI only, so the agent can't skip the interface with a shell."""
 
-    max_steps: int = Field(default=30, ge=1)
+    max_steps: int | None = Field(default=30, ge=1)  # None: no step limit
     """GUI tasks take more steps than shell tasks."""

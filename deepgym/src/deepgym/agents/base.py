@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 import time
 from typing import Literal, Protocol, runtime_checkable
 
@@ -32,8 +33,8 @@ class Budget(BaseModel):
     """
 
     model_config = ConfigDict(frozen=True, allow_inf_nan=False)
-    max_turns: int = Field(default=30, ge=1)
-    max_seconds: float = Field(default=300, gt=0)
+    max_turns: int | None = Field(default=30, ge=1)  # None: no turn limit
+    max_seconds: float | None = Field(default=300, gt=0)  # None: no wall-clock limit
     max_cost_usd: float | None = Field(default=None, ge=0)
 
 
@@ -132,8 +133,15 @@ class BudgetTracker:
 
     @property
     def remaining_seconds(self) -> float:
-        """Return remaining wall time, including retries and tool execution."""
+        """Return remaining wall time, including retries and tools; inf without a limit."""
+        if self.budget.max_seconds is None:
+            return math.inf
         return max(0, self.budget.max_seconds - (time.monotonic() - self.started))
+
+    @property
+    def request_timeout(self) -> float | None:
+        """Deadline for one provider call or action; None without a wall-clock limit."""
+        return None if self.budget.max_seconds is None else self.remaining_seconds
 
     @property
     def reason(self) -> TerminationReason | None:
@@ -153,7 +161,7 @@ class BudgetTracker:
     def before_turn(self) -> None:
         """Admit one provider call, raising BudgetExceeded at an exhausted bound."""
         self.check()
-        if self.turns >= self.budget.max_turns:
+        if self.budget.max_turns is not None and self.turns >= self.budget.max_turns:
             raise BudgetExceeded('turn_budget')
         self.turns += 1
 

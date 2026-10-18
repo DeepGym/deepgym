@@ -28,7 +28,10 @@ _DIRECTIONS = ('up', 'down', 'left', 'right')
 def do_everything(env: MultiTurnEnvironment) -> list[Action]:
     """Every allowed action type in turn, with fixed arguments, for the whole step budget."""
     kinds = _kinds(env)
-    return [_action(kinds[step % len(kinds)], step, None) for step in range(env.max_steps)]
+    steps = (
+        env.max_steps if env.max_steps is not None else len(kinds)
+    )  # no step limit: one action of each kind
+    return [_action(kinds[step % len(kinds)], step, None) for step in range(steps)]
 
 
 def random_agent(env: MultiTurnEnvironment) -> list[Action]:

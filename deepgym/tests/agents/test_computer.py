@@ -911,3 +911,13 @@ def test_anthropic_completed_stream_acts(monkeypatch):
     )
     assert result.termination_reason == 'completed'
     assert [action.action_type for _, action in result.trajectory.steps] == ['click']
+
+
+def test_unlimited_budget_sends_no_deadline(sdk):
+    client = sdk('anthropic', [anthropic_response([{'type': 'text', 'text': 'Done'}])])
+    session = FakeSession()
+    result = AnthropicComputerAgent('test').run(
+        session, session.observation, task='Task', budget=Budget(max_turns=None, max_seconds=None)
+    )
+    assert result.termination_reason == 'completed'
+    assert client.requests[0]['timeout'] is None

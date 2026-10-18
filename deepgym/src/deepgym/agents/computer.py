@@ -43,7 +43,7 @@ def _step(session: Session, action: Action, tracker: BudgetTracker) -> Observati
         raise BudgetExceeded('session_done')
     if action.action_type == 'wait' and action.amount > tracker.remaining_seconds:
         raise BudgetExceeded('time_budget')
-    observation = session.step(action, timeout=tracker.remaining_seconds).observation
+    observation = session.step(action, timeout=tracker.request_timeout).observation
     tracker.check()
     return observation
 
@@ -217,7 +217,7 @@ class AnthropicComputerAgent:
                         }
                     ],
                     messages=messages,
-                    timeout=tracker.remaining_seconds,
+                    timeout=tracker.request_timeout,
                 ) as stream:
                     stopped, failure = False, None
                     try:  # consume every event; only a received message_stop completes a response
@@ -366,7 +366,7 @@ class OpenAIComputerAgent:
                     input=items,
                     previous_response_id=previous,
                     **({'reasoning': {'effort': self.effort}} if self.effort else {}),
-                    timeout=tracker.remaining_seconds,
+                    timeout=tracker.request_timeout,
                 ).model_dump(exclude_none=True)
                 _account(tracker, response.get('usage'), self.prices, 'openai')
                 previous = response['id']

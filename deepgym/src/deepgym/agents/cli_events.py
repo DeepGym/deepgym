@@ -147,7 +147,11 @@ class CliEvents:
             and self.tracker.cost.usd >= self.tracker.budget.max_cost_usd
         ):
             self.stop_reason = 'cost_budget'
-        elif not self.completed and self.tracker.turns >= self.tracker.budget.max_turns:
+        elif (
+            not self.completed
+            and self.tracker.budget.max_turns is not None
+            and self.tracker.turns >= self.tracker.budget.max_turns
+        ):
             self.stop_reason = 'turn_budget'
         return self.stop_reason
 

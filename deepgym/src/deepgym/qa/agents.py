@@ -28,14 +28,22 @@ _DIRECTIONS = ('up', 'down', 'left', 'right')
 def do_everything(env: MultiTurnEnvironment) -> list[Action]:
     """Every allowed action type in turn, with fixed arguments, for the whole step budget."""
     kinds = _kinds(env)
-    return [_action(kinds[step % len(kinds)], step, None) for step in range(env.max_steps)]
+    return [
+        _action(kinds[step % len(kinds)], step, None) for step in range(_control_steps(env, kinds))
+    ]
 
 
 def random_agent(env: MultiTurnEnvironment) -> list[Action]:
     """Seeded random actions of the allowed types, for the whole step budget."""
     rng = random.Random(_SEED)
     kinds = _kinds(env)
-    return [_action(rng.choice(kinds), step, rng) for step in range(env.max_steps)]
+    return [_action(rng.choice(kinds), step, rng) for step in range(_control_steps(env, kinds))]
+
+
+def _control_steps(env: MultiTurnEnvironment, kinds: list[ActionType]) -> int:
+    """Length of a scripted QA control: the env's step budget, or one round of every allowed
+    action type when the env sets no step limit (fixed controls must end; never a model run)."""
+    return env.max_steps if env.max_steps is not None else len(kinds)
 
 
 def _kinds(env: MultiTurnEnvironment) -> list[ActionType]:

@@ -59,3 +59,12 @@ def test_inline_api_cannot_open_trusted_root_egress(as_model: bool) -> None:
         environment = MultiTurnEnvironment(**environment)
     with pytest.raises(ValidationError, match='cli_provider_egress cannot be set over the API'):
         CreateSessionRequest(environment=environment)
+
+
+@pytest.mark.parametrize('as_model', [False, True])
+def test_inline_api_cannot_mount_volumes(as_model: bool) -> None:
+    environment = {'task': 'task', 'volumes': [{'volume_id': 'v', 'mount_path': '/data'}]}
+    if as_model:
+        environment = MultiTurnEnvironment(**environment)
+    with pytest.raises(ValidationError, match='volumes cannot be set over the API'):
+        CreateSessionRequest(environment=environment)

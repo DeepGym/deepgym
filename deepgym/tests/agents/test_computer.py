@@ -1,5 +1,7 @@
 """Test actual provider loops with in-memory SDK responses and Session stepping."""
 
+import importlib
+import json
 import sys
 from types import SimpleNamespace
 
@@ -131,8 +133,29 @@ class FakeClient:
             raise response
         return SimpleNamespace(model_dump=lambda **_: response)
 
+    def stream(self, **kwargs):
+        return _Stream(self.create(**kwargs))  # raises like a failed request
+
     def close(self):
         self.closed = True
+
+
+class _Stream:
+    def __init__(self, response):
+        self.response = response
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        return False
+
+    def __iter__(self):  # a complete fake stream ends with message_stop
+        yield SimpleNamespace(type='message_stop')
+
+    @property
+    def current_message_snapshot(self):
+        return self.response
 
 
 @pytest.fixture
@@ -296,21 +319,41 @@ def test_openai_safety_checks_block_all_actions(sdk):
     assert result.trajectory.steps == []
 
 
-@pytest.mark.parametrize(
-    'agent,provider,response',
-    [
-        (AnthropicComputerAgent, 'anthropic', anthropic_response([], stop_reason='max_tokens')),
-        (OpenAIComputerAgent, 'openai', openai_response([], status='incomplete')),
-    ],
-)
-def test_incomplete_responses_consume_turn_budget(sdk, agent, provider, response):
-    client = sdk(provider, [response])
+def test_anthropic_output_limit_continues_within_turn_budget(sdk):
+    client = sdk('anthropic', [anthropic_response([], stop_reason='max_tokens')])
     session = FakeSession()
-    result = agent('test').run(
+    result = AnthropicComputerAgent('test').run(
         session, session.observation, task='Task', budget=Budget(max_turns=1)
     )
     assert result.termination_reason == 'turn_budget'
     assert len(client.requests) == 1
+
+
+CLICK = {'type': 'computer_call', 'call_id': 'call', 'action': {'type': 'click', 'x': 1, 'y': 2}}
+
+
+@pytest.mark.parametrize('output', [[], [CLICK]])
+@pytest.mark.parametrize(
+    'details', [{'reason': 'max_output_tokens'}, {'reason': 'content_filter'}, None]
+)
+def test_openai_incomplete_response_stops_without_acting(sdk, output, details):
+    response = openai_response(output, status='incomplete')
+    if details:
+        response['incomplete_details'] = details
+    client = sdk('openai', [response])
+    session = FakeSession()
+    result = OpenAIComputerAgent('test').run(
+        session, session.observation, task='Task', budget=Budget(max_turns=5)
+    )
+    assert result.termination_reason == 'error'
+    reason = (details or {}).get('reason', 'incomplete')
+    assert result.error == f'Response did not complete: {reason}'
+    assert len(client.requests) == 1
+    assert 'max_output_tokens' not in client.requests[0] and client.requests[0]['reasoning'] == {
+        'effort': 'max'
+    }
+    assert not result.trajectory.steps
+    assert result.usage.output_tokens == 10
 
 
 @pytest.mark.parametrize('agent', [AnthropicComputerAgent, OpenAIComputerAgent])
@@ -747,3 +790,134 @@ def test_anthropic_requests_cache_the_prefix_and_set_thinking(sdk, effort):
         assert request['output_config'] == {'effort': 'high'}
     else:
         assert 'thinking' not in request and 'output_config' not in request
+
+
+def _sdk_transport():
+    """The HTTP package the installed anthropic SDK uses (httpx, or httpx2 from 1.15 on)."""
+    base = importlib.import_module('anthropic._base_client')
+    return getattr(base, 'httpx2', None) or base.httpx
+
+
+def _sse(*events: dict) -> bytes:
+    return b''.join(f'event: {e["type"]}\ndata: {json.dumps(e)}\n\n'.encode() for e in events)
+
+
+START = {
+    'type': 'message_start',
+    'message': {
+        'id': 'msg',
+        'type': 'message',
+        'role': 'assistant',
+        'model': 'test',
+        'content': [],
+        'stop_reason': None,
+        'stop_sequence': None,
+        'usage': {'input_tokens': 100, 'output_tokens': 1},
+    },
+}
+OUT = {'output_tokens': 5}
+CLICK_EVENTS = (
+    {
+        'type': 'content_block_start',
+        'index': 0,
+        'content_block': {'type': 'tool_use', 'id': 'c1', 'name': 'left_click', 'input': {}},
+    },
+    {
+        'type': 'content_block_delta',
+        'index': 0,
+        'delta': {'type': 'input_json_delta', 'partial_json': '{"coordinate": [10, 20]}'},
+    },
+    {'type': 'content_block_stop', 'index': 0},
+)
+
+
+DELTA = {
+    'type': 'message_delta',
+    'delta': {'stop_reason': 'tool_use'},
+    'usage': {'output_tokens': 5},
+}
+
+
+@pytest.mark.parametrize('failure', ['eof', 'disconnect', 'eof_after_delta', 'empty'])
+def test_anthropic_unfinished_stream_never_acts(monkeypatch, failure):
+    anthropic = pytest.importorskip('anthropic')
+    httpx = _sdk_transport()
+    body = {  # none of these streams reaches message_stop
+        'eof': _sse(START, *CLICK_EVENTS),
+        'disconnect': _sse(START, *CLICK_EVENTS),
+        'eof_after_delta': _sse(START, *CLICK_EVENTS, DELTA),
+        'empty': b'',
+    }[failure]
+
+    class Cut(httpx.SyncByteStream):
+        def __iter__(self):
+            yield body
+            if failure == 'disconnect':
+                raise httpx.RemoteProtocolError('peer closed connection')
+
+    def handler(request):
+        return httpx.Response(200, headers={'content-type': 'text/event-stream'}, stream=Cut())
+
+    real = anthropic.Anthropic
+
+    def client(**kwargs):
+        transport = httpx.MockTransport(handler)
+        return real(api_key='test', http_client=httpx.Client(transport=transport), max_retries=0)
+
+    monkeypatch.setattr(anthropic, 'Anthropic', client)
+    session = FakeSession()
+    result = AnthropicComputerAgent('test').run(
+        session, session.observation, task='Task', budget=Budget()
+    )
+    assert result.termination_reason == 'error'
+    assert not result.trajectory.steps  # the half-received click was not executed
+    assert result.usage.input_tokens == (
+        0 if failure == 'empty' else 100
+    )  # observed usage kept once
+    assert result.cost.usd is None and 'billing unresolved' in result.cost.provenance
+
+
+def test_anthropic_completed_stream_acts(monkeypatch):
+    anthropic = pytest.importorskip('anthropic')
+    httpx = _sdk_transport()
+    done = (
+        {'type': 'message_delta', 'delta': {'stop_reason': 'tool_use'}, 'usage': OUT},
+        {'type': 'message_stop'},
+    )
+    text = (
+        {'type': 'content_block_start', 'index': 0, 'content_block': {'type': 'text', 'text': ''}},
+        {'type': 'content_block_delta', 'index': 0, 'delta': {'type': 'text_delta', 'text': 'Ok'}},
+        {'type': 'content_block_stop', 'index': 0},
+        {'type': 'message_delta', 'delta': {'stop_reason': 'end_turn'}, 'usage': OUT},
+        {'type': 'message_stop'},
+    )
+    bodies = iter([_sse(START, *CLICK_EVENTS, *done), _sse(START, *text)])
+
+    def handler(request):
+        return httpx.Response(
+            200, headers={'content-type': 'text/event-stream'}, content=next(bodies)
+        )
+
+    real = anthropic.Anthropic
+
+    def client(**kwargs):
+        transport = httpx.MockTransport(handler)
+        return real(api_key='test', http_client=httpx.Client(transport=transport), max_retries=0)
+
+    monkeypatch.setattr(anthropic, 'Anthropic', client)
+    session = FakeSession()
+    result = AnthropicComputerAgent('test').run(
+        session, session.observation, task='Task', budget=Budget()
+    )
+    assert result.termination_reason == 'completed'
+    assert [action.action_type for _, action in result.trajectory.steps] == ['click']
+
+
+def test_unlimited_budget_sends_no_deadline(sdk):
+    client = sdk('anthropic', [anthropic_response([{'type': 'text', 'text': 'Done'}])])
+    session = FakeSession()
+    result = AnthropicComputerAgent('test').run(
+        session, session.observation, task='Task', budget=Budget(max_turns=None, max_seconds=None)
+    )
+    assert result.termination_reason == 'completed'
+    assert client.requests[0]['timeout'] is None

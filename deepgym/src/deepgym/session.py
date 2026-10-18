@@ -1086,7 +1086,7 @@ class Session:
             done = (
                 action.action_type == 'done'
                 or _signals_done(output)
-                or self._step >= self._env.max_steps
+                or (self._env.max_steps is not None and self._step >= self._env.max_steps)
             )
             observation: Observation | None = None
             try:

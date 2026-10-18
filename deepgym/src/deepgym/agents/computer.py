@@ -43,9 +43,25 @@ def _step(session: Session, action: Action, tracker: BudgetTracker) -> Observati
         raise BudgetExceeded('session_done')
     if action.action_type == 'wait' and action.amount > tracker.remaining_seconds:
         raise BudgetExceeded('time_budget')
-    observation = session.step(action, timeout=tracker.remaining_seconds).observation
+    observation = session.step(action, timeout=tracker.request_timeout).observation
     tracker.check()
     return observation
+
+
+def _snapshot(stream: Any) -> Any:
+    """The accumulated message, or None when no message_start arrived (the SDK asserts then)."""
+    try:
+        return stream.current_message_snapshot
+    except AssertionError:
+        return None
+
+
+def _incomplete(tracker: BudgetTracker, snapshot: Any, prices: TokenPrices | None) -> None:
+    """Keep the usage an unfinished stream reported, with the total bill marked unresolved."""
+    data = snapshot.model_dump(exclude_none=True).get('usage') if snapshot is not None else None
+    usage = _anthropic_usage(data) if isinstance(data, dict) else Usage()
+    unresolved = 'incomplete streamed response: partial usage, billing unresolved'
+    tracker.add_usage(usage, Cost(provenance=unresolved))
 
 
 def _account(
@@ -103,6 +119,9 @@ def _openai_usage(data: dict[str, Any]) -> Usage:
 # The SDK retries connection drops, 429s and 5xx with backoff; one blip shouldn't end an
 # hours-long episode. A retried request may be billed twice; usage counts only answers.
 _SDK_RETRIES = 4
+ANTHROPIC_MAX_TOKENS = (
+    128_000  # Opus 5.5's maximum output (the API states it); streamed, as the SDK requires
+)
 
 
 def _api_error(exc: Exception) -> str:
@@ -127,17 +146,21 @@ class AnthropicComputerAgent:
         model: Provider model supporting computer_toolset_20260801.
         prices: Explicit model-specific rates, required for a USD budget.
         effort: Adaptive-thinking effort; None sends no thinking or effort settings.
+        max_tokens: Output limit per response; defaults to Opus 5.5's maximum so the
+            harness never caps the model below what it can produce.
     """
 
     def __init__(
         self,
         model: str,
         prices: TokenPrices | None = None,
-        effort: Literal['low', 'medium', 'high'] | None = 'medium',
+        effort: Literal['low', 'medium', 'high', 'xhigh', 'max'] | None = 'max',
+        max_tokens: int = ANTHROPIC_MAX_TOKENS,
     ) -> None:
         self.model = model
         self.prices = prices
         self.effort = effort
+        self.max_tokens = max_tokens
 
     def run(
         self, session: Session, initial: Observation, *, task: str, budget: Budget
@@ -181,9 +204,9 @@ class AnthropicComputerAgent:
                     if self.effort
                     else {}
                 )
-                response = client.messages.create(
+                with client.messages.stream(
                     model=self.model,
-                    max_tokens=16000,
+                    max_tokens=self.max_tokens,
                     cache_control={'type': 'ephemeral'},
                     **thinking,
                     system=_SYSTEM,
@@ -194,8 +217,26 @@ class AnthropicComputerAgent:
                         }
                     ],
                     messages=messages,
-                    timeout=tracker.remaining_seconds,
-                ).model_dump(exclude_none=True)
+                    timeout=tracker.request_timeout,
+                ) as stream:
+                    stopped, failure = False, None
+                    try:  # consume every event; only a received message_stop completes a response
+                        for event in stream:
+                            stopped = stopped or event.type == 'message_stop'
+                    # Anything raised while reading (httpx or httpx2 transport errors, by SDK
+                    # version, or an error event) ends this response.
+                    except Exception as exc:  # noqa: BLE001
+                        failure = type(exc).__name__
+                    snapshot = _snapshot(stream)
+                if failure or not stopped or snapshot is None:
+                    _incomplete(tracker, snapshot, self.prices)
+                    error = (
+                        f'Response stream failed: {failure}'
+                        if failure
+                        else 'Response stream ended before completion'
+                    )
+                    return tracker.result(session, 'error', error=error)
+                response = snapshot.model_dump(exclude_none=True)
                 _account(tracker, response.get('usage'), self.prices, 'anthropic')
                 content = response['content']
                 messages.append({'role': 'assistant', 'content': content})
@@ -274,11 +315,19 @@ class OpenAIComputerAgent:
     Args:
         model: Provider model supporting the Responses computer tool.
         prices: Explicit model-specific rates, required for a USD budget.
+        effort: Reasoning effort; None sends no reasoning setting. No output limit is sent,
+            so the model may use its full output allowance.
     """
 
-    def __init__(self, model: str, prices: TokenPrices | None = None) -> None:
+    def __init__(
+        self,
+        model: str,
+        prices: TokenPrices | None = None,
+        effort: Literal['none', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max'] | None = 'max',
+    ) -> None:
         self.model = model
         self.prices = prices
+        self.effort = effort
 
     def run(
         self, session: Session, initial: Observation, *, task: str, budget: Budget
@@ -316,8 +365,8 @@ class OpenAIComputerAgent:
                     tools=[{'type': 'computer'}],
                     input=items,
                     previous_response_id=previous,
-                    max_output_tokens=4096,
-                    timeout=tracker.remaining_seconds,
+                    **({'reasoning': {'effort': self.effort}} if self.effort else {}),
+                    timeout=tracker.request_timeout,
                 ).model_dump(exclude_none=True)
                 _account(tracker, response.get('usage'), self.prices, 'openai')
                 previous = response['id']
@@ -339,17 +388,15 @@ class OpenAIComputerAgent:
                         'safety_check',
                         error=('Provider safety checks require approval; no actions executed'),
                     )
-                if not calls:
-                    if response.get('status') == 'incomplete':
-                        items = [{'role': 'user', 'content': 'Continue from the output limit.'}]
-                        continue
-                    if response.get('status') != 'completed':
-                        return tracker.result(session, 'error', error='Response did not complete')
-                    return tracker.result(session, 'completed', text)
                 if response.get('status') != 'completed':
+                    # Never act on, or blindly continue, a partial response; keep its reason.
+                    details = response.get('incomplete_details') or {}
+                    reason = details.get('reason') or response.get('status')
                     return tracker.result(
-                        session, 'error', error='Computer response did not complete'
+                        session, 'error', error=f'Response did not complete: {reason}'
                     )
+                if not calls:
+                    return tracker.result(session, 'completed', text)
                 items = []
                 notes = []
                 for call in calls:

@@ -212,7 +212,7 @@ class EnvMetadata(BaseModel):
     image: str | None = None
     snapshot: str | None = None
     """Multi-turn and computer-use envs: the Daytona snapshot their sessions boot."""
-    max_steps: int = Field(default=10, ge=1)
+    max_steps: int | None = Field(default=10, ge=1)  # None: no step limit
     timeout_per_step: int = Field(default=30, ge=1)
     repo_dir: str | None = None
     """Image-based repo patch envs (test_patch.diff): where the repo lives in the image."""
@@ -491,6 +491,15 @@ class Trajectory(BaseModel):
     without one, so a failed episode has one reward fewer than steps."""
 
 
+class VolumeMount(BaseModel):
+    """One provider volume mounted at an absolute path inside the sandbox."""
+
+    model_config = ConfigDict(frozen=True, extra='forbid')
+    volume_id: str = Field(min_length=1)
+    mount_path: str = Field(pattern=r'^/')
+    subpath: str | None = None
+
+
 class MultiTurnEnvironment(BaseModel):
     """Define a multi-turn environment where agents take multiple steps.
 
@@ -516,6 +525,13 @@ class MultiTurnEnvironment(BaseModel):
     The command must start the service itself and exit non-zero if readiness fails.
     """
 
+    volumes: tuple[VolumeMount, ...] = ()
+    """Provider volumes mounted into the sandbox (Daytona), for evidence too large for the image,
+    such as attachment files. Trusted environment configuration only; never accept from an agent.
+    A volume is shared and outlives each sandbox, so whatever one episode writes, the next reads:
+    mount it where untrusted processes cannot write (e.g. a root-only path re-exposed through a
+    read-only bind mount in root_service_start) and check its contents against a pinned manifest."""
+
     cli_provider_egress: bool = Field(default=False, strict=True)
     """Opt in to sandbox-level egress for the trusted CLI provider proxy (Daytona).
     Agent commands, root service startup and verification remain in the offline namespace.
@@ -531,7 +547,7 @@ class MultiTurnEnvironment(BaseModel):
     final_verifier_code: str = ''
     """Verifier run at the end to compute final score."""
 
-    max_steps: int = Field(default=10, ge=1)
+    max_steps: int | None = Field(default=10, ge=1)  # None: no step limit
     """Maximum number of steps before forced termination."""
 
     timeout_per_step: int = Field(default=30, ge=1)

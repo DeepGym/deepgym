@@ -129,3 +129,13 @@ def test_computer_use_qa_replays_on_a_desktop(monkeypatch: pytest.MonkeyPatch) -
 
     assert report.status == 'pass', report.checks
     assert set(report.ran) >= {'reference_passes', 'busy_fails', 'random_fails'}
+
+
+def test_scripted_controls_end_without_a_step_limit():
+    from deepgym.qa.agents import _kinds, do_everything, random_agent
+
+    env = MultiTurnEnvironment(
+        name='no-limit', task='t', max_steps=None, final_verifier_code='print(1)'
+    )
+    kinds = _kinds(env)
+    assert len(do_everything(env)) == len(kinds) == len(random_agent(env))

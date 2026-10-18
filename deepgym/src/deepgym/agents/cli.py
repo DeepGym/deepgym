@@ -88,6 +88,10 @@ class _CliAgent(BaseModel):
             raise ValueError(f'{source} or api_key is required')
         if tracker.remaining_seconds <= 0:
             return tracker.result(session, 'time_budget')
+        if budget.max_seconds is None:
+            raise ValueError(
+                'CLI runs need Budget.max_seconds: the supervisor enforces the CLI deadline'
+            )
         events = CliEvents(self.provider, tracker, self.prices)
         credential = source if self.provider == 'anthropic' else 'CODEX_API_KEY'
         request = CliRequest(

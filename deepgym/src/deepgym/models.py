@@ -527,7 +527,10 @@ class MultiTurnEnvironment(BaseModel):
 
     volumes: tuple[VolumeMount, ...] = ()
     """Provider volumes mounted into the sandbox (Daytona), for evidence too large for the image,
-    such as attachment files. Trusted environment configuration only; never accept from an agent."""
+    such as attachment files. Trusted environment configuration only; never accept from an agent.
+    A volume is shared and outlives each sandbox, so whatever one episode writes, the next reads:
+    mount it where untrusted processes cannot write (e.g. a root-only path re-exposed through a
+    read-only bind mount in root_service_start) and check its contents against a pinned manifest."""
 
     cli_provider_egress: bool = Field(default=False, strict=True)
     """Opt in to sandbox-level egress for the trusted CLI provider proxy (Daytona).

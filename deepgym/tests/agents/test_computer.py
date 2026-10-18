@@ -296,21 +296,39 @@ def test_openai_safety_checks_block_all_actions(sdk):
     assert result.trajectory.steps == []
 
 
-@pytest.mark.parametrize(
-    'agent,provider,response',
-    [
-        (AnthropicComputerAgent, 'anthropic', anthropic_response([], stop_reason='max_tokens')),
-        (OpenAIComputerAgent, 'openai', openai_response([], status='incomplete')),
-    ],
-)
-def test_incomplete_responses_consume_turn_budget(sdk, agent, provider, response):
-    client = sdk(provider, [response])
+def test_anthropic_output_limit_continues_within_turn_budget(sdk):
+    client = sdk('anthropic', [anthropic_response([], stop_reason='max_tokens')])
     session = FakeSession()
-    result = agent('test').run(
+    result = AnthropicComputerAgent('test').run(
         session, session.observation, task='Task', budget=Budget(max_turns=1)
     )
     assert result.termination_reason == 'turn_budget'
     assert len(client.requests) == 1
+
+
+CLICK = {'type': 'computer_call', 'call_id': 'call', 'action': {'type': 'click', 'x': 1, 'y': 2}}
+
+
+@pytest.mark.parametrize('output', [[], [CLICK]])
+@pytest.mark.parametrize(
+    'details', [{'reason': 'max_output_tokens'}, {'reason': 'content_filter'}, None]
+)
+def test_openai_incomplete_response_stops_without_acting(sdk, output, details):
+    response = openai_response(output, status='incomplete')
+    if details:
+        response['incomplete_details'] = details
+    client = sdk('openai', [response])
+    session = FakeSession()
+    result = OpenAIComputerAgent('test').run(
+        session, session.observation, task='Task', budget=Budget(max_turns=5)
+    )
+    assert result.termination_reason == 'error'
+    reason = (details or {}).get('reason', 'incomplete')
+    assert result.error == f'Response did not complete: {reason}'
+    assert len(client.requests) == 1
+    assert client.requests[0]['max_output_tokens'] == 16000
+    assert not result.trajectory.steps
+    assert result.usage.output_tokens == 10
 
 
 @pytest.mark.parametrize('agent', [AnthropicComputerAgent, OpenAIComputerAgent])

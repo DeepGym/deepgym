@@ -103,6 +103,8 @@ def _openai_usage(data: dict[str, Any]) -> Usage:
 # The SDK retries connection drops, 429s and 5xx with backoff; one blip shouldn't end an
 # hours-long episode. A retried request may be billed twice; usage counts only answers.
 _SDK_RETRIES = 4
+ANTHROPIC_MAX_TOKENS = 16000
+OPENAI_MAX_OUTPUT_TOKENS = 16000  # covers reasoning plus output on the Responses API
 
 
 def _api_error(exc: Exception) -> str:
@@ -183,7 +185,7 @@ class AnthropicComputerAgent:
                 )
                 response = client.messages.create(
                     model=self.model,
-                    max_tokens=16000,
+                    max_tokens=ANTHROPIC_MAX_TOKENS,
                     cache_control={'type': 'ephemeral'},
                     **thinking,
                     system=_SYSTEM,
@@ -316,7 +318,7 @@ class OpenAIComputerAgent:
                     tools=[{'type': 'computer'}],
                     input=items,
                     previous_response_id=previous,
-                    max_output_tokens=4096,
+                    max_output_tokens=OPENAI_MAX_OUTPUT_TOKENS,
                     timeout=tracker.remaining_seconds,
                 ).model_dump(exclude_none=True)
                 _account(tracker, response.get('usage'), self.prices, 'openai')
@@ -339,17 +341,15 @@ class OpenAIComputerAgent:
                         'safety_check',
                         error=('Provider safety checks require approval; no actions executed'),
                     )
-                if not calls:
-                    if response.get('status') == 'incomplete':
-                        items = [{'role': 'user', 'content': 'Continue from the output limit.'}]
-                        continue
-                    if response.get('status') != 'completed':
-                        return tracker.result(session, 'error', error='Response did not complete')
-                    return tracker.result(session, 'completed', text)
                 if response.get('status') != 'completed':
+                    # Never act on, or blindly continue, a partial response; keep its reason.
+                    details = response.get('incomplete_details') or {}
+                    reason = details.get('reason') or response.get('status')
                     return tracker.result(
-                        session, 'error', error='Computer response did not complete'
+                        session, 'error', error=f'Response did not complete: {reason}'
                     )
+                if not calls:
+                    return tracker.result(session, 'completed', text)
                 items = []
                 notes = []
                 for call in calls:

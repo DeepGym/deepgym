@@ -138,12 +138,11 @@ def test_cli_egress_keeps_agent_root_services_and_verifier_offline(monkeypatch) 
 def test_daytona_params_mount_declared_volumes() -> None:
     pytest.importorskip('daytona')
     from deepgym.models import VolumeMount
-    from deepgym.sandboxes.daytona import create_params
+    from deepgym.sandboxes.daytona.sandbox import _session_params
 
     mount = VolumeMount(volume_id='vol', mount_path='/srv/a', subpath='x')
-    env = MultiTurnEnvironment(task='t', snapshot='snap', volumes=(mount,))
-    params = create_params(env)
+    params = _session_params(MultiTurnEnvironment(task='t', snapshot='snap', volumes=(mount,)))
     assert [(v.volume_id, v.mount_path, v.subpath) for v in params.volumes] == [
         ('vol', '/srv/a', 'x')
     ]
-    assert not create_params(MultiTurnEnvironment(task='t', snapshot='snap')).volumes
+    assert not _session_params(MultiTurnEnvironment(task='t', snapshot='snap')).volumes

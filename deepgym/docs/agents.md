@@ -1,7 +1,7 @@
 # Agent harnesses
 
 `deepgym.agents` supplies `AnthropicComputerAgent`, `OpenAIComputerAgent`,
-`ClaudeCodeAgent`, and `CodexAgent`. Each implements
+`AnthropicToolAgent`, `OpenAIToolAgent`, `ClaudeCodeAgent`, and `CodexAgent`. Each implements
 `run(session, initial, *, task, budget) -> AgentResult`. Start the Session first;
 the caller owns grading and cleanup. `DeepGym.run_episode(env, agent, budget=...)`
 does that lifecycle and returns `(AgentResult, RunResult)`. Its existing callable
@@ -53,6 +53,59 @@ with the existing wall deadline as the bound. Terminal failures with recognized
 structured provider codes use `provider_error`; message-only or unknown-code errors
 remain `error`, regardless of their prose. Evidence and fixture limits are recorded
 in `tests/agents/fixtures/README.md`.
+
+## API tool agents
+
+`AnthropicToolAgent` and `OpenAIToolAgent` give the model only the environment's
+declared API tools plus a `done` tool. No hosted or server-side tool (web search, code
+execution, browsing) is requested, and provider keys stay on the host. An environment
+declares its tools as trusted configuration:
+
+```python
+from deepgym.models import MultiTurnEnvironment
+from deepgym.tools import HttpRoute, HttpTool
+
+env = MultiTurnEnvironment(
+    task='your task',
+    snapshot='your-app-snapshot',
+    root_service_start='your trusted service start command',
+    tools=(
+        HttpTool(
+            name='bugzilla',
+            description='Bugzilla 5.0 REST API. Put the API docs the task needs here.',
+            base_url='http://127.0.0.1:8080',
+            routes=(
+                HttpRoute(method='GET', path='/rest/bug'),
+                HttpRoute(method='GET', path='/rest/bug/{id}/comment'),
+                HttpRoute(method='POST', path='/rest/bug/{id}/comment'),
+            ),
+            headers={'X-BUGZILLA-API-KEY': app_key},
+        ),
+    ),
+    allowed_actions=frozenset({'tool', 'done'}),
+    max_steps=None,
+)
+```
+
+`base_url` must be on a loopback host. A call names a method and a path that fits a
+declared route; `{name}` matches one path segment and `{name:path}` also takes an
+encoded `/` (GitLab project paths and file paths). The model supplies only the method,
+path, query and JSON body. Each call is a Session `tool` action: the host checks it,
+then a constant runner sends it with http.client from inside the sandbox, as the agent
+user in the offline network namespace. Its request arrives on stdin from a root-only
+file. Redirects are returned, never followed.
+Header values are treated as credentials and redacted from every record and result.
+An environment with tools allows exactly `tool` and `done`.
+
+The observation, which the model gets back whole, records the full request, the full
+response (status, every header, the body) and timing. A write whose response was lost
+is marked `"uncertain": true` and is never retried. Only the `done` tool ends the
+episode; app output that reads `DONE` does not. A reply without tool calls gets a
+reminder. Defaults are uncapped: maximum effort, Anthropic's model-maximum
+`max_tokens`, no OpenAI output limit, and only the turn, time and USD limits the
+caller's `Budget` sets. `AgentResult.messages` holds every model message, full
+responses with their usage included; under `dg.trace`, each step also carries the
+messages that produced it.
 
 ## CLI isolation and its exposure
 

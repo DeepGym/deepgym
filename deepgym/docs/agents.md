@@ -94,8 +94,12 @@ path, query and JSON body. Each call is a Session `tool` action: the host checks
 then a constant runner sends it with http.client from inside the sandbox, as the agent
 user in the offline network namespace. Its request arrives on stdin from a root-only
 file. Redirects are returned, never followed.
-Header values are treated as credentials and redacted from every record and result.
-An environment with tools allows exactly `tool` and `done`.
+Header values are credentials: masked in dumps, environment fingerprints and validation
+errors, and redacted from every record and result, including forms an app may echo
+(escaped, percent-encoded, base64, a Basic pair or password, any letter case) and the
+cookies it sets. Pattern redaction cannot catch every transformation, so declare only
+routes that never return credentials. An environment with tools allows exactly `tool`
+and `done`.
 
 The observation, which the model gets back whole, records the full request, the full
 response (status, every header, the body) and timing. A write whose response was lost

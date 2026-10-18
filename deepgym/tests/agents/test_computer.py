@@ -150,7 +150,11 @@ class _Stream:
     def __exit__(self, *exc):
         return False
 
-    def get_final_message(self):
+    def __iter__(self):  # a complete fake stream ends with message_stop
+        yield SimpleNamespace(type='message_stop')
+
+    @property
+    def current_message_snapshot(self):
         return self.response
 
 
@@ -827,11 +831,23 @@ CLICK_EVENTS = (
 )
 
 
-@pytest.mark.parametrize('failure', ['eof', 'disconnect'])
+DELTA = {
+    'type': 'message_delta',
+    'delta': {'stop_reason': 'tool_use'},
+    'usage': {'output_tokens': 5},
+}
+
+
+@pytest.mark.parametrize('failure', ['eof', 'disconnect', 'eof_after_delta', 'empty'])
 def test_anthropic_unfinished_stream_never_acts(monkeypatch, failure):
     anthropic = pytest.importorskip('anthropic')
     httpx = _sdk_transport()
-    body = _sse(START, *CLICK_EVENTS)  # no message_delta / message_stop
+    body = {  # none of these streams reaches message_stop
+        'eof': _sse(START, *CLICK_EVENTS),
+        'disconnect': _sse(START, *CLICK_EVENTS),
+        'eof_after_delta': _sse(START, *CLICK_EVENTS, DELTA),
+        'empty': b'',
+    }[failure]
 
     class Cut(httpx.SyncByteStream):
         def __iter__(self):
@@ -855,7 +871,9 @@ def test_anthropic_unfinished_stream_never_acts(monkeypatch, failure):
     )
     assert result.termination_reason == 'error'
     assert not result.trajectory.steps  # the half-received click was not executed
-    assert result.usage.input_tokens == 100  # observed usage kept
+    assert result.usage.input_tokens == (
+        0 if failure == 'empty' else 100
+    )  # observed usage kept once
     assert result.cost.usd is None and 'billing unresolved' in result.cost.provenance
 
 

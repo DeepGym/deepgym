@@ -48,6 +48,14 @@ def _step(session: Session, action: Action, tracker: BudgetTracker) -> Observati
     return observation
 
 
+def _snapshot(stream: Any) -> Any:
+    """The accumulated message, or None when no message_start arrived (the SDK asserts then)."""
+    try:
+        return stream.current_message_snapshot
+    except AssertionError:
+        return None
+
+
 def _incomplete(tracker: BudgetTracker, snapshot: Any, prices: TokenPrices | None) -> None:
     """Keep the usage an unfinished stream reported, with the total bill marked unresolved."""
     data = snapshot.model_dump(exclude_none=True).get('usage') if snapshot is not None else None
@@ -211,20 +219,24 @@ class AnthropicComputerAgent:
                     messages=messages,
                     timeout=tracker.remaining_seconds,
                 ) as stream:
-                    try:
-                        response = stream.get_final_message().model_dump(exclude_none=True)
-                    # Anything raised while reading the stream (transport errors come from httpx or
-                    # httpx2 depending on the SDK version, or an APIError event) ends this response.
+                    stopped, failure = False, None
+                    try:  # consume every event; only a received message_stop completes a response
+                        for event in stream:
+                            stopped = stopped or event.type == 'message_stop'
+                    # Anything raised while reading (httpx or httpx2 transport errors, by SDK
+                    # version, or an error event) ends this response.
                     except Exception as exc:  # noqa: BLE001
-                        _incomplete(tracker, stream.current_message_snapshot, self.prices)
-                        return tracker.result(
-                            session, 'error', error=f'Response stream failed: {type(exc).__name__}'
-                        )
-                if response.get('stop_reason') is None:  # stream ended without message_stop
-                    _incomplete(tracker, stream.current_message_snapshot, self.prices)
-                    return tracker.result(
-                        session, 'error', error='Response stream ended before completion'
+                        failure = type(exc).__name__
+                    snapshot = _snapshot(stream)
+                if failure or not stopped or snapshot is None:
+                    _incomplete(tracker, snapshot, self.prices)
+                    error = (
+                        f'Response stream failed: {failure}'
+                        if failure
+                        else 'Response stream ended before completion'
                     )
+                    return tracker.result(session, 'error', error=error)
+                response = snapshot.model_dump(exclude_none=True)
                 _account(tracker, response.get('usage'), self.prices, 'anthropic')
                 content = response['content']
                 messages.append({'role': 'assistant', 'content': content})

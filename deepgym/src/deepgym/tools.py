@@ -13,6 +13,8 @@ own services answer, with http.client, which parses no URL and follows no redire
 
 from __future__ import annotations
 
+import base64
+import html
 import ipaddress
 import json
 import re
@@ -21,9 +23,9 @@ import unicodedata
 from collections.abc import Iterator, Mapping
 from pathlib import Path
 from typing import Literal
-from urllib.parse import unquote, urlencode, urlsplit
+from urllib.parse import quote, quote_plus, unquote, urlencode, urlsplit
 
-from pydantic import BaseModel, ConfigDict, Field, JsonValue, field_validator
+from pydantic import BaseModel, ConfigDict, Field, JsonValue, SecretStr, field_validator
 
 HttpMethod = Literal['GET', 'POST', 'PUT', 'PATCH', 'DELETE']
 QueryScalar = str | int | float | bool
@@ -50,17 +52,29 @@ _TOKEN = re.compile(r"[!#$%&'*+\-.^_`|~0-9A-Za-z]+")
 _METHOD_OVERRIDES = frozenset(
     {'_method', 'x-http-method-override', 'x-http-method', 'x-method-override'}
 )
-_RESERVED_HEADERS = _METHOD_OVERRIDES | {'host', 'content-length', 'transfer-encoding'}
+_RESERVED_HEADERS = _METHOD_OVERRIDES | {
+    'host', 'content-length', 'transfer-encoding', 'content-type',
+}  # fmt: skip
+# Response headers carrying credentials the app issues (a session cookie, say).
+_ISSUED_CREDENTIALS = frozenset({'set-cookie', 'set-cookie2'})
+_URL_SAFE = str.maketrans('+/', '-_')
+# A base64 run shorter than one 4-character group also turns up in unrelated text.
+_MIN_BASE64 = 4
 _PORTS = {'http': 80, 'https': 443}
 
 
 def _readings(text: str) -> Iterator[str]:
     """*text* and each further percent-decoding of it until none changes, NFKC-normalized:
     every way an app that decodes once, twice, ... or folds compatibility forms may read it.
-    Each decoding is shorter than the last, so this ends."""
+    Each decoding is shorter than the last, so this ends.
+
+    Raises:
+        UnicodeDecodeError: If a decoding is not UTF-8, such as an overlong ``%C0%AE``
+            that some servers read as ``.``.
+    """
     while True:
         yield unicodedata.normalize('NFKC', text)
-        decoded = unquote(text)
+        decoded = unquote(text, errors='strict')
         if decoded == text:
             return
         text = decoded
@@ -68,13 +82,69 @@ def _readings(text: str) -> Iterator[str]:
 
 def _unsafe(path: str) -> bool:
     """Whether a reading of *path* has a dot segment (``..;x`` too), a backslash or a
-    control character."""
-    return any(
-        '\\' in form
-        or any(char < ' ' or char == '\x7f' for char in form)
-        or any(_DOTS.fullmatch(part.split(';', 1)[0]) for part in form.split('/'))
-        for form in _readings(path)
-    )
+    control character, or one is not UTF-8."""
+    try:
+        return any(
+            '\\' in form
+            or any(char < ' ' or char == '\x7f' for char in form)
+            or any(_DOTS.fullmatch(part.split(';', 1)[0]) for part in form.split('/'))
+            for form in _readings(path)
+        )
+    except UnicodeDecodeError:
+        return True
+
+
+def _needles(name: str, value: str) -> set[str]:
+    """A credential header's value and the parts an app may echo on their own: the
+    credentials after an Authorization scheme, a Basic pair and its password, each Cookie
+    value."""
+    needles = {value}
+    if name.lower() in ('authorization', 'proxy-authorization'):
+        scheme, _, credentials = value.partition(' ')
+        needles.add(credentials.strip())
+        if scheme.lower() == 'basic':
+            try:
+                pair = base64.b64decode(credentials.strip(), validate=True).decode('utf-8')
+            except ValueError:  # binascii.Error and UnicodeDecodeError are ValueErrors
+                pair = ''
+            needles |= {pair, pair.partition(':')[2]}
+    if name.lower() == 'cookie':
+        needles |= {part.partition('=')[2].strip() for part in value.split(';')}
+    return {needle for needle in needles if needle}
+
+
+def _forms(needle: str) -> set[str]:
+    """The forms an app may echo *needle* in: as is, JSON- and HTML-escaped, percent- and
+    form-encoded (matched in any letter case, so either hex case)."""
+    return {
+        needle,
+        json.dumps(needle)[1:-1],
+        json.dumps(needle, ensure_ascii=False)[1:-1],
+        html.escape(needle),
+        quote(needle, safe=''),
+        quote_plus(needle, safe=''),
+    }
+
+
+def _base64_forms(needle: str) -> set[str]:
+    """The base64 characters *needle*'s bytes alone determine, at each of the three byte
+    alignments it can have inside a longer encoding, in the standard and URL-safe alphabets.
+    Matched as they are: base64 is case-sensitive."""
+    raw = needle.encode('utf-8')
+    forms = set()
+    for shift in range(3):
+        encoded = base64.b64encode(bytes(shift) + raw).decode('ascii')
+        inner = encoded[(8 * shift + 5) // 6 : 8 * (shift + len(raw)) // 6]
+        forms |= {inner, inner.translate(_URL_SAFE)}
+    return {form for form in forms if len(form) >= _MIN_BASE64}
+
+
+def _replaced(text: str, forms: set[str], flags: int) -> str:
+    """*text* with every one of *forms* replaced by REDACTED, longest first."""
+    if not forms:
+        return text
+    pattern = '|'.join(map(re.escape, sorted(forms, key=len, reverse=True)))
+    return re.sub(pattern, REDACTED, text, flags=flags)
 
 
 class HttpRoute(BaseModel):
@@ -136,10 +206,11 @@ class HttpTool(BaseModel):
     """An API tool: HTTP requests to declared routes under one loopback base URL.
 
     The model sees *name*, *description* (the place for the API docs a task needs) and the
-    routes. *headers* go with every request and are treated as credentials (an API key for
-    the local app, say): their values appear in no record, result, trace or error, and
-    never on disk where the agent user could read them. Responses come back whole: status,
-    every header (pagination links included) and the full body.
+    routes. *headers* go with every request and are credentials (an API key or login for
+    the local app, say), kept as secrets: masked in repr, dumps, fingerprints and
+    validation errors, redacted from every record and result (see :meth:`redact`), and
+    never on disk where the agent user could read them. Responses come back whole (status,
+    every header, pagination links included, and the full body) but for those redactions.
 
     Example::
 
@@ -156,12 +227,12 @@ class HttpTool(BaseModel):
         )
     """
 
-    model_config = ConfigDict(frozen=True, extra='forbid')
+    model_config = ConfigDict(frozen=True, extra='forbid', hide_input_in_errors=True)
     name: str = Field(pattern=r'^[A-Za-z0-9_-]{1,64}$')
     description: str = Field(min_length=1)
     base_url: str
     routes: tuple[HttpRoute, ...] = Field(min_length=1)
-    headers: dict[str, str] = Field(default_factory=dict)
+    headers: dict[str, SecretStr] = Field(default_factory=dict)
 
     @field_validator('name')
     @classmethod
@@ -205,9 +276,13 @@ class HttpTool(BaseModel):
 
     @field_validator('headers')
     @classmethod
-    def check_headers(cls, value: dict[str, str]) -> dict[str, str]:
-        """Accept token names, none that reroutes or reframes a request, with plain values."""
-        for name, text in value.items():
+    def check_headers(cls, value: dict[str, SecretStr]) -> dict[str, SecretStr]:
+        """Accept distinct token names, none that reroutes or reframes a request, with
+        plain values."""
+        if len({name.lower() for name in value}) != len(value):
+            raise ValueError('header names must differ in more than letter case')
+        for name, secret in value.items():
+            text = secret.get_secret_value()
             if (
                 not _TOKEN.fullmatch(name)
                 or name.lower() in _RESERVED_HEADERS
@@ -296,7 +371,7 @@ class HttpTool(BaseModel):
         ]
         base = urlsplit(self.base_url)
         target = base.path + call.path + (f'?{urlencode(pairs)}' if pairs else '')
-        headers = dict(self.headers)
+        headers = {name: secret.get_secret_value() for name, secret in self.headers.items()}
         record: dict[str, JsonValue] = {
             'method': call.method,
             'url': f'{base.scheme}://{base.netloc}{target}',
@@ -322,12 +397,34 @@ class HttpTool(BaseModel):
         }
 
     def redact(self, text: str) -> str:
-        """*text* with each header value, as is and JSON-escaped, replaced by REDACTED, in
-        case the app echoes one back."""
-        for value in self.headers.values():
-            for form in {value, json.dumps(value)[1:-1]}:
-                text = text.replace(form, REDACTED)
-        return text
+        """Return a runner's record (or any text) with the credentials an app may echo
+        redacted, where the session records it.
+
+        A response header named like a tool header, or carrying a credential the app issued
+        (Set-Cookie), loses its whole value. Then every form of every header value and of
+        its echoable parts (see :func:`_needles`) is replaced wherever it appears (body,
+        headers, a redirect's Location, an error): escaped or encoded in any letter case
+        (:func:`_forms`), and in base64 (:func:`_base64_forms`).
+        """
+        try:
+            record = json.loads(text)
+        except ValueError:
+            record = None
+        if isinstance(record, dict) and isinstance(record.get('response'), dict):
+            response = record['response']
+            hidden = {name.lower() for name in self.headers} | _ISSUED_CREDENTIALS
+            response['headers'] = [
+                [name, REDACTED if str(name).lower() in hidden else value]
+                for name, value in response.get('headers', [])
+            ]
+            text = json.dumps(record, ensure_ascii=False)
+        needles = {
+            needle
+            for name, secret in self.headers.items()
+            for needle in _needles(name, secret.get_secret_value())
+        }
+        text = _replaced(text, {form for n in needles for form in _forms(n)}, re.IGNORECASE)
+        return _replaced(text, {form for n in needles for form in _base64_forms(n)}, 0)
 
 
 def run_command(python: str) -> str:

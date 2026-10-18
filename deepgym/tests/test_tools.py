@@ -1,18 +1,21 @@
 """Tests for declared HTTP API tools run as Session tool actions, against a loopback app."""
 
+import base64
+import html
 import json
 import shlex
 from pathlib import Path
+from urllib.parse import quote, quote_plus
 
 import pytest
-from pydantic import ValidationError
+from pydantic import SecretStr, ValidationError
 
 from deepgym.exceptions import ActionError
 from deepgym.models import Action, MultiTurnEnvironment
 from deepgym.qa.agents import do_everything, random_agent
 from deepgym.sandboxes import ExecResult
-from deepgym.session import SandboxBackend, Session
-from deepgym.tools import HttpRoute, HttpTool, run_command
+from deepgym.session import LocalBackend, SandboxBackend, Session
+from deepgym.tools import REDACTED, HttpRoute, HttpTool, run_command
 from tests.http_app import API_KEY, BIG, ROUTES, App, app_env, app_session, tool
 
 
@@ -274,6 +277,111 @@ def test_sandbox_stdin_is_staged_root_only_and_never_on_a_command_line() -> None
     assert API_KEY not in command
 
 
+SECRET = 'k3y/with+special&"chars<>'
+PASSWORD = 's3cret-pass:word'
+
+
+def test_echoed_credentials_are_redacted_in_every_form(app: App) -> None:
+    basic = base64.b64encode(f'admin:{PASSWORD}'.encode()).decode()
+    env = app_env(app.url).model_copy(
+        update={
+            'tools': (
+                tool(app.url).model_copy(
+                    update={
+                        'headers': {
+                            'X-API-KEY': SecretStr(SECRET),
+                            'Authorization': SecretStr(f'Basic {basic}'),
+                        }
+                    }
+                ),
+            )
+        }
+    )
+    with Session(env, LocalBackend()) as session:
+        session.start()
+
+        content = session.step(call('/rest/echo')).observation.content
+
+    seen = app.requests[0]['headers']
+    assert seen['x-api-key'] == SECRET  # the app did get both credentials
+    assert seen['authorization'] == f'Basic {basic}'
+    for secret in (SECRET, f'Basic {basic}', basic, f'admin:{PASSWORD}', PASSWORD):
+        for form in (
+            secret,
+            secret.upper(),
+            json.dumps(secret)[1:-1],
+            html.escape(secret),
+            quote(secret, safe=''),
+            quote(secret, safe='').lower(),
+            quote_plus(secret, safe=''),
+        ):
+            assert form not in content, form
+    response = json.loads(content)['response']
+    headers = dict(response['headers'])
+    assert headers['Set-Cookie'] == headers['x-api-key'] == headers['X-Seen'] == REDACTED
+    assert headers['Location'] == f'/next?key={REDACTED}'
+    assert 'issued-session-id' not in content
+    for prefix in (b'', b'x', b'xy'):  # the 12 middle characters depend on the key alone
+        encoded = base64.b64encode(prefix + SECRET.encode() + b'!').decode()
+        assert encoded[4:16] not in content
+    assert json.loads(response['body'])['basic'] == {'pair': REDACTED, 'password': REDACTED}
+
+
+def test_credentials_are_masked_in_dumps_fingerprints_and_errors() -> None:
+    from deepgym.traces.schema import environment_sha256
+
+    one, other = (
+        app_env('http://127.0.0.1').model_copy(
+            update={'tools': (tool('http://127.0.0.1').model_copy(update={'headers': headers}),)}
+        )
+        for headers in ({'X-API-KEY': SecretStr(SECRET)}, {'X-API-KEY': SecretStr('other')})
+    )
+    assert SECRET not in repr(one) and SECRET not in one.model_dump_json()
+    # A fingerprint hash of a secret could be brute-forced; the secret is not in it.
+    assert environment_sha256(one) == environment_sha256(other)
+    for headers in ({'Host': SECRET}, {'X-Key': f'{SECRET}\n'}, {'X-Key': SECRET, 'x-key': SECRET}):
+        with pytest.raises(ValidationError) as invalid:
+            HttpTool(
+                name='t',
+                description='d',
+                base_url='http://127.0.0.1',
+                routes=ROUTES,
+                headers=headers,
+            )
+        assert SECRET not in str(invalid.value)
+
+
+@pytest.mark.parametrize('path', ['/rest/bug/%C0%AE%C0%AE', '/rest/bug/%C0%AF', '/rest/bug/%FF'])
+def test_escapes_that_are_not_utf8_are_rejected(app: App, path: str) -> None:
+    with app_session(app.url) as session:
+        session.start()
+        with pytest.raises(ActionError, match='no dot segments'):
+            session.step(call(path))
+    assert app.requests == []
+
+
+@pytest.mark.parametrize(
+    ('path', 'method', 'body'),
+    [
+        ('/rest/bug/%C3%A9', 'GET', None),
+        ('/rest/bug/a;b', 'GET', None),
+        ('/rest/bug/1/comment', 'POST', {'comment': 'x'}),
+    ],
+)
+def test_the_request_line_is_the_validated_target(
+    app: App, path: str, method: str, body: dict | None
+) -> None:
+    with app_session(app.url) as session:
+        session.start()
+        arguments = {'query': {'q': 'a b'}} | ({'body': body} if body else {})
+        result = record(session, call(path, method, **arguments))
+
+    (seen,) = app.requests
+    target = result['request']['url'].removeprefix(app.url)
+    assert target == f'{path}?q=a+b'
+    assert seen['line'] == f'{method} {target} HTTP/1.1'  # exactly what was validated
+
+
 @pytest.mark.parametrize('method', ['get', 'Get', 'GET ', 'HEAD', 'OPTIONS', 'TRACE', 'CONNECT'])
 def test_method_must_be_a_declared_one_exactly(app: App, method: str) -> None:
     with app_session(app.url) as session:
@@ -315,6 +423,8 @@ def test_method_overrides_are_rejected(app: App, arguments: dict) -> None:
         {'X-Key': 'a\r\nX-Injected: 1'},
         {'X-Key': ''},
         {'Bad Name': 'x'},
+        {'Content-Type': 'text/plain'},
+        {'X-Key': 'a', 'x-key': 'b'},
     ],
 )
 def test_tool_headers_cannot_reroute_or_reframe_requests(headers: dict) -> None:

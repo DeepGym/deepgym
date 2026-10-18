@@ -1,9 +1,12 @@
 """A loopback HTTP app for API tool tests: real sockets, no sandbox, no provider call."""
 
+import base64
+import html
 import json
 import threading
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from urllib.parse import quote, quote_plus
 
 from deepgym.models import MultiTurnEnvironment
 from deepgym.session import LocalBackend, Session
@@ -25,6 +28,43 @@ ROUTES = (
     HttpRoute(method='GET', path='/rest/echo'),
     HttpRoute(method='GET', path='/rest/file/{name:path}'),
 )
+
+
+def _echo(headers) -> dict:
+    """Every request header value back, in the forms an app may echo it in."""
+    received = dict(headers.items())
+    authorization = received.get('Authorization', '')
+    pair = (
+        base64.b64decode(authorization.split(' ', 1)[1]).decode()
+        if authorization.startswith('Basic ')
+        else ''
+    )
+    return {
+        'raw': received,
+        'quoted': {name: quote(value, safe='') for name, value in received.items()},
+        'lower_hex': {name: quote(value, safe='').lower() for name, value in received.items()},
+        'form': {name: quote_plus(value, safe='') for name, value in received.items()},
+        'html': f'<p>{"".join(html.escape(value) for value in received.values())}</p>',
+        'upper': {name: value.upper() for name, value in received.items()},
+        'basic': {'pair': pair, 'password': pair.partition(':')[2]},
+        'base64': {
+            name: base64.b64encode(f'{prefix}{value}!'.encode()).decode()
+            for name, value in received.items()
+            for prefix in ('', 'x', 'xy')  # each byte alignment inside a longer encoding
+        },
+    }
+
+
+def _echoed(headers) -> dict[str, str]:
+    """Response headers that hand a credential back: an issued cookie, an echoed key, a
+    redirect carrying it."""
+    key = headers.get('X-API-KEY', '')
+    return {
+        'Set-Cookie': 'session=issued-session-id; Path=/; HttpOnly',
+        'x-api-key': key,
+        'X-Seen': key,
+        'Location': f'/next?key={quote(key, safe="")}',
+    }
 
 
 class App:
@@ -50,6 +90,7 @@ class App:
                 body = self.rfile.read(length).decode('utf-8')
                 app.requests.append(
                     {
+                        'line': self.requestline,
                         'method': self.command,
                         'path': self.path,
                         'headers': {name.lower(): value for name, value in self.headers.items()},
@@ -66,8 +107,8 @@ class App:
                     self._send(302, b'', {'Location': app.redirect_to})
                 elif route.endswith('/done'):
                     self._send(200, b'DONE\n{"done": true}\n', {'Content-Type': 'text/plain'})
-                elif route.endswith('/echo'):  # an app that reflects request headers
-                    self._send(200, json.dumps(dict(self.headers.items())).encode(), {})
+                elif route.endswith('/echo'):  # an app that reflects its credentials
+                    self._send(200, json.dumps(_echo(self.headers)).encode(), _echoed(self.headers))
                 elif route.endswith('/binary'):
                     self._send(200, b'\xff\x00\xfe', {})
                 elif route.endswith('/comment'):

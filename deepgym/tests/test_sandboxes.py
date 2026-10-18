@@ -56,6 +56,11 @@ from deepgym.session import _SEALED_PATH_CHECK, SandboxBackend, Session
 # Fake sandboxes pass session setup's check that only root can change TRUSTED_PATH.
 _SEALED_NEEDLE = 'root would run what others can change'
 _SEALED = (_SEALED_NEEDLE, sealed_path.SEALED)
+_CONTAINED_AGENT_PREFIX = (
+    '/usr/bin/nsenter --net=/opt/deepgym-netns -- '
+    '/usr/bin/nsenter --pid=/opt/deepgym-staging/agent-processes/pid '
+    '--mount=/opt/deepgym-staging/agent-processes/mnt -- /usr/bin/setpriv'
+)
 
 
 class FakeSandbox:
@@ -567,9 +572,7 @@ def test_session_runs_as_agent_and_joins_netns_only_when_needed() -> None:
     open_ = FakeSandbox(network_blocked=False, answers=[_USERS])
     SandboxBackend(open_).exec('ls', timeout=5)
     assert any('mount --bind /proc/$pid/ns/net /opt/deepgym-netns' in c for c in open_.commands)
-    assert open_.commands[-1].startswith(
-        '/usr/bin/nsenter --net=/opt/deepgym-netns -- /usr/bin/setpriv'
-    )
+    assert open_.commands[-1].startswith(_CONTAINED_AGENT_PREFIX)
 
 
 def test_session_verifier_runs_as_its_own_user_from_a_private_file() -> None:
@@ -1452,7 +1455,7 @@ def test_daytona_session_runs_agent_and_verifier_as_separate_users(
     box = client.boxes[0]
     step = next(c for c in box.events if 'step-marker' in c)
     assert step.startswith('/usr/bin/sudo -n -E /bin/sh -c')
-    assert '/usr/bin/nsenter --net=/opt/deepgym-netns -- /usr/bin/setpriv --reuid=997' in step
+    assert f'{_CONTAINED_AGENT_PREFIX} --reuid=997' in step
     assert not any('SECRET' in c for c in box.events), 'verifier code must not be in a command'
     score = next(c for c in box.events if '/opt/deepgym-verifier/' in c and 'python3' in c)
     assert '--reuid=996' in score
@@ -1646,6 +1649,6 @@ def test_lockdown_writes_the_chromium_policy_to_every_dir_and_inspects_no_binary
     assert 'is not owned by root' in prepare and 'the agent can still write' in prepare
     # Discovery runs as the agent (so it skips what only root can reach); root makes the pin.
     assert 'for name in chromium chromium-browser google-chrome' in prepare
-    assert 'launch=$(/usr/bin/nsenter --net=/opt/deepgym-netns -- /usr/bin/setpriv' in prepare
+    assert f'launch=$({_CONTAINED_AGENT_PREFIX}' in prepare
     for inspection in ('177ELF', 'head -c', 'grep -qF /etc/chromium/policies', 'LIBDIR'):
         assert inspection not in prepare

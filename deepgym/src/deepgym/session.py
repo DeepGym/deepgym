@@ -14,6 +14,7 @@ import contextlib
 import errno
 import json
 import logging
+import math
 import os
 import posixpath
 import shlex
@@ -29,6 +30,9 @@ from pathlib import Path, PurePosixPath
 from typing import TYPE_CHECKING, NamedTuple, Protocol
 from uuid import uuid4
 
+from pydantic import JsonValue
+
+from deepgym.cli_runtime import CliExecution, CliRequest, EventObserver, execute_cli
 from deepgym.exceptions import (
     ActionError,
     DeepGymError,
@@ -475,6 +479,10 @@ class SandboxBackend:
             if sealed.exit_code != 0 or sealed.output.strip() != sealed_path.SEALED:
                 raise SandboxError(f'Refusing the sandbox: {sealed.output[-500:]}')
             self._as_agent = _drop_to(setpriv, agent_uid, agent_gid)
+            self._agent_drop = self._as_agent
+            self._agent_namespace = ''
+            self._nsenter = nsenter
+            self._agent_uid = int(agent_uid)
             self._as_verifier = _drop_to(
                 setpriv, verifier_uid, verifier_gid, allow_sudo=solver == '1'
             )
@@ -506,6 +514,8 @@ class SandboxBackend:
                 **locale,
             }
             self._verifier_base = {'DEEPGYM_AGENT_HOME': _AGENT_HOME, **locale}
+            if self._offline:
+                self._make_agent_namespace()
         except BaseException:
             self.close()
             raise
@@ -514,6 +524,36 @@ class SandboxBackend:
     def workdir(self) -> str:
         """The work directory, as it really is in the sandbox (links resolved)."""
         return self._workdir
+
+    def _make_agent_namespace(self) -> None:
+        directory = f'{_STAGING_DIR}/agent-processes'
+        self._agent_scope = directory
+        control = f'{directory}/control.py'
+        _checked('Agent containment directory', self.exec_trusted(f'mkdir -m 700 {directory}', 30))
+        source = Path(__file__).with_name('_pid_namespace.py').read_bytes()
+        self._sandbox.upload(source, control)
+        _checked(
+            'Agent PID namespace',
+            self.exec_trusted(f'python3 -I {control} create {directory} {self._agent_uid}', 30),
+        )
+        self._agent_namespace = (
+            f'{shlex.quote(self._nsenter)} --pid={directory}/pid --mount={directory}/mnt -- '
+        )
+        self._as_agent = self._agent_namespace + self._agent_drop
+
+    def stop_agent(self) -> None:
+        """Destroy all setup and CLI descendants before grading; refuse uncertain cleanup.
+
+        Root services and the verifier never enter this PID namespace.
+
+        Raises:
+            SandboxError: If kernel teardown or the no-survivor check fails.
+        """
+        directory = self._agent_scope
+        _checked(
+            'Agent PID namespace teardown',
+            self.exec_trusted(f'python3 -I {directory}/control.py stop {directory}', 30),
+        )
 
     def _make_offline_namespace(self) -> None:
         """Make a loopback-only network namespace and bind-mount it at ``_NETNS``.
@@ -576,6 +616,21 @@ class SandboxBackend:
             env=self._clear,
             timeout=timeout,
         )
+
+    def run_cli(self, request: CliRequest, on_event: EventObserver) -> CliExecution:
+        """Run the CLI with fixed-provider egress and kill every agent process on exit.
+
+        Args:
+            request: CLI command and explicit model-readable credential opt-in.
+            on_event: Observer returning a stop reason to terminate the CLI.
+
+        Returns:
+            Protected captured events and process termination status.
+
+        Raises:
+            SandboxError: If supervision or isolated provider transport is unavailable.
+        """
+        return execute_cli(self, request, on_event)
 
     def exec_trusted(self, command: str, timeout: int) -> ExecResult:
         """Run a harness *command* as root with an empty environment and only trusted folders
@@ -745,21 +800,26 @@ class SandboxBackend:
         )
         self._agent_env['DISPLAY'] = _DISPLAY
 
-    def act(self, action: Action) -> None:
+    def act(self, action: Action, *, timeout: float | None = None) -> None:
         """Apply a GUI action.
 
         Raises:
             DeepGymError: If this provider has no desktop.
         """
-        self._need_desktop('GUI actions').act(action)
+        if timeout is None:
+            self._need_desktop('GUI actions').act(action)
+        else:
+            self._need_desktop('GUI actions').act(action, timeout=timeout)
 
-    def screenshot(self) -> str:
+    def screenshot(self, *, timeout: float | None = None) -> str:
         """Return the screen as a base64 PNG.
 
         Raises:
             DeepGymError: If this provider has no desktop.
         """
-        return self._need_desktop('Screenshots').screenshot()
+        if timeout is None:
+            return self._need_desktop('Screenshots').screenshot()
+        return self._need_desktop('Screenshots').screenshot(timeout=timeout)
 
     def booted_image(self) -> SandboxImage:
         """Return the image the sandbox booted and its digest, as its provider reports them."""
@@ -884,6 +944,7 @@ class Session:
         self._obs: Observation | None = None
         self._step = 0
         self._done = False
+        self._cli_finalized = False
         self._step_verdict: dict[str, object] | None = None
         # The episode's result, once a failed step fixed it (see step()).
         self._failed_result: RunResult | None = None
@@ -939,6 +1000,18 @@ class Session:
             if self._obs is not None:
                 raise DeepGymError('Session already started; open a new session per episode')
             env = self._env
+            if env.root_service_start:
+                if not isinstance(self._backend, SandboxBackend):
+                    raise SandboxError('root_service_start requires an isolated SandboxBackend')
+                _checked(
+                    'Root service startup',
+                    self._backend.exec_root(
+                        env.root_service_start,
+                        env.setup_timeout,
+                        offline=True,
+                        env={'PATH': TRUSTED_PATH},
+                    ),
+                )
             for path, content in env.files.items():
                 self._backend.write_file(path, content.encode('utf-8'))
             if env.desktop:
@@ -955,7 +1028,7 @@ class Session:
             self._obs = self._observe(output, done=False)
             return self._obs
 
-    def step(self, action: Action) -> StepResult:
+    def step(self, action: Action, *, timeout: float | None = None) -> StepResult:
         """Apply one action and return the new observation, step reward, and done flag.
 
         The new observation (with its screenshot) is taken before the step verifier runs,
@@ -967,6 +1040,10 @@ class Session:
         verifier that times out after reading the agent's output gives the step a judged 0
         (``solution_timeout``) instead, and the episode goes on.
 
+        ``timeout`` bounds agent execution and the following screenshot by one remaining
+        wall-time deadline. Desktop overrides require SandboxBackend. Verifier time is
+        separate; provider transport can take its own cleanup grace after a deadline.
+
         Raises:
             DeepGymError: If the session is not running.
             ActionError: If the action is not allowed here, the desktop rejects it, or the
@@ -977,6 +1054,9 @@ class Session:
             SandboxError: If the sandbox fails to apply the action, take the screenshot or
                 run the step verifier.
         """
+        if timeout is not None and (not math.isfinite(timeout) or timeout <= 0):
+            raise ValueError('Step timeout must be finite and positive')
+        deadline = time.monotonic() + timeout if timeout is not None else None
         with self._lock:
             if self._obs is None or self._done:
                 raise DeepGymError('Session is not running; call start() or open a new session')
@@ -985,11 +1065,19 @@ class Session:
                     f'Action {action.action_type!r} not allowed here. '
                     f'Allowed: {sorted(self._env.allowed_actions)}'
                 )
+            if action.action_type == 'cli':
+                raise ActionError('CLI actions can only be executed through Session.run_cli')
+            if (
+                timeout is not None
+                and self._env.desktop
+                and not isinstance(self._backend, SandboxBackend)
+            ):
+                raise ActionError('Desktop deadline overrides require SandboxBackend')
 
             self._step += 1
             self._step_verdict = None
             try:
-                output, exit_code = self._apply(action)
+                output, exit_code = self._apply(action, timeout=_remaining(deadline))
             except ActionError:
                 raise
             except BaseException as exc:
@@ -1002,7 +1090,9 @@ class Session:
             )
             observation: Observation | None = None
             try:
-                observation = self._observe(output, done=done, exit_code=exit_code)
+                observation = self._observe(
+                    output, done=done, exit_code=exit_code, timeout=_remaining(deadline)
+                )
                 reward = self._step_reward(output) if self._env.step_verifier_code else 0.0
             except BaseException as exc:
                 # Here an ActionError means the agent's own files blocked the step's output.
@@ -1010,6 +1100,102 @@ class Session:
                 raise
             self._record(action, observation, reward=reward, done=done)
             return StepResult(observation, reward, done)
+
+    def run_cli(self, request: CliRequest, on_event: EventObserver) -> CliExecution:
+        """Record one real CLI action with nested events, without replaying its commands.
+
+        CLI agents require shell access and SandboxBackend. Completion is explicit:
+        stdout DONE lines do not stop supervision. All dgagent processes, including its
+        desktop, are killed before returning, so the final observation is text-only.
+
+        Args:
+            request: CLI process and opt-in for model-readable provider credentials.
+            on_event: Return a stop reason when parsed events exceed the caller's budget.
+
+        Returns:
+            Captured stdout, events, exit code, and any budget stop reason.
+
+        Raises:
+            DeepGymError: If the session is not running.
+            ActionError: If the environment disallows shell execution or CLI provider egress.
+            SandboxError: If the backend cannot isolate or supervise the CLI safely.
+        """
+        with self._lock:
+            if self._obs is None or self._done:
+                raise DeepGymError('Session is not running; call start() or open a new session')
+            if not {'bash', 'cli'} & self._env.allowed_actions:
+                raise ActionError('CLI agents require bash or cli in allowed_actions')
+            if not self._env.cli_provider_egress:
+                raise ActionError(
+                    'CLI provider egress is disabled; set cli_provider_egress=True on the '
+                    'environment before creating the session'
+                )
+            if not isinstance(self._backend, SandboxBackend):
+                raise SandboxError('CLI agents require an isolated SandboxBackend')
+            action = Action(action_type='cli', content=shlex.join(request.argv))
+            self._step += 1
+            self._step_verdict = None
+            started = time.monotonic()
+            events: list[dict[str, JsonValue]] = []
+
+            def observe(event: dict[str, JsonValue]) -> str | None:
+                events.append(event)
+                return on_event(event)
+
+            try:
+                result = self._backend.run_cli(request, observe)
+                self._cli_finalized = True
+                action = action.model_copy(update={'events': result.events})
+                observation = Observation(
+                    content=result.output,
+                    step=self._step,
+                    done=True,
+                    metadata={
+                        'exit_code': result.exit_code,
+                        'stop_reason': result.stop_reason,
+                        'cli_version': result.cli_version,
+                        'version_source': 'sandbox CLI --version',
+                        'version_error': result.version_error,
+                    },
+                )
+                reward = self._step_reward(result.output) if self._env.step_verifier_code else 0.0
+                self._record(action, observation, reward=reward, done=True)
+                return result
+            except BaseException as exc:
+                action = action.model_copy(update={'events': tuple(events)})
+                self._end(action, None, exc)
+                raise
+            finally:
+                self._acting_s += time.monotonic() - started
+
+    def finalize_cli(self) -> None:
+        """Stop the CLI episode's agent population even when no CLI was launched.
+
+        The shared backend teardown includes setup descendants. Successful runtime
+        execution already performed it; no extra action or reward is recorded here.
+        GUI agents never call this method, so their desktops survive normal scoring.
+        Already-ended episodes retain their terminal observation, including unknown state.
+
+        Raises:
+            SandboxError: If containment is unavailable or cannot be stopped.
+                The stored failure has no verdict and prevents subsequent verification.
+        """
+        with self._lock:
+            if self._cli_finalized:
+                return
+            was_done = self._done
+            self._done = True
+            try:
+                if not isinstance(self._backend, SandboxBackend):
+                    raise SandboxError('CLI finalization requires an isolated SandboxBackend')
+                self._backend.stop_agent()
+            except BaseException as exc:
+                self._failed_result = error_result(exc, self.sandbox_id)
+                raise
+            self._cli_finalized = True
+            if not was_done and self._obs is not None:
+                self._obs = self._obs.model_copy(update={'done': True})
+                self._trajectory.final_observation = self._obs
 
     def score(self) -> RunResult:
         """Run the final verifier against the current state.
@@ -1090,18 +1276,23 @@ class Session:
                 'Could not delete sandbox %s; it may still exist', self.sandbox_id, exc_info=True
             )
 
-    def _apply(self, action: Action) -> tuple[str, int | None]:
+    def _apply(self, action: Action, *, timeout: float | None = None) -> tuple[str, int | None]:
         """Execute *action*; return its text output and exit code (None if not a command).
 
         Its time, however it ends, counts as the agent's (see :meth:`_ran_out_the_clock`).
         """
-        timeout = self._env.timeout_per_step
+        bounded = timeout is not None
+        timeout = (
+            min(timeout, self._env.timeout_per_step)
+            if timeout is not None
+            else self._env.timeout_per_step
+        )
         started = time.monotonic()
         try:
             try:
                 match action.action_type:
                     case 'code':
-                        exit_code, output = self._run_python('_step.py', action.content)
+                        exit_code, output = self._run_python('_step.py', action.content, timeout)
                         return output, exit_code
                     case 'bash':
                         exit_code, output = self._backend.exec(action.content, timeout)
@@ -1116,12 +1307,15 @@ class Session:
                         return '', None
             except TimeoutError:
                 return f'[timed out after {timeout}s]', None
-            self._backend.act(action)
+            if bounded and isinstance(self._backend, SandboxBackend):
+                self._backend.act(action, timeout=timeout)
+            else:
+                self._backend.act(action)
             return '', None
         finally:
             self._acting_s += time.monotonic() - started
 
-    def _run_python(self, filename: str, code: str, timeout: int | None = None) -> ExecResult:
+    def _run_python(self, filename: str, code: str, timeout: float | None = None) -> ExecResult:
         self._backend.write_file(filename, code.encode('utf-8'))
         return self._backend.exec(
             f'{self._backend.python} {filename}', timeout or self._env.timeout_per_step
@@ -1163,12 +1357,20 @@ class Session:
         if done:
             self._trajectory.final_observation = observation
 
-    def _observe(self, output: str, *, done: bool, exit_code: int | None = None) -> Observation:
+    def _observe(
+        self, output: str, *, done: bool, exit_code: int | None = None, timeout: float | None = None
+    ) -> Observation:
+        screenshot = None
+        if self._env.desktop:
+            if timeout is not None and isinstance(self._backend, SandboxBackend):
+                screenshot = self._backend.screenshot(timeout=timeout)
+            else:
+                screenshot = self._backend.screenshot()
         return Observation(
             content=output,
             step=self._step,
             done=done,
-            screenshot=self._backend.screenshot() if self._env.desktop else None,
+            screenshot=screenshot,
             metadata=None if exit_code is None else {'exit_code': exit_code},
         )
 
@@ -1295,6 +1497,15 @@ def run_episode(
                 if not session.done:  # the agent failed, or its action was rejected
                     raise
         return session.trajectory, session.score()
+
+
+def _remaining(deadline: float | None) -> float | None:
+    if deadline is None:
+        return None
+    remaining = deadline - time.monotonic()
+    if remaining <= 0:
+        raise TimeoutError('Step exhausted the agent wall-time budget')
+    return remaining
 
 
 def ran_out_the_clock(exc: BaseException, acting_s: float, elapsed_s: float) -> bool:

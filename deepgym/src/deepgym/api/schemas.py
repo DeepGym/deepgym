@@ -212,9 +212,13 @@ class CreateSessionRequest(BaseModel):
     def reject_runtime(
         cls, v: str | MultiTurnEnvironment | ComputerUseEnvironment
     ) -> str | MultiTurnEnvironment | ComputerUseEnvironment:
-        """Refuse a caller-chosen image or snapshot: root in the sandbox runs its binaries."""
+        """Refuse inline runtime overrides and root commands; registry specs stay trusted."""
         if not isinstance(v, str) and (v.image is not None or v.snapshot is not None):
             raise ValueError('image and snapshot cannot be set over the API')
+        if not isinstance(v, str) and v.root_service_start:
+            raise ValueError('root_service_start cannot be set over the API')
+        if not isinstance(v, str) and v.cli_provider_egress:
+            raise ValueError('cli_provider_egress cannot be set over the API')
         return v
 
 

@@ -10,7 +10,7 @@ from enum import Enum
 from pathlib import Path, PurePosixPath
 from typing import Any, Literal, get_args
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+from pydantic import BaseModel, ConfigDict, Field, JsonValue, field_validator, model_validator
 
 from deepgym.exceptions import InvalidScoreError
 
@@ -411,7 +411,7 @@ GuiActionType = Literal[
     'screenshot',
     'wait',
 ]
-ActionType = Literal[ShellActionType, GuiActionType, 'done']
+ActionType = Literal[ShellActionType, GuiActionType, 'done', 'cli']
 
 GUI_ACTIONS: frozenset[GuiActionType] = frozenset(get_args(GuiActionType))
 
@@ -433,6 +433,9 @@ class Action(BaseModel):
     content: str = ''
     """Code, shell command, file contents, text to type, key chord ('ctrl+s'),
     or scroll direction (up/down/left/right)."""
+
+    events: tuple[dict[str, JsonValue], ...] = ()
+    """Nested CLI stdout events, recorded once after execution; never replayed as actions."""
 
     x: int | None = Field(default=None, ge=0)
     """Pointer x for click/move/scroll, or drag start."""
@@ -507,6 +510,18 @@ class MultiTurnEnvironment(BaseModel):
     setup_script: str = ''
     """Bash run in the work directory after files are written (start servers, open apps)."""
 
+    root_service_start: str = ''
+    """Trusted image service startup, as root in the offline namespace before desktop/setup.
+    Uses setup_timeout. Only SandboxBackend supports it; never accept this from an agent.
+    The command must start the service itself and exit non-zero if readiness fails.
+    """
+
+    cli_provider_egress: bool = Field(default=False, strict=True)
+    """Opt in to sandbox-level egress for the trusted CLI provider proxy (Daytona).
+    Agent commands, root service startup and verification remain in the offline namespace.
+    Other trusted root processes outside that namespace also gain network access.
+    """
+
     setup_code: str = ''
     """Python run after setup_script. Its output is the first observation."""
 
@@ -555,9 +570,11 @@ class MultiTurnEnvironment(BaseModel):
 
     @model_validator(mode='after')
     def check_desktop_actions(self) -> MultiTurnEnvironment:
-        """Reject GUI actions on environments without a desktop."""
+        """Reject GUI actions without a desktop and CLI egress without shell actions."""
         if not self.desktop and self.allowed_actions & GUI_ACTIONS:
             raise ValueError('GUI actions need desktop=True')
+        if self.cli_provider_egress and not self.allowed_actions & {'bash', 'cli'}:
+            raise ValueError('cli_provider_egress requires bash or cli in allowed_actions')
         return self
 
 

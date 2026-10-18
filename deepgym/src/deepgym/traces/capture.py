@@ -13,6 +13,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import shlex
 import threading
 import time
 from collections.abc import Callable, Sequence
@@ -21,8 +22,16 @@ from pathlib import Path
 from typing import TextIO, TypeVar
 from uuid import uuid4
 
+from deepgym.cli_runtime import CliExecution, CliExecutionError, CliRequest, EventObserver
 from deepgym.exceptions import DeepGymError, SandboxError
-from deepgym.models import Action, MultiTurnEnvironment, Observation, RunResult, is_verdict
+from deepgym.models import (
+    Action,
+    MultiTurnEnvironment,
+    Observation,
+    RunResult,
+    Trajectory,
+    is_verdict,
+)
 from deepgym.session import Session, StepResult
 from deepgym.traces.schema import (
     TRACE_SCHEMA_VERSION,
@@ -94,6 +103,12 @@ class TracedSession:
         return self._session.done
 
     @property
+    def trajectory(self) -> Trajectory:
+        """Return a copy of the session trajectory for an agent's result."""
+        with self._lock:
+            return self._session.trajectory.model_copy(deep=True)
+
+    @property
     def trace(self) -> Trace:
         """A copy of everything recorded so far."""
         with self._lock:
@@ -127,7 +142,13 @@ class TracedSession:
             self._write({'event': 'reset', 'observation': self._initial})
             return observation
 
-    def step(self, action: Action, messages: Sequence[TraceMessage] = ()) -> StepResult:
+    def step(
+        self,
+        action: Action,
+        messages: Sequence[TraceMessage] = (),
+        *,
+        timeout: float | None = None,
+    ) -> StepResult:
         """Apply *action* and record it with the model *messages* that produced it.
 
         A step that raises is recorded with its error (and its observation, when the
@@ -137,6 +158,7 @@ class TracedSession:
             action: The agent's action.
             messages: Model messages new at this step, ending with the assistant reply
                 that produced *action* (see :attr:`TraceStep.messages`).
+            timeout: Optional action deadline forwarded to the session.
 
         Returns:
             The session's step result.
@@ -146,6 +168,41 @@ class TracedSession:
                 started, ended or already scored: a verdict must match the state the
                 trace ends in). Nothing is recorded then.
         """
+        return self._capture(action, messages, lambda: self._session.step(action, timeout=timeout))
+
+    def run_cli(self, request: CliRequest, on_event: EventObserver) -> CliExecution:
+        """Run and capture one CLI launch, with its events nested under that action.
+
+        Args:
+            request: The sandbox CLI and explicit credential-exposure opt-in.
+            on_event: The agent's budget observer; never replays parsed commands.
+
+        Returns:
+            The supervised process result after its descendants have stopped.
+
+        Raises:
+            DeepGymError: If the trace cannot accept actions or CLI execution fails.
+        """
+        return self._capture(
+            Action(action_type='cli', content=shlex.join(request.argv)),
+            (),
+            lambda: self._session.run_cli(request, on_event),
+        )
+
+    def finalize_cli(self) -> None:
+        """Finalize CLI containment without inventing an action in the trace.
+
+        Raises:
+            DeepGymError: If containment cleanup fails; the trace records the error.
+        """
+        with self._lock:
+            self._check_open()
+            self._recorded(self._session.finalize_cli)
+
+    def _capture(
+        self, action: Action, messages: Sequence[TraceMessage], call: Callable[[], _T]
+    ) -> _T:
+        """Record the one real Session action produced by *call*, even on failure."""
         with self._lock:
             self._check_open()
             if self._results:
@@ -154,7 +211,6 @@ class TracedSession:
                 raise DeepGymError('The episode is not running; call start() or open a new trace')
             trajectory = self._session.trajectory
             applied_before = len(trajectory.steps)
-            scored = bool(self._env.step_verifier_code)
             record = {
                 'index': len(self._steps) + 1,
                 'action': action.model_copy(deep=True),
@@ -163,12 +219,15 @@ class TracedSession:
             }
             start = time.perf_counter()
             try:
-                result = self._session.step(action)
+                result = call()
             except BaseException as exc:
-                # The session records a failed step, with no step reward, whenever its action
-                # may have taken effect (anything but a rejected action), and ends the episode.
+                if isinstance(exc, CliExecutionError):
+                    self._cli_version(exc.cli_version)
+                # Only the session knows whether a failed operation changed the sandbox.
                 applied = len(trajectory.steps) > applied_before
                 observation = trajectory.final_observation if applied else None
+                if applied:
+                    record['action'] = trajectory.steps[-1][1].model_copy(deep=True)
                 self._add_step(
                     TraceStep(
                         **record,
@@ -179,15 +238,35 @@ class TracedSession:
                     )
                 )
                 raise
+            record['action'] = trajectory.steps[-1][1].model_copy(deep=True)
+            if isinstance(result, CliExecution) and result.cli_version is not None:
+                self._cli_version(result.cli_version)
+            observation = (
+                result.observation
+                if isinstance(result, StepResult)
+                else trajectory.final_observation
+            )
+            assert observation is not None
             self._add_step(
                 TraceStep(
                     **record,
-                    **(self._step_score(result.reward) if scored else {}),
-                    observation=result.observation.model_copy(deep=True),
+                    **(
+                        self._step_score(trajectory.step_rewards[-1])
+                        if self._env.step_verifier_code
+                        else {}
+                    ),
+                    observation=observation.model_copy(deep=True),
                     duration_ms=_elapsed_ms(start),
                 )
             )
             return result
+
+    def _cli_version(self, version: str | None) -> None:
+        if version is not None:
+            self._provenance = self._provenance.model_copy(
+                update={'agent': self._provenance.agent.model_copy(update={'version': version})}
+            )
+            self._write({'event': 'agent_version', 'version': version})
 
     def score(self) -> RunResult:
         """Run the final verifier and record its result.
@@ -337,6 +416,8 @@ def load_trace(path: Path) -> Trace:
                 fields['initial_observation'] = event['observation']
             case 'step':
                 steps.append(event['step'])
+            case 'agent_version':
+                fields['provenance']['agent']['version'] = event['version']
             case 'result':
                 results.append(event['result'])
             case 'end':

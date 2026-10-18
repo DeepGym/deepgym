@@ -1,0 +1,5 @@
+{"type":"system","subtype":"init","session_id":"sample-session"}
+{"type":"assistant","message":{"id":"message-one","content":[{"type":"tool_use","id":"tool-one","name":"Bash","input":{"command":"printf fixture-only"}}],"usage":{"input_tokens":20,"output_tokens":8,"cache_read_input_tokens":4,"cache_creation_input_tokens":2}}}
+{"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"tool-one","content":"fixture-only","is_error":false}]}}
+{"type":"assistant","message":{"id":"message-two","content":[{"type":"text","text":"The requested change is complete."}],"usage":{"input_tokens":10,"output_tokens":5,"cache_read_input_tokens":6,"cache_creation_input_tokens":0}}}
+{"type":"result","subtype":"success","is_error":false,"num_turns":2,"result":"The requested change is complete.","usage":{"input_tokens":30,"output_tokens":13,"cache_read_input_tokens":10,"cache_creation_input_tokens":2},"total_cost_usd":0.0012}

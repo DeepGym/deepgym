@@ -1,0 +1,6 @@
+{"type":"thread.started","thread_id":"sample-thread"}
+{"type":"turn.started"}
+{"type":"item.started","item":{"id":"command-one","type":"command_execution","command":"printf fixture-only","aggregated_output":"","status":"in_progress"}}
+{"type":"item.completed","item":{"id":"command-one","type":"command_execution","command":"printf fixture-only","aggregated_output":"fixture-only","exit_code":0,"status":"completed"}}
+{"type":"item.completed","item":{"id":"message-one","type":"agent_message","text":"The requested change is complete."}}
+{"type":"turn.completed","usage":{"input_tokens":40,"cached_input_tokens":10,"output_tokens":12}}

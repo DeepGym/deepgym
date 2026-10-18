@@ -9,8 +9,8 @@
 DeepGym runs a model's answer (code, a patch, shell commands or desktop actions) in a
 sandbox and scores it with a verifier kept apart from that answer. When the infrastructure
 fails instead of judging the answer, the run gets no verdict and can be kept out of
-training instead of counting as a 0. It's for teams training and evaluating coding and
-computer-use agents with verl, TRL, OpenRLHF, Axolotl or their own GRPO loop.
+training instead of counting as a 0. It ships agent harnesses for Claude Code, Codex and
+computer use, and plugs into verl, TRL, OpenRLHF, Axolotl or your own GRPO loop.
 
 ## Install
 
@@ -27,7 +27,8 @@ Python 3.10 or later. Optional extras:
 | `deepgym[hf]` | Hugging Face Hub sharing and dataset loaders |
 | `deepgym[lm_eval]` | lm-evaluation-harness tasks |
 | `deepgym[traces]` | Parquet trace export |
-| `deepgym[all]` | Everything above except `lm_eval` |
+| `deepgym[anthropic]`, `deepgym[openai]` | The built-in computer-use agents |
+| `deepgym[all]` | Everything above except `lm_eval` and the agent extras |
 
 ## Quickstart
 
@@ -69,21 +70,10 @@ provider such as `mode='docker'`; nothing else changes.
   flag, and optionally each test case with a reason. It reaches the answer only through
   the `deepgym_solution` helpers, which run it in a separate, isolated process with no
   network.
-- **Sandbox providers:** where answers run, picked with `mode`. In every sandbox mode, code
-  run through the `deepgym_solution` helpers and shell sessions runs as a separate Linux
-  user with no network; repo-patch tests run the patched code as root inside the sandbox.
-  Docker shares the host's kernel, so it isolates less than the VM-based providers.
-
-  | `mode` | Runs on | Setup |
-  |---|---|---|
-  | `local` | This machine, under `sandbox-exec` (macOS) or `bwrap` (Linux) | None; for development only, and repo-patch, Harbor and CyberGym tasks refuse it |
-  | `docker` | A throwaway container with no network | A running Docker daemon |
-  | `apple` | A throwaway Linux VM from Apple's `container` CLI (macOS) | `brew install container`, then `container system start` |
-  | `daytona` | A Daytona sandbox, cloud or self-hosted; desktops need it | `deepgym[daytona]` and `DAYTONA_API_KEY` (self-hosted: also `DAYTONA_API_URL`) |
-  | `modal` | A Modal sandbox | `deepgym[modal]`, then `modal token set` |
-  | `e2b` | An E2B sandbox | `deepgym[e2b]` and `E2B_API_KEY` |
-  | `auto` (default) | Daytona when `DAYTONA_API_KEY` is set, otherwise `local`; also `local`, with a warning, if `deepgym[daytona]` isn't installed | |
-
+- **Sandbox providers:** where answers run, picked with `mode` (table below).
+- **Agents:** built-in harnesses that run a model against a live session: Claude Code and
+  Codex inside the sandbox, or Anthropic and OpenAI computer-use loops, with turn, time
+  and cost budgets.
 - **Reward contract:**
   - *Infrastructure failures give no verdict.* When the sandbox or verifier fails before
     the answer is in play, or the provider or network fails, `result.has_verdict` is
@@ -99,10 +89,30 @@ provider such as `mode='docker'`; nothing else changes.
 
 More in [core concepts][concepts] and [the reward contract][reward-contract].
 
+### Sandbox providers
+
+In every sandbox mode, code run through the `deepgym_solution` helpers and shell sessions
+runs as a separate Linux user with no network; repo-patch tests run the patched code as
+root inside the sandbox. Docker shares the host's kernel, so it isolates less than the
+VM-based providers.
+
+| `mode` | Runs on | Setup |
+|---|---|---|
+| `local` | This machine, under `sandbox-exec` (macOS) or `bwrap` (Linux) | None; for development only, and repo-patch, Harbor and CyberGym tasks refuse it |
+| `docker` | A throwaway container with no network | A running Docker daemon |
+| `apple` | A throwaway Linux VM from Apple's `container` CLI (macOS) | `brew install container`, then `container system start` |
+| `daytona` | A Daytona sandbox, cloud or self-hosted; desktops need it | `deepgym[daytona]` and `DAYTONA_API_KEY` (self-hosted: also `DAYTONA_API_URL`) |
+| `modal` | A Modal sandbox | `deepgym[modal]`, then `modal token set` |
+| `e2b` | An E2B sandbox | `deepgym[e2b]` and `E2B_API_KEY` |
+| `auto` (default) | Daytona when `DAYTONA_API_KEY` is set, otherwise `local`; also `local`, with a warning, if `deepgym[daytona]` isn't installed | |
+
 ## What's in the box
 
 - **31 built-in environments:** 22 coding, 5 computer-use, 2 tool-use and 2 cyber tasks
   ([list][built-ins]).
+- **Agent harnesses:** Claude Code and Codex CLI inside the sandbox, Anthropic and OpenAI
+  computer-use loops, with budgets, cost tracking and every agent process stopped before
+  grading ([agents][agents]).
 - **Benchmark importers:** HumanEval, MBPP, EvalPlus, BigCodeBench, CyberGym, SWE-bench
   Pro, MiMo-V2.6-RL code tasks and Harbor datasets such as Terminal-Bench 2.0
   ([importers][importers]).
@@ -258,26 +268,59 @@ Agents act with `code`, `bash`, `write_file` and `done`; an optional step verifi
 each step. `dg.run_episode(env, agent)` runs a whole episode in one call. More in
 [sessions][sessions].
 
-For Claude Code, Codex, and provider computer-use loops, see the
-[agent harnesses and budget/isolation limits](docs/agents.md).
-
-### Drive a desktop
+### Drive a desktop with a computer-use agent
 
 Computer-use tasks boot a locked-down desktop on Daytona and score what the agent changed,
-never pixels:
+never pixels (`pip install "deepgym[daytona,anthropic]"`, plus `DAYTONA_API_KEY` and
+`ANTHROPIC_API_KEY`):
 
 ```python
 from deepgym import DeepGym, load_environment
+from deepgym.agents import AnthropicComputerAgent, Budget
 
 dg = DeepGym(mode='daytona')
 env = load_environment('settings_tabs', variant=3)
 
-trajectory, result = dg.run_episode(env, my_agent)   # my_agent(obs) -> Action(...)
-print(result.score, result.output)                   # e.g. "3/3 changes made"
+result, grade = dg.run_episode(
+    env,
+    AnthropicComputerAgent(model='claude-opus-5-5'),
+    budget=Budget(max_turns=60, max_seconds=1800),
+)
+print(grade.score, result.termination_reason, result.turns)
 ```
 
-`obs.screenshot` is a base64 PNG, and actions are clicks, typing, keys, scrolls and drags
-in screenshot pixels. More in [computer use][computer-use].
+`OpenAIComputerAgent` works the same way. Your own agent can be any callable that maps an
+observation (`obs.screenshot` is a base64 PNG) to an `Action`: clicks, typing, keys,
+scrolls and drags in screenshot pixels. More in [computer use][computer-use].
+
+### Run Claude Code or Codex in the sandbox
+
+The CLI runs headless inside the session's sandbox as an unprivileged user, and DeepGym
+scores the state it leaves:
+
+```python
+from deepgym import DeepGym, MultiTurnEnvironment
+from deepgym.agents import Budget, ClaudeCodeAgent
+
+env = MultiTurnEnvironment(
+    task='Fix the failing test in the repo, then stop.',
+    snapshot='my-snapshot-with-claude-code',   # the CLI must be installed in the image
+    allowed_actions=frozenset({'cli', 'done'}),
+    cli_provider_egress=True,                   # lets the provider proxy reach its API
+    final_verifier_code=verifier,
+)
+agent = ClaudeCodeAgent(model='claude-opus-5-5', allow_model_credentials=True)
+result, grade = DeepGym(mode='daytona').run_episode(
+    env, agent, budget=Budget(max_turns=100, max_seconds=1800)
+)
+```
+
+The agent's network reaches only the provider's API host, through a proxy outside its
+namespace, and every process it started is stopped before grading. The provider key is
+readable by the model, which is why `allow_model_credentials` must be set. `CodexAgent`
+works the same way. Supported CLI versions live in one place
+(`deepgym.agents.SUPPORTED_CLIS`), and `cli_install_command()` gives the install line for
+your image. More in [agents][agents].
 
 ### Record and export traces
 
@@ -522,6 +565,7 @@ Commercial use needs a license: [contact@deepgym.io](mailto:contact@deepgym.io).
 [importers-harbor]: https://github.com/DeepGym/deepgym/blob/main/deepgym/docs/environments/importers.md#harbor-tasks
 [computer-use]: https://github.com/DeepGym/deepgym/blob/main/deepgym/docs/environments/computer-use.md
 [sessions]: https://github.com/DeepGym/deepgym/blob/main/deepgym/docs/environments/sessions.md
+[agents]: https://github.com/DeepGym/deepgym/blob/main/deepgym/docs/agents.md
 [authoring]: https://github.com/DeepGym/deepgym/blob/main/deepgym/docs/authoring/new-check-qa.md
 [verifiers]: https://github.com/DeepGym/deepgym/blob/main/deepgym/docs/authoring/verifiers.md
 [qa-gate]: https://github.com/DeepGym/deepgym/blob/main/deepgym/docs/authoring/qa-gate.md

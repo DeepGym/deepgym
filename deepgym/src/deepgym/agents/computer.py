@@ -103,8 +103,9 @@ def _openai_usage(data: dict[str, Any]) -> Usage:
 # The SDK retries connection drops, 429s and 5xx with backoff; one blip shouldn't end an
 # hours-long episode. A retried request may be billed twice; usage counts only answers.
 _SDK_RETRIES = 4
-ANTHROPIC_MAX_TOKENS = 16000
-OPENAI_MAX_OUTPUT_TOKENS = 16000  # covers reasoning plus output on the Responses API
+ANTHROPIC_MAX_TOKENS = (
+    128_000  # Opus 5.5's maximum output (the API states it); streamed, as the SDK requires
+)
 
 
 def _api_error(exc: Exception) -> str:
@@ -129,17 +130,21 @@ class AnthropicComputerAgent:
         model: Provider model supporting computer_toolset_20260801.
         prices: Explicit model-specific rates, required for a USD budget.
         effort: Adaptive-thinking effort; None sends no thinking or effort settings.
+        max_tokens: Output limit per response; defaults to Opus 5.5's maximum so the
+            harness never caps the model below what it can produce.
     """
 
     def __init__(
         self,
         model: str,
         prices: TokenPrices | None = None,
-        effort: Literal['low', 'medium', 'high'] | None = 'medium',
+        effort: Literal['low', 'medium', 'high', 'xhigh', 'max'] | None = 'max',
+        max_tokens: int = ANTHROPIC_MAX_TOKENS,
     ) -> None:
         self.model = model
         self.prices = prices
         self.effort = effort
+        self.max_tokens = max_tokens
 
     def run(
         self, session: Session, initial: Observation, *, task: str, budget: Budget
@@ -183,9 +188,9 @@ class AnthropicComputerAgent:
                     if self.effort
                     else {}
                 )
-                response = client.messages.create(
+                with client.messages.stream(
                     model=self.model,
-                    max_tokens=ANTHROPIC_MAX_TOKENS,
+                    max_tokens=self.max_tokens,
                     cache_control={'type': 'ephemeral'},
                     **thinking,
                     system=_SYSTEM,
@@ -197,7 +202,8 @@ class AnthropicComputerAgent:
                     ],
                     messages=messages,
                     timeout=tracker.remaining_seconds,
-                ).model_dump(exclude_none=True)
+                ) as stream:
+                    response = stream.get_final_message().model_dump(exclude_none=True)
                 _account(tracker, response.get('usage'), self.prices, 'anthropic')
                 content = response['content']
                 messages.append({'role': 'assistant', 'content': content})
@@ -276,11 +282,19 @@ class OpenAIComputerAgent:
     Args:
         model: Provider model supporting the Responses computer tool.
         prices: Explicit model-specific rates, required for a USD budget.
+        effort: Reasoning effort; None sends no reasoning setting. No output limit is sent,
+            so the model may use its full output allowance.
     """
 
-    def __init__(self, model: str, prices: TokenPrices | None = None) -> None:
+    def __init__(
+        self,
+        model: str,
+        prices: TokenPrices | None = None,
+        effort: Literal['none', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max'] | None = 'max',
+    ) -> None:
         self.model = model
         self.prices = prices
+        self.effort = effort
 
     def run(
         self, session: Session, initial: Observation, *, task: str, budget: Budget
@@ -318,7 +332,7 @@ class OpenAIComputerAgent:
                     tools=[{'type': 'computer'}],
                     input=items,
                     previous_response_id=previous,
-                    max_output_tokens=OPENAI_MAX_OUTPUT_TOKENS,
+                    **({'reasoning': {'effort': self.effort}} if self.effort else {}),
                     timeout=tracker.remaining_seconds,
                 ).model_dump(exclude_none=True)
                 _account(tracker, response.get('usage'), self.prices, 'openai')

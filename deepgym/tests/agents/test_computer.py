@@ -131,8 +131,25 @@ class FakeClient:
             raise response
         return SimpleNamespace(model_dump=lambda **_: response)
 
+    def stream(self, **kwargs):
+        return _Stream(self.create(**kwargs))  # raises like a failed request
+
     def close(self):
         self.closed = True
+
+
+class _Stream:
+    def __init__(self, response):
+        self.response = response
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        return False
+
+    def get_final_message(self):
+        return self.response
 
 
 @pytest.fixture
@@ -326,7 +343,9 @@ def test_openai_incomplete_response_stops_without_acting(sdk, output, details):
     reason = (details or {}).get('reason', 'incomplete')
     assert result.error == f'Response did not complete: {reason}'
     assert len(client.requests) == 1
-    assert client.requests[0]['max_output_tokens'] == 16000
+    assert 'max_output_tokens' not in client.requests[0] and client.requests[0]['reasoning'] == {
+        'effort': 'max'
+    }
     assert not result.trajectory.steps
     assert result.usage.output_tokens == 10
 

@@ -48,6 +48,14 @@ def _step(session: Session, action: Action, tracker: BudgetTracker) -> Observati
     return observation
 
 
+def _incomplete(tracker: BudgetTracker, snapshot: Any, prices: TokenPrices | None) -> None:
+    """Keep the usage an unfinished stream reported, with the total bill marked unresolved."""
+    data = snapshot.model_dump(exclude_none=True).get('usage') if snapshot is not None else None
+    usage = _anthropic_usage(data) if isinstance(data, dict) else Usage()
+    unresolved = 'incomplete streamed response: partial usage, billing unresolved'
+    tracker.add_usage(usage, Cost(provenance=unresolved))
+
+
 def _account(
     tracker: BudgetTracker,
     data: dict[str, Any] | None,
@@ -203,7 +211,20 @@ class AnthropicComputerAgent:
                     messages=messages,
                     timeout=tracker.remaining_seconds,
                 ) as stream:
-                    response = stream.get_final_message().model_dump(exclude_none=True)
+                    try:
+                        response = stream.get_final_message().model_dump(exclude_none=True)
+                    # Anything raised while reading the stream (transport errors come from httpx or
+                    # httpx2 depending on the SDK version, or an APIError event) ends this response.
+                    except Exception as exc:  # noqa: BLE001
+                        _incomplete(tracker, stream.current_message_snapshot, self.prices)
+                        return tracker.result(
+                            session, 'error', error=f'Response stream failed: {type(exc).__name__}'
+                        )
+                if response.get('stop_reason') is None:  # stream ended without message_stop
+                    _incomplete(tracker, stream.current_message_snapshot, self.prices)
+                    return tracker.result(
+                        session, 'error', error='Response stream ended before completion'
+                    )
                 _account(tracker, response.get('usage'), self.prices, 'anthropic')
                 content = response['content']
                 messages.append({'role': 'assistant', 'content': content})

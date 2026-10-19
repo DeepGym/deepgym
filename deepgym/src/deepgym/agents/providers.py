@@ -2,7 +2,8 @@
 
 USD enforcement uses returned usage and caller-supplied prices, so one response can
 overshoot the cap. Only a complete response is ever acted on: an Anthropic stream must
-reach message_stop, an OpenAI response must have status completed.
+reach message_stop, and its tool calls run only if it stopped for them; an OpenAI response
+must have status completed.
 """
 
 from __future__ import annotations
@@ -46,7 +47,9 @@ def anthropic_message(
     unfinished one is never acted on (see :func:`anthropic_incomplete`): the usage it
     reported is kept, its billing unresolved, and it comes back as the partial message
     (empty if none started) with ``status`` ``incomplete`` and the reason in
-    ``incomplete_details``, as OpenAI marks its own.
+    ``incomplete_details``, as OpenAI marks its own. A message that didn't stop for tool
+    use also carries ``input_json``: each tool call's input exactly as it streamed, by
+    content index, since the SDK's parse of an unfinished one drops what doesn't parse.
 
     Args:
         client: The Anthropic client.
@@ -59,15 +62,21 @@ def anthropic_message(
     """
     with client.messages.stream(**request) as stream:
         stopped, failure = False, None
+        fragments: dict[str, str] = {}
         try:
             for event in stream:
                 stopped = stopped or event.type == 'message_stop'
+                if event.type == 'content_block_delta' and event.delta.type == 'input_json_delta':
+                    index = str(event.index)
+                    fragments[index] = fragments.get(index, '') + event.delta.partial_json
         # Anything raised while reading (httpx or httpx2 transport errors, by SDK
         # version, or an error event) ends this response.
         except Exception as exc:  # noqa: BLE001
             failure = type(exc).__name__
         snapshot = _snapshot(stream)
     message = snapshot.model_dump(exclude_none=True) if snapshot is not None else {}
+    if fragments and message.get('stop_reason') != 'tool_use':
+        message['input_json'] = fragments
     if failure or not stopped or snapshot is None:
         _incomplete(tracker, message, prices)
         reason = (
@@ -84,6 +93,18 @@ def anthropic_incomplete(message: dict[str, Any]) -> str | None:
     if message.get('status') != 'incomplete':
         return None
     return message['incomplete_details']['reason']
+
+
+def anthropic_unfinished_calls(message: dict[str, Any]) -> str | None:
+    """Why a complete *message*'s tool calls must not run, or None if they may.
+
+    Its tool calls are whole only if it stopped for tool use; one cut at max_tokens may
+    hold a call whose input was parsed from a fragment.
+    """
+    stop = message.get('stop_reason')
+    if stop == 'tool_use' or not any(part['type'] == 'tool_use' for part in message['content']):
+        return None
+    return f'Response stopped ({stop}) before its tool calls were complete'
 
 
 def openai_incomplete(response: dict[str, Any]) -> str | None:

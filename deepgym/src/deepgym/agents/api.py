@@ -39,6 +39,7 @@ from deepgym.agents.providers import (
     account,
     anthropic_incomplete,
     anthropic_message,
+    anthropic_unfinished_calls,
     api_error,
     openai_incomplete,
     validate_budget,
@@ -238,6 +239,8 @@ class AnthropicToolAgent:
                 stop = response.get('stop_reason')
                 if stop == 'refusal':
                     return episode.result('refusal', text)
+                if error := anthropic_unfinished_calls(response):
+                    return episode.result('error', text, error=error)
                 calls = [part for part in content if part['type'] == 'tool_use']
                 if not calls:
                     if stop in {'max_tokens', 'pause_turn'}:

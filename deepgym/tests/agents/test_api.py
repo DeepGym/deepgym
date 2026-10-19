@@ -344,6 +344,47 @@ def test_anthropic_unfinished_stream_never_acts(app, monkeypatch, failure):
     assert payload['content'][0]['name'] == 'tracker'
 
 
+@pytest.mark.parametrize('finished', [True, False])
+def test_anthropic_tool_calls_cut_short_never_run(app, monkeypatch, finished):
+    raw = '{"method": "POST", "path": "/rest/bug/1/comment", "body": {"comment": "unfini'
+    events = [
+        START,
+        {'type': 'content_block_start', 'index': 0, 'content_block': use('tracker', {})},
+        {
+            'type': 'content_block_delta',
+            'index': 0,
+            'delta': {'type': 'input_json_delta', 'partial_json': raw},
+        },
+    ]
+    if finished:  # a whole message, stopped at the output limit mid-call
+        events += [
+            {'type': 'content_block_stop', 'index': 0},
+            {
+                'type': 'message_delta',
+                'delta': {'stop_reason': 'max_tokens'},
+                'usage': {'output_tokens': 5},
+            },
+            {'type': 'message_stop'},
+        ]
+    anthropic(
+        monkeypatch,
+        b''.join(f'event: {e["type"]}\ndata: {json.dumps(e)}\n\n'.encode() for e in events),
+    )
+    session, initial = started(app)
+    with session:
+        result = AnthropicToolAgent('test').run(session, initial, task='T', budget=UNLIMITED)
+
+    assert result.termination_reason == 'error'
+    assert app.requests == [] and not result.trajectory.steps  # the cut call never ran
+    payload = json.loads(result.messages[-1].content)
+    assert payload['input_json'] == {'0': raw}  # every fragment received, kept
+    if finished:
+        assert payload['stop_reason'] == 'max_tokens' and 'max_tokens' in result.error
+        assert payload['usage']['output_tokens'] == 5 and result.usage.output_tokens == 5
+    else:
+        assert payload['status'] == 'incomplete'
+
+
 @pytest.mark.parametrize('details', [{'reason': 'max_output_tokens'}, None])
 def test_openai_incomplete_response_never_acts(app, monkeypatch, details):
     body = response(function_call('tracker', GET_BUG), status='incomplete')

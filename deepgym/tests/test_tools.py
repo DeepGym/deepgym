@@ -578,6 +578,27 @@ def test_tool_headers_cannot_reroute_or_reframe_requests(headers: dict) -> None:
 
 
 @pytest.mark.parametrize(
+    'value',
+    [
+        'café',  # http.client sends it as Latin-1, bytes no UTF-8 search finds
+        'Basic ' + base64.b64encode('admin:café'.encode('latin-1')).decode(),
+        'Basic ' + base64.b64encode('admin:café'.encode()).decode(),
+    ],
+)
+def test_header_credentials_must_be_ascii(value: str) -> None:
+    name = 'Authorization' if value.startswith('Basic') else 'X-Key'
+    with pytest.raises(ValidationError, match='ASCII') as invalid:
+        HttpTool(
+            name='t',
+            description='d',
+            base_url='http://127.0.0.1',
+            routes=ROUTES,
+            headers={name: value},
+        )
+    assert 'caf' not in str(invalid.value) and value not in str(invalid.value)
+
+
+@pytest.mark.parametrize(
     'path',
     [
         '/rest/bug/1@evil.example',

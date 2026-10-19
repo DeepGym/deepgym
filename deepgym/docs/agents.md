@@ -98,8 +98,9 @@ Header values are credentials: masked in dumps, environment fingerprints and val
 errors, and every tool's are redacted from every call's record and result, including
 forms an app may echo (escaped, percent-encoded, base64, a Basic pair or password, any
 letter case) and the cookies it sets. A body that isn't UTF-8 comes back base64-encoded,
-with its bytes redacted. Pattern redaction cannot catch every transformation, so declare
-only routes that never return credentials. An environment with tools allows exactly
+with its bytes redacted. Header values must be ASCII, a Basic pair inside one too, so the
+bytes an app sees match what redaction looks for. Pattern redaction cannot catch every
+transformation, so declare only routes that never return credentials. An environment with tools allows exactly
 `tool` and `done`. Tools are trusted configuration, so an inline environment sent to the
 sessions API cannot declare any; a registered environment can, in code or in its
 folder's `metadata.json` (`tools`, `allowed_actions`, `root_tool_settle`).

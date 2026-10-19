@@ -57,6 +57,7 @@ _RESERVED_HEADERS = _METHOD_OVERRIDES | {
 }  # fmt: skip
 # Response headers carrying credentials the app issues (a session cookie, say).
 _ISSUED_CREDENTIALS = frozenset({'set-cookie', 'set-cookie2'})
+_AUTHORIZATION = frozenset({'authorization', 'proxy-authorization'})
 _URL_SAFE = str.maketrans('+/', '-_')
 # A base64 run shorter than one 4-character group also turns up in unrelated text.
 _MIN_BASE64 = 4
@@ -99,7 +100,7 @@ def _needles(name: str, value: str) -> set[str]:
     credentials after an Authorization scheme, a Basic pair and its password, each Cookie
     value."""
     needles = {value}
-    if name.lower() in ('authorization', 'proxy-authorization'):
+    if name.lower() in _AUTHORIZATION:
         scheme, _, credentials = value.partition(' ')
         needles.add(credentials.strip())
         if scheme.lower() == 'basic':
@@ -111,6 +112,23 @@ def _needles(name: str, value: str) -> set[str]:
     if name.lower() == 'cookie':
         needles |= {part.partition('=')[2].strip() for part in value.split(';')}
     return {needle for needle in needles if needle}
+
+
+def _ascii(name: str, value: str) -> bool:
+    """Whether credential header *value* is ASCII, a Basic pair inside it too.
+
+    http.client sends a header as Latin-1, and an app decodes a Basic pair as it likes, so
+    the bytes of a non-ASCII credential differ from the UTF-8 that redaction looks for.
+    """
+    if not value.isascii():
+        return False
+    scheme, _, credentials = value.partition(' ')
+    if name.lower() not in _AUTHORIZATION or scheme.lower() != 'basic':
+        return True
+    try:
+        return base64.b64decode(credentials.strip(), validate=True).isascii()
+    except ValueError:  # binascii.Error
+        return False
 
 
 def _forms(needle: str) -> set[str]:
@@ -284,7 +302,7 @@ class HttpTool(BaseModel):
     @classmethod
     def check_headers(cls, value: dict[str, SecretStr]) -> dict[str, SecretStr]:
         """Accept distinct token names, none that reroutes or reframes a request, with
-        plain values."""
+        plain ASCII values (see :func:`_ascii`)."""
         if len({name.lower() for name in value}) != len(value):
             raise ValueError('header names must differ in more than letter case')
         for name, secret in value.items():
@@ -293,12 +311,13 @@ class HttpTool(BaseModel):
                 not _TOKEN.fullmatch(name)
                 or name.lower() in _RESERVED_HEADERS
                 or not text
+                or not _ascii(name, text)
                 or any((char < ' ' and char != '\t') or char == '\x7f' for char in text)
             ):
                 raise ValueError(
                     f'header {name!r} must be a token name other than '
-                    f'{sorted(_RESERVED_HEADERS)}, with a non-empty value and no control '
-                    'characters'
+                    f'{sorted(_RESERVED_HEADERS)}, with a non-empty ASCII value (a Basic pair '
+                    'too) and no control characters'
                 )
         return value
 

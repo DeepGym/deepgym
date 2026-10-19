@@ -178,10 +178,11 @@ def sdk(monkeypatch):
 
 
 def anthropic_response(content, **kwargs):
+    calls = any(part.get('type') == 'tool_use' for part in content)
     return {
         'usage': {'input_tokens': 100, 'output_tokens': 10},
         'content': content,
-        'stop_reason': 'end_turn',
+        'stop_reason': 'tool_use' if calls else 'end_turn',
         **kwargs,
     }
 
@@ -875,6 +876,39 @@ def test_anthropic_unfinished_stream_never_acts(monkeypatch, failure):
         0 if failure == 'empty' else 100
     )  # observed usage kept once
     assert result.cost.usd is None and 'billing unresolved' in result.cost.provenance
+
+
+def test_anthropic_actions_cut_at_max_tokens_never_run(monkeypatch):
+    anthropic = pytest.importorskip('anthropic')
+    httpx = _sdk_transport()
+    limit = {'type': 'message_delta', 'delta': {'stop_reason': 'max_tokens'}, 'usage': OUT}
+    text = (
+        {'type': 'content_block_start', 'index': 0, 'content_block': {'type': 'text', 'text': ''}},
+        {'type': 'content_block_stop', 'index': 0},
+        {'type': 'message_delta', 'delta': {'stop_reason': 'end_turn'}, 'usage': OUT},
+        {'type': 'message_stop'},
+    )
+    bodies = iter([_sse(START, *CLICK_EVENTS, limit, {'type': 'message_stop'}), _sse(START, *text)])
+
+    def handler(request):
+        return httpx.Response(
+            200, headers={'content-type': 'text/event-stream'}, content=next(bodies)
+        )
+
+    real = anthropic.Anthropic
+
+    def client(**kwargs):
+        transport = httpx.MockTransport(handler)
+        return real(api_key='test', http_client=httpx.Client(transport=transport), max_retries=0)
+
+    monkeypatch.setattr(anthropic, 'Anthropic', client)
+    session = FakeSession()
+    result = AnthropicComputerAgent('test').run(
+        session, session.observation, task='Task', budget=Budget()
+    )
+    assert result.termination_reason == 'error' and 'max_tokens' in result.error
+    assert not result.trajectory.steps  # the click it was cut in never ran
+    assert result.usage.output_tokens == 5  # the response is still accounted
 
 
 def test_anthropic_completed_stream_acts(monkeypatch):

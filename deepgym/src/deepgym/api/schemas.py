@@ -217,10 +217,14 @@ class CreateSessionRequest(BaseModel):
             raise ValueError('image and snapshot cannot be set over the API')
         if not isinstance(v, str) and v.root_service_start:
             raise ValueError('root_service_start cannot be set over the API')
+        if not isinstance(v, str) and v.root_tool_settle:
+            raise ValueError('root_tool_settle cannot be set over the API')
         if not isinstance(v, str) and v.cli_provider_egress:
             raise ValueError('cli_provider_egress cannot be set over the API')
         if not isinstance(v, str) and v.volumes:
             raise ValueError('volumes cannot be set over the API')
+        if not isinstance(v, str) and v.tools:
+            raise ValueError('tools cannot be set over the API')
         return v
 
 

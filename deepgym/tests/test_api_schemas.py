@@ -9,7 +9,7 @@ from deepgym.models import MultiTurnEnvironment
 
 
 @pytest.mark.parametrize('environment_type', ['multi-turn', 'computer-use'])
-@pytest.mark.parametrize('field', ['image', 'snapshot', 'root_service_start'])
+@pytest.mark.parametrize('field', ['image', 'snapshot', 'root_service_start', 'root_tool_settle'])
 def test_inline_session_rejects_privileged_configuration(
     environment_type: str,
     field: str,
@@ -67,4 +67,24 @@ def test_inline_api_cannot_mount_volumes(as_model: bool) -> None:
     if as_model:
         environment = MultiTurnEnvironment(**environment)
     with pytest.raises(ValidationError, match='volumes cannot be set over the API'):
+        CreateSessionRequest(environment=environment)
+
+
+@pytest.mark.parametrize('as_model', [False, True])
+def test_inline_api_cannot_declare_tools(as_model: bool) -> None:
+    environment = {
+        'task': 'task',
+        'allowed_actions': ['tool', 'done'],
+        'tools': [
+            {
+                'name': 'jenkins',
+                'description': 'Jenkins',
+                'base_url': 'http://127.0.0.1:8080',
+                'routes': [{'method': 'POST', 'path': '/scriptText'}],
+            }
+        ],
+    }
+    if as_model:
+        environment = MultiTurnEnvironment(**environment)
+    with pytest.raises(ValidationError, match='tools cannot be set over the API'):
         CreateSessionRequest(environment=environment)

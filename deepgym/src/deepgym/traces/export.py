@@ -16,7 +16,8 @@ Row shapes (``rows=``):
   ``message_index``: where in ``messages`` the reply that produced it is, shared by the
   actions of one turn. A trace with a turn that has no model messages has no whole
   conversation to train on and is skipped. In RL Parquet, ``action.events`` is a
-  list of JSON strings, preserving arbitrary nested CLI event shapes.
+  list of JSON strings, preserving arbitrary nested CLI event shapes, and a tool action's
+  ``action.arguments`` is one JSON string.
 
 Every row carries ``has_verdict``, and its ``score``/``reward`` and ``passed`` are null
 without one, so a failed sandbox or verifier never reads as a scored 0. ``only_valid``
@@ -196,6 +197,7 @@ def _write_parquet(records: Sequence[Row], out: Path, rows: RowShape) -> None:
                         'action': {
                             **step['action'],
                             'events': [json_text(event) for event in step['action']['events']],
+                            'arguments': json_text(step['action']['arguments']),
                         },
                     }
                     for step in record['steps']
@@ -243,6 +245,8 @@ def _schema(rows: RowShape) -> pa.Schema:
         ('path', pa.string()),
         ('amount', pa.int64()),
         ('events', pa.list_(pa.string())),
+        ('tool', pa.string()),
+        ('arguments', pa.string()),
     ])  # fmt: skip
     step = pa.struct([
         ('message_index', pa.int64()),

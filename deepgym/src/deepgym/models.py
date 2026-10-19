@@ -13,6 +13,7 @@ from typing import Any, Literal, get_args
 from pydantic import BaseModel, ConfigDict, Field, JsonValue, field_validator, model_validator
 
 from deepgym.exceptions import InvalidScoreError
+from deepgym.tools import HttpTool
 
 logger = logging.getLogger(__name__)
 
@@ -411,7 +412,7 @@ GuiActionType = Literal[
     'screenshot',
     'wait',
 ]
-ActionType = Literal[ShellActionType, GuiActionType, 'done', 'cli']
+ActionType = Literal[ShellActionType, GuiActionType, 'done', 'cli', 'tool']
 
 GUI_ACTIONS: frozenset[GuiActionType] = frozenset(get_args(GuiActionType))
 
@@ -425,6 +426,7 @@ class Action(BaseModel):
 
     Shell actions (code, bash, write_file) run in the session work directory.
     GUI actions drive the desktop; coordinates are screenshot pixels.
+    Tool actions call one of the environment's declared API tools (see :mod:`deepgym.tools`).
     """
 
     action_type: ActionType = 'code'
@@ -455,6 +457,12 @@ class Action(BaseModel):
     amount: int = Field(default=1, ge=1, le=60)
     """Scroll clicks, or seconds for wait."""
 
+    tool: str | None = None
+    """Name of the declared tool a tool action calls."""
+
+    arguments: dict[str, JsonValue] = Field(default_factory=dict)
+    """A tool action's arguments; the session checks them against the tool's routes."""
+
     @model_validator(mode='after')
     def check_arguments(self) -> Action:
         """Reject actions missing the arguments their type needs."""
@@ -467,6 +475,8 @@ class Action(BaseModel):
             raise ValueError(f'scroll content must be one of {sorted(_SCROLL_DIRECTIONS)}')
         if kind in _TEXT_ACTIONS and not self.content:
             raise ValueError(f'{kind} needs content')
+        if kind == 'tool' and not self.tool:
+            raise ValueError('tool needs the name of a declared tool')
         if kind == 'write_file':
             rel = PurePosixPath(self.path or '')
             if not rel.parts or rel.is_absolute() or '..' in rel.parts:
@@ -559,6 +569,23 @@ class MultiTurnEnvironment(BaseModel):
     allowed_actions: frozenset[ActionType] = frozenset({'code', 'bash', 'write_file', 'done'})
     """Action types the agent may use. Anything else is rejected."""
 
+    tools: tuple[HttpTool, ...] = ()
+    """API tools that tool actions call, run in the sandbox's offline namespace (see
+    :mod:`deepgym.tools`). Trusted environment configuration only; never accept from an agent.
+    Declaring any needs allowed_actions to be exactly ``tool`` and ``done``: a tool-calling
+    agent ends the episode only by an explicit ``done``, and no shell, file or GUI action
+    runs as the agent user beside the tool runner, which holds the tools' credentials."""
+
+    root_tool_settle: str = ''
+    """Trusted reconciliation of the tool writes an episode sent: the app may still apply
+    one after answering it (a queued job) or after its runner was stopped. Runs before the
+    final verifier whenever a write may have reached the app, as root in the offline
+    namespace (as the session user on LocalBackend, which isolates nothing), with
+    setup_timeout. It must exit 0 only once the app has applied or abandoned every request
+    it received: stop its server, wait for its queue to drain, or check the writes in its
+    database. Without it, or if it fails, the episode gets no verdict, whatever its score.
+    Never accept this from an agent."""
+
     desktop: bool = False
     """Start a desktop (Xvfb + xfce) and return screenshots. Needs the Daytona backend."""
 
@@ -591,6 +618,29 @@ class MultiTurnEnvironment(BaseModel):
             raise ValueError('GUI actions need desktop=True')
         if self.cli_provider_egress and not self.allowed_actions & {'bash', 'cli'}:
             raise ValueError('cli_provider_egress requires bash or cli in allowed_actions')
+        return self
+
+    @model_validator(mode='after')
+    def check_tools(self) -> MultiTurnEnvironment:
+        """Require unique tool names, tools exactly when tool actions are allowed, no other
+        action beside them but done, and no step verifier beside tools that write."""
+        names = [tool.name for tool in self.tools]
+        if len(set(names)) != len(names):
+            raise ValueError(f'tool names must be unique, got {names}')
+        if self.tools and self.allowed_actions != {'tool', 'done'}:
+            raise ValueError(
+                'tools need allowed_actions to be exactly tool and done: no other action may '
+                'run beside the tool runner and its credentials'
+            )
+        if 'tool' in self.allowed_actions and not self.tools:
+            raise ValueError('tool actions need declared tools')
+        if self.step_verifier_code and any(
+            route.method != 'GET' for tool in self.tools for route in tool.routes
+        ):
+            raise ValueError(
+                'a step verifier cannot run beside tools that write: their writes settle '
+                'only once the episode ends (see root_tool_settle)'
+            )
         return self
 
 

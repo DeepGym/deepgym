@@ -33,6 +33,7 @@ from deepgym.models import (
     is_verdict,
 )
 from deepgym.session import Session, StepResult
+from deepgym.tools import HttpTool
 from deepgym.traces.schema import (
     TRACE_SCHEMA_VERSION,
     Provenance,
@@ -101,6 +102,11 @@ class TracedSession:
     def done(self) -> bool:
         """Whether the episode has ended."""
         return self._session.done
+
+    @property
+    def tools(self) -> tuple[HttpTool, ...]:
+        """The API tools the environment declares, for tool-calling agents."""
+        return self._session.tools
 
     @property
     def trajectory(self) -> Trajectory:

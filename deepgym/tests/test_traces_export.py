@@ -106,13 +106,24 @@ def _trace_records(data: dict) -> list[tuple]:
 
 
 def _rl_records(row: dict) -> list[tuple]:
-    """(turn, action, observation, reward) of each step of an RL row; a turn is its reply."""
+    """(turn, action, observation, reward) of each step of an RL row; a turn is its reply.
+
+    Parquet holds a tool action's arguments as one JSON string.
+    """
     replies = sorted({step['message_index'] for step in row['steps']})
     return [
-        (replies.index(step['message_index']) + 1, Action.model_validate(step['action']),
+        (replies.index(step['message_index']) + 1, Action.model_validate(_decoded(step['action'])),
          step['observation'], step['reward'])
         for step in row['steps']
     ]  # fmt: skip
+
+
+def _decoded(action: dict) -> dict:
+    arguments = action['arguments']
+    return {
+        **action,
+        'arguments': json.loads(arguments) if isinstance(arguments, str) else arguments,
+    }
 
 
 def _atif_records(document: dict) -> list[tuple]:

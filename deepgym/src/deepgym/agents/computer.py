@@ -21,6 +21,17 @@ from deepgym.agents.base import (
     TokenPrices,
     Usage,
 )
+from deepgym.agents.providers import (
+    ANTHROPIC_MAX_TOKENS,
+    SDK_RETRIES,
+    account,
+    anthropic_incomplete,
+    anthropic_message,
+    anthropic_unfinished_calls,
+    api_error,
+    openai_incomplete,
+    validate_budget,
+)
 from deepgym.exceptions import ActionError, DeepGymError
 from deepgym.models import Action, Observation
 from deepgym.session import Session
@@ -46,97 +57,6 @@ def _step(session: Session, action: Action, tracker: BudgetTracker) -> Observati
     observation = session.step(action, timeout=tracker.request_timeout).observation
     tracker.check()
     return observation
-
-
-def _snapshot(stream: Any) -> Any:
-    """The accumulated message, or None when no message_start arrived (the SDK asserts then)."""
-    try:
-        return stream.current_message_snapshot
-    except AssertionError:
-        return None
-
-
-def _incomplete(tracker: BudgetTracker, snapshot: Any, prices: TokenPrices | None) -> None:
-    """Keep the usage an unfinished stream reported, with the total bill marked unresolved."""
-    data = snapshot.model_dump(exclude_none=True).get('usage') if snapshot is not None else None
-    usage = _anthropic_usage(data) if isinstance(data, dict) else Usage()
-    unresolved = 'incomplete streamed response: partial usage, billing unresolved'
-    tracker.add_usage(usage, Cost(provenance=unresolved))
-
-
-def _account(
-    tracker: BudgetTracker,
-    data: dict[str, Any] | None,
-    prices: TokenPrices | None,
-    provider: Literal['anthropic', 'openai'],
-) -> None:
-    try:
-        if not isinstance(data, dict):
-            raise ValueError('provider did not return token usage')
-        usage = _anthropic_usage(data) if provider == 'anthropic' else _openai_usage(data)
-    except (KeyError, TypeError, ValueError):
-        tracker.add_usage(
-            Usage(), Cost(provenance=f'{provider} usage unavailable; billing unknown')
-        )
-        raise
-    tracker.add_usage(
-        usage,
-        prices.estimate(usage)
-        if prices
-        else Cost(
-            provenance='provider token usage; prices not supplied',
-        ),
-    )
-    tracker.check()
-
-
-def _validate_budget(budget: Budget, prices: TokenPrices | None) -> None:
-    if budget.max_cost_usd is not None and prices is None:
-        raise ValueError('A USD budget requires explicit TokenPrices with source provenance')
-
-
-def _anthropic_usage(data: dict[str, Any]) -> Usage:
-    return Usage(
-        input_tokens=data['input_tokens'],
-        output_tokens=data['output_tokens'],
-        cache_read_tokens=data.get('cache_read_input_tokens') or 0,
-        cache_write_tokens=data.get('cache_creation_input_tokens') or 0,
-    )
-
-
-def _openai_usage(data: dict[str, Any]) -> Usage:
-    details = data.get('input_tokens_details') or {}
-    cached = details.get('cached_tokens') or 0
-    written = details.get('cache_write_tokens') or 0
-    return Usage(
-        input_tokens=data['input_tokens'] - cached - written,
-        output_tokens=data['output_tokens'],
-        cache_read_tokens=cached,
-        cache_write_tokens=written,
-    )
-
-
-# The SDK retries connection drops, 429s and 5xx with backoff; one blip shouldn't end an
-# hours-long episode. A retried request may be billed twice; usage counts only answers.
-_SDK_RETRIES = 4
-ANTHROPIC_MAX_TOKENS = (
-    128_000  # Opus 5.5's maximum output (the API states it); streamed, as the SDK requires
-)
-
-
-def _api_error(exc: Exception) -> str:
-    """Describe a provider API error by class, status and the provider's own validation message.
-
-    Only the structured error body is used, never the exception text, which may echo request
-    content.
-    """
-    status = getattr(exc, 'status_code', None)
-    body = getattr(exc, 'body', None)
-    error = body.get('error', body) if isinstance(body, dict) else None
-    detail = error.get('message') if isinstance(error, dict) else None
-    status_text = f' {status}' if status else ''
-    detail_text = f': {str(detail)[:300]}' if detail else ''
-    return f'{type(exc).__name__}{status_text}{detail_text}'
 
 
 class AnthropicComputerAgent:
@@ -171,7 +91,7 @@ class AnthropicComputerAgent:
             ImportError: If the optional anthropic extra is absent.
             ValueError: If required prices or the initial screenshot are missing.
         """
-        _validate_budget(budget, self.prices)
+        validate_budget(budget, self.prices)
         screenshot = _image(initial.screenshot)
         import anthropic
 
@@ -188,7 +108,7 @@ class AnthropicComputerAgent:
                 ],
             }
         ]
-        client = anthropic.Anthropic(max_retries=_SDK_RETRIES)
+        client = anthropic.Anthropic(max_retries=SDK_RETRIES)
         try:
             while True:
                 if session.done:
@@ -204,7 +124,10 @@ class AnthropicComputerAgent:
                     if self.effort
                     else {}
                 )
-                with client.messages.stream(
+                response = anthropic_message(
+                    client,
+                    tracker,
+                    self.prices,
                     model=self.model,
                     max_tokens=self.max_tokens,
                     cache_control={'type': 'ephemeral'},
@@ -218,31 +141,17 @@ class AnthropicComputerAgent:
                     ],
                     messages=messages,
                     timeout=tracker.request_timeout,
-                ) as stream:
-                    stopped, failure = False, None
-                    try:  # consume every event; only a received message_stop completes a response
-                        for event in stream:
-                            stopped = stopped or event.type == 'message_stop'
-                    # Anything raised while reading (httpx or httpx2 transport errors, by SDK
-                    # version, or an error event) ends this response.
-                    except Exception as exc:  # noqa: BLE001
-                        failure = type(exc).__name__
-                    snapshot = _snapshot(stream)
-                if failure or not stopped or snapshot is None:
-                    _incomplete(tracker, snapshot, self.prices)
-                    error = (
-                        f'Response stream failed: {failure}'
-                        if failure
-                        else 'Response stream ended before completion'
-                    )
+                )
+                if error := anthropic_incomplete(response):
                     return tracker.result(session, 'error', error=error)
-                response = snapshot.model_dump(exclude_none=True)
-                _account(tracker, response.get('usage'), self.prices, 'anthropic')
+                account(tracker, response.get('usage'), self.prices, 'anthropic')
                 content = response['content']
                 messages.append({'role': 'assistant', 'content': content})
                 text = ' '.join(part['text'] for part in content if part['type'] == 'text')
                 if response.get('stop_reason') == 'refusal':
                     return tracker.result(session, 'refusal', text)
+                if error := anthropic_unfinished_calls(response):
+                    return tracker.result(session, 'error', text, error=error)
                 calls = [part for part in content if part['type'] == 'tool_use']
                 if not calls:
                     if response.get('stop_reason') in {'max_tokens', 'pause_turn'}:
@@ -302,7 +211,7 @@ class AnthropicComputerAgent:
         except anthropic.APIError as exc:
             tracker.add_usage(Usage(), Cost(provenance='Anthropic failed request; billing unknown'))
             reason = 'time_budget' if tracker.remaining_seconds <= 0 else 'error'
-            return tracker.result(session, reason, error=f'Anthropic {_api_error(exc)}')
+            return tracker.result(session, reason, error=f'Anthropic {api_error(exc)}')
         except (ValueError, KeyError, TypeError) as exc:
             return tracker.result(session, 'error', error=f'Invalid Anthropic response: {exc}')
         finally:
@@ -338,7 +247,7 @@ class OpenAIComputerAgent:
             ImportError: If the optional openai extra is absent.
             ValueError: If required prices or the initial screenshot are missing.
         """
-        _validate_budget(budget, self.prices)
+        validate_budget(budget, self.prices)
         screenshot = _image(initial.screenshot)
         import openai
 
@@ -353,7 +262,7 @@ class OpenAIComputerAgent:
             }
         ]
         previous: str | None = None
-        client = openai.OpenAI(max_retries=_SDK_RETRIES)
+        client = openai.OpenAI(max_retries=SDK_RETRIES)
         try:
             while True:
                 if session.done:
@@ -368,7 +277,7 @@ class OpenAIComputerAgent:
                     **({'reasoning': {'effort': self.effort}} if self.effort else {}),
                     timeout=tracker.request_timeout,
                 ).model_dump(exclude_none=True)
-                _account(tracker, response.get('usage'), self.prices, 'openai')
+                account(tracker, response.get('usage'), self.prices, 'openai')
                 previous = response['id']
                 output = response['output']
                 parts = [
@@ -388,13 +297,8 @@ class OpenAIComputerAgent:
                         'safety_check',
                         error=('Provider safety checks require approval; no actions executed'),
                     )
-                if response.get('status') != 'completed':
-                    # Never act on, or blindly continue, a partial response; keep its reason.
-                    details = response.get('incomplete_details') or {}
-                    reason = details.get('reason') or response.get('status')
-                    return tracker.result(
-                        session, 'error', error=f'Response did not complete: {reason}'
-                    )
+                if error := openai_incomplete(response):
+                    return tracker.result(session, 'error', error=error)
                 if not calls:
                     return tracker.result(session, 'completed', text)
                 items = []
@@ -441,7 +345,7 @@ class OpenAIComputerAgent:
         except openai.APIError as exc:
             tracker.add_usage(Usage(), Cost(provenance='OpenAI failed request; billing unknown'))
             reason = 'time_budget' if tracker.remaining_seconds <= 0 else 'error'
-            return tracker.result(session, reason, error=f'OpenAI {_api_error(exc)}')
+            return tracker.result(session, reason, error=f'OpenAI {api_error(exc)}')
         except (ValueError, KeyError, TypeError) as exc:
             return tracker.result(session, 'error', error=f'Invalid OpenAI response: {exc}')
         finally:

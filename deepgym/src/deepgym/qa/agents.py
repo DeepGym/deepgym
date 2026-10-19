@@ -3,7 +3,7 @@
 A verifier must give them nothing. One that pays for being busy, or for random
 clicks and commands, rewards a policy for activity instead of the outcome.
 Their shell actions are harmless (``ls``, ``print``, notes files), because a local
-session runs them on the host.
+session runs them on the host; their tool calls only read (GET on a declared route).
 """
 
 from __future__ import annotations
@@ -11,6 +11,7 @@ from __future__ import annotations
 import random
 
 from deepgym.models import Action, ActionType, MultiTurnEnvironment
+from deepgym.tools import PLACEHOLDER
 
 _SCREEN = (1024, 768)
 """Daytona's default desktop, in screenshot pixels."""
@@ -29,7 +30,8 @@ def do_everything(env: MultiTurnEnvironment) -> list[Action]:
     """Every allowed action type in turn, with fixed arguments, for the whole step budget."""
     kinds = _kinds(env)
     return [
-        _action(kinds[step % len(kinds)], step, None) for step in range(_control_steps(env, kinds))
+        _action(env, kinds[step % len(kinds)], step, None)
+        for step in range(_control_steps(env, kinds))
     ]
 
 
@@ -37,7 +39,9 @@ def random_agent(env: MultiTurnEnvironment) -> list[Action]:
     """Seeded random actions of the allowed types, for the whole step budget."""
     rng = random.Random(_SEED)
     kinds = _kinds(env)
-    return [_action(rng.choice(kinds), step, rng) for step in range(_control_steps(env, kinds))]
+    return [
+        _action(env, rng.choice(kinds), step, rng) for step in range(_control_steps(env, kinds))
+    ]
 
 
 def _control_steps(env: MultiTurnEnvironment, kinds: list[ActionType]) -> int:
@@ -51,11 +55,22 @@ def _kinds(env: MultiTurnEnvironment) -> list[ActionType]:
     return sorted(env.allowed_actions - {'done'}) or ['done']
 
 
-def _action(kind: ActionType, step: int, rng: random.Random | None) -> Action:
+def _action(
+    env: MultiTurnEnvironment, kind: ActionType, step: int, rng: random.Random | None
+) -> Action:
     """One harmless action of *kind*: fixed arguments without *rng*, random ones with it."""
 
     def pick(options: tuple[str, ...]) -> str:
         return rng.choice(options) if rng else options[step % len(options)]
+
+    def read() -> Action:
+        """A GET on a declared route, each placeholder filled with 1; done if none reads."""
+        reads = [(t.name, r.path) for t in env.tools for r in t.routes if r.method == 'GET']
+        if not reads:
+            return Action(action_type='done')
+        name, path = rng.choice(reads) if rng else reads[step % len(reads)]
+        arguments = {'method': 'GET', 'path': PLACEHOLDER.sub('1', path)}
+        return Action(action_type=kind, tool=name, arguments=arguments)
 
     def point() -> tuple[int, int]:
         if rng is None:
@@ -81,5 +96,7 @@ def _action(kind: ActionType, step: int, rng: random.Random | None) -> Action:
             return Action(action_type=kind, x=x, y=y, to_x=to_x, to_y=to_y)
         case 'click' | 'double_click' | 'right_click' | 'move':
             return Action(action_type=kind, x=x, y=y)
+        case 'tool':
+            return read()
         case _:  # screenshot, wait, done
             return Action(action_type=kind)

@@ -11,6 +11,7 @@ from pydantic import BaseModel, ConfigDict, Field
 from deepgym.exceptions import DeepGymError
 from deepgym.models import Observation, Trajectory
 from deepgym.session import Session
+from deepgym.traces.schema import TraceMessage
 
 TerminationReason = Literal[
     'completed',
@@ -95,6 +96,10 @@ class AgentResult(BaseModel):
     error: str | None = None
     cli_version: str | None = None
     """Installed CLI version observed by the sandbox supervisor via --version."""
+    messages: tuple[TraceMessage, ...] = ()
+    """Every model message as exchanged with the provider, for agents that record them (the
+    API tool agents): the system prompt, the task, each full response with its usage, and
+    each tool result. Complete however the run ended; empty for other agents."""
 
 
 @runtime_checkable

@@ -1,11 +1,12 @@
 """Tests for deepgym.registry -- environment registry loading."""
 
+import json
 from pathlib import Path
 
 import pytest
 
 from deepgym import registry as registry_module
-from deepgym.models import Environment
+from deepgym.models import Environment, MultiTurnEnvironment
 from deepgym.registry import (
     _read_registry,
     list_environments,
@@ -97,6 +98,36 @@ class TestLoadEnvironment:
         env = registry_module._load_env_from_dir(tmp_path)
 
         assert env.image == 'python:3.11-slim'
+
+    def test_multi_turn_metadata_declares_tools_and_their_settling(self, tmp_path: Path) -> None:
+        tools = [
+            {
+                'name': 'tracker',
+                'description': 'Bug tracker REST API.',
+                'base_url': 'http://127.0.0.1:8080',
+                'routes': [{'method': 'POST', 'path': '/rest/bug/{id}/comment'}],
+                'headers': {'X-API-KEY': 'app-key'},
+            }
+        ]
+        metadata = {
+            'type': 'multi-turn',
+            'allowed_actions': ['tool', 'done'],
+            'tools': tools,
+            'root_tool_settle': 'service tracker stop',
+        }
+        (tmp_path / 'task.md').write_text('Triage bug 1.\n', encoding='utf-8')
+        (tmp_path / 'verifier.py').write_text('print(1.0)\n', encoding='utf-8')
+        (tmp_path / 'metadata.json').write_text(json.dumps(metadata), encoding='utf-8')
+
+        env = registry_module._load_env_from_dir(tmp_path)
+
+        assert isinstance(env, MultiTurnEnvironment)
+        assert env.allowed_actions == {'tool', 'done'}
+        assert env.root_tool_settle == 'service tracker stop'
+        (declared,) = env.tools
+        assert declared.name == 'tracker'
+        assert declared.headers['X-API-KEY'].get_secret_value() == 'app-key'
+        assert 'metadata.json' not in env.files  # the key never reaches the work directory
 
     def test_load_humaneval_task_id_with_slash_alias(
         self,

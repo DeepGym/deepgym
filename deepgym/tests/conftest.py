@@ -5,7 +5,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
-from collections.abc import Mapping
+from collections.abc import Iterator, Mapping
 from pathlib import Path
 
 import pytest
@@ -14,6 +14,7 @@ from deepgym import solution_runtime
 from deepgym.core import DeepGym
 from deepgym.models import Environment
 from deepgym.sandboxes import ExecResult
+from tests.http_app import App
 
 # ---------------------------------------------------------------------------
 # Paths
@@ -168,6 +169,14 @@ class RunnerSandbox:
 
     def delete(self) -> None:
         shutil.rmtree(self.root, ignore_errors=True)
+
+
+@pytest.fixture
+def app() -> Iterator[App]:
+    """A running loopback HTTP app for API tool tests, stopped afterwards."""
+    served = App()
+    yield served
+    served.close()
 
 
 @pytest.fixture()

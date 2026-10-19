@@ -1,5 +1,6 @@
 """Run provider agents over DeepGym sessions; SDKs are optional and imported on run."""
 
+from deepgym.agents.api import AnthropicToolAgent, OpenAIToolAgent
 from deepgym.agents.base import Agent, AgentResult, Budget, Cost, TokenPrices, Usage
 from deepgym.agents.cli import ClaudeCodeAgent, CodexAgent
 from deepgym.agents.computer import AnthropicComputerAgent, OpenAIComputerAgent
@@ -9,11 +10,13 @@ __all__ = [
     'Agent',
     'AgentResult',
     'AnthropicComputerAgent',
+    'AnthropicToolAgent',
     'Budget',
     'ClaudeCodeAgent',
     'CodexAgent',
     'Cost',
     'OpenAIComputerAgent',
+    'OpenAIToolAgent',
     'TokenPrices',
     'Usage',
     'SUPPORTED_CLIS',

@@ -81,6 +81,7 @@ from deepgym.sandboxes import (
     SandboxTimeoutError,
     sealed_path,
 )
+from deepgym.tools import HttpTool, lost_response, redact, run_command
 from deepgym.verifier_template import guard_crashes
 
 if TYPE_CHECKING:
@@ -177,6 +178,11 @@ class SessionBackend(Protocol):
         """Run a bash command in the work directory."""
         ...
 
+    def exec_input(self, command: str, data: str, timeout: float) -> ExecResult:
+        """Run a bash command as exec does, with *data* on its stdin; where the backend
+        isolates the agent, *data* is never in a file the session user can read."""
+        ...
+
     def write_file(self, path: str, content: bytes) -> None:
         """Write a file relative to the work directory.
 
@@ -234,10 +240,19 @@ class LocalBackend:
         Raises:
             TimeoutError: If the command exceeds *timeout* seconds.
         """
-        exit_code, stdout, stderr = self._run(command, timeout, env)
-        return ExecResult(exit_code, stdout + ('\n' + stderr if stderr else ''))
+        return _joined(self._run(command, timeout, env))
 
-    def _run(self, command: str, timeout: int, env: dict[str, str] | None) -> VerifierOutput:
+    def exec_input(self, command: str, data: str, timeout: float) -> ExecResult:
+        """Run *command* as :meth:`exec` does, with *data* on its stdin.
+
+        Raises:
+            TimeoutError: If the command exceeds *timeout* seconds.
+        """
+        return _joined(self._run(command, timeout, None, data))
+
+    def _run(
+        self, command: str, timeout: float, env: dict[str, str] | None, data: str | None = None
+    ) -> VerifierOutput:
         """Run *command* with bash in the temp directory, keeping stdout and stderr apart.
 
         Raises:
@@ -247,6 +262,7 @@ class LocalBackend:
         # Own process group, so background children die with the command or the session.
         proc = subprocess.Popen(
             ['bash', '-c', command],
+            stdin=None if data is None else subprocess.PIPE,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             text=True,
@@ -257,7 +273,7 @@ class LocalBackend:
         )
         self._groups.add(proc.pid)
         try:
-            stdout, stderr = proc.communicate(timeout=timeout)
+            stdout, stderr = proc.communicate(data, timeout=timeout)
         except subprocess.TimeoutExpired as exc:
             _kill_group(proc.pid)
             stdout, _ = proc.communicate()
@@ -592,6 +608,29 @@ class SandboxBackend:
             f'{self._offline}{self._as_agent} bash -c {shlex.quote(command)}',
             cwd=self._workdir,
             env={**self._clear, **self._agent_env, **(env or {})},
+            timeout=timeout,
+        )
+
+    def exec_input(self, command: str, data: str, timeout: float) -> ExecResult:
+        """Run *command* as the session user, offline, with *data* on its stdin.
+
+        Root uploads *data* to its private staging directory and opens it for the command,
+        so the session user gets the bytes but never a path to them, and deletes it after (a
+        command the timeout stops can leave it there, still root-only). The command gets
+        only :data:`~deepgym.sandboxes.TRUSTED_PATH`, never the image's environment.
+
+        Raises:
+            TimeoutError: If the command exceeds *timeout* seconds.
+        """
+        staged = f'{_STAGING_DIR}/{uuid4().hex}'
+        self._sandbox.upload(data.encode('utf-8'), staged)
+        return self._sandbox.exec(
+            trusted(
+                f'{self._offline}{self._as_agent} {command} < {staged}; '
+                f'status=$?; rm -f {staged}; exit $status'
+            ),
+            cwd=self._workdir,
+            env=self._clear,
             timeout=timeout,
         )
 
@@ -951,6 +990,8 @@ class Session:
         # The session's start, and the seconds spent applying the agent's actions since.
         self._opened = time.monotonic()
         self._acting_s = 0.0
+        # Request records of the tool writes sent, until settled (see score()).
+        self._unsettled: list[JsonValue] = []
         # One sandbox, one actor at a time: concurrent step/score/close calls queue up.
         self._lock = threading.Lock()
 
@@ -963,6 +1004,11 @@ class Session:
     def trajectory(self) -> Trajectory:
         """Everything that happened so far."""
         return self._trajectory
+
+    @property
+    def tools(self) -> tuple[HttpTool, ...]:
+        """The API tools the environment declares, for tool-calling agents."""
+        return self._env.tools
 
     @property
     def step_verdict(self) -> dict[str, object] | None:
@@ -1040,15 +1086,20 @@ class Session:
         verifier that times out after reading the agent's output gives the step a judged 0
         (``solution_timeout``) instead, and the episode goes on.
 
+        A tool action's arguments are checked against its declared tool before it counts
+        as a step. Only an explicit ``done`` ends an episode of tool actions: their output
+        is the app's, so a DONE line in it never does.
+
         ``timeout`` bounds agent execution and the following screenshot by one remaining
         wall-time deadline. Desktop overrides require SandboxBackend. Verifier time is
         separate; provider transport can take its own cleanup grace after a deadline.
 
         Raises:
             DeepGymError: If the session is not running.
-            ActionError: If the action is not allowed here, the desktop rejects it, or the
-                agent's own files are in the way of a write (the episode goes on, unless
-                they blocked the step's output file).
+            ActionError: If the action is not allowed here, names no declared tool or has
+                arguments its tool rejects, the desktop rejects it, or the agent's own files
+                are in the way of a write (the episode goes on, unless they blocked the
+                step's output file).
             VerifierError: If the step verifier fails, gives no verdict, or times out before
                 it reads the agent's output.
             SandboxError: If the sandbox fails to apply the action, take the screenshot or
@@ -1073,11 +1124,12 @@ class Session:
                 and not isinstance(self._backend, SandboxBackend)
             ):
                 raise ActionError('Desktop deadline overrides require SandboxBackend')
+            call = self._tool_call(action) if action.action_type == 'tool' else None
 
             self._step += 1
             self._step_verdict = None
             try:
-                output, exit_code = self._apply(action, timeout=_remaining(deadline))
+                output, exit_code = self._apply(action, timeout=_remaining(deadline), call=call)
             except ActionError:
                 raise
             except BaseException as exc:
@@ -1085,7 +1137,7 @@ class Session:
                 raise
             done = (
                 action.action_type == 'done'
-                or _signals_done(output)
+                or (action.action_type != 'tool' and _signals_done(output))
                 or (self._env.max_steps is not None and self._step >= self._env.max_steps)
             )
             observation: Observation | None = None
@@ -1207,6 +1259,11 @@ class Session:
         after reading the agent's output (``solution_timeout``), and a provider lifetime the
         agent's own actions ran out (see :meth:`_ran_out_the_clock`).
 
+        Every tool write sent may still change the app after its response (a queued job, a
+        write whose runner was stopped), so the environment's ``root_tool_settle`` settles
+        them first. If it can't (none declared, or it fails), the episode gets no verdict
+        (``unsettled_write``), whatever the verifier would say, and the verifier doesn't run.
+
         Raises:
             VerifierError: If, before it read the agent's output, the verifier timed out or
                 its output is not valid protocol JSON or isn't backed by its exit code; or its
@@ -1228,6 +1285,8 @@ class Session:
                     sandbox_id=self.sandbox_id,
                     error_type='no_verifier',
                 )
+            if unsettled := self._settle():
+                return _unsettled_result(unsettled, self._unsettled, self.sandbox_id)
             start = time.perf_counter()
             acted = bool(self._trajectory.steps)
             try:
@@ -1276,10 +1335,17 @@ class Session:
                 'Could not delete sandbox %s; it may still exist', self.sandbox_id, exc_info=True
             )
 
-    def _apply(self, action: Action, *, timeout: float | None = None) -> tuple[str, int | None]:
+    def _apply(
+        self,
+        action: Action,
+        *,
+        timeout: float | None = None,
+        call: dict[str, JsonValue] | None = None,
+    ) -> tuple[str, int | None]:
         """Execute *action*; return its text output and exit code (None if not a command).
 
-        Its time, however it ends, counts as the agent's (see :meth:`_ran_out_the_clock`).
+        A tool action sends *call*, from :meth:`_tool_call`. Its time, however it ends,
+        counts as the agent's (see :meth:`_ran_out_the_clock`).
         """
         bounded = timeout is not None
         timeout = (
@@ -1300,6 +1366,9 @@ class Session:
                     case 'write_file':
                         self._backend.write_file(str(action.path), action.content.encode('utf-8'))
                         return f'wrote {action.path}', None
+                    case 'tool':
+                        assert call is not None
+                        return self._send(call, timeout)
                     case 'wait':
                         time.sleep(min(action.amount, timeout))
                         return '', None
@@ -1314,6 +1383,74 @@ class Session:
             return '', None
         finally:
             self._acting_s += time.monotonic() - started
+
+    def _tool_call(self, action: Action) -> dict[str, JsonValue]:
+        """Return the request *action* sends with its declared tool (see HttpTool.prepare).
+
+        Raises:
+            ActionError: If no declared tool has its name, or the tool rejects its arguments.
+        """
+        tool = next((tool for tool in self._env.tools if tool.name == action.tool), None)
+        if tool is None:
+            names = sorted(tool.name for tool in self._env.tools)
+            raise ActionError(f'No tool named {action.tool!r}. Declared: {names}')
+        try:
+            return tool.prepare(action.arguments)
+        except ValueError as exc:
+            raise ActionError(f'Tool {tool.name!r} rejected the call: {exc}') from exc
+
+    def _send(self, request: Mapping[str, JsonValue], timeout: float) -> tuple[str, int | None]:
+        """Send *request* from the sandbox; return the runner's record of it and its exit code.
+
+        The request reaches the constant runner command as data on its stdin, never through
+        a file or argument the agent user could read or change, and every tool's header
+        values are redacted from what comes back. It is never retried: a runner the timeout
+        stops reports no response, and a mutation it may have sent is recorded as uncertain.
+
+        A mutation counts as unsettled from before it is sent until :meth:`score` settles
+        it, since neither a response nor a stopped runner shows the app is done with it;
+        only a runner that proves it never connected clears it.
+        """
+        if request['mutation']:
+            self._unsettled.append(request['record'])
+        command = run_command(self._backend.python)
+        try:
+            exit_code, output = self._backend.exec_input(command, json.dumps(request), timeout)
+        except TimeoutError:
+            exit_code = None
+            output = lost_response(request, f'the request was stopped after {timeout}s')
+        if request['mutation'] and _never_sent(output):
+            self._unsettled.pop()
+        return redact(output, self._env.tools), exit_code
+
+    def _settle(self) -> str | None:
+        """Settle the tool writes sent with the environment's ``root_tool_settle``; return
+        why they stay unsettled, or None once none are.
+
+        Only the environment's own reconciliation settles them: an app may still apply a
+        write it answered (queued it, say) or whose runner was stopped, and a model's later
+        reads prove nothing.
+        """
+        if not self._unsettled:
+            return None
+        command, timeout = self._env.root_tool_settle, self._env.setup_timeout
+        if not command:
+            return 'the environment declares no root_tool_settle'
+        try:
+            if isinstance(self._backend, SandboxBackend):
+                settled = self._backend.exec_root(
+                    command, timeout, offline=True, env={'PATH': TRUSTED_PATH}
+                )
+            else:
+                settled = self._backend.exec(command, timeout)
+        except TimeoutError:
+            return f'root_tool_settle timed out after {timeout}s'
+        except DeepGymError as exc:  # the sandbox failed under it: nothing is proven
+            return f'root_tool_settle failed: {type(exc).__name__}'
+        if settled.exit_code != 0:
+            return f'root_tool_settle exited {settled.exit_code}'
+        self._unsettled.clear()
+        return None
 
     def _run_python(self, filename: str, code: str, timeout: float | None = None) -> ExecResult:
         self._backend.write_file(filename, code.encode('utf-8'))
@@ -1554,6 +1691,12 @@ def failure_result(exc: BaseException, sandbox_id: str, *, exhausted: bool = Fal
     return result.model_copy(update={'error_type': 'policy_sandbox_failure'})
 
 
+def _joined(output: VerifierOutput) -> ExecResult:
+    """Return a command's *output* as one text: stdout, then stderr."""
+    exit_code, stdout, stderr = output
+    return ExecResult(exit_code, stdout + ('\n' + stderr if stderr else ''))
+
+
 def _kill_group(group: int) -> None:
     """SIGKILL a process group; it may already be gone."""
     # ponytail: a group id could be reused within one session's lifetime; accepted, low risk.
@@ -1611,6 +1754,32 @@ def _failed_after_reading(
     details = f"The verifier failed after reading the agent's output: {exc}"
     verdict = _judged_zero(details, 'solution_error').verifier_result
     return build_run_result(verdict, elapsed_ms, sandbox_id, stderr=stderr, exit_code=1)
+
+
+def _unsettled_result(why: str, writes: Sequence[JsonValue], sandbox_id: str) -> RunResult:
+    """Return the result of an episode whose tool *writes* the app may still apply: no
+    verdict, whatever the score would be, since any write could still raise or lower it. A
+    policy that learns to leave writes unsettled shows in the masked rate (see
+    :mod:`deepgym.integrations.reward`)."""
+    listed = json.dumps(writes, ensure_ascii=False)
+    return RunResult(
+        score=0.0,
+        passed=False,
+        output=f'Not graded, tool writes unsettled ({why}): {listed}',
+        stderr='',
+        exit_code=1,
+        execution_time_ms=0.0,
+        sandbox_id=sandbox_id,
+        error_type='unsettled_write',
+    )
+
+
+def _never_sent(output: str) -> bool:
+    """Whether a tool runner's record shows its request never reached the app."""
+    try:
+        return json.loads(output).get('uncertain') is False
+    except (ValueError, AttributeError):
+        return False
 
 
 def _reported(executed: ExecutionResult) -> VerifierOutput:

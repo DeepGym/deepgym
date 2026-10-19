@@ -332,8 +332,12 @@ _SESSION_SETTINGS = (
     'timeout_per_step',
     'image',
     'snapshot',
+    'allowed_actions',
+    'tools',
+    'root_tool_settle',
 )
-"""metadata.json keys a multi-turn or computer-use env takes as they are."""
+"""metadata.json keys a multi-turn or computer-use env takes as they are. The folder is
+trusted configuration, so its tools' credentials and root commands are too."""
 
 
 def _load_computer_use_env(env_dir: Path, metadata: dict, variant: int) -> ComputerUseEnvironment:

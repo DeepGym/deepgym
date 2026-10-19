@@ -154,7 +154,9 @@ class HttpRoute(BaseModel):
     hold an encoded ``/`` either, since an app that decodes before routing would read more
     segments; ``{name:path}`` allows one (GitLab's ``group%2Fproject`` ids and file paths).
     Every other segment must match literally. An endpoint no route names (an admin page, a
-    script runner) is unreachable.
+    script runner) is unreachable. A route checks only method and path, so one that
+    dispatches on its body (GraphQL, JSON-RPC) allows every operation the tool's
+    credentials permit.
     """
 
     model_config = ConfigDict(frozen=True, extra='forbid')

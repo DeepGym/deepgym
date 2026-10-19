@@ -81,7 +81,7 @@ from deepgym.sandboxes import (
     SandboxTimeoutError,
     sealed_path,
 )
-from deepgym.tools import HttpTool, lost_response, run_command
+from deepgym.tools import HttpTool, lost_response, redact, run_command
 from deepgym.verifier_template import guard_crashes
 
 if TYPE_CHECKING:
@@ -1340,7 +1340,7 @@ class Session:
         action: Action,
         *,
         timeout: float | None = None,
-        call: tuple[HttpTool, dict[str, JsonValue]] | None = None,
+        call: dict[str, JsonValue] | None = None,
     ) -> tuple[str, int | None]:
         """Execute *action*; return its text output and exit code (None if not a command).
 
@@ -1368,7 +1368,7 @@ class Session:
                         return f'wrote {action.path}', None
                     case 'tool':
                         assert call is not None
-                        return self._send(*call, timeout)
+                        return self._send(call, timeout)
                     case 'wait':
                         time.sleep(min(action.amount, timeout))
                         return '', None
@@ -1384,8 +1384,8 @@ class Session:
         finally:
             self._acting_s += time.monotonic() - started
 
-    def _tool_call(self, action: Action) -> tuple[HttpTool, dict[str, JsonValue]]:
-        """Return *action*'s declared tool and the request it sends (see HttpTool.prepare).
+    def _tool_call(self, action: Action) -> dict[str, JsonValue]:
+        """Return the request *action* sends with its declared tool (see HttpTool.prepare).
 
         Raises:
             ActionError: If no declared tool has its name, or the tool rejects its arguments.
@@ -1395,19 +1395,17 @@ class Session:
             names = sorted(tool.name for tool in self._env.tools)
             raise ActionError(f'No tool named {action.tool!r}. Declared: {names}')
         try:
-            return tool, tool.prepare(action.arguments)
+            return tool.prepare(action.arguments)
         except ValueError as exc:
             raise ActionError(f'Tool {tool.name!r} rejected the call: {exc}') from exc
 
-    def _send(
-        self, tool: HttpTool, request: Mapping[str, JsonValue], timeout: float
-    ) -> tuple[str, int | None]:
+    def _send(self, request: Mapping[str, JsonValue], timeout: float) -> tuple[str, int | None]:
         """Send *request* from the sandbox; return the runner's record of it and its exit code.
 
         The request reaches the constant runner command as data on its stdin, never through
-        a file or argument the agent user could read or change, and the tool's header values
-        are redacted from what comes back. It is never retried: a runner the timeout stops
-        reports no response, and a mutation it may have sent is recorded as uncertain.
+        a file or argument the agent user could read or change, and every tool's header
+        values are redacted from what comes back. It is never retried: a runner the timeout
+        stops reports no response, and a mutation it may have sent is recorded as uncertain.
 
         A mutation counts as unsettled from before it is sent until :meth:`score` settles
         it, since neither a response nor a stopped runner shows the app is done with it;
@@ -1423,7 +1421,7 @@ class Session:
             output = lost_response(request, f'the request was stopped after {timeout}s')
         if request['mutation'] and _never_sent(output):
             self._unsettled.pop()
-        return tool.redact(output), exit_code
+        return redact(output, self._env.tools), exit_code
 
     def _settle(self) -> str | None:
         """Settle the tool writes sent with the environment's ``root_tool_settle``; return

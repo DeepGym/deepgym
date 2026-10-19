@@ -31,6 +31,7 @@ ROUTES = (
     HttpRoute(method='GET', path='/rest/file/{name:path}'),
     HttpRoute(method='GET', path='/rest/partial'),
     HttpRoute(method='GET', path='/rest/reset'),
+    HttpRoute(method='GET', path='/rest/binary-key'),
 )
 
 
@@ -118,6 +119,10 @@ class App:
                         linger = struct.pack('ii', 1, 0)
                         self.connection.setsockopt(socket.SOL_SOCKET, socket.SO_LINGER, linger)
                         self.connection.close()
+                    return
+                if route.endswith('/binary-key'):  # the key inside a body that isn't UTF-8
+                    key = self.headers.get('X-API-KEY', '').encode()
+                    self._send(200, b'\xff' + key + b'\x80', {})
                     return
                 if route.endswith('/redirect'):
                     self._send(302, b'', {'Location': app.redirect_to})

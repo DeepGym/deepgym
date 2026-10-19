@@ -439,6 +439,37 @@ def test_redaction_keeps_the_record_json_and_its_protocol_types(app: App) -> Non
     assert json.loads(response['body'])['raw']['X-API-KEY'] == REDACTED
 
 
+def test_every_tools_credentials_are_redacted_from_every_record(app: App) -> None:
+    app.redirect_to = f'http://127.0.0.1:9/?k={SECRET}'  # the app hands back the other key
+    admin = tool(app.url).model_copy(
+        update={'name': 'admin', 'headers': {'X-Admin-Key': SecretStr(SECRET)}}
+    )
+    env = app_env(app.url).model_copy(update={'tools': (tool(app.url), admin)})
+    with Session(env, LocalBackend()) as session:
+        session.start()
+        content = session.step(call('/rest/redirect')).observation.content
+
+    assert json.dumps(SECRET)[1:-1] not in content and quote(SECRET, safe='') not in content
+    headers = dict(json.loads(content)['response']['headers'])
+    assert headers['Location'] == f'http://127.0.0.1:9/?k={REDACTED}'
+
+
+def test_credentials_in_a_binary_body_are_redacted_in_its_bytes(app: App) -> None:
+    env = app_env(app.url).model_copy(
+        update={
+            'tools': (
+                tool(app.url).model_copy(update={'headers': {'X-API-KEY': SecretStr('200')}}),
+            )
+        }
+    )
+    with Session(env, LocalBackend()) as session:
+        session.start()
+        result = record(session, call('/rest/binary-key'))
+
+    body = base64.b64decode(result['response']['body_base64'], validate=True)
+    assert body == b'\xff' + REDACTED.encode() + b'\x80'
+
+
 def test_credentials_are_masked_in_dumps_fingerprints_and_errors() -> None:
     from deepgym.traces.schema import environment_sha256
 

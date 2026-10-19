@@ -20,9 +20,9 @@ import json
 import re
 import shlex
 import unicodedata
-from collections.abc import Iterator, Mapping
+from collections.abc import Iterable, Iterator, Mapping
 from pathlib import Path
-from typing import Literal
+from typing import AnyStr, Literal
 from urllib.parse import quote, quote_plus, unquote, urlencode, urlsplit
 
 from pydantic import BaseModel, ConfigDict, Field, JsonValue, SecretStr, field_validator
@@ -139,10 +139,14 @@ def _base64_forms(needle: str) -> set[str]:
     return {form for form in forms if len(form) >= _MIN_BASE64}
 
 
-def _replaced(text: str, forms: set[str], flags: int) -> str:
-    """*text* with every one of *forms* replaced by REDACTED, longest first."""
+def _replaced(text: AnyStr, forms: set[str], flags: int) -> AnyStr:
+    """*text* with every one of *forms* (as UTF-8, in bytes) replaced by REDACTED, longest
+    first."""
     if not forms:
         return text
+    if isinstance(text, bytes):
+        encoded = sorted((form.encode('utf-8') for form in forms), key=len, reverse=True)
+        return re.sub(b'|'.join(map(re.escape, encoded)), REDACTED.encode(), text, flags=flags)
     pattern = '|'.join(map(re.escape, sorted(forms, key=len, reverse=True)))
     return re.sub(pattern, REDACTED, text, flags=flags)
 
@@ -210,7 +214,7 @@ class HttpTool(BaseModel):
     The model sees *name*, *description* (the place for the API docs a task needs) and the
     routes. *headers* go with every request and are credentials (an API key or login for
     the local app, say), kept as secrets: masked in repr, dumps, fingerprints and
-    validation errors, redacted from every record and result (see :meth:`redact`), and
+    validation errors, redacted from every record and result (see :func:`redact`), and
     never on disk where the agent user could read them. Responses come back whole (status,
     every header, pagination links included, and the full body) but for those redactions.
 
@@ -398,53 +402,61 @@ class HttpTool(BaseModel):
             'record': record,
         }
 
-    def redact(self, text: str) -> str:
-        """Return a runner's record (or any text) with the credentials an app may echo
-        redacted, where the session records it.
 
-        A response header named like a tool header, or carrying a credential the app issued
-        (Set-Cookie), loses its whole value. Then every form of every header value and of
-        its echoable parts (see :func:`_needles`) is replaced wherever it appears (body,
-        headers, a redirect's Location, an error): escaped or encoded in any letter case
-        (:func:`_forms`), and in base64 (:func:`_base64_forms`). In a JSON record only its
-        string values are searched, so it stays JSON with its numbers and booleans (a
-        credential ``200`` leaves status 200 alone); its keys are the runner's or the
-        model's, never the app's.
-        """
-        needles = {
-            needle
-            for name, secret in self.headers.items()
-            for needle in _needles(name, secret.get_secret_value())
-        }
-        forms = {form for needle in needles for form in _forms(needle)}
-        encoded = {form for needle in needles for form in _base64_forms(needle)}
+def redact(text: str, tools: Iterable[HttpTool]) -> str:
+    """Return a runner's record (or any text) with the credentials an app may echo
+    redacted, where the session records it: every credential of every one of *tools*,
+    whichever tool's call the record is of.
 
-        def hide(text: str) -> str:
-            return _replaced(_replaced(text, forms, re.IGNORECASE), encoded, 0)
+    A response header named like a tool header, or carrying a credential the app issued
+    (Set-Cookie), loses its whole value. Then every form of every header value and of its
+    echoable parts (see :func:`_needles`) is replaced wherever it appears (body, headers, a
+    redirect's Location, an error): escaped or encoded in any letter case (:func:`_forms`),
+    and in base64 (:func:`_base64_forms`). In a JSON record only its string values are
+    searched, so it stays JSON with its numbers and booleans (a credential ``200`` leaves
+    status 200 alone); its keys are the runner's or the model's, never the app's. A body
+    that isn't UTF-8 is searched in its bytes, then base64-encoded again.
+    """
+    headers = [
+        (name, secret.get_secret_value()) for tool in tools for name, secret in tool.headers.items()
+    ]
+    needles = {needle for name, value in headers for needle in _needles(name, value)}
+    forms = {form for needle in needles for form in _forms(needle)}
+    encoded = {form for needle in needles for form in _base64_forms(needle)}
 
-        def scrub(value: JsonValue) -> JsonValue:
-            if isinstance(value, str):
-                return hide(value)
-            if isinstance(value, list):
-                return [scrub(item) for item in value]
-            if isinstance(value, dict):
-                return {key: scrub(item) for key, item in value.items()}
-            return value
+    def hide(data: AnyStr) -> AnyStr:
+        return _replaced(_replaced(data, forms, re.IGNORECASE), encoded, 0)
 
-        try:
-            record = json.loads(text)
-        except ValueError:
-            record = None
-        if not isinstance(record, dict):
-            return hide(text)
-        if isinstance(record.get('response'), dict):
-            response = record['response']
-            hidden = {name.lower() for name in self.headers} | _ISSUED_CREDENTIALS
-            response['headers'] = [
-                [name, REDACTED if str(name).lower() in hidden else value]
-                for name, value in response.get('headers', [])
-            ]
-        return json.dumps(scrub(record), ensure_ascii=False)
+    def scrub(value: JsonValue) -> JsonValue:
+        if isinstance(value, str):
+            return hide(value)
+        if isinstance(value, list):
+            return [scrub(item) for item in value]
+        if isinstance(value, dict):
+            return {key: scrub(item) for key, item in value.items()}
+        return value
+
+    try:
+        record = json.loads(text)
+    except ValueError:
+        record = None
+    if not isinstance(record, dict):
+        return hide(text)
+    response = record.get('response')
+    binary = None
+    if isinstance(response, dict):
+        hidden = {name.lower() for name, _ in headers} | _ISSUED_CREDENTIALS
+        response['headers'] = [
+            [name, REDACTED if str(name).lower() in hidden else value]
+            for name, value in response.get('headers', [])
+        ]
+        if isinstance(response.get('body_base64'), str):
+            raw = hide(base64.b64decode(response['body_base64']))
+            binary = base64.b64encode(raw).decode('ascii')
+    scrubbed = scrub(record)
+    if binary is not None:  # its masked bytes, not a search of their encoding
+        scrubbed['response']['body_base64'] = binary
+    return json.dumps(scrubbed, ensure_ascii=False)
 
 
 def run_command(python: str) -> str:

@@ -990,7 +990,7 @@ class Session:
         # The session's start, and the seconds spent applying the agent's actions since.
         self._opened = time.monotonic()
         self._acting_s = 0.0
-        # Request records of tool writes whose outcome is unknown, until settled (see score()).
+        # Request records of the tool writes sent, until settled (see score()).
         self._unsettled: list[JsonValue] = []
         # One sandbox, one actor at a time: concurrent step/score/close calls queue up.
         self._lock = threading.Lock()
@@ -1259,10 +1259,10 @@ class Session:
         after reading the agent's output (``solution_timeout``), and a provider lifetime the
         agent's own actions ran out (see :meth:`_ran_out_the_clock`).
 
-        A tool write whose outcome is unknown (its response lost, cut short or stopped) may
-        still land after grading, so the environment's ``root_tool_settle`` must settle it
-        first; until then a score above 0 has no verdict (``unsettled_write``), and a 0
-        stands.
+        Every tool write sent may still change the app after its response (a queued job, a
+        write whose runner was stopped), so the environment's ``root_tool_settle`` settles
+        them first. If it can't (none declared, or it fails), the episode gets no verdict
+        (``unsettled_write``), whatever the verifier would say, and the verifier doesn't run.
 
         Raises:
             VerifierError: If, before it read the agent's output, the verifier timed out or
@@ -1285,10 +1285,11 @@ class Session:
                     sandbox_id=self.sandbox_id,
                     error_type='no_verifier',
                 )
+            if unsettled := self._settle():
+                return _unsettled_result(unsettled, self._unsettled, self.sandbox_id)
             start = time.perf_counter()
             acted = bool(self._trajectory.steps)
             try:
-                unsettled = self._settle()
                 (exit_code, stdout, stderr), consulted = self._verify(self._env.final_verifier_code)
             except SandboxDiedError as exc:
                 if not acted:
@@ -1312,8 +1313,6 @@ class Session:
             if consulted and not result.has_verdict and result.error_type != 'sandbox_error':
                 detail = VerifierError(f'{result.error_type}: {result.output}')
                 return _failed_after_reading(detail, elapsed_ms, self.sandbox_id, stderr)
-            if unsettled and result.has_verdict and result.score > 0:
-                return _unsettled_result(result, unsettled, self._unsettled)
             return result
 
     def close(self) -> None:
@@ -1408,25 +1407,31 @@ class Session:
         The request reaches the constant runner command as data on its stdin, never through
         a file or argument the agent user could read or change, and the tool's header values
         are redacted from what comes back. It is never retried: a runner the timeout stops
-        reports no response, and a mutation it may have sent is recorded as uncertain and
-        kept unsettled for :meth:`score`, since stopping the runner never stops the app.
+        reports no response, and a mutation it may have sent is recorded as uncertain.
+
+        A mutation counts as unsettled from before it is sent until :meth:`score` settles
+        it, since neither a response nor a stopped runner shows the app is done with it;
+        only a runner that proves it never connected clears it.
         """
+        if request['mutation']:
+            self._unsettled.append(request['record'])
         command = run_command(self._backend.python)
         try:
             exit_code, output = self._backend.exec_input(command, json.dumps(request), timeout)
         except TimeoutError:
             exit_code = None
             output = lost_response(request, f'the request was stopped after {timeout}s')
-        if request['mutation'] and exit_code != 0 and not _never_sent(output):
-            self._unsettled.append(request['record'])
+        if request['mutation'] and _never_sent(output):
+            self._unsettled.pop()
         return tool.redact(output), exit_code
 
     def _settle(self) -> str | None:
-        """Settle unsettled tool writes with the environment's ``root_tool_settle``; return
+        """Settle the tool writes sent with the environment's ``root_tool_settle``; return
         why they stay unsettled, or None once none are.
 
-        Only the environment's own reconciliation settles them: the app may apply a write
-        whose runner was stopped, and a model's later reads prove nothing.
+        Only the environment's own reconciliation settles them: an app may still apply a
+        write it answered (queued it, say) or whose runner was stopped, and a model's later
+        reads prove nothing.
         """
         if not self._unsettled:
             return None
@@ -1442,6 +1447,8 @@ class Session:
                 settled = self._backend.exec(command, timeout)
         except TimeoutError:
             return f'root_tool_settle timed out after {timeout}s'
+        except DeepGymError as exc:  # the sandbox failed under it: nothing is proven
+            return f'root_tool_settle failed: {type(exc).__name__}'
         if settled.exit_code != 0:
             return f'root_tool_settle exited {settled.exit_code}'
         self._unsettled.clear()
@@ -1751,20 +1758,20 @@ def _failed_after_reading(
     return build_run_result(verdict, elapsed_ms, sandbox_id, stderr=stderr, exit_code=1)
 
 
-def _unsettled_result(result: RunResult, why: str, writes: Sequence[JsonValue]) -> RunResult:
-    """Return *result*, a score above 0 over tool *writes* the app may still apply, with
-    no verdict: the write may have earned it, or may yet undo it. A 0 keeps its verdict,
-    or a policy could dodge it by sending a write that never answers."""
+def _unsettled_result(why: str, writes: Sequence[JsonValue], sandbox_id: str) -> RunResult:
+    """Return the result of an episode whose tool *writes* the app may still apply: no
+    verdict, whatever the score would be, since any write could still raise or lower it. A
+    policy that learns to leave writes unsettled shows in the masked rate (see
+    :mod:`deepgym.integrations.reward`)."""
     listed = json.dumps(writes, ensure_ascii=False)
     return RunResult(
         score=0.0,
         passed=False,
-        output=f'Not scored, tool writes unsettled ({why}): {listed}. '
-        f'The verifier said: {result.output}',
-        stderr=result.stderr,
-        exit_code=result.exit_code,
-        execution_time_ms=result.execution_time_ms,
-        sandbox_id=result.sandbox_id,
+        output=f'Not graded, tool writes unsettled ({why}): {listed}',
+        stderr='',
+        exit_code=1,
+        execution_time_ms=0.0,
+        sandbox_id=sandbox_id,
         error_type='unsettled_write',
     )
 

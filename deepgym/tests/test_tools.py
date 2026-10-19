@@ -216,14 +216,27 @@ def scored(session: Session, *actions: Action) -> RunResult:
     return session.score()
 
 
-@pytest.mark.parametrize(
-    ('path', 'settings'), [('/rest/lost', {}), ('/rest/slow', {'timeout_per_step': 2})]
+SETTLED_VERIFIER = (
+    'import json, pathlib\n'
+    'ok = pathlib.Path("settled").exists()\n'
+    'print(json.dumps({"score": float(ok), "passed": ok}))\n'
 )
-def test_a_pass_over_an_unsettled_write_gets_no_verdict(
-    app: App, path: str, settings: dict
+
+
+@pytest.mark.parametrize('score', [1.0, 0.0])
+@pytest.mark.parametrize(
+    ('path', 'settings'),
+    [
+        ('/rest/bug/1/comment', {}),  # answered 201: the app may still be applying it
+        ('/rest/lost', {}),
+        ('/rest/slow', {'timeout_per_step': 2}),
+    ],
+)
+def test_a_write_never_settled_gets_no_verdict_whatever_its_score(
+    app: App, path: str, settings: dict, score: float
 ) -> None:
     write = call(path, 'POST', body={'status': 'RESOLVED'})
-    with app_session(app.url, final_verifier_code=verifier(1.0), **settings) as session:
+    with app_session(app.url, final_verifier_code=verifier(score), **settings) as session:
         result = scored(session, write)
 
     assert not result.has_verdict and result.error_type == 'unsettled_write'
@@ -231,18 +244,11 @@ def test_a_pass_over_an_unsettled_write_gets_no_verdict(
     assert f'{app.url}{path}' in result.output and 'no root_tool_settle' in result.output
 
 
-def test_a_zero_over_an_unsettled_write_stands(app: App) -> None:
-    write = call('/rest/lost', 'POST', body={'status': 'RESOLVED'})
-    with app_session(app.url, final_verifier_code=verifier(0.0)) as session:
-        result = scored(session, write)
-    assert result.has_verdict and result.score == 0
-
-
-@pytest.mark.parametrize(('settle', 'graded'), [('true', True), ('exit 3', False)])
-def test_settled_writes_are_graded(app: App, settle: str, graded: bool) -> None:
-    write = call('/rest/lost', 'POST', body={'status': 'RESOLVED'})
+@pytest.mark.parametrize(('settle', 'graded'), [('touch settled', True), ('exit 3', False)])
+def test_writes_are_settled_before_grading(app: App, settle: str, graded: bool) -> None:
+    write = call('/rest/bug/1/comment', 'POST', body={'comment': 'x'})
     with app_session(
-        app.url, final_verifier_code=verifier(1.0), root_tool_settle=settle
+        app.url, final_verifier_code=SETTLED_VERIFIER, root_tool_settle=settle
     ) as session:
         result = scored(session, write)
     assert result.has_verdict is graded and result.passed is graded

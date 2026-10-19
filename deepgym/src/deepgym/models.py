@@ -577,13 +577,13 @@ class MultiTurnEnvironment(BaseModel):
     runs as the agent user beside the tool runner, which holds the tools' credentials."""
 
     root_tool_settle: str = ''
-    """Trusted reconciliation of tool writes whose outcome is unknown: a response lost, cut
-    short or stopped by the step timeout, after which the app may still apply the write.
-    Runs before the final verifier, only when such a write exists, as root in the offline
+    """Trusted reconciliation of the tool writes an episode sent: the app may still apply
+    one after answering it (a queued job) or after its runner was stopped. Runs before the
+    final verifier whenever a write may have reached the app, as root in the offline
     namespace (as the session user on LocalBackend, which isolates nothing), with
     setup_timeout. It must exit 0 only once the app has applied or abandoned every request
-    it received: stop its server, wait for its queue to drain, or check the write in its
-    database. Without it, or if it fails, a score above 0 gets no verdict; a 0 stands.
+    it received: stop its server, wait for its queue to drain, or check the writes in its
+    database. Without it, or if it fails, the episode gets no verdict, whatever its score.
     Never accept this from an agent."""
 
     desktop: bool = False

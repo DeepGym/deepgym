@@ -622,8 +622,8 @@ class MultiTurnEnvironment(BaseModel):
 
     @model_validator(mode='after')
     def check_tools(self) -> MultiTurnEnvironment:
-        """Require unique tool names, tools exactly when tool actions are allowed, and
-        no other action beside them but done."""
+        """Require unique tool names, tools exactly when tool actions are allowed, no other
+        action beside them but done, and no step verifier beside tools that write."""
         names = [tool.name for tool in self.tools]
         if len(set(names)) != len(names):
             raise ValueError(f'tool names must be unique, got {names}')
@@ -634,6 +634,13 @@ class MultiTurnEnvironment(BaseModel):
             )
         if 'tool' in self.allowed_actions and not self.tools:
             raise ValueError('tool actions need declared tools')
+        if self.step_verifier_code and any(
+            route.method != 'GET' for tool in self.tools for route in tool.routes
+        ):
+            raise ValueError(
+                'a step verifier cannot run beside tools that write: their writes settle '
+                'only once the episode ends (see root_tool_settle)'
+            )
         return self
 
 

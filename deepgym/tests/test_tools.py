@@ -255,6 +255,20 @@ def test_writes_are_settled_before_grading(app: App, settle: str, graded: bool) 
     assert graded or 'root_tool_settle exited 3' in result.output
 
 
+def test_step_verifiers_cannot_run_beside_write_tools() -> None:
+    with pytest.raises(ValidationError, match='step verifier'):
+        app_env('http://127.0.0.1', step_verifier_code='print(1)')
+    reads = tool('http://127.0.0.1').model_copy(
+        update={'routes': tuple(r for r in ROUTES if r.method == 'GET')}
+    )
+    MultiTurnEnvironment(  # a tool that only reads leaves nothing to settle
+        task='t',
+        tools=(reads,),
+        allowed_actions=frozenset({'tool', 'done'}),
+        step_verifier_code='print(1)',
+    )
+
+
 def test_reads_and_writes_that_never_arrived_leave_nothing_to_settle(app: App) -> None:
     closed = App()
     closed.close()

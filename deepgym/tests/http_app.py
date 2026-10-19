@@ -3,6 +3,8 @@
 import base64
 import html
 import json
+import socket
+import struct
 import threading
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -28,6 +30,7 @@ ROUTES = (
     HttpRoute(method='GET', path='/rest/echo'),
     HttpRoute(method='GET', path='/rest/file/{name:path}'),
     HttpRoute(method='GET', path='/rest/partial'),
+    HttpRoute(method='GET', path='/rest/reset'),
 )
 
 
@@ -104,12 +107,17 @@ class App:
                     return
                 if route.endswith('/slow'):
                     time.sleep(3)
-                if route.endswith('/partial'):  # the status, headers and part of the body
+                if route.endswith(('/partial', '/reset')):  # the status, headers, part of the body
                     self.send_response(200)
                     self.send_header('Content-Length', '100')
                     self.end_headers()
                     self.wfile.write(b'{"id": 7, "sta')
                     self.close_connection = True
+                    if route.endswith('/reset'):  # then a reset, not a close
+                        time.sleep(0.2)  # the client reads what was sent first
+                        linger = struct.pack('ii', 1, 0)
+                        self.connection.setsockopt(socket.SOL_SOCKET, socket.SO_LINGER, linger)
+                        self.connection.close()
                     return
                 if route.endswith('/redirect'):
                     self._send(302, b'', {'Location': app.redirect_to})

@@ -16,6 +16,9 @@ import ssl
 import sys
 import time
 
+_READ = 1 << 16
+"""Bytes asked for per read; reads repeat until the body ends, so this bounds nothing."""
+
 
 def _answer(response: http.client.HTTPResponse, raw: bytes) -> dict:
     """The record of *response*: status, every header, and *raw* as its body."""
@@ -31,11 +34,26 @@ def _answer(response: http.client.HTTPResponse, raw: bytes) -> dict:
     return answer
 
 
+def _read(response: http.client.HTTPResponse, received: bytearray) -> None:
+    """Read *response*'s body into *received* as it arrives, so a cut keeps every byte before it.
+
+    Raises:
+        http.client.IncompleteRead: If the connection ended before the declared length.
+        OSError: If the connection failed mid-body (a reset, say).
+    """
+    chunk = response.read1(_READ)
+    while chunk:
+        received += chunk
+        chunk = response.read1(_READ)
+    if response.length:  # read1 ends quietly at a close; the length shows what never came
+        raise http.client.IncompleteRead(bytes(received), response.length)
+
+
 def main() -> int:
     """Send the request on stdin; print its record; return 0 if a whole response came back.
 
-    A response cut short keeps what arrived (status, headers, the partial body), marked
-    ``incomplete``.
+    A response cut short keeps what arrived (status, headers, every body byte received),
+    marked ``incomplete``.
     """
     spec = json.load(sys.stdin)
     if spec['scheme'] == 'https':
@@ -54,6 +72,7 @@ def main() -> int:
     else:
         body = spec['body']
         response = None
+        received = bytearray()
         try:
             connection.request(
                 spec['method'],
@@ -62,17 +81,16 @@ def main() -> int:
                 spec['headers'],
             )
             response = connection.getresponse()
-            raw = response.read()
+            _read(response, received)
         except (OSError, http.client.HTTPException) as exc:
             # The request may have reached the app: a write is then neither known done nor not.
             kind = 'No' if response is None else 'Incomplete'
             record['error'] = f'{kind} response: {type(exc).__name__}: {exc}'
             record['uncertain'] = spec['mutation']
             if response is not None:
-                partial = exc.partial if isinstance(exc, http.client.IncompleteRead) else b''
-                record['response'] = {**_answer(response, partial), 'incomplete': True}
+                record['response'] = {**_answer(response, bytes(received)), 'incomplete': True}
         else:
-            record['response'] = _answer(response, raw)
+            record['response'] = _answer(response, bytes(received))
             status = 0
     finally:
         connection.close()

@@ -189,19 +189,20 @@ def test_write_stopped_by_the_step_timeout_is_uncertain(app: App) -> None:
         assert len(app.requests) == 1
 
 
-def test_incomplete_response_keeps_what_arrived(app: App) -> None:
+@pytest.mark.parametrize('path', ['/rest/partial', '/rest/reset'])
+def test_incomplete_response_keeps_what_arrived(app: App, path: str) -> None:
     with app_session(app.url) as session:
         session.start()
-        step = session.step(call('/rest/partial'))
+        step = session.step(call(path))
 
     result = json.loads(step.observation.content)
     assert step.observation.metadata == {'exit_code': 1}  # no complete response
-    assert result['error'].startswith('Incomplete response: IncompleteRead')
+    assert result['error'].startswith('Incomplete response: ')
     assert result['uncertain'] is False
     response = result['response']
     assert response['incomplete'] is True
     assert response['status'] == 200 and ['Content-Length', '100'] in response['headers']
-    assert response['body'] == '{"id": 7, "sta'
+    assert response['body'] == '{"id": 7, "sta'  # every byte received
 
 
 def verifier(score: float) -> str:

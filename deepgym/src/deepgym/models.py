@@ -576,6 +576,16 @@ class MultiTurnEnvironment(BaseModel):
     agent ends the episode only by an explicit ``done``, and no shell, file or GUI action
     runs as the agent user beside the tool runner, which holds the tools' credentials."""
 
+    root_tool_settle: str = ''
+    """Trusted reconciliation of tool writes whose outcome is unknown: a response lost, cut
+    short or stopped by the step timeout, after which the app may still apply the write.
+    Runs before the final verifier, only when such a write exists, as root in the offline
+    namespace (as the session user on LocalBackend, which isolates nothing), with
+    setup_timeout. It must exit 0 only once the app has applied or abandoned every request
+    it received: stop its server, wait for its queue to drain, or check the write in its
+    database. Without it, or if it fails, a score above 0 gets no verdict; a 0 stands.
+    Never accept this from an agent."""
+
     desktop: bool = False
     """Start a desktop (Xvfb + xfce) and return screenshots. Needs the Daytona backend."""
 

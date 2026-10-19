@@ -11,7 +11,7 @@ import pytest
 from pydantic import SecretStr, ValidationError
 
 from deepgym.exceptions import ActionError
-from deepgym.models import Action, MultiTurnEnvironment
+from deepgym.models import Action, MultiTurnEnvironment, RunResult
 from deepgym.qa.agents import do_everything, random_agent
 from deepgym.sandboxes import ExecResult
 from deepgym.session import LocalBackend, SandboxBackend, Session
@@ -187,6 +187,62 @@ def test_write_stopped_by_the_step_timeout_is_uncertain(app: App) -> None:
         assert 'stopped after' in result['error']
         assert result['request']['url'] == f'{app.url}/rest/slow'
         assert len(app.requests) == 1
+
+
+def verifier(score: float) -> str:
+    return f'import json\nprint(json.dumps({{"score": {score}, "passed": {score == 1}}}))\n'
+
+
+def scored(session: Session, *actions: Action) -> RunResult:
+    session.start()
+    for action in actions:
+        session.step(action)
+    session.step(Action(action_type='done'))
+    return session.score()
+
+
+@pytest.mark.parametrize(
+    ('path', 'settings'), [('/rest/lost', {}), ('/rest/slow', {'timeout_per_step': 2})]
+)
+def test_a_pass_over_an_unsettled_write_gets_no_verdict(
+    app: App, path: str, settings: dict
+) -> None:
+    write = call(path, 'POST', body={'status': 'RESOLVED'})
+    with app_session(app.url, final_verifier_code=verifier(1.0), **settings) as session:
+        result = scored(session, write)
+
+    assert not result.has_verdict and result.error_type == 'unsettled_write'
+    assert result.score == 0 and not result.passed
+    assert f'{app.url}{path}' in result.output and 'no root_tool_settle' in result.output
+
+
+def test_a_zero_over_an_unsettled_write_stands(app: App) -> None:
+    write = call('/rest/lost', 'POST', body={'status': 'RESOLVED'})
+    with app_session(app.url, final_verifier_code=verifier(0.0)) as session:
+        result = scored(session, write)
+    assert result.has_verdict and result.score == 0
+
+
+@pytest.mark.parametrize(('settle', 'graded'), [('true', True), ('exit 3', False)])
+def test_settled_writes_are_graded(app: App, settle: str, graded: bool) -> None:
+    write = call('/rest/lost', 'POST', body={'status': 'RESOLVED'})
+    with app_session(
+        app.url, final_verifier_code=verifier(1.0), root_tool_settle=settle
+    ) as session:
+        result = scored(session, write)
+    assert result.has_verdict is graded and result.passed is graded
+    assert graded or 'root_tool_settle exited 3' in result.output
+
+
+def test_reads_and_writes_that_never_arrived_leave_nothing_to_settle(app: App) -> None:
+    closed = App()
+    closed.close()
+    for base_url, action in (
+        (app.url, call('/rest/lost')),
+        (closed.url, call('/rest/bug/1/comment', 'POST', body={'comment': 'x'})),
+    ):
+        with app_session(base_url, final_verifier_code=verifier(1.0)) as session:
+            assert scored(session, action).passed
 
 
 def test_done_text_from_the_app_never_ends_the_episode(app: App) -> None:

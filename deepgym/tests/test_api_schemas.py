@@ -9,7 +9,7 @@ from deepgym.models import MultiTurnEnvironment
 
 
 @pytest.mark.parametrize('environment_type', ['multi-turn', 'computer-use'])
-@pytest.mark.parametrize('field', ['image', 'snapshot', 'root_service_start'])
+@pytest.mark.parametrize('field', ['image', 'snapshot', 'root_service_start', 'root_tool_settle'])
 def test_inline_session_rejects_privileged_configuration(
     environment_type: str,
     field: str,

@@ -990,6 +990,8 @@ class Session:
         # The session's start, and the seconds spent applying the agent's actions since.
         self._opened = time.monotonic()
         self._acting_s = 0.0
+        # Request records of tool writes whose outcome is unknown, until settled (see score()).
+        self._unsettled: list[JsonValue] = []
         # One sandbox, one actor at a time: concurrent step/score/close calls queue up.
         self._lock = threading.Lock()
 
@@ -1257,6 +1259,11 @@ class Session:
         after reading the agent's output (``solution_timeout``), and a provider lifetime the
         agent's own actions ran out (see :meth:`_ran_out_the_clock`).
 
+        A tool write whose outcome is unknown (its response lost, cut short or stopped) may
+        still land after grading, so the environment's ``root_tool_settle`` must settle it
+        first; until then a score above 0 has no verdict (``unsettled_write``), and a 0
+        stands.
+
         Raises:
             VerifierError: If, before it read the agent's output, the verifier timed out or
                 its output is not valid protocol JSON or isn't backed by its exit code; or its
@@ -1281,6 +1288,7 @@ class Session:
             start = time.perf_counter()
             acted = bool(self._trajectory.steps)
             try:
+                unsettled = self._settle()
                 (exit_code, stdout, stderr), consulted = self._verify(self._env.final_verifier_code)
             except SandboxDiedError as exc:
                 if not acted:
@@ -1304,6 +1312,8 @@ class Session:
             if consulted and not result.has_verdict and result.error_type != 'sandbox_error':
                 detail = VerifierError(f'{result.error_type}: {result.output}')
                 return _failed_after_reading(detail, elapsed_ms, self.sandbox_id, stderr)
+            if unsettled and result.has_verdict and result.score > 0:
+                return _unsettled_result(result, unsettled, self._unsettled)
             return result
 
     def close(self) -> None:
@@ -1398,14 +1408,44 @@ class Session:
         The request reaches the constant runner command as data on its stdin, never through
         a file or argument the agent user could read or change, and the tool's header values
         are redacted from what comes back. It is never retried: a runner the timeout stops
-        reports no response, and a mutation it may have sent is recorded as uncertain.
+        reports no response, and a mutation it may have sent is recorded as uncertain and
+        kept unsettled for :meth:`score`, since stopping the runner never stops the app.
         """
         command = run_command(self._backend.python)
         try:
             exit_code, output = self._backend.exec_input(command, json.dumps(request), timeout)
         except TimeoutError:
-            return lost_response(request, f'the request was stopped after {timeout}s'), None
+            exit_code = None
+            output = lost_response(request, f'the request was stopped after {timeout}s')
+        if request['mutation'] and exit_code != 0 and not _never_sent(output):
+            self._unsettled.append(request['record'])
         return tool.redact(output), exit_code
+
+    def _settle(self) -> str | None:
+        """Settle unsettled tool writes with the environment's ``root_tool_settle``; return
+        why they stay unsettled, or None once none are.
+
+        Only the environment's own reconciliation settles them: the app may apply a write
+        whose runner was stopped, and a model's later reads prove nothing.
+        """
+        if not self._unsettled:
+            return None
+        command, timeout = self._env.root_tool_settle, self._env.setup_timeout
+        if not command:
+            return 'the environment declares no root_tool_settle'
+        try:
+            if isinstance(self._backend, SandboxBackend):
+                settled = self._backend.exec_root(
+                    command, timeout, offline=True, env={'PATH': TRUSTED_PATH}
+                )
+            else:
+                settled = self._backend.exec(command, timeout)
+        except TimeoutError:
+            return f'root_tool_settle timed out after {timeout}s'
+        if settled.exit_code != 0:
+            return f'root_tool_settle exited {settled.exit_code}'
+        self._unsettled.clear()
+        return None
 
     def _run_python(self, filename: str, code: str, timeout: float | None = None) -> ExecResult:
         self._backend.write_file(filename, code.encode('utf-8'))
@@ -1709,6 +1749,32 @@ def _failed_after_reading(
     details = f"The verifier failed after reading the agent's output: {exc}"
     verdict = _judged_zero(details, 'solution_error').verifier_result
     return build_run_result(verdict, elapsed_ms, sandbox_id, stderr=stderr, exit_code=1)
+
+
+def _unsettled_result(result: RunResult, why: str, writes: Sequence[JsonValue]) -> RunResult:
+    """Return *result*, a score above 0 over tool *writes* the app may still apply, with
+    no verdict: the write may have earned it, or may yet undo it. A 0 keeps its verdict,
+    or a policy could dodge it by sending a write that never answers."""
+    listed = json.dumps(writes, ensure_ascii=False)
+    return RunResult(
+        score=0.0,
+        passed=False,
+        output=f'Not scored, tool writes unsettled ({why}): {listed}. '
+        f'The verifier said: {result.output}',
+        stderr=result.stderr,
+        exit_code=result.exit_code,
+        execution_time_ms=result.execution_time_ms,
+        sandbox_id=result.sandbox_id,
+        error_type='unsettled_write',
+    )
+
+
+def _never_sent(output: str) -> bool:
+    """Whether a tool runner's record shows its request never reached the app."""
+    try:
+        return json.loads(output).get('uncertain') is False
+    except (ValueError, AttributeError):
+        return False
 
 
 def _reported(executed: ExecutionResult) -> VerifierOutput:

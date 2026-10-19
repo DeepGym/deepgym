@@ -339,7 +339,7 @@ def test_anthropic_unfinished_stream_never_acts(app, monkeypatch, failure):
     assert partial.role == 'assistant'
     payload = json.loads(partial.content)
     assert payload['status'] == 'incomplete'
-    assert payload['incomplete_details'] == {'reason': result.error}
+    assert payload['incomplete_details']['reason'] == result.error
     assert payload['usage']['input_tokens'] == 100
     assert payload['content'][0]['name'] == 'tracker'
 
@@ -383,6 +383,44 @@ def test_anthropic_tool_calls_cut_short_never_run(app, monkeypatch, finished):
         assert payload['usage']['output_tokens'] == 5 and result.usage.output_tokens == 5
     else:
         assert payload['status'] == 'incomplete'
+
+
+def test_anthropic_delta_the_sdk_cannot_parse_is_kept_and_never_runs(app, monkeypatch):
+    first = '{"method": "POST", "path": "/rest/bug/1/comment", '
+    events = [
+        START,
+        {'type': 'content_block_start', 'index': 0, 'content_block': use('tracker', {})},
+        {
+            'type': 'content_block_delta',
+            'index': 0,
+            'delta': {'type': 'input_json_delta', 'partial_json': first},
+        },
+        {
+            'type': 'content_block_delta',
+            'index': 0,
+            'delta': {'type': 'input_json_delta', 'partial_json': 'BROKEN_LAST_DELTA_MARKER}'},
+        },
+        {'type': 'content_block_stop', 'index': 0},
+        {
+            'type': 'message_delta',
+            'delta': {'stop_reason': 'tool_use'},
+            'usage': {'output_tokens': 5},
+        },
+        {'type': 'message_stop'},
+    ]
+    anthropic(
+        monkeypatch,
+        b''.join(f'event: {e["type"]}\ndata: {json.dumps(e)}\n\n'.encode() for e in events),
+    )
+    session, initial = started(app)
+    with session:
+        result = AnthropicToolAgent('test').run(session, initial, task='T', budget=UNLIMITED)
+
+    assert result.termination_reason == 'error'
+    assert app.requests == [] and not result.trajectory.steps  # nothing it held ran
+    payload = json.loads(result.messages[-1].content)
+    assert payload['status'] == 'incomplete'
+    assert 'BROKEN_LAST_DELTA_MARKER' in payload['incomplete_details']['detail']
 
 
 @pytest.mark.parametrize('details', [{'reason': 'max_output_tokens'}, None])

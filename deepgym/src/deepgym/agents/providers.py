@@ -47,9 +47,10 @@ def anthropic_message(
     unfinished one is never acted on (see :func:`anthropic_incomplete`): the usage it
     reported is kept, its billing unresolved, and it comes back as the partial message
     (empty if none started) with ``status`` ``incomplete`` and the reason in
-    ``incomplete_details``, as OpenAI marks its own. A message that didn't stop for tool
-    use also carries ``input_json``: each tool call's input exactly as it streamed, by
-    content index, since the SDK's parse of an unfinished one drops what doesn't parse.
+    ``incomplete_details``, as OpenAI marks its own, with the text of what ended the
+    stream as ``detail``. A message that didn't stop for tool use also carries
+    ``input_json``: each tool call's input exactly as it streamed, by content index, since
+    the SDK's parse of an unfinished one drops what doesn't parse.
 
     Args:
         client: The Anthropic client.
@@ -61,7 +62,8 @@ def anthropic_message(
         anthropic.APIError: If the request itself fails.
     """
     with client.messages.stream(**request) as stream:
-        stopped, failure = False, None
+        stopped = False
+        failure: Exception | None = None
         fragments: dict[str, str] = {}
         try:
             for event in stream:
@@ -72,19 +74,22 @@ def anthropic_message(
         # Anything raised while reading (httpx or httpx2 transport errors, by SDK
         # version, or an error event) ends this response.
         except Exception as exc:  # noqa: BLE001
-            failure = type(exc).__name__
+            failure = exc
         snapshot = _snapshot(stream)
     message = snapshot.model_dump(exclude_none=True) if snapshot is not None else {}
     if fragments and message.get('stop_reason') != 'tool_use':
         message['input_json'] = fragments
-    if failure or not stopped or snapshot is None:
+    if failure is not None or not stopped or snapshot is None:
         _incomplete(tracker, message, prices)
-        reason = (
-            f'Response stream failed: {failure}'
-            if failure
-            else 'Response stream ended before completion'
-        )
-        return {**message, 'status': 'incomplete', 'incomplete_details': {'reason': reason}}
+        details = {'reason': 'Response stream ended before completion'}
+        if failure is not None:
+            # Its text too: the SDK's error for a delta it can't parse quotes that delta,
+            # which never reaches the snapshot or the fragments above.
+            details = {
+                'reason': f'Response stream failed: {type(failure).__name__}',
+                'detail': str(failure),
+            }
+        return {**message, 'status': 'incomplete', 'incomplete_details': details}
     return message
 
 

@@ -406,27 +406,45 @@ class HttpTool(BaseModel):
         (Set-Cookie), loses its whole value. Then every form of every header value and of
         its echoable parts (see :func:`_needles`) is replaced wherever it appears (body,
         headers, a redirect's Location, an error): escaped or encoded in any letter case
-        (:func:`_forms`), and in base64 (:func:`_base64_forms`).
+        (:func:`_forms`), and in base64 (:func:`_base64_forms`). In a JSON record only its
+        string values are searched, so it stays JSON with its numbers and booleans (a
+        credential ``200`` leaves status 200 alone); its keys are the runner's or the
+        model's, never the app's.
         """
+        needles = {
+            needle
+            for name, secret in self.headers.items()
+            for needle in _needles(name, secret.get_secret_value())
+        }
+        forms = {form for needle in needles for form in _forms(needle)}
+        encoded = {form for needle in needles for form in _base64_forms(needle)}
+
+        def hide(text: str) -> str:
+            return _replaced(_replaced(text, forms, re.IGNORECASE), encoded, 0)
+
+        def scrub(value: JsonValue) -> JsonValue:
+            if isinstance(value, str):
+                return hide(value)
+            if isinstance(value, list):
+                return [scrub(item) for item in value]
+            if isinstance(value, dict):
+                return {key: scrub(item) for key, item in value.items()}
+            return value
+
         try:
             record = json.loads(text)
         except ValueError:
             record = None
-        if isinstance(record, dict) and isinstance(record.get('response'), dict):
+        if not isinstance(record, dict):
+            return hide(text)
+        if isinstance(record.get('response'), dict):
             response = record['response']
             hidden = {name.lower() for name in self.headers} | _ISSUED_CREDENTIALS
             response['headers'] = [
                 [name, REDACTED if str(name).lower() in hidden else value]
                 for name, value in response.get('headers', [])
             ]
-            text = json.dumps(record, ensure_ascii=False)
-        needles = {
-            needle
-            for name, secret in self.headers.items()
-            for needle in _needles(name, secret.get_secret_value())
-        }
-        text = _replaced(text, {form for n in needles for form in _forms(n)}, re.IGNORECASE)
-        return _replaced(text, {form for n in needles for form in _base64_forms(n)}, 0)
+        return json.dumps(scrub(record), ensure_ascii=False)
 
 
 def run_command(python: str) -> str:

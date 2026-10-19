@@ -383,6 +383,26 @@ def test_echoed_credentials_are_redacted_in_every_form(app: App) -> None:
     assert json.loads(response['body'])['basic'] == {'pair': REDACTED, 'password': REDACTED}
 
 
+def test_redaction_keeps_the_record_json_and_its_protocol_types(app: App) -> None:
+    env = app_env(app.url).model_copy(
+        update={
+            'tools': (
+                tool(app.url).model_copy(update={'headers': {'X-API-KEY': SecretStr('200')}}),
+            )
+        }
+    )
+    with Session(env, LocalBackend()) as session:
+        session.start()
+        step = session.step(call('/rest/echo'))
+
+    assert step.observation.metadata == {'exit_code': 0}
+    result = json.loads(step.observation.content)  # still a record, the credential gone
+    response = result['response']
+    assert response['status'] == 200 and isinstance(result['elapsed_ms'], float)
+    assert dict(response['headers'])['X-Seen'] == REDACTED
+    assert json.loads(response['body'])['raw']['X-API-KEY'] == REDACTED
+
+
 def test_credentials_are_masked_in_dumps_fingerprints_and_errors() -> None:
     from deepgym.traces.schema import environment_sha256
 

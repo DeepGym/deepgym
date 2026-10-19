@@ -95,12 +95,14 @@ then a constant runner sends it with http.client from inside the sandbox, as the
 user in the offline network namespace. Its request arrives on stdin from a root-only
 file. Redirects are returned, never followed.
 Header values are credentials: masked in dumps, environment fingerprints and validation
-errors, and redacted from every record and result, including forms an app may echo
-(escaped, percent-encoded, base64, a Basic pair or password, any letter case) and the
-cookies it sets. Pattern redaction cannot catch every transformation, so declare only
-routes that never return credentials. An environment with tools allows exactly `tool`
-and `done`. Tools are trusted configuration, so an inline environment sent to the
-sessions API cannot declare any; only registered environments can.
+errors, and every tool's are redacted from every call's record and result, including
+forms an app may echo (escaped, percent-encoded, base64, a Basic pair or password, any
+letter case) and the cookies it sets. A body that isn't UTF-8 comes back base64-encoded,
+with its bytes redacted. Pattern redaction cannot catch every transformation, so declare
+only routes that never return credentials. An environment with tools allows exactly
+`tool` and `done`. Tools are trusted configuration, so an inline environment sent to the
+sessions API cannot declare any; a registered environment can, in code or in its
+folder's `metadata.json` (`tools`, `allowed_actions`, `root_tool_settle`).
 
 A route allows exactly a method and a path; the body is checked only as JSON, not
 against the app's operations. A declared GraphQL endpoint (`POST /graphql`) or any
@@ -109,21 +111,30 @@ allows every operation the tool's credentials permit. Give such a tool an app ac
 whose role allows only what the task needs.
 
 The observation, which the model gets back whole, records the full request, the full
-response (status, every header, the body) and timing. A response cut short keeps what
-arrived, marked `"incomplete": true`, and counts as a failed call. A write whose response
-was lost, cut short or stopped by the step timeout is marked `"uncertain": true` and is
-never retried. Stopping the request does not stop the app, which may still apply the
-write after the episode, so the session keeps such writes unsettled. Before the final
-verifier, the environment's trusted `root_tool_settle` command (root, offline namespace,
-`setup_timeout`) must settle them: exit 0 only once the app has applied or abandoned
-every request it received, for example by stopping its server or waiting for its queue
-to drain. Without it, or if it fails, a score above 0 gets no verdict
-(`error_type='unsettled_write'`) and a 0 stands. Only the `done` tool ends the episode;
-app output that reads `DONE` does not. A reply without tool calls gets a reminder. Defaults are uncapped: maximum effort, Anthropic's model-maximum
-`max_tokens`, no OpenAI output limit, and only the turn, time and USD limits the
-caller's `Budget` sets. `AgentResult.messages` holds every model message, full
+response (status, every header, the body) and timing. A response cut short keeps every
+byte that arrived, marked `"incomplete": true`, and counts as a failed call. A write
+whose response was lost, cut short or stopped by the step timeout is marked
+`"uncertain": true` and is never retried.
+
+An app may still change after it answers a write (a queued job, say) or after its runner
+was stopped, so the session holds every write it sends as unsettled; only a call that
+never connected is cleared. Before the final verifier runs, the environment's trusted
+`root_tool_settle` command (root, offline namespace, `setup_timeout`) must settle them:
+exit 0 only once the app has applied or abandoned every request it received, for example
+by stopping its server or waiting for its queue to drain. Without it, or if it fails,
+the episode gets no verdict (`error_type='unsettled_write'`) whatever its score, and
+counts toward the masked rate. Writes leave no settled state between steps, so an
+environment whose tools have any route other than `GET` cannot have a step verifier.
+
+Only the `done` tool ends the episode; app output that reads `DONE` does not. A reply
+without tool calls gets a reminder. Defaults are uncapped: maximum effort, Anthropic's
+model-maximum `max_tokens`, no OpenAI output limit, and only the turn, time and USD
+limits the caller's `Budget` sets. `AgentResult.messages` holds every model message, full
 responses with their usage included. A provider response that never completed is kept
-too, as what arrived marked `"status": "incomplete"`, and its tool calls never run. Under
+too, as what arrived marked `"status": "incomplete"`, and its tool calls never run. Nor
+do the calls of an Anthropic response that stopped for any reason but tool use
+(`max_tokens` mid-call, say): the run ends with an error, and the response is kept with
+its `stop_reason`, usage and `input_json`, each call's input exactly as it streamed. Under
 `dg.trace`, each step also carries the messages that produced it.
 
 ## CLI isolation and its exposure

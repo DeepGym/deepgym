@@ -12,8 +12,9 @@ headers, body), timing, and whether a write whose response was lost may have hap
 A call is never retried. Only the done tool ends an episode; a reply without tool calls
 gets a reminder instead. Streaming, accounting and incomplete-response handling are the
 computer agents' (see :mod:`deepgym.agents.providers`). Every model message goes to
-``AgentResult.messages``; under a TracedSession, each step also carries the messages that
-produced it.
+``AgentResult.messages``, a response that never completed too (what arrived of it, marked
+``status: incomplete``; its tool calls never run); under a TracedSession, each step also
+carries the messages that produced it.
 """
 
 from __future__ import annotations
@@ -36,6 +37,7 @@ from deepgym.agents.providers import (
     ANTHROPIC_MAX_TOKENS,
     SDK_RETRIES,
     account,
+    anthropic_incomplete,
     anthropic_message,
     api_error,
     openai_incomplete,
@@ -226,9 +228,9 @@ class AnthropicToolAgent:
                     messages=messages,
                     timeout=tracker.request_timeout,
                 )
-                if isinstance(response, str):
-                    return episode.result('error', error=response)
                 episode.say('assistant', response)
+                if error := anthropic_incomplete(response):
+                    return episode.result('error', error=error)
                 account(tracker, response.get('usage'), self.prices, 'anthropic')
                 content = response['content']
                 messages.append({'role': 'assistant', 'content': content})

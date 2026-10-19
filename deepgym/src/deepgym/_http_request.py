@@ -17,8 +17,26 @@ import sys
 import time
 
 
+def _answer(response: http.client.HTTPResponse, raw: bytes) -> dict:
+    """The record of *response*: status, every header, and *raw* as its body."""
+    answer: dict[str, object] = {
+        'status': response.status,
+        'reason': response.reason,
+        'headers': [list(header) for header in response.getheaders()],
+    }
+    try:
+        answer['body'] = raw.decode('utf-8')
+    except UnicodeDecodeError:
+        answer['body_base64'] = base64.b64encode(raw).decode('ascii')
+    return answer
+
+
 def main() -> int:
-    """Send the request on stdin; print its record; return 0 if a response came back."""
+    """Send the request on stdin; print its record; return 0 if a whole response came back.
+
+    A response cut short keeps what arrived (status, headers, the partial body), marked
+    ``incomplete``.
+    """
     spec = json.load(sys.stdin)
     if spec['scheme'] == 'https':
         context = ssl.create_default_context()
@@ -35,6 +53,7 @@ def main() -> int:
         record['uncertain'] = False
     else:
         body = spec['body']
+        response = None
         try:
             connection.request(
                 spec['method'],
@@ -46,19 +65,14 @@ def main() -> int:
             raw = response.read()
         except (OSError, http.client.HTTPException) as exc:
             # The request may have reached the app: a write is then neither known done nor not.
-            record['error'] = f'No response: {type(exc).__name__}: {exc}'
+            kind = 'No' if response is None else 'Incomplete'
+            record['error'] = f'{kind} response: {type(exc).__name__}: {exc}'
             record['uncertain'] = spec['mutation']
+            if response is not None:
+                partial = exc.partial if isinstance(exc, http.client.IncompleteRead) else b''
+                record['response'] = {**_answer(response, partial), 'incomplete': True}
         else:
-            answer: dict[str, object] = {
-                'status': response.status,
-                'reason': response.reason,
-                'headers': [list(header) for header in response.getheaders()],
-            }
-            try:
-                answer['body'] = raw.decode('utf-8')
-            except UnicodeDecodeError:
-                answer['body_base64'] = base64.b64encode(raw).decode('ascii')
-            record['response'] = answer
+            record['response'] = _answer(response, raw)
             status = 0
     finally:
         connection.close()

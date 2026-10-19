@@ -335,6 +335,13 @@ def test_anthropic_unfinished_stream_never_acts(app, monkeypatch, failure):
     assert not result.trajectory.steps and app.requests == []  # the received call never ran
     assert result.usage.input_tokens == 100  # the partial usage is kept
     assert result.cost.usd is None and 'billing unresolved' in result.cost.provenance
+    partial = result.messages[-1]  # what arrived is kept, marked incomplete
+    assert partial.role == 'assistant'
+    payload = json.loads(partial.content)
+    assert payload['status'] == 'incomplete'
+    assert payload['incomplete_details'] == {'reason': result.error}
+    assert payload['usage']['input_tokens'] == 100
+    assert payload['content'][0]['name'] == 'tracker'
 
 
 @pytest.mark.parametrize('details', [{'reason': 'max_output_tokens'}, None])
@@ -353,6 +360,8 @@ def test_openai_incomplete_response_never_acts(app, monkeypatch, details):
     )
     assert len(sent) == 1 and not result.trajectory.steps and app.requests == []
     assert result.usage.output_tokens == 10
+    payload = json.loads(result.messages[-1].content)  # what arrived is kept, marked incomplete
+    assert payload['status'] == 'incomplete' and payload['output'][0]['name'] == 'tracker'
 
 
 def test_reply_without_tool_calls_is_reminded_not_completed(app, monkeypatch):

@@ -27,6 +27,7 @@ ROUTES = (
     HttpRoute(method='GET', path='/rest/binary'),
     HttpRoute(method='GET', path='/rest/echo'),
     HttpRoute(method='GET', path='/rest/file/{name:path}'),
+    HttpRoute(method='GET', path='/rest/partial'),
 )
 
 
@@ -103,6 +104,13 @@ class App:
                     return
                 if route.endswith('/slow'):
                     time.sleep(3)
+                if route.endswith('/partial'):  # the status, headers and part of the body
+                    self.send_response(200)
+                    self.send_header('Content-Length', '100')
+                    self.end_headers()
+                    self.wfile.write(b'{"id": 7, "sta')
+                    self.close_connection = True
+                    return
                 if route.endswith('/redirect'):
                     self._send(302, b'', {'Location': app.redirect_to})
                 elif route.endswith('/done'):

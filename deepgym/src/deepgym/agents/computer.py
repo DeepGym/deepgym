@@ -25,6 +25,7 @@ from deepgym.agents.providers import (
     ANTHROPIC_MAX_TOKENS,
     SDK_RETRIES,
     account,
+    anthropic_incomplete,
     anthropic_message,
     api_error,
     openai_incomplete,
@@ -140,8 +141,8 @@ class AnthropicComputerAgent:
                     messages=messages,
                     timeout=tracker.request_timeout,
                 )
-                if isinstance(response, str):
-                    return tracker.result(session, 'error', error=response)
+                if error := anthropic_incomplete(response):
+                    return tracker.result(session, 'error', error=error)
                 account(tracker, response.get('usage'), self.prices, 'anthropic')
                 content = response['content']
                 messages.append({'role': 'assistant', 'content': content})

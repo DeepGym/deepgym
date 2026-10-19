@@ -189,6 +189,21 @@ def test_write_stopped_by_the_step_timeout_is_uncertain(app: App) -> None:
         assert len(app.requests) == 1
 
 
+def test_incomplete_response_keeps_what_arrived(app: App) -> None:
+    with app_session(app.url) as session:
+        session.start()
+        step = session.step(call('/rest/partial'))
+
+    result = json.loads(step.observation.content)
+    assert step.observation.metadata == {'exit_code': 1}  # no complete response
+    assert result['error'].startswith('Incomplete response: IncompleteRead')
+    assert result['uncertain'] is False
+    response = result['response']
+    assert response['incomplete'] is True
+    assert response['status'] == 200 and ['Content-Length', '100'] in response['headers']
+    assert response['body'] == '{"id": 7, "sta'
+
+
 def verifier(score: float) -> str:
     return f'import json\nprint(json.dumps({{"score": {score}, "passed": {score == 1}}}))\n'
 

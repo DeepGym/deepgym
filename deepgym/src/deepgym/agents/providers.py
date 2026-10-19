@@ -27,9 +27,11 @@ def _snapshot(stream: Any) -> Any:
         return None
 
 
-def _incomplete(tracker: BudgetTracker, snapshot: Any, prices: TokenPrices | None) -> None:
+def _incomplete(
+    tracker: BudgetTracker, message: dict[str, Any], prices: TokenPrices | None
+) -> None:
     """Keep the usage an unfinished stream reported, with the total bill marked unresolved."""
-    data = snapshot.model_dump(exclude_none=True).get('usage') if snapshot is not None else None
+    data = message.get('usage')
     usage = _anthropic_usage(data) if isinstance(data, dict) else Usage()
     unresolved = 'incomplete streamed response: partial usage, billing unresolved'
     tracker.add_usage(usage, Cost(provenance=unresolved))
@@ -37,11 +39,14 @@ def _incomplete(tracker: BudgetTracker, snapshot: Any, prices: TokenPrices | Non
 
 def anthropic_message(
     client: Any, tracker: BudgetTracker, prices: TokenPrices | None, **request: Any
-) -> dict[str, Any] | str:
-    """Stream one Anthropic response; return it whole, or why it never completed.
+) -> dict[str, Any]:
+    """Stream one Anthropic response; return it whole, or what arrived of it marked incomplete.
 
     Every event is consumed and only a received message_stop completes a response. An
-    unfinished one is never acted on: the usage it reported is kept, its billing unresolved.
+    unfinished one is never acted on (see :func:`anthropic_incomplete`): the usage it
+    reported is kept, its billing unresolved, and it comes back as the partial message
+    (empty if none started) with ``status`` ``incomplete`` and the reason in
+    ``incomplete_details``, as OpenAI marks its own.
 
     Args:
         client: The Anthropic client.
@@ -62,12 +67,23 @@ def anthropic_message(
         except Exception as exc:  # noqa: BLE001
             failure = type(exc).__name__
         snapshot = _snapshot(stream)
+    message = snapshot.model_dump(exclude_none=True) if snapshot is not None else {}
     if failure or not stopped or snapshot is None:
-        _incomplete(tracker, snapshot, prices)
-        if failure:
-            return f'Response stream failed: {failure}'
-        return 'Response stream ended before completion'
-    return snapshot.model_dump(exclude_none=True)
+        _incomplete(tracker, message, prices)
+        reason = (
+            f'Response stream failed: {failure}'
+            if failure
+            else 'Response stream ended before completion'
+        )
+        return {**message, 'status': 'incomplete', 'incomplete_details': {'reason': reason}}
+    return message
+
+
+def anthropic_incomplete(message: dict[str, Any]) -> str | None:
+    """Why :func:`anthropic_message` returned *message* incomplete, or None if it completed."""
+    if message.get('status') != 'incomplete':
+        return None
+    return message['incomplete_details']['reason']
 
 
 def openai_incomplete(response: dict[str, Any]) -> str | None:

@@ -1,0 +1,21 @@
+{
+  "pages": [
+    "---Getting started---",
+    "concepts",
+    "cli",
+    "external:[RL primer](/rl-primer.html)",
+    "---Environments---",
+    "...environments",
+    "---Authoring---",
+    "...authoring",
+    "---Training---",
+    "...training",
+    "---Reference---",
+    "api-server",
+    "sandboxes",
+    "traces",
+    "console",
+    "agents",
+    "cyberbench"
+  ]
+}

@@ -64,7 +64,7 @@ core-metadata-version = "2.3"
 [tool.hatch.build.targets.sdist]
 core-metadata-version = "2.3"
 # UI sources and node_modules stay in git; the sdist carries only the built static artifact.
-exclude = ["console-ui"]
+exclude = ["console-ui", "docs-site"]
 
 [tool.ruff]
 target-version = "py310"

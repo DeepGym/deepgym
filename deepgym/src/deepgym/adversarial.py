@@ -22,7 +22,7 @@ import logging
 import os
 import re
 import textwrap
-from typing import TYPE_CHECKING, Literal, get_args
+from typing import TYPE_CHECKING, Any, Literal, get_args
 
 from pydantic import BaseModel, Field
 
@@ -33,6 +33,45 @@ if TYPE_CHECKING:
     from deepgym.models import Environment
 
 logger = logging.getLogger(__name__)
+
+# Opus 5.5's maximum output (see deepgym.agents.providers). A model with a smaller one
+# says so in its error, and the request is made again at that size.
+_CLAUDE_MAX_TOKENS = 128_000
+_STATED_MAX = re.compile(r'> (\d+), which is the maximum allowed number of output tokens')
+
+
+def claude_reply(client: Any, model: str, prompt: str) -> str:
+    """Return Claude's whole reply to *prompt*, generated up to the model's own maximum.
+
+    Streamed, as the SDK requires for long outputs. A model whose maximum is below
+    Opus 5.5's is asked again at the maximum its error states.
+
+    Raises:
+        DeepGymError: If the request fails, or the reply stopped at the output limit (a
+            list cut off there isn't the model's whole answer).
+    """
+    max_tokens = _CLAUDE_MAX_TOKENS
+    try:
+        while True:
+            try:
+                with client.messages.stream(
+                    model=model,
+                    max_tokens=max_tokens,
+                    messages=[{'role': 'user', 'content': prompt}],
+                ) as stream:
+                    message = stream.get_final_message()
+                break
+            except Exception as exc:
+                stated = _STATED_MAX.search(str(exc))
+                if stated is None or int(stated.group(1)) >= max_tokens:
+                    raise
+                max_tokens = int(stated.group(1))
+    except Exception as exc:
+        raise DeepGymError(f'Anthropic API call failed: {type(exc).__name__}: {exc}') from exc
+    if message.stop_reason == 'max_tokens':
+        raise DeepGymError(f'{model} stopped at its {max_tokens}-token output limit mid-reply')
+    return ''.join(block.text for block in message.content if block.type == 'text')
+
 
 # ---------------------------------------------------------------------------
 # Default attack strategies
@@ -804,16 +843,7 @@ def _generate_llm_exploits(
         max_attacks=max_attacks,
     )
 
-    try:
-        client = Anthropic(api_key=resolved_key)
-        message = client.messages.create(
-            model=model,
-            max_tokens=4096,
-            messages=[{'role': 'user', 'content': prompt}],
-        )
-        response_text = message.content[0].text
-    except Exception as exc:
-        raise DeepGymError(f'Anthropic API call failed: {type(exc).__name__}: {exc}') from exc
+    response_text = claude_reply(Anthropic(api_key=resolved_key), model, prompt)
 
     exploits = _parse_exploits(response_text)
     logger.info('LLM generated %d exploits for: %s', len(exploits), env.task[:80])
@@ -1201,15 +1231,7 @@ class BlackBoxAdversarialTester:
         Raises:
             DeepGymError: If the API call fails.
         """
-        try:
-            message = client.messages.create(
-                model=self._model,
-                max_tokens=4096,
-                messages=[{'role': 'user', 'content': prompt}],
-            )
-            response_text = message.content[0].text
-        except Exception as exc:
-            raise DeepGymError(f'Anthropic API call failed: {type(exc).__name__}: {exc}') from exc
+        response_text = claude_reply(client, self._model, prompt)
 
         parts = _EXPLOIT_SEPARATOR.split(response_text)
         codes: list[str] = []

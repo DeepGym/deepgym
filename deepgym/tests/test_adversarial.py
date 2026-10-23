@@ -1,9 +1,12 @@
 """Tests for deepgym.adversarial — reward hack detection."""
 
+import contextlib
 import json
 import subprocess
 import sys
 import tempfile
+import types
+from collections.abc import Iterator
 from pathlib import Path
 
 import pytest
@@ -16,6 +19,7 @@ from deepgym.adversarial import (
     entry_points,
 )
 from deepgym.core import DeepGym
+from deepgym.exceptions import DeepGymError
 from deepgym.models import Environment
 
 
@@ -326,17 +330,43 @@ def test_payloads_carry_json_values_as_python(strategy: str, printed: list[str])
 
 
 class _ScriptedLLM:
-    """Stands in for the Anthropic client: answers each round from a list."""
+    """Stands in for the Anthropic client: streams each round's reply from a list."""
 
-    def __init__(self, replies: list[str]) -> None:
+    def __init__(self, replies: list[str | Exception], stop: str = 'end_turn') -> None:
         self.replies = iter(replies)
         self.messages = self
+        self.stop = stop
+        self.max_tokens: list[object] = []
 
-    def create(self, **kwargs: object) -> object:
+    @contextlib.contextmanager
+    def stream(self, **kwargs: object) -> Iterator[object]:
+        self.max_tokens.append(kwargs['max_tokens'])
         reply = next(self.replies)
         if isinstance(reply, Exception):
             raise reply
-        return type('Message', (), {'content': [type('Text', (), {'text': reply})()]})()
+        text = types.SimpleNamespace(type='text', text=reply)
+        message = types.SimpleNamespace(content=[text], stop_reason=self.stop)
+        yield types.SimpleNamespace(get_final_message=lambda: message)
+
+
+def test_claude_is_asked_for_its_maximum_and_a_smaller_one_is_read_from_its_error() -> None:
+    """No output cap of ours: Opus 5.5's maximum first, then the one a smaller model states."""
+    from deepgym.adversarial import claude_reply
+
+    stated = RuntimeError(
+        'max_tokens: 128000 > 64000, which is the maximum allowed number of output tokens'
+    )
+    llm = _ScriptedLLM([stated, 'the whole reply'])
+
+    assert claude_reply(llm, 'claude-haiku', 'p') == 'the whole reply'
+    assert llm.max_tokens == [128_000, 64_000]
+
+
+def test_a_reply_cut_off_at_the_output_limit_is_refused() -> None:
+    from deepgym.adversarial import claude_reply
+
+    with pytest.raises(DeepGymError, match='output limit'):
+        claude_reply(_ScriptedLLM(['half a list'], stop='max_tokens'), 'm', 'p')
 
 
 @pytest.mark.parametrize(

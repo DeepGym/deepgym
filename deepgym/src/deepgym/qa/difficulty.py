@@ -15,7 +15,7 @@ import httpx
 
 from deepgym.exceptions import DeepGymError
 from deepgym.integrations.verl import extract_code
-from deepgym.integrations.zai import ZaiChatClient
+from deepgym.integrations.zai import Completion, ZaiChatClient
 from deepgym.models import SCORE_TOLERANCE, Environment
 from deepgym.qa.checks import solved
 from deepgym.qa.report import DIFFICULTY_CHECK, QACheck
@@ -63,10 +63,12 @@ def difficulty_check(env: Environment, dg: DeepGym, client: ZaiChatClient, sampl
     neither too hard nor flat.
 
     The last fenced code block of each completion is the solution; a completion with
-    none is an empty answer, the model's own failure. The endpoint's failures are not
-    the model's: a request it rate-limits (429), times out or fails (5xx) is retried
-    with backoff, and if it never comes back, or the verifier can't judge a sample,
-    the check is inconclusive.
+    none is an empty answer, the model's own failure. The probe sets no output limit, so
+    a completion the endpoint still cuts off at its own (finish_reason 'length') is no
+    answer at all, and the check is inconclusive rather than counting it as a failure.
+    The endpoint's failures are not the model's either: a request it rate-limits (429),
+    times out or fails (5xx) is retried with backoff, and if it never comes back, or the
+    verifier can't judge a sample, the check is inconclusive.
 
     Raises:
         DeepGymError: If the endpoint refuses a request outright (a bad key or model).
@@ -79,7 +81,14 @@ def difficulty_check(env: Environment, dg: DeepGym, client: ZaiChatClient, sampl
             f'after {_RETRIES} retries: {missing[0]}'
         )
         return QACheck(name=DIFFICULTY_CHECK, status='inconclusive', details=details)
-    results = dg.run_batch(env, [extract_code(str(text)) for text in completions]).results
+    answers = [completion for completion in completions if isinstance(completion, Completion)]
+    if cut := sum(answer.truncated for answer in answers):
+        details = (
+            f"{cut}/{samples} samples were cut off at the endpoint's output limit "
+            "(finish_reason 'length')"
+        )
+        return QACheck(name=DIFFICULTY_CHECK, status='inconclusive', details=details)
+    results = dg.run_batch(env, [extract_code(answer.text) for answer in answers]).results
     if errored := sum(not result.has_verdict for result in results):
         details = f'{errored}/{samples} samples got no verdict (the verifier errored)'
         return QACheck(name=DIFFICULTY_CHECK, status='inconclusive', details=details)
@@ -104,7 +113,7 @@ def difficulty_check(env: Environment, dg: DeepGym, client: ZaiChatClient, sampl
     return QACheck(name=DIFFICULTY_CHECK, status='pass', details=details)
 
 
-def _complete(client: ZaiChatClient, prompt: str) -> str | Exception:
+def _complete(client: ZaiChatClient, prompt: str) -> Completion | Exception:
     """Return one completion, retrying the endpoint's own failures with backoff.
 
     Waits as long as a Retry-After header asks, else a random time up to 2s, 4s, 8s ...

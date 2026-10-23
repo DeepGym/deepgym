@@ -12,7 +12,11 @@ import lm_eval
 from deepgym import load_environment
 from deepgym.integrations.lm_eval import make_lm_eval_task
 
-tasks = [make_lm_eval_task(load_environment(n), n) for n in ['coin_change', 'two_sum']]
+# max_gen_toks: the model's maximum output (Qwen2.5 generates up to 8K tokens).
+tasks = [
+    make_lm_eval_task(load_environment(n), n, max_gen_toks=8192)
+    for n in ['coin_change', 'two_sum']
+]
 results = lm_eval.simple_evaluate(
     model='hf', model_args='pretrained=Qwen/Qwen2.5-0.5B-Instruct', tasks=tasks
 )
@@ -23,6 +27,10 @@ results = lm_eval.simple_evaluate(
 - lm-eval has no registry for Python tasks, so pass the task objects; `lm_eval --tasks`
   can't name them.
 - The last fenced code block of the generation runs, or all of it if there is none.
+- Generation runs to the model's maximum output, which you pass as `max_gen_toks`: lm-eval
+  needs a number, its backends would otherwise cut every answer at 256, and only you know
+  your model's real maximum, so there is no default. lm-eval gives the scorer only the
+  text, so a generation that reached the maximum is scored as written.
 - Pass `dg=` to pick the client that runs the verifier; without one, the task uses
   `DeepGym(mode='auto')`.
 

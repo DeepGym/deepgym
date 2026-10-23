@@ -61,7 +61,7 @@ def _glm_patch(
         max_tokens=args.max_tokens,
         temperature=args.temperature,
         thinking=args.thinking,
-    )
+    ).text
     cache_path.parent.mkdir(parents=True, exist_ok=True)
     cache_path.write_text(answer, encoding='utf-8')
     return answer, 'glm'
@@ -140,7 +140,7 @@ def main() -> int:
     parser.add_argument('--output', default='data/cyberbench/top100_artifact_eval.jsonl')
     parser.add_argument('--cache-dir', default='data/cyberbench/glm_patch_cache')
     parser.add_argument('--refresh-cache', action='store_true')
-    parser.add_argument('--max-tokens', type=int, default=4096)
+    parser.add_argument('--max-tokens', type=int)
     parser.add_argument('--temperature', type=float, default=0.1)
     parser.add_argument('--thinking', choices=['enabled', 'disabled'], default='enabled')
     parser.add_argument('--zai-timeout', type=float, default=60.0)

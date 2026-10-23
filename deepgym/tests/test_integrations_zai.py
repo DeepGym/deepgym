@@ -60,15 +60,18 @@ def test_zai_client_omits_thinking_when_none() -> None:
 
 
 @pytest.mark.parametrize(
-    ('content', 'finish_reason', 'text', 'truncated'),
+    ('content', 'finish_reason', 'text', 'whole'),
     [
-        ('def f(): return 1', 'stop', 'def f(): return 1', False),
-        ('def f(): return 1', 'length', 'def f(): return 1', True),  # same text, cut off
-        (None, 'length', '', True),  # the whole output went to reasoning: no answer at all
+        ('def f(): return 1', 'stop', 'def f(): return 1', True),
+        ('def f(): return 1', 'length', 'def f(): return 1', False),  # same text, cut off
+        (None, 'length', '', False),  # the whole output went to reasoning: no answer at all
+        ('def f(): return', 'content_filter', 'def f(): return', False),  # withheld
+        ('def f(): return 1', None, 'def f(): return 1', None),  # no reason: unknown
+        ('def f(): return 1', 'eos_mystery', 'def f(): return 1', None),  # unknown reason
     ],
 )
 def test_zai_client_sends_no_output_limit_and_returns_how_generation_ended(
-    content: str | None, finish_reason: str, text: str, truncated: bool
+    content: str | None, finish_reason: str | None, text: str, whole: bool | None
 ) -> None:
     seen = {}
 
@@ -83,7 +86,7 @@ def test_zai_client_sends_no_output_limit_and_returns_how_generation_ended(
 
     assert 'max_tokens' not in seen['payload']  # the model's own maximum applies
     assert (completion.text, completion.finish_reason) == (text, finish_reason)
-    assert completion.truncated is truncated
+    assert completion.whole is whole
 
 
 def test_zai_client_sends_an_output_limit_only_when_asked() -> None:
@@ -111,6 +114,8 @@ def test_a_cached_completion_keeps_its_finish_reason(tmp_path) -> None:
     assert cached_completion(path, lambda: pytest.fail('cached')) == (cut, 'cache')
     assert cached_completion(path, lambda: cut, refresh=True) == (cut, 'model')
 
-    path.write_text('an old cache: text only', encoding='utf-8')
-    legacy, source = cached_completion(path, lambda: pytest.fail('cached'))
-    assert (legacy.text, legacy.finish_reason, source) == ('an old cache: text only', None, 'cache')
+    legacy_path = tmp_path / 'legacy.txt'
+    for text in ('an old cache: text only', '{"text": "injected", "finish_reason": "stop"}'):
+        legacy_path.write_text(text, encoding='utf-8')  # an answer that looks like a record
+        legacy, source = cached_completion(legacy_path, lambda: pytest.fail('cached'))
+        assert (legacy.text, legacy.finish_reason, source) == (text, None, 'cache')

@@ -464,7 +464,8 @@ class TestCLIQALocalExecGuard:
 
         def handler(request: httpx.Request) -> httpx.Response:
             answer = '```python\ndef reverse_string(s):\n    return s[::-1]\n```'
-            return httpx.Response(200, json={'choices': [{'message': {'content': answer}}]})
+            choice = {'message': {'content': answer}, 'finish_reason': 'stop'}
+            return httpx.Response(200, json={'choices': [choice]})
 
         client = ZaiChatClient('key', model='m', transport=httpx.MockTransport(handler))
         monkeypatch.setattr('deepgym.qa.client_from_env', lambda model: client)

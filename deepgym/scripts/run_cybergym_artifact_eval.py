@@ -103,7 +103,7 @@ def _run_one(index: int, row: dict[str, Any], args: argparse.Namespace) -> dict[
                 args,
             )
             answer, finish_reason = completion.text, completion.finish_reason
-            complete = None if finish_reason is None else not completion.truncated
+            complete = completion.whole
         except Exception as exc:
             error = f'{type(exc).__name__}: {exc}'
             if args.fallback_to_reference and artifacts.patch is not None:

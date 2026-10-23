@@ -56,14 +56,12 @@ def environment_id(env: Environment) -> str:
 
 
 def grading_fingerprint(env: Environment) -> str:
-    """Return a short hash of everything that grades *env*: its verifier, test cases and
-    support files. Two environments can share a verifier and grade differently."""
-    grading = {
-        'verifier': env.verifier_source,
-        'test_cases': env.test_cases,
-        'support_files': env.support_files,
-    }
-    return hashlib.sha256(json.dumps(grading, sort_keys=True).encode('utf-8')).hexdigest()[:16]
+    """Return a short hash of the whole definition of *env*, so it covers every input that
+    grades it: verifier, test cases, support files, and whatever a subclass grades with
+    (Harbor's test scripts, which its placeholder verifier doesn't show)."""
+    from deepgym.traces.schema import environment_sha256
+
+    return environment_sha256(env)[:16]
 
 
 def claude_reply(client: Any, model: str, prompt: str) -> str:

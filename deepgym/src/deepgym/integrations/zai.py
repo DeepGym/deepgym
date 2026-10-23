@@ -31,12 +31,18 @@ class Completion(BaseModel):
     """The reply's content; empty if the endpoint returned none."""
     finish_reason: str | None
     """The endpoint's ``finish_reason``: ``'stop'`` at a natural end, ``'length'`` when an
-    output limit cut the reply off. None if the endpoint gave none."""
+    output limit cut the reply off, ``'content_filter'`` when the endpoint withheld some of
+    it. None if the endpoint gave none."""
 
     @property
-    def truncated(self) -> bool:
-        """Whether an output limit cut the reply off before the model finished it."""
-        return self.finish_reason == 'length'
+    def whole(self) -> bool | None:
+        """Whether this is the model's whole answer: True only for a natural end
+        (``'stop'``), False when a limit or filter cut it (``'length'``,
+        ``'content_filter'``), None when unknown (no reason, or one this client doesn't
+        know). Only a whole answer may be scored as the model's."""
+        if self.finish_reason == 'stop':
+            return True
+        return False if self.finish_reason in ('length', 'content_filter') else None
 
 
 class ZaiChatClient:
@@ -98,7 +104,7 @@ class ZaiChatClient:
         """Return the assistant's reply to a chat-completions request, with its finish reason.
 
         No output limit is sent unless *max_tokens* is given, so the model may answer up to
-        its own maximum; check ``Completion.truncated`` for a reply an endpoint cut off.
+        its own maximum; check ``Completion.whole`` before scoring the reply as the model's.
         Pass ``thinking=None`` to omit the Z.ai-specific field for other
         OpenAI-compatible endpoints.
         """
@@ -161,21 +167,25 @@ def _completion(data: dict[str, Any]) -> Completion:
 def cached_completion(
     cache_path: Path, complete: Callable[[], Completion], *, refresh: bool = False
 ) -> tuple[Completion, Literal['cache', 'model']]:
-    """Return a completion from *cache_path*, else *complete*'s, cached with its finish reason.
+    """Return a completion from the cache at *cache_path*, else *complete*'s, cached with its
+    finish reason in ``<cache_path>.completion.json``.
 
-    A cache written before finish reasons were kept holds only the text; it comes back
-    with ``finish_reason`` None: unknown, not known to be whole.
+    A legacy cache (the answer text alone, at *cache_path* itself) is read as opaque text,
+    never parsed, so an answer that looks like a cache record can't pass for one; it comes
+    back with ``finish_reason`` None: unknown, not known to be whole.
 
     Returns:
         The completion, and where it came from.
     """
-    if cache_path.exists() and not refresh:
-        raw = cache_path.read_text(encoding='utf-8')
-        try:
-            return Completion.model_validate_json(raw), 'cache'
-        except ValueError:
-            return Completion(text=raw, finish_reason=None), 'cache'
+    record = cache_path.with_name(cache_path.name + '.completion.json')
+    if not refresh:
+        if record.exists():
+            return Completion.model_validate_json(record.read_text(encoding='utf-8')), 'cache'
+        if cache_path.exists():
+            return Completion(
+                text=cache_path.read_text(encoding='utf-8'), finish_reason=None
+            ), 'cache'
     completion = complete()
-    cache_path.parent.mkdir(parents=True, exist_ok=True)
-    cache_path.write_text(completion.model_dump_json(), encoding='utf-8')
+    record.parent.mkdir(parents=True, exist_ok=True)
+    record.write_text(completion.model_dump_json(), encoding='utf-8')
     return completion, 'model'

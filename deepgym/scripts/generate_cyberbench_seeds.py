@@ -98,8 +98,8 @@ def main() -> int:
                     temperature=args.temperature,
                     thinking='enabled',
                 )
-                if response.truncated:
-                    raise ValueError('the reply was cut off at the output limit')
+                if response.whole is not True:
+                    raise ValueError(f'not a whole reply (finish_reason {response.finish_reason})')
                 spec = spec_from_glm_json(response.text, row=row, index=index)
             except Exception as exc:
                 spec = cyber_seed_from_hf_row(row, index=index)

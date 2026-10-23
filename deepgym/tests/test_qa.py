@@ -362,14 +362,17 @@ def test_difficulty_is_inconclusive_when_a_sample_gets_no_verdict(local_dg: Deep
 
 
 @pytest.mark.parametrize(
-    ('answers', 'finish_reasons', 'cut'),
+    ('answers', 'finish_reasons', 'cut', 'reasons'),
     [
-        ([''], ['length'], 2),  # the whole output went to reasoning: never too_hard
-        ([_RIGHT, '```python\ndef add(a, b):\n    return a'], ['stop', 'length'], 1),
+        ([''], ['length'], 2, "['length']"),  # all output went to reasoning: never too_hard
+        ([_RIGHT, '```python\ndef add(a, b):\n    return a'], ['stop', 'length'], 1, "['length']"),
+        ([_RIGHT], ['content_filter'], 2, "['content_filter']"),  # the endpoint withheld it
+        ([_RIGHT], [None], 2, "['None']"),  # no reason given: unknown, not whole
+        ([_RIGHT], ['eos_mystery'], 2, "['eos_mystery']"),  # a reason this client doesn't know
     ],
 )
-def test_a_sample_cut_off_at_the_output_limit_is_not_a_failure(
-    answers: list[str], finish_reasons: list[str], cut: int, local_dg: DeepGym
+def test_a_sample_that_is_not_a_whole_answer_is_not_a_failure(
+    answers: list[str], finish_reasons: list[str | None], cut: int, reasons: str, local_dg: DeepGym
 ) -> None:
     seen: list[dict] = []
     client = _client(answers, seen, finish_reasons)
@@ -378,7 +381,8 @@ def test_a_sample_cut_off_at_the_output_limit_is_not_a_failure(
 
     assert check.status == 'inconclusive'  # never too_hard, never a pass@1 of 0.50
     assert check.details == (
-        f"{cut}/2 samples were cut off at the endpoint's output limit (finish_reason 'length')"
+        f'{cut}/2 samples are not known to be whole answers (finish reasons {reasons}: cut '
+        'off, filtered or unknown)'
     )
     assert all('max_tokens' not in request for request in seen)  # the probe sets no limit
 
@@ -401,7 +405,8 @@ def _flaky_client(statuses: list[int], seen: list[int]) -> ZaiChatClient:
         seen.append(status)
         if status != 200:
             return httpx.Response(status, headers={'retry-after': '0'}, json={})
-        return httpx.Response(200, json={'choices': [{'message': {'content': _RIGHT}}]})
+        choice = {'message': {'content': _RIGHT}, 'finish_reason': 'stop'}
+        return httpx.Response(200, json={'choices': [choice]})
 
     transport = httpx.MockTransport(handler)
     return ZaiChatClient('key', base_url='https://llm.test/v1', model='m', transport=transport)
@@ -479,7 +484,8 @@ def test_rate_limit_backoff_honors_retry_after_else_jitters(
 
     def handler(request: httpx.Request) -> httpx.Response:
         status, headers = next(replies)
-        body = {'choices': [{'message': {'content': _RIGHT}}]} if status == 200 else {}
+        choice = {'message': {'content': _RIGHT}, 'finish_reason': 'stop'}
+        body = {'choices': [choice]} if status == 200 else {}
         return httpx.Response(status, headers=headers, json=body)
 
     waits: list[float] = []

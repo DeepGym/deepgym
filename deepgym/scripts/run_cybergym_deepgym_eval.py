@@ -295,7 +295,7 @@ def main() -> int:
                 result = dg.run(env, completion.text)
                 record |= {
                     'finish_reason': finish_reason,
-                    'complete': None if finish_reason is None else not completion.truncated,
+                    'complete': completion.whole,
                     'score': result.score,
                     'passed': result.passed,
                     'has_verdict': result.has_verdict,

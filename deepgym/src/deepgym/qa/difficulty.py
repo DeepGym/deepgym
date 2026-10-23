@@ -82,10 +82,10 @@ def difficulty_check(env: Environment, dg: DeepGym, client: ZaiChatClient, sampl
         )
         return QACheck(name=DIFFICULTY_CHECK, status='inconclusive', details=details)
     answers = [completion for completion in completions if isinstance(completion, Completion)]
-    if cut := sum(answer.truncated for answer in answers):
+    if partial := [answer.finish_reason for answer in answers if answer.whole is not True]:
         details = (
-            f"{cut}/{samples} samples were cut off at the endpoint's output limit "
-            "(finish_reason 'length')"
+            f'{len(partial)}/{samples} samples are not known to be whole answers (finish '
+            f'reasons {sorted(set(map(str, partial)))}: cut off, filtered or unknown)'
         )
         return QACheck(name=DIFFICULTY_CHECK, status='inconclusive', details=details)
     results = dg.run_batch(env, [extract_code(answer.text) for answer in answers]).results

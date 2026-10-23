@@ -1,10 +1,12 @@
 """Find Harbor tasks in a local folder, a git repository or a Hugging Face dataset.
 
-Remote datasets are shallow-cloned once into ``~/.deepgym/benchmarks/harbor/`` and reused.
+Remote datasets are shallow-cloned once into ``~/.deepgym/benchmarks/harbor/``, one folder
+per URL, and reused only while git confirms the folder is a clone of that URL.
 """
 
 from __future__ import annotations
 
+import hashlib
 import re
 import subprocess
 import tempfile
@@ -27,7 +29,8 @@ def dataset_root(source: str | Path) -> Path:
             Face dataset.
 
     Raises:
-        DeepGymError: If *source* is none of those, or cloning it fails.
+        DeepGymError: If *source* is none of those, cloning it fails, or its cache folder
+            isn't a clone of it.
     """
     local = Path(source).expanduser()
     if local.is_dir():
@@ -37,9 +40,11 @@ def dataset_root(source: str | Path) -> Path:
         if not _HF_DATASET.fullmatch(url):
             raise DeepGymError(f'{url!r} is not a folder, a git URL or a Hugging Face dataset')
         url = f'https://huggingface.co/datasets/{url}'
-    target = _cache_dir() / re.sub(r'[^\w.-]+', '_', url.split('://')[-1])
+    target = _cache_dir() / _cache_name(url)
     if not target.is_dir():
         _clone(url, target)
+    if _cloned_from(target) != url:
+        raise DeepGymError(f'{target} is not a clone of {url}; delete it to clone again')
     return target
 
 
@@ -73,6 +78,29 @@ def load_tasks(source: str | Path, limit: int | None = None) -> list[HarborTask]
 def _cache_dir() -> Path:
     """Where remote datasets are cloned."""
     return Path.home() / '.deepgym' / 'benchmarks' / 'harbor'
+
+
+def _cache_name(url: str) -> str:
+    """The cache folder name for *url*: readable, and keyed by a digest of the whole URL.
+
+    The readable part alone isn't unique: ``host/team_one/task`` and ``host/team/one_task``
+    both read ``host_team_one_task``.
+    """
+    readable = re.sub(r'[^\w.-]+', '_', url.split('://')[-1])
+    return f'{readable}-{hashlib.sha256(url.encode()).hexdigest()[:16]}'
+
+
+def _cloned_from(clone: Path) -> str | None:
+    """The URL *clone* was cloned from, as git recorded it; None if it isn't a git clone."""
+    try:
+        done = subprocess.run(
+            ['git', '--git-dir', clone / '.git', 'config', '--local', '--get', 'remote.origin.url'],
+            capture_output=True,
+            text=True,
+        )
+    except OSError as exc:
+        raise DeepGymError(f'Could not read where {clone} was cloned from: {exc}') from exc
+    return done.stdout.strip() if done.returncode == 0 else None
 
 
 def _clone(url: str, target: Path) -> None:

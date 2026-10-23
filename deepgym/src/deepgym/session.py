@@ -39,6 +39,7 @@ from deepgym.exceptions import (
     SandboxDiedError,
     SandboxError,
     SandboxExpiredError,
+    SessionClosedError,
     TimeoutError,
     VerifierError,
     is_infrastructure_failure,
@@ -1393,10 +1394,10 @@ class Session:
         failing there would be scored as the agent's doing when it was the host's.
 
         Raises:
-            DeepGymError: If the session is closed.
+            SessionClosedError: If the session is closed.
         """
         if self._closed:
-            raise DeepGymError('Session is closed; open a new session')
+            raise SessionClosedError('Session is closed; open a new session')
 
     def _apply(
         self,

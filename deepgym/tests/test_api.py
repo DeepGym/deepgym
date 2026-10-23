@@ -682,29 +682,31 @@ class TestSessions:
         assert client.post('/v1/sessions', json={'environment': FILE_CHECK_ENV}).status_code == 201
         real_close()
 
-    def test_a_step_that_loses_the_race_with_delete_is_refused(
-        self, client: TestClient, monkeypatch: pytest.MonkeyPatch
+    @pytest.mark.parametrize(
+        ('route', 'body'),
+        [('step', {'action_type': 'bash', 'content': 'echo hello > out.txt'}), ('score', None)],
+    )
+    def test_a_request_that_loses_the_race_with_delete_is_refused(
+        self, client: TestClient, monkeypatch: pytest.MonkeyPatch, route: str, body: dict | None
     ) -> None:
-        """A5: a step whose route looked the session up just before a DELETE closed it never
-        reaches the deleted sandbox, so the host's delete is not scored as the agent's zero."""
+        """A5: a request whose route looked the session up just before a DELETE closed it
+        never reaches the deleted sandbox, so the host's delete is not scored as the agent's
+        zero."""
         session_id = _open_session(client)
         session = routes._sessions[session_id]
         real_get_session = routes._get_session
 
         def get_then_delete(sid: str) -> Session:
             found = real_get_session(sid)
-            routes.close_session(sid)  # the DELETE lands between the lookup and the step
+            routes.close_session(sid)  # the DELETE lands between the lookup and the request
             return found
 
         monkeypatch.setattr(routes, '_get_session', get_then_delete)
 
-        step = client.post(
-            f'/v1/sessions/{session_id}/step',
-            json={'action_type': 'bash', 'content': 'echo hello > out.txt'},
-        )
+        response = client.post(f'/v1/sessions/{session_id}/{route}', json=body)
 
-        assert step.status_code == 409
-        assert 'closed' in step.json()['detail']
+        assert response.status_code == 409
+        assert 'closed' in response.json()['detail']
         assert not session.trajectory.steps and session.failed_result is None
 
     def test_a_failed_start_whose_delete_fails_is_retried_by_the_sweep(

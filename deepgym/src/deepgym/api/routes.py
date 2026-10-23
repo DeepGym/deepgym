@@ -48,7 +48,7 @@ from deepgym.api.schemas import (
 )
 from deepgym.benchmark_ops import build_benchmark_audit
 from deepgym.core import DeepGym
-from deepgym.exceptions import DeepGymError, SandboxError, VerifierError
+from deepgym.exceptions import DeepGymError, SandboxError, SessionClosedError, VerifierError
 from deepgym.models import (
     Action,
     BatchJob,
@@ -133,6 +133,8 @@ def _http_errors(
     """Translate DeepGym errors into HTTP exceptions."""
     try:
         yield
+    except SessionClosedError as exc:  # deleted while this request waited for it
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc
     except VerifierError as exc:
         raise HTTPException(
             status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,

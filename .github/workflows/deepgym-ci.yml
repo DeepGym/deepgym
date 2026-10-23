@@ -39,8 +39,10 @@ jobs:
       - name: Install bubblewrap (the local sandbox)
         run: |
           sudo apt-get update -q && sudo apt-get install -y -q bubblewrap
-          # Ubuntu 24.04 blocks the unprivileged user namespaces bwrap needs.
-          sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+          # Ubuntu 24.04 kernels with AppArmor block the unprivileged user namespaces bwrap needs.
+          knob=/proc/sys/kernel/apparmor_restrict_unprivileged_userns
+          if [ -e "$knob" ]; then sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0; fi
+          bwrap --ro-bind / / --unshare-all true
 
       - name: Install dependencies
         run: pip install -e ".[dev,anthropic,openai]"
@@ -73,7 +75,9 @@ jobs:
       - name: Install bubblewrap (the local sandbox)
         run: |
           sudo apt-get update -q && sudo apt-get install -y -q bubblewrap
-          sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+          knob=/proc/sys/kernel/apparmor_restrict_unprivileged_userns
+          if [ -e "$knob" ]; then sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0; fi
+          bwrap --ro-bind / / --unshare-all true
 
       # CPU-only torch keeps the job small. TRL 1.15 computes GRPO log-probs with Triton GPU
       # kernels, so CPU runners stay on TRL 1.14, whose reward and advantage code is the same.

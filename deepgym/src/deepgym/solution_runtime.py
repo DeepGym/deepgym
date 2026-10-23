@@ -318,7 +318,7 @@ def _sandbox_members(mark: str) -> set[int]:
     return {
         pid
         for pid in _all_pids()
-        if can_look_up(pid, mark) and not can_look_up(pid, _SANDBOX_CANARY)
+        if not can_look_up(pid, _SANDBOX_CANARY) and can_look_up(pid, mark)
     }
 
 
@@ -772,7 +772,7 @@ def run_solution(
             forwarder = stack.enter_context(_loopback(loopback_port))
             prefix, signal_fds, started, release = stack.enter_context(_start_signal())
             launch = [*prefix, *forwarder, *command]
-            mark = _sandbox_mark()
+            mark = _sandbox_mark() if allow_subprocess else None  # else it can't fork
             argv = _launch_argv(launch, workdir, env, allow_subprocess, loopback_port, mark)
             proc = subprocess.Popen(
                 argv,

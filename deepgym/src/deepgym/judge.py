@@ -180,52 +180,151 @@ def local_isolation_kind() -> Literal['macos', 'bwrap', 'none']:
         with contextlib.suppress(OSError, subprocess.SubprocessError):
             if subprocess.run(probe, capture_output=True, timeout=10).returncode == 0:
                 return kind  # type: ignore[return-value]
-    logger.warning(
-        'No sandbox-exec or bwrap available: local solutions run in a separate process but '
-        'can read judge files. Use Daytona for untrusted code.'
-    )
     return 'none'
+
+
+ALLOW_UNSANDBOXED_ENV = 'DEEPGYM_ALLOW_UNSANDBOXED'
+"""Set to 1 to run local solutions with no sandbox, where none works; they can then read
+every file this user can, verifiers and answer keys included."""
+
+
+def unsandboxed_allowed() -> bool:
+    """Whether the user opted in to local runs with no sandbox (:data:`ALLOW_UNSANDBOXED_ENV`)."""
+    return os.environ.get(ALLOW_UNSANDBOXED_ENV, '').lower() in ('1', 'true', 'yes')
+
+
+# What a local solution may read besides the Python installation and its own run: the
+# operating system and the software trees a Python links against (Homebrew's, MacPorts',
+# Nix's, Apple's developer tools). Nothing else is readable, so nothing a user or another
+# process wrote is: home, temp directories (other runs and their verifiers), mounted
+# volumes, daemon sockets in /run and /var/run.
+_SYSTEM_READ = {
+    'darwin': (
+        '/System',
+        '/usr',
+        '/bin',
+        '/sbin',
+        '/dev',
+        '/private/etc',
+        '/private/var/db/timezone',
+        '/private/var/select',
+        '/private/var/db/xcode_select_link',
+        '/Library/Frameworks',
+        '/Library/Developer/CommandLineTools',
+        '/Applications/Xcode.app/Contents/Developer',
+        '/opt/homebrew',
+        '/opt/local',
+        '/nix/store',
+    ),
+    'linux': (
+        '/usr',
+        '/bin',
+        '/sbin',
+        '/lib',
+        '/lib32',
+        '/lib64',
+        '/libx32',
+        '/etc',
+        '/sys',
+        '/nix/store',
+        '/gnu/store',
+    ),
+}
+# Service data inside those trees (databases, logs), hidden again.
+_SYSTEM_HIDE = ('/opt/homebrew/var', '/opt/local/var', '/usr/local/var')
 
 
 _runs_root_lock = threading.Lock()
 _runs_root: list[str] = []
+_RUNS_PREFIX = 'deepgym_runs_'
+_RUNS_LOCK = '.owner.lock'
 
 
 def local_runs_root() -> str:
-    """One parent for every local run in this process, hidden from all solutions.
+    """One parent for every local run in this process, unreadable to all solutions.
 
     Anything else no local solution may read (an approval's snapshot) goes here too.
+    It is removed at exit; this process holds a lock in it for life, so a later process
+    can tell a root left by one that was killed and remove it (see :func:`_remove_stale_roots`).
 
-    Locked: parallel batch runs must share it, or each would hide only its own.
+    Locked: parallel batch runs must share it.
     """
+    import fcntl  # Unix only, like the local sandboxes
+
     with _runs_root_lock:
         if not _runs_root:
-            root = os.path.realpath(tempfile.mkdtemp(prefix='deepgym_runs_'))
+            _remove_stale_roots()
+            root = os.path.realpath(tempfile.mkdtemp(prefix=_RUNS_PREFIX))
+            # Locked before it takes the name another process looks for, so it is never
+            # seen unlocked while this process lives. The kernel drops the lock however
+            # this process ends; the descriptor stays open until then.
+            fd = os.open(f'{root}/.locking', os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
+            fcntl.flock(fd, fcntl.LOCK_EX)
+            os.rename(f'{root}/.locking', f'{root}/{_RUNS_LOCK}')
             atexit.register(shutil.rmtree, root, ignore_errors=True)
             _runs_root.append(root)
         return _runs_root[0]
 
 
-def local_isolation(expose: list[str]) -> dict:
-    """Isolation spec for a local run.
+def _remove_stale_roots() -> None:
+    """Remove this user's runs roots whose process is gone: killed, it never ran its exit
+    cleanup. A root whose lock another process holds, or that has none, is left alone."""
+    import fcntl
 
-    Hides the home directory (repo clones, other worktrees, ~/.deepgym), all
-    runs, the deepgym package, and /run and /var/run: daemon sockets there (Docker,
-    D-Bus, systemd) would act outside the sandbox on request, read-only mount or not.
-    Re-exposes the Python installation and this run's own *expose* directories; the
-    package is hidden again even if it sits inside the Python installation.
+    for root in Path(tempfile.gettempdir()).glob(f'{_RUNS_PREFIX}*'):
+        try:
+            if root.is_symlink() or root.stat().st_uid != os.getuid():
+                continue
+            fd = os.open(root / _RUNS_LOCK, os.O_RDONLY | os.O_NOFOLLOW)
+        except OSError:
+            continue
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except OSError:
+            continue  # its process is alive
+        finally:
+            os.close(fd)
+        shutil.rmtree(root, ignore_errors=True)
+
+
+def _deepgym_packages() -> list[str]:
+    """Every deepgym package a solution's Python could import: this one, and any other
+    copy on the import path (an installed wheel next to a source checkout, say)."""
+    here = os.path.realpath(Path(__file__).resolve().parent)
+    found = (os.path.realpath(Path(entry or os.curdir, 'deepgym')) for entry in sys.path)
+    others = [path for path in found if Path(path, '__init__.py').is_file()]
+    return list(dict.fromkeys([here, *others]))
+
+
+def local_isolation(expose: list[str]) -> dict:
+    """Isolation spec for a local run: what its solution may read.
+
+    Only the operating system and the software trees a Python links against (see
+    :data:`_SYSTEM_READ`), the Python installation and this run's own *expose*
+    directories. Every deepgym package stays unreadable even inside those.
+
+    Raises:
+        SandboxError: If this machine has no working sandbox-exec or bwrap, unless
+            :data:`ALLOW_UNSANDBOXED_ENV` is set.
     """
     kind = local_isolation_kind()
     if kind == 'none':
-        return {'kind': 'none'}
-    package = os.path.realpath(Path(__file__).resolve().parent)
-    hide = [str(Path.home()), local_runs_root(), '/run', '/var/run']
+        if unsandboxed_allowed():
+            return {'kind': 'none'}
+        raise SandboxError(
+            'No working sandbox-exec or bwrap on this machine, so a local solution could '
+            'read every file you can, its verifier included. Install bubblewrap (Linux), '
+            f'use a sandbox provider (mode="docker", "daytona", ...), or set '
+            f'{ALLOW_UNSANDBOXED_ENV}=1 to run it unsandboxed anyway.'
+        )
+    system = _SYSTEM_READ['darwin' if kind == 'macos' else 'linux']
     pythons = {os.path.realpath(p) for p in (sys.prefix, sys.base_prefix, sys.exec_prefix)}
+    hidden = [path for path in _SYSTEM_HIDE if os.path.exists(path)]
     return {
         'kind': kind,
-        'hide': list(dict.fromkeys(os.path.realpath(p) for p in hide if os.path.exists(p))),
-        'expose': [*sorted(pythons), *expose],
-        'rehide': [package],
+        # Unresolved: bwrap recreates a symlinked tree (/bin -> usr/bin) as the link.
+        'read': [path for path in system if os.path.lexists(path)] + sorted(pythons) + expose,
+        'hide': [*_deepgym_packages(), *hidden],
     }
 
 
@@ -269,9 +368,9 @@ def local_judge(
         judge = [sys.executable, *job.verifier_args(judge_dir, solution_path)]
         deadline = {'DEEPGYM_DEADLINE': str(time.time() + job.timeout), 'TMPDIR': tmp_dir}
         if confined:
-            outer = local_isolation([run_dir])
-            if outer['kind'] == 'none':
+            if local_isolation_kind() == 'none':  # never unsandboxed, opt-in or not
                 raise SandboxError('confining the judge needs sandbox-exec or bwrap')
+            outer = local_isolation([run_dir])
             env = {
                 'PATH': os.environ.get('PATH', os.defpath),
                 **job.runtime_env(outer, runtime_path, sys.executable, solution_dir),

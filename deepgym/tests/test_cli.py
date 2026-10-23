@@ -439,6 +439,19 @@ class TestCLIQALocalExecGuard:
         assert '--allow-local-exec' in err
         assert '--mode docker' in err
 
+    def test_model_without_a_sandbox_exits_unless_allowed(
+        self, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture
+    ) -> None:
+        monkeypatch.setattr('deepgym.cli.local_isolation_kind', lambda: 'none')
+        monkeypatch.delenv('DEEPGYM_ALLOW_UNSANDBOXED', raising=False)
+        args = ['deepgym', 'qa', 'reverse_string', '--model', 'm', '--allow-local-exec']
+
+        with patch.object(sys, 'argv', args), pytest.raises(SystemExit) as exc:
+            main()
+
+        assert exc.value.code == 1
+        assert 'DEEPGYM_ALLOW_UNSANDBOXED=1' in capsys.readouterr().err
+
     @pytest.mark.parametrize('isolation', ['bwrap', 'none'])
     def test_model_with_the_flag_proceeds(
         self,
@@ -447,6 +460,8 @@ class TestCLIQALocalExecGuard:
         monkeypatch: pytest.MonkeyPatch,
         capsys: pytest.CaptureFixture,
     ) -> None:
+        monkeypatch.setenv('DEEPGYM_ALLOW_UNSANDBOXED', '1')  # needed only where none works
+
         def handler(request: httpx.Request) -> httpx.Response:
             answer = '```python\ndef reverse_string(s):\n    return s[::-1]\n```'
             return httpx.Response(200, json={'choices': [{'message': {'content': answer}}]})

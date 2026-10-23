@@ -220,35 +220,120 @@ def _runtime() -> str:
 
 
 def _macos_profile(
-    spec: dict, writable: Sequence[str], allow_fork: bool, loopback_port: int | None
+    spec: dict,
+    writable: Sequence[str],
+    allow_fork: bool,
+    loopback_port: int | None,
+    mark: str | None,
 ) -> str:
     def paths(items: Sequence[str]) -> str:
         return ' '.join(f'(subpath {json.dumps(os.path.realpath(p))})' for p in items) or (
             '(literal "/nonexistent")'
         )
 
-    hide, expose, rehide = spec['hide'], spec.get('expose', []), spec.get('rehide', [])
     loopback = (
         f'(allow network-outbound (remote ip "localhost:{int(loopback_port)}"))'
         if loopback_port is not None
         else ''
     )
+    marked = f'(allow mach-lookup (global-name {json.dumps(mark)}))' if mark else ''
 
-    # Later rules win: hide whole trees, then re-expose this run's own directories.
-    # Hiding denies reading contents and listings, not stat, so tools that resolve
-    # their working path (git) still work. No Mach IPC or AppleEvents: they let a
-    # process ask launchd or another app to start something outside the sandbox.
+    # Later rules win: nothing is readable, then what the spec reads and the run's own
+    # directories are (and the root directory itself, which dyld lists to start any
+    # process), then the spec's hidden paths aren't. Denying data, not metadata, so tools
+    # that resolve their working path (git) still work. No Mach IPC or AppleEvents: they
+    # let a process ask launchd or another app to start something outside the sandbox;
+    # the mark is a service name that exists nowhere, so looking it up reaches nothing.
     return (
-        f'(version 1)(allow default)(deny network*){loopback}(deny mach-lookup)'
+        f'(version 1)(allow default)(deny network*){loopback}(deny mach-lookup){marked}'
         '(deny appleevent-send)'
-        f'(deny file-read-data {paths(hide)})'
-        f'(allow file-read-data {paths([*expose, *writable])})'
-        f'(deny file-read-data {paths(rehide)})'
+        '(deny file-read-data (subpath "/"))'
+        f'(allow file-read-data (literal "/") {paths([*spec["read"], *writable])})'
+        f'(deny file-read-data {paths(spec["hide"])})'
         f'(deny file-write*)(allow file-write* {paths(writable)} (literal "/dev/null"))'
-        # Without a separate user there is no reliable way to kill a child that
-        # calls setsid(), so no forking unless the caller needs subprocesses.
+        # A child that calls setsid() leaves the process group; with no separate user,
+        # only its sandbox (see _sandbox_members) still finds it, so no forking unless
+        # the caller needs subprocesses and marks this sandbox to sweep afterwards.
         + ('' if allow_fork else '(deny process-fork)')
     )
+
+
+# Every DeepGym macOS sandbox denies looking this up; a process outside any denies nothing.
+_SANDBOX_CANARY = 'com.deepgym.sandbox.canary'
+
+
+def _sandbox_mark() -> str | None:
+    """A service name only one macOS sandbox may look up, to find its processes later
+    (see :func:`_sandbox_members`); None where sandboxes aren't sandbox-exec's."""
+    if _isolation()['kind'] != 'macos':
+        return None
+    return f'com.deepgym.sandbox.{os.urandom(16).hex()}'
+
+
+@functools.cache
+def _sandbox_check() -> Callable[[int, str], bool]:
+    """Return can_look_up(pid, name): whether *pid*'s sandbox lets it look up service *name*.
+
+    libsystem's sandbox_check is variadic; on arm64 Apple passes variadic arguments on
+    the stack, so the name goes ninth, after five fillers for the registers it skips.
+    """
+    import ctypes
+    import platform
+
+    check = ctypes.CDLL('/usr/lib/libSystem.dylib').sandbox_check
+    check.restype = ctypes.c_int
+    filler = (0,) * 5 if platform.machine() == 'arm64' else ()
+    check.argtypes = [
+        ctypes.c_int,
+        ctypes.c_char_p,
+        ctypes.c_int,
+        *[ctypes.c_long] * len(filler),
+        ctypes.c_char_p,
+    ]
+    name_filter = 2 | 0x40000000  # SANDBOX_FILTER_GLOBAL_NAME | SANDBOX_CHECK_NO_REPORT
+
+    def can_look_up(pid: int, name: str) -> bool:
+        return check(pid, b'mach-lookup', name_filter, *filler, name.encode()) == 0
+
+    return can_look_up
+
+
+def _all_pids() -> list[int]:
+    import ctypes
+
+    listall = ctypes.CDLL('/usr/lib/libproc.dylib').proc_listallpids
+    listall.restype = ctypes.c_int
+    while True:
+        size = listall(None, 0) + 256
+        pids = (ctypes.c_int * size)()
+        count = listall(pids, ctypes.sizeof(pids))
+        if count < size:  # else processes appeared in between; it may have filled up
+            return [pid for pid in pids[:count] if pid > 0]
+
+
+def _sandbox_members(mark: str) -> set[int]:
+    """Pids in the macOS sandbox that *mark* names: a sandbox can't be left, so this finds
+    every process the solution started, whatever group or session it moved to."""
+    can_look_up = _sandbox_check()
+    return {
+        pid
+        for pid in _all_pids()
+        if can_look_up(pid, mark) and not can_look_up(pid, _SANDBOX_CANARY)
+    }
+
+
+def _sweep_sandbox(mark: str | None) -> None:
+    """Kill every process in the macOS sandbox *mark* names, until no new one turns up."""
+    if mark is None:
+        return
+    killed: set[int] = set()
+    while members := _sandbox_members(mark):
+        for pid in members:  # killed ones linger unreaped until their parent waits
+            with contextlib.suppress(ProcessLookupError, PermissionError):
+                os.kill(pid, signal.SIGKILL)
+        if members <= killed:
+            return
+        killed |= members
 
 
 def _share_with_solution(workdir: str) -> None:
@@ -284,14 +369,17 @@ def _launch_argv(
     extra_env: dict[str, str] | None = None,
     allow_fork: bool = False,
     loopback_port: int | None = None,
+    mark: str | None = None,
 ) -> list[str]:
-    """Wrap *command* to run as the isolated solution: empty env, writes only in *workdir*.
+    """Wrap *command* to run as the isolated solution: empty env, writes only in *workdir*,
+    reads only what the spec allows (see :func:`deepgym.judge.local_isolation`).
 
-    *loopback_port* only matters on macOS, where the solution shares the judge's
-    network stack; elsewhere :func:`_loopback` forwards the port. A ``none`` spec with
-    ``no_fork`` (inside a macOS-confined judge, see :func:`_confine`) lets the command
-    start no processes at all, *allow_fork* or not: nothing there could reap one that
-    detaches.
+    *loopback_port* and *mark* (see :func:`_sandbox_mark`) only matter on macOS, where
+    the solution shares the judge's network stack and process space; elsewhere
+    :func:`_loopback` forwards the port and the PID namespace holds every process. A
+    ``none`` spec with ``no_fork`` (inside a macOS-confined judge, see :func:`_confine`)
+    lets the command start no processes at all, *allow_fork* or not: nothing there could
+    reap one that detaches.
     """
     spec = _isolation()
     writable = [workdir]
@@ -302,19 +390,21 @@ def _launch_argv(
         _share_with_solution(workdir)
         return [*spec['prefix'], *clean, *command]
     if kind == 'macos':
-        profile = _macos_profile(spec, writable, allow_fork, loopback_port)
+        profile = _macos_profile(spec, writable, allow_fork, loopback_port, mark)
         return ['sandbox-exec', '-p', profile, *clean, *command]
     if kind == 'bwrap':
-        argv = ['bwrap', '--ro-bind', '/', '/', '--dev', '/dev', '--proc', '/proc']
+        # A fresh root holding only what the spec reads; the rest of the host isn't there.
+        argv = ['bwrap']
+        for path in spec['read']:
+            link = os.path.islink(path)
+            argv += ['--symlink', os.readlink(path), path] if link else ['--ro-bind', path, path]
+        argv += ['--dev', '/dev', '--proc', '/proc']
         for path in spec['hide']:
-            argv += ['--tmpfs', path]
-        for path in spec.get('expose', []):
-            argv += ['--ro-bind', path, path]
-        for path in spec.get('rehide', []):
             argv += ['--tmpfs', path]
         for path in writable:
             argv += ['--bind', path, path]
-        argv += ['--unshare-all', '--die-with-parent', '--new-session', '--chdir', workdir]
+        argv += ['--remount-ro', '/', '--unshare-all', '--die-with-parent', '--new-session']
+        argv += ['--chdir', workdir]
         return [*argv, *clean, *command]
     if spec.get('no_fork'):
         return [*clean, _python(), '-I', '-S', '-c', _NO_FORK, *command]
@@ -568,9 +658,11 @@ def _sweep_solver_user() -> None:
         subprocess.run(kill_all, capture_output=True, check=False)
 
 
-def _kill(proc: subprocess.Popen) -> None:
-    """Kill an isolated process and everything in its process group, and reap it."""
+def _kill(proc: subprocess.Popen, mark: str | None = None) -> None:
+    """Kill an isolated process, everything in its process group and, given its macOS
+    sandbox's *mark*, everything in that sandbox; then reap it."""
     _kill_group(proc.pid)
+    _sweep_sandbox(mark)
     with contextlib.suppress(Exception):
         proc.kill()
     with contextlib.suppress(Exception):
@@ -605,15 +697,24 @@ def _stop_watcher() -> None:
         _watcher.wait(timeout=10)
 
 
-def _watch_group(group: int) -> None:
-    """Have the watcher kill process group *group* (a solution just started) if this judge
-    ends without doing so itself: killed by its host, say.
+def _watch_group(group: int, mark: str | None = None) -> None:
+    """Have the watcher kill process group *group* (a solution just started), and the
+    macOS sandbox *mark* names, if this judge ends without doing so itself: killed by its
+    host, say.
 
     Raises:
         OSError: If the watcher can't be told (it died, say).
     """
-    _watcher.stdin.write(f'{group}\n'.encode())
+    _watcher.stdin.write(f'{group} {mark or ""}\n'.encode())
     _watcher.stdin.flush()
+
+
+def _unwatch(mark: str | None) -> None:
+    """Tell the watcher this judge swept *mark*'s sandbox itself (see :func:`_watch_group`)."""
+    if mark is not None:
+        with contextlib.suppress(OSError):
+            _watcher.stdin.write(f'-{mark}\n'.encode())
+            _watcher.stdin.flush()
 
 
 def _remaining() -> float:
@@ -671,7 +772,8 @@ def run_solution(
             forwarder = stack.enter_context(_loopback(loopback_port))
             prefix, signal_fds, started, release = stack.enter_context(_start_signal())
             launch = [*prefix, *forwarder, *command]
-            argv = _launch_argv(launch, workdir, env, allow_subprocess, loopback_port)
+            mark = _sandbox_mark()
+            argv = _launch_argv(launch, workdir, env, allow_subprocess, loopback_port, mark)
             proc = subprocess.Popen(
                 argv,
                 stdin=subprocess.PIPE if input is not None else subprocess.DEVNULL,
@@ -682,13 +784,13 @@ def run_solution(
                 pass_fds=signal_fds,
             )
             try:
-                _watch_group(proc.pid)
+                _watch_group(proc.pid, mark)
                 # The mark goes out first: a solution that dies or hangs the moment it is
                 # released must not beat it and pass for one that never started.
                 _announce()
                 release()
             except BaseException:
-                _kill(proc)  # held until released, so no solution code ran
+                _kill(proc, mark)  # held until released, so no solution code ran
                 raise
         timed_out = False
         try:
@@ -700,7 +802,8 @@ def run_solution(
             ran = started()
             _consulted = _consulted or ran
             with _launching():
-                _kill(proc)
+                _kill(proc, mark)
+            _unwatch(mark)
         # Solution code used up the time, this launch's or earlier calls' (it may never start).
         if timed_out and _consulted:
             raise _marked(subprocess.TimeoutExpired, SolutionTimeoutError)(argv, limit)
@@ -1275,9 +1378,10 @@ def _watch() -> None:
     leaves it to finish, and in its own process, so a solution that hogs the interpreter
     (a long C call holds the lock every thread needs) can't stop it. Each second it drops
     groups that are gone; killing an unrelated group would take the system reusing one's
-    id within that second.
+    id within that second. A macOS sandbox mark stays until the judge says it swept it.
     """
     groups: set[int] = set()
+    marks: set[str] = set()
     seen = False
     pending = b''
     with selectors.DefaultSelector() as selector:
@@ -1288,11 +1392,19 @@ def _watch() -> None:
                 if not data:
                     break
                 *lines, pending = (pending + data).split(b'\n')
-                groups.update(int(line) for line in lines if line)
+                for line in filter(None, map(bytes.decode, lines)):
+                    if line.startswith('-'):
+                        marks.discard(line[1:])
+                        continue
+                    group, _, mark = line.partition(' ')
+                    groups.add(int(group))
+                    marks.update(filter(None, [mark]))
                 seen = seen or bool(groups)
             groups = {group for group in groups if _group_exists(group)}
     if seen:  # a child that left its group (setsid) is still the sandbox user's
         _sweep_solver_user()
+    for mark in marks:  # or still in its macOS sandbox
+        _sweep_sandbox(mark)
     for group in groups:
         with contextlib.suppress(ProcessLookupError, PermissionError):
             os.killpg(group, signal.SIGKILL)

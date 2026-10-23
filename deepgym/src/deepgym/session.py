@@ -27,7 +27,7 @@ import threading
 import time
 from collections.abc import Callable, Mapping, Sequence
 from pathlib import Path, PurePosixPath
-from typing import TYPE_CHECKING, NamedTuple, Protocol
+from typing import TYPE_CHECKING, Literal, NamedTuple, Protocol
 from uuid import uuid4
 
 from pydantic import JsonValue
@@ -304,10 +304,12 @@ class LocalBackend:
     def verify(self, code: str, timeout: int, env: dict[str, str] | None = None) -> VerifierOutput:
         """Run verifier *code* inline; it shares the agent's user here.
 
-        Code it loads through ``deepgym_solution`` runs in the local judge's sandbox.
+        Code it loads through ``deepgym_solution`` runs in the local judge's sandbox, which
+        reads the runtime and the agent's working directory: the files the agent wrote.
         """
+        isolation = local_isolation([str(self._runtime.parent), str(self._dir)])
         runtime = {
-            'DEEPGYM_ISOLATION': json.dumps(local_isolation([str(self._runtime.parent)])),
+            'DEEPGYM_ISOLATION': json.dumps(isolation),
             'DEEPGYM_RUNTIME': str(self._runtime),
             'DEEPGYM_PYTHON': sys.executable,
             'DEEPGYM_DEADLINE': str(time.time() + timeout),
@@ -1248,6 +1250,28 @@ class Session:
             if not was_done and self._obs is not None:
                 self._obs = self._obs.model_copy(update={'done': True})
                 self._trajectory.final_observation = self._obs
+
+    def abandon(self, error_type: Literal['provider_error', 'setup_error'], detail: str) -> None:
+        """End the episode with no verdict: it stopped through nothing the policy did.
+
+        That is the model provider failing (``provider_error``) or the agent harness never
+        starting the model (``setup_error``). :meth:`score` then returns that result
+        without running the verifier: whatever state the policy reached, it didn't finish.
+        A step that failed first keeps its own result.
+        """
+        with self._lock:
+            if self._failed_result is None:
+                self._failed_result = RunResult(
+                    score=0.0,
+                    passed=False,
+                    output=f'Not graded: {detail}',
+                    stderr='',
+                    exit_code=1,
+                    execution_time_ms=0.0,
+                    sandbox_id=self.sandbox_id,
+                    error_type=error_type,
+                )
+            self._done = True
 
     def score(self) -> RunResult:
         """Run the final verifier against the current state.

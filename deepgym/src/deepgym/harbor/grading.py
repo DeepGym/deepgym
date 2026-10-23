@@ -37,8 +37,6 @@ from deepgym.session import SandboxBackend, resolve_outside
 TESTS_DIR = '/tests'
 REWARD_DIR = '/logs/verifier'
 _TESTS_ARCHIVE = f'{STAGING_DIR}/tests.tgz'
-# Characters of test output kept in the run result.
-_LOG_TAIL = 4000
 # Image variables tests/test.sh may see, read before the restore with shell builtins.
 _PASSED_ON = ('PATH', 'LANG', 'LC_ALL', 'TERM')
 _IMAGE_ENV = "printf '%s\\0' " + ' '.join(f'"${{{name}-}}"' for name in _PASSED_ON)
@@ -54,7 +52,7 @@ def grade(sandbox: Sandbox, task: HarborTask, workspace: bytes, workdir: str) ->
         workdir: Where to unpack it; tests/test.sh runs there.
 
     Returns:
-        The reward as a verifier result, the tail of the tests' output, and their exit code.
+        The reward as a verifier result, the tests' whole output, and their exit code.
 
     Raises:
         SandboxError: If setting up the sandbox fails.
@@ -83,7 +81,7 @@ def grade(sandbox: Sandbox, task: HarborTask, workspace: bytes, workdir: str) ->
         listing = backend.exec_trusted(read_reward_command(REWARD_DIR), timeout=60)
         return ExecutionResult(
             reward_result(listing.output, tests),
-            stderr=tests.output[-_LOG_TAIL:],
+            stderr=tests.output,
             exit_code=tests.exit_code,
         )
     finally:

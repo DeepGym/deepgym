@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.6.2 (2026-10-23)
 
 - **Unsandboxed runs leave a trace:** every local `RunResult` records how its solution was isolated (`isolation`: `macos`, `bwrap`, or `none` under `DEEPGYM_ALLOW_UNSANDBOXED`), and the process logs a warning once when local solutions run unsandboxed. A local session's results record `none`, since its agent actions run on the host, and creating one warns once.
 - **Closed sessions stay closed:** once `close()` runs (even if the delete fails), `start`, `step`, `run_cli`, `finalize_cli` and `score` raise the new `SessionClosedError` before touching the sandbox; `score()` still returns a result a failed step already fixed. The API answers a request that raced a DELETE with 409, so a host-deleted sandbox is never scored as the agent's 0. A session whose setup fails is closed through the same pipeline as a DELETE, so a failed delete keeps its slot, is retried by the sweep and is reported in `leaked_sandboxes` if it never succeeds.

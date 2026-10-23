@@ -22,6 +22,12 @@ Task interface:
       one document is the environment's ``task`` string, given to the model as the prompt.
     - The last fenced code block of the generation (or all of it) is run by the
       environment's verifier, as in the TRL and verl adapters.
+    - Generation length is the caller's: the task sets no ``max_gen_toks``, so the model
+      backend's own applies (lm-eval's hf, vllm and API backends default it to 256); pass
+      the model's output maximum with ``gen_kwargs={'max_gen_toks': N}`` to
+      ``simple_evaluate``. lm-eval hands ``process_results`` the text alone, so a
+      generation cut off at that limit can't be told from one that ended, and is scored
+      as written.
     - Metrics: ``deepgym_score`` (0.0-1.0) and ``deepgym_pass`` (0 or 1), averaged over the
       documents that got a verdict, and ``deepgym_verdict``, the fraction that did. A
       sandbox or verifier failure counts in neither score nor pass, instead of as a wrong
@@ -101,14 +107,15 @@ def make_lm_eval_task(
             'doc_to_text': 'task',
             'doc_to_target': '',
             'output_type': 'generate_until',
-            # No stop strings (code has blank lines): generation ends at EOS or max_gen_toks.
-            'generation_kwargs': {'until': [], 'max_gen_toks': 1024, 'do_sample': False},
+            # No stop strings (code has blank lines) and no length limit of ours: generation
+            # ends at EOS or the caller's max_gen_toks (see the module docstring).
+            'generation_kwargs': {'until': [], 'do_sample': False},
             'process_results': process_results,
             'metric_list': [
                 {'metric': 'deepgym_score', 'aggregation': 'nanmean', 'higher_is_better': True},
                 {'metric': 'deepgym_pass', 'aggregation': 'nanmean', 'higher_is_better': True},
                 {'metric': 'deepgym_verdict', 'aggregation': 'mean', 'higher_is_better': True},
             ],
-            'metadata': {'version': 2},
+            'metadata': {'version': 3},
         }
     )

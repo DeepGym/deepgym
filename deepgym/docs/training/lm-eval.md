@@ -23,6 +23,10 @@ results = lm_eval.simple_evaluate(
 - lm-eval has no registry for Python tasks, so pass the task objects; `lm_eval --tasks`
   can't name them.
 - The last fenced code block of the generation runs, or all of it if there is none.
+- The task sets no generation length, so the model backend's `max_gen_toks` applies
+  (lm-eval's `hf`, `vllm` and API backends default it to 256). Pass the model's output
+  maximum with `simple_evaluate(..., gen_kwargs={'max_gen_toks': N})`. lm-eval gives the
+  scorer only the text, so a generation cut off at that limit is scored as written.
 - Pass `dg=` to pick the client that runs the verifier; without one, the task uses
   `DeepGym(mode='auto')`.
 

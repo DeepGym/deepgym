@@ -43,7 +43,9 @@ def test_raises_import_error_when_lm_eval_missing(env: Environment) -> None:
             make_lm_eval_task(env, task_name='reverse_string')
 
 
-def _evaluate(lm_eval: ModuleType, reply: str, *tasks: object) -> tuple[dict, list]:
+def _evaluate(
+    lm_eval: ModuleType, reply: str, *tasks: object, gen_kwargs: dict | None = None
+) -> tuple[dict, list]:
     """Run *tasks* through lm_eval.simple_evaluate with a model that always says *reply*."""
     from lm_eval.api.model import LM
     from lm_eval.tasks import TaskManager
@@ -67,7 +69,11 @@ def _evaluate(lm_eval: ModuleType, reply: str, *tasks: object) -> tuple[dict, li
     # Our tasks are objects; skip indexing lm-eval's thousands of built-in task configs.
     task_manager = TaskManager(include_defaults=False)
     out = lm_eval.simple_evaluate(
-        model=model, tasks=list(tasks), task_manager=task_manager, bootstrap_iters=0
+        model=model,
+        tasks=list(tasks),
+        task_manager=task_manager,
+        bootstrap_iters=0,
+        gen_kwargs=gen_kwargs,
     )
     return out['results'], model.requests
 
@@ -90,6 +96,22 @@ def test_fenced_answer_is_scored_by_the_verifier(
     assert prompt == env.task
     # No stop strings: code has blank lines, so only EOS or max_gen_toks may end it.
     assert generation_kwargs['until'] == []
+
+
+def test_generation_length_is_the_callers(
+    lm_eval: ModuleType, env: Environment, local_dg: DeepGym
+) -> None:
+    """The task sets no length limit of its own; one the caller passes reaches the model."""
+    _, requests = _evaluate(lm_eval, GOOD_SOLUTION, make_lm_eval_task(env, 'r', local_dg))
+    assert 'max_gen_toks' not in requests[0].args[1]  # the model's own setting applies
+
+    _, requests = _evaluate(
+        lm_eval,
+        GOOD_SOLUTION,
+        make_lm_eval_task(env, 'r', local_dg),
+        gen_kwargs={'max_gen_toks': 32768},
+    )
+    assert requests[0].args[1]['max_gen_toks'] == 32768
 
 
 def test_a_verifier_failure_is_not_a_wrong_answer(

@@ -303,12 +303,18 @@ _RIGHT = '```python\ndef add(a, b):\n    return a + b\n```'
 _WRONG = 'Sure:\n```python\ndef add(a, b):\n    return a - b\n```'
 
 
-def _client(answers: list[str], seen: list[dict]) -> ZaiChatClient:
-    replies = itertools.cycle(answers)
+def _client(
+    answers: list[str], seen: list[dict], finish_reasons: list[str] | None = None
+) -> ZaiChatClient:
+    """A client whose endpoint gives *answers* in turn, each ended by its finish reason
+    ('stop' unless given)."""
+    replies = itertools.cycle(zip(answers, finish_reasons or ['stop'] * len(answers)))
 
     def handler(request: httpx.Request) -> httpx.Response:
         seen.append(json.loads(request.content.decode()))
-        return httpx.Response(200, json={'choices': [{'message': {'content': next(replies)}}]})
+        content, finish_reason = next(replies)
+        choice = {'message': {'content': content}, 'finish_reason': finish_reason}
+        return httpx.Response(200, json={'choices': [choice]})
 
     return ZaiChatClient(
         'key', base_url='https://llm.test/v1', model='m', transport=httpx.MockTransport(handler)
@@ -353,6 +359,28 @@ def test_difficulty_is_inconclusive_when_a_sample_gets_no_verdict(local_dg: Deep
 
     assert check.status == 'inconclusive'  # never a pass@1 of 0.50 from one real verdict
     assert check.details == '1/2 samples got no verdict (the verifier errored)'
+
+
+@pytest.mark.parametrize(
+    ('answers', 'finish_reasons', 'cut'),
+    [
+        ([''], ['length'], 2),  # the whole output went to reasoning: never too_hard
+        ([_RIGHT, '```python\ndef add(a, b):\n    return a'], ['stop', 'length'], 1),
+    ],
+)
+def test_a_sample_cut_off_at_the_output_limit_is_not_a_failure(
+    answers: list[str], finish_reasons: list[str], cut: int, local_dg: DeepGym
+) -> None:
+    seen: list[dict] = []
+    client = _client(answers, seen, finish_reasons)
+
+    check = difficulty_check(_env(_ADD_VERIFIER), local_dg, client, samples=2)
+
+    assert check.status == 'inconclusive'  # never too_hard, never a pass@1 of 0.50
+    assert check.details == (
+        f"{cut}/2 samples were cut off at the endpoint's output limit (finish_reason 'length')"
+    )
+    assert all('max_tokens' not in request for request in seen)  # the probe sets no limit
 
 
 def test_partial_rewards_are_variance_not_too_hard(local_dg: DeepGym) -> None:
@@ -461,5 +489,5 @@ def test_rate_limit_backoff_honors_retry_after_else_jitters(
         'k', base_url='https://llm.test/v1', model='m', transport=httpx.MockTransport(handler)
     )
 
-    assert difficulty._complete(client, 'task') == _RIGHT
+    assert difficulty._complete(client, 'task').text == _RIGHT
     assert waits == [2.0, 7.0, 8.0]  # jitter up to 2s, then as asked, then up to 8s

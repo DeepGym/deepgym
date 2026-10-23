@@ -31,7 +31,7 @@ def test_zai_client_posts_openai_compatible_payload() -> None:
 
     result = client.complete_prompt('solve task', thinking='disabled', temperature=0.0)
 
-    assert result == '{"ok": true}'
+    assert result.text == '{"ok": true}'
     assert seen['url'] == 'https://api.test/v4/chat/completions'
     assert seen['auth'] == 'Bearer test-key'
     assert seen['payload']['model'] == 'glm-5.1'
@@ -55,5 +55,45 @@ def test_zai_client_omits_thinking_when_none() -> None:
 
     client = ZaiChatClient('test-key', transport=httpx.MockTransport(handler))
 
-    assert client.complete_prompt('solve task', thinking=None) == 'ok'
+    assert client.complete_prompt('solve task', thinking=None).text == 'ok'
     assert 'thinking' not in seen['payload']
+
+
+@pytest.mark.parametrize(
+    ('content', 'finish_reason', 'text', 'truncated'),
+    [
+        ('def f(): return 1', 'stop', 'def f(): return 1', False),
+        ('def f(): return 1', 'length', 'def f(): return 1', True),  # same text, cut off
+        (None, 'length', '', True),  # the whole output went to reasoning: no answer at all
+    ],
+)
+def test_zai_client_sends_no_output_limit_and_returns_how_generation_ended(
+    content: str | None, finish_reason: str, text: str, truncated: bool
+) -> None:
+    seen = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen['payload'] = json.loads(request.content.decode())
+        choice = {'message': {'content': content}, 'finish_reason': finish_reason}
+        return httpx.Response(200, json={'choices': [choice]})
+
+    client = ZaiChatClient('test-key', transport=httpx.MockTransport(handler))
+
+    completion = client.complete_prompt('solve task')
+
+    assert 'max_tokens' not in seen['payload']  # the model's own maximum applies
+    assert (completion.text, completion.finish_reason) == (text, finish_reason)
+    assert completion.truncated is truncated
+
+
+def test_zai_client_sends_an_output_limit_only_when_asked() -> None:
+    seen = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen['payload'] = json.loads(request.content.decode())
+        return httpx.Response(200, json={'choices': [{'message': {'content': 'ok'}}]})
+
+    client = ZaiChatClient('test-key', transport=httpx.MockTransport(handler))
+
+    assert client.complete_prompt('solve task', max_tokens=50).finish_reason is None
+    assert seen['payload']['max_tokens'] == 50

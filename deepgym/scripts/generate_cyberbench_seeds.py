@@ -69,7 +69,7 @@ def main() -> int:
     parser.add_argument('--output', default='data/cyberbench/seed_specs.jsonl')
     parser.add_argument('--use-zai', action='store_true', help='Use Z.ai/GLM to enrich specs')
     parser.add_argument('--temperature', type=float, default=0.2)
-    parser.add_argument('--max-tokens', type=int, default=1600)
+    parser.add_argument('--max-tokens', type=int)
     parser.add_argument('--zai-timeout', type=float, default=30.0)
     parser.add_argument('--fail-on-invalid', action='store_true')
     args = parser.parse_args()
@@ -97,7 +97,7 @@ def main() -> int:
                     max_tokens=args.max_tokens,
                     temperature=args.temperature,
                     thinking='enabled',
-                )
+                ).text
                 spec = spec_from_glm_json(response, row=row, index=index)
             except Exception as exc:
                 spec = cyber_seed_from_hf_row(row, index=index)

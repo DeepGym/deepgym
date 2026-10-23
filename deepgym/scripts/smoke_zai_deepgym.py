@@ -43,7 +43,7 @@ def main() -> int:
     parser = argparse.ArgumentParser(description='Smoke-test a DeepGym env with Z.ai/GLM.')
     parser.add_argument('--env', default='cyber/cve_2021_44228_log_triage')
     parser.add_argument('--mode', choices=['local', 'auto', 'daytona'], default='local')
-    parser.add_argument('--max-tokens', type=int, default=2048)
+    parser.add_argument('--max-tokens', type=int)
     parser.add_argument('--temperature', type=float, default=0.1)
     parser.add_argument('--thinking', choices=['enabled', 'disabled'], default='enabled')
     args = parser.parse_args()
@@ -64,9 +64,10 @@ def main() -> int:
     )
 
     dg = DeepGym(mode=args.mode)
-    result = dg.run(env, completion)
+    result = dg.run(env, completion.text)
     print(f'env={args.env}')
     print(f'model={client.model}')
+    print(f'finish_reason={completion.finish_reason}')
     print(f'score={result.score:.3f} passed={result.passed}')
     print(f'details={result.output}')
     if result.reward_components:

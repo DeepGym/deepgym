@@ -89,9 +89,11 @@ Where mutants can run:
 (every sample earned the same), since group-relative RL learns nothing from equal
 rewards. Partial rewards are variance: `[0.2, 0.8]` is neither too hard nor flat.
 
-Rate limits (429), timeouts and 5xx are retried with backoff; if a sample never comes
-back, or the verifier couldn't judge one, the check is inconclusive. A refused request (a
-bad key or model) stops the run.
+The probe sends no output limit. If the endpoint still cuts a sample off at its own
+(`finish_reason` `length`), that sample is no answer, so the check is inconclusive
+instead of reading it as a failure. Rate limits (429), timeouts and 5xx are retried with
+backoff; if a sample never comes back, or the verifier couldn't judge one, the check is
+inconclusive. A refused request (a bad key or model) stops the run.
 
 `--model` runs model-generated code, so with `--mode local` (the default) or `auto` (which
 can fall back to local) it refuses to start unless you pass `--allow-local-exec`. Use a

@@ -39,6 +39,7 @@ from deepgym.exceptions import (
     SandboxDiedError,
     SandboxError,
     SandboxExpiredError,
+    SessionClosedError,
     TimeoutError,
     VerifierError,
     is_infrastructure_failure,
@@ -1005,6 +1006,8 @@ class Session:
         self._unsettled: list[JsonValue] = []
         # One sandbox, one actor at a time: concurrent step/score/close calls queue up.
         self._lock = threading.Lock()
+        # Set by close() whether or not the delete succeeds (see _check_open).
+        self._closed = False
 
     @property
     def done(self) -> bool:
@@ -1049,11 +1052,12 @@ class Session:
         """Write files, start the desktop, run setup, and return the first observation.
 
         Raises:
-            DeepGymError: If the session was already started.
+            DeepGymError: If the session was already started or is closed.
             SandboxError: If setup exits non-zero.
             TimeoutError: If setup exceeds ``setup_timeout``.
         """
         with self._lock:
+            self._check_open()
             if self._obs is not None:
                 raise DeepGymError('Session already started; open a new session per episode')
             env = self._env
@@ -1106,7 +1110,7 @@ class Session:
         separate; provider transport can take its own cleanup grace after a deadline.
 
         Raises:
-            DeepGymError: If the session is not running.
+            DeepGymError: If the session is not running or is closed.
             ActionError: If the action is not allowed here, names no declared tool or has
                 arguments its tool rejects, the desktop rejects it, or the agent's own files
                 are in the way of a write (the episode goes on, unless they blocked the
@@ -1120,6 +1124,7 @@ class Session:
             raise ValueError('Step timeout must be finite and positive')
         deadline = time.monotonic() + timeout if timeout is not None else None
         with self._lock:
+            self._check_open()
             if self._obs is None or self._done:
                 raise DeepGymError('Session is not running; call start() or open a new session')
             if action.action_type not in self._env.allowed_actions:
@@ -1179,11 +1184,12 @@ class Session:
             Captured stdout, events, exit code, and any budget stop reason.
 
         Raises:
-            DeepGymError: If the session is not running.
+            DeepGymError: If the session is not running or is closed.
             ActionError: If the environment disallows shell execution or CLI provider egress.
             SandboxError: If the backend cannot isolate or supervise the CLI safely.
         """
         with self._lock:
+            self._check_open()
             if self._obs is None or self._done:
                 raise DeepGymError('Session is not running; call start() or open a new session')
             if not {'bash', 'cli'} & self._env.allowed_actions:
@@ -1240,10 +1246,12 @@ class Session:
         Already-ended episodes retain their terminal observation, including unknown state.
 
         Raises:
+            DeepGymError: If the session is closed.
             SandboxError: If containment is unavailable or cannot be stopped.
                 The stored failure has no verdict and prevents subsequent verification.
         """
         with self._lock:
+            self._check_open()
             if self._cli_finalized:
                 return
             was_done = self._done
@@ -1298,6 +1306,7 @@ class Session:
         (``unsettled_write``), whatever the verifier would say, and the verifier doesn't run.
 
         Raises:
+            DeepGymError: If the session is closed.
             VerifierError: If, before it read the agent's output, the verifier timed out or
                 its output is not valid protocol JSON or isn't backed by its exit code; or its
                 code couldn't be uploaded. After, any of these is the agent's judged 0
@@ -1305,6 +1314,7 @@ class Session:
             TimeoutError: If the verifier timed out and the provider returned nothing.
         """
         with self._lock:
+            self._check_open()
             if self._failed_result is not None:
                 return self._failed_result
             if not self._env.final_verifier_code:
@@ -1354,8 +1364,14 @@ class Session:
             return result
 
     def close(self) -> None:
-        """Release the backend, waiting for any in-flight step to finish."""
+        """Release the backend, waiting for any in-flight step to finish.
+
+        The session counts as closed from here on, even if the delete fails, so a call
+        queued behind this one is refused (see :meth:`_check_open`). Calling close() again
+        retries a failed delete.
+        """
         with self._lock:
+            self._closed = True
             self._backend.close()
 
     def __enter__(self) -> Session:
@@ -1372,6 +1388,16 @@ class Session:
             logger.warning(
                 'Could not delete sandbox %s; it may still exist', self.sandbox_id, exc_info=True
             )
+
+    def _check_open(self) -> None:
+        """Refuse to use the backend after close(): its sandbox may be deleted, and a step
+        failing there would be scored as the agent's doing when it was the host's.
+
+        Raises:
+            SessionClosedError: If the session is closed.
+        """
+        if self._closed:
+            raise SessionClosedError('Session is closed; open a new session')
 
     def _apply(
         self,

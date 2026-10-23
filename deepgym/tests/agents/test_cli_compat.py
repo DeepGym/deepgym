@@ -10,7 +10,7 @@ from pathlib import Path
 
 import pytest
 
-from deepgym._cli_worker import parse_cli_version
+from deepgym._cli_worker import cli_version_supported, parse_cli_version
 from deepgym.agents.base import Budget, BudgetTracker
 from deepgym.agents.cli import ClaudeCodeAgent, CodexAgent
 from deepgym.agents.cli_events import CliEvents
@@ -47,9 +47,9 @@ def test_installed_cli_supports_adapter_flags(provider: str, tmp_path: Path) -> 
         timeout=20,
         env=env,
     )
-    assert parse_cli_version(version.stdout) == release.version, (
+    assert cli_version_supported(parse_cli_version(version.stdout), release.version), (
         f'Unsupported local {release.command}: {version.stdout.strip()}. '
-        f'Install the pinned CLIs with `{cli_install_command()}`, or bump SUPPORTED_CLIS, '
+        f'Install the tested CLIs with `{cli_install_command()}`, or bump SUPPORTED_CLIS, '
         'record new stream fixtures, run the compat test, and rebuild images.'
     )
     agent = (ClaudeCodeAgent if provider == 'anthropic' else CodexAgent)(model='compat-only')

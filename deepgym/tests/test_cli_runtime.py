@@ -1,7 +1,9 @@
 """Offline checks for CLI supervision, retained isolation and root service ordering."""
 
 import base64
+import errno
 import json
+import os
 import socket
 from types import SimpleNamespace
 from urllib.request import proxy_bypass_environment
@@ -11,9 +13,9 @@ from pydantic import ValidationError
 
 from deepgym import _cli_worker, cli_runtime
 from deepgym.cli_runtime import CliExecution, CliRequest
-from deepgym.exceptions import ActionError, SandboxError
+from deepgym.exceptions import ActionError, SandboxError, VerifierError
 from deepgym.models import Action, MultiTurnEnvironment
-from deepgym.sandboxes import ExecResult
+from deepgym.sandboxes import ExecResult, SandboxTimeoutError
 from deepgym.session import LocalBackend, SandboxBackend, Session
 from tests.test_sandboxes import _USERS, FakeSandbox
 
@@ -555,3 +557,51 @@ def test_worker_passes_loopback_only_bypass_to_cli_and_child_environment(
         assert not proxy_bypass_environment(host, bypass), host
     for variable in ('HTTP_PROXY', 'HTTPS_PROXY', 'http_proxy', 'https_proxy'):
         assert captured[variable] == 'http://127.0.0.1:12345'
+
+
+@pytest.mark.parametrize('acted', [False, True])
+def test_a_verifier_upload_the_agent_may_have_blocked(monkeypatch, acted: bool) -> None:
+    """The verifier's folder is on the disk the agent shares: once it acted, a failed upload
+    (the disk it filled) is its judged 0, like any write; before, no verdict."""
+    box = FakeSandbox(False, [_USERS])
+    backend = SandboxBackend(box)
+
+    def disk_full(content: bytes, path: str) -> None:
+        raise OSError(errno.ENOSPC, os.strerror(errno.ENOSPC))
+
+    session = Session(MultiTurnEnvironment(task='task', final_verifier_code='print(1)'), backend)
+    session.start()
+    if acted:
+        session.step(Action(action_type='bash', content='true'))
+    monkeypatch.setattr(box, 'upload', disk_full)
+
+    if not acted:
+        with pytest.raises(VerifierError, match='Could not upload the verifier'):
+            session.score()
+        return
+    result = session.score()
+    assert (result.has_verdict, result.error_type) == (True, 'policy_sandbox_failure')
+
+
+@pytest.mark.parametrize('acted', [False, True])
+def test_a_verifier_timeout_with_no_output_blames_only_an_agent_that_acted(
+    monkeypatch, acted: bool
+) -> None:
+    """Before any action the work directory holds only the environment's files: a verifier
+    timeout whose output was lost is ours then, not a policy zero."""
+    backend = SandboxBackend(FakeSandbox(False, [_USERS]))
+    session = Session(MultiTurnEnvironment(task='task', final_verifier_code='print(1)'), backend)
+    session.start()
+    if acted:
+        session.step(Action(action_type='bash', content='true'))
+
+    def lost(*args, **kwargs):
+        raise SandboxTimeoutError('verifier exceeded 30s', '')
+
+    monkeypatch.setattr(backend, 'verify', lost)
+    if not acted:
+        with pytest.raises(VerifierError, match='before the agent acted'):
+            session.score()
+        return
+    result = session.score()
+    assert (result.has_verdict, result.error_type) == (True, 'policy_sandbox_failure')

@@ -2,8 +2,11 @@
 and a failing judge reports a verifier error instead of a score."""
 
 import ast
+import os
 import random
 import runpy
+import shutil
+import subprocess
 import sys
 import tempfile
 from pathlib import Path
@@ -264,3 +267,96 @@ def test_a_constant_answer_to_a_yes_no_task_earns_nothing(
 
     assert result.has_verdict
     assert result.score == 0.0
+
+
+def _cli_task_verifier():
+    """The cli_task verifier module, its deepgym_solution import served by the runtime."""
+    import importlib.util
+
+    sys.modules.setdefault('deepgym_solution', solution_runtime)
+    spec = importlib.util.spec_from_file_location(
+        'cli_task_verifier', ENVS_DIR / 'cli_task' / 'verifier.py'
+    )
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def _git(repo: Path, *args: str) -> None:
+    env = {**os.environ, 'GIT_CONFIG_GLOBAL': os.devnull, 'GIT_CONFIG_NOSYSTEM': '1'}
+    subprocess.run(['git', *args], cwd=repo, env=env, check=True, capture_output=True)
+
+
+@pytest.mark.skipif(shutil.which('git') is None, reason='needs git to build the real repo')
+def test_cli_task_reads_a_real_commit_of_the_file(tmp_path: Path) -> None:
+    verifier = _cli_task_verifier()
+    repo = tmp_path / 'my_repo'
+    repo.mkdir()
+    _git(repo, 'init', '-q')
+    _git(repo, 'checkout', '-q', '-b', 'feature')
+    (repo / 'hello.txt').write_text('Hello, DeepGym!')
+    _git(repo, 'add', 'hello.txt')
+    _git(repo, '-c', 'user.name=t', '-c', 'user.email=t@t', 'commit', '-q', '-m', 'Add hello.txt')
+
+    read = verifier._Repo(str(repo), str(tmp_path))
+
+    commits = read.commits(read.branches().values())
+    assert read.commit(read.head()) is not None
+    assert [message.strip() for message, _ in commits] == ['Add hello.txt']
+    assert read.file_in(commits[0][1], 'hello.txt') == b'Hello, DeepGym!'
+
+
+def test_cli_task_takes_no_forged_git_files(tmp_path: Path) -> None:
+    """A ref to forty zeroes and an object that merely starts like a commit, with no HEAD or
+    tree: what used to earn every check, now none of the git ones."""
+    import zlib
+
+    verifier = _cli_task_verifier()
+    git = tmp_path / 'my_repo' / '.git'
+    (git / 'refs' / 'heads').mkdir(parents=True)
+    (git / 'refs' / 'heads' / 'feature').write_text('0' * 40)
+    (git / 'objects' / '00').mkdir(parents=True)
+    (git / 'objects' / '00' / ('0' * 38)).write_bytes(
+        zlib.compress(b'commit 999\0\n\nAdd hello.txt')
+    )
+
+    read = verifier._Repo(str(tmp_path / 'my_repo'), str(tmp_path))
+
+    assert read.head() is None
+    assert read.branches() == {'feature': '0' * 40}
+    assert read.commit('0' * 40) is None  # its content doesn't hash to its name
+    assert read.commits(read.branches().values()) == []
+
+
+def _store(git: Path, kind: str, body: bytes) -> str:
+    """Write a loose object as git does, under its true id; return the id."""
+    import hashlib
+    import zlib
+
+    raw = f'{kind} {len(body)}'.encode() + b'\0' + body
+    sha = hashlib.sha1(raw).hexdigest()
+    (git / 'objects' / sha[:2]).mkdir(parents=True, exist_ok=True)
+    (git / 'objects' / sha[:2] / sha[2:]).write_bytes(zlib.compress(raw))
+    return sha
+
+
+def test_cli_task_takes_no_malformed_or_missing_tree(tmp_path: Path) -> None:
+    """Objects stored under their true ids still prove nothing if git can't parse them: a
+    tree with a malformed entry after hello.txt, or a commit whose tree doesn't exist."""
+    verifier = _cli_task_verifier()
+    git = tmp_path / 'my_repo' / '.git'
+    blob = _store(git, 'blob', b'Hello, DeepGym!')
+    entry = b'100644 hello.txt\0' + bytes.fromhex(blob)
+    good = _store(git, 'tree', entry)
+    bad = _store(git, 'tree', entry + b'not a valid tree entry')
+    who = b'author t <t@t> 0 +0000\ncommitter t <t@t> 0 +0000\n\nAdd hello.txt\n'
+    with_good = _store(git, 'commit', f'tree {good}\n'.encode() + who)
+    with_bad = _store(git, 'commit', f'tree {bad}\n'.encode() + who)
+    with_none = _store(git, 'commit', f'tree {"1" * 40}\n'.encode() + who)
+
+    read = verifier._Repo(str(tmp_path / 'my_repo'), str(tmp_path))
+
+    assert read.file_in(good, 'hello.txt') == b'Hello, DeepGym!'
+    assert read.commit(with_good) is not None
+    assert read.entries(bad) is None and read.file_in(bad, 'hello.txt') is None
+    assert read.commit(with_bad) is None and read.commit(with_none) is None

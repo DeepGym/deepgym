@@ -159,3 +159,25 @@ def test_modal_errors_are_told_apart() -> None:
     assert is_infrastructure_failure(modal.exception.ConnectionError('no route'))
     assert not is_infrastructure_failure(modal.exception.SandboxTerminatedError('terminated'))
     assert not is_infrastructure_failure(modal.exception.ExecTimeoutError('slow'))
+
+
+@pytest.mark.parametrize(
+    ('module', 'name'),
+    [
+        ('e2b.exceptions', 'AuthenticationException'),
+        ('modal.exception', 'AuthError'),
+        ('modal.exception', 'PermissionDeniedError'),
+    ],
+)
+def test_provider_auth_errors_without_an_http_status_are_infrastructure(
+    monkeypatch: pytest.MonkeyPatch, module: str, name: str
+) -> None:
+    """Our credentials refused by an SDK whose error carries no integer status (E2B's has
+    none, Modal's is an Enum): never the policy's zero."""
+    import sys
+    import types
+
+    error = type(name, (Exception,), {})
+    monkeypatch.setitem(sys.modules, module, types.SimpleNamespace(**{name: error}))
+
+    assert is_infrastructure_failure(_caused_by(SandboxError('exec failed'), error('denied')))

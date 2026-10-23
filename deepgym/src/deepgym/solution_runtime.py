@@ -57,6 +57,7 @@ import atexit
 import base64
 import builtins
 import contextlib
+import errno
 import functools
 import importlib.util
 import json
@@ -81,6 +82,8 @@ _PATH = '/usr/local/bin:/opt/homebrew/bin:/usr/bin:/bin'
 if hasattr(sys, 'set_int_max_str_digits'):
     sys.set_int_max_str_digits(0)
 _MAX_DEPTH = 100
+# The most the judge holds in memory of one protocol message, a script's stdout or stderr,
+# or an output file: more is the solution's failure, never cut to a prefix and graded.
 _MAX_MESSAGE = 64 * 1024 * 1024
 _LOAD_TIMEOUT_S = 30.0
 _READY = '{"ready": true}\n'
@@ -227,28 +230,39 @@ def _macos_profile(
             '(literal "/nonexistent")'
         )
 
-    hide, expose, rehide = spec['hide'], spec.get('expose', []), spec.get('rehide', [])
     loopback = (
         f'(allow network-outbound (remote ip "localhost:{int(loopback_port)}"))'
         if loopback_port is not None
         else ''
     )
 
-    # Later rules win: hide whole trees, then re-expose this run's own directories.
-    # Hiding denies reading contents and listings, not stat, so tools that resolve
-    # their working path (git) still work. No Mach IPC or AppleEvents: they let a
-    # process ask launchd or another app to start something outside the sandbox.
+    # Later rules win: nothing is readable, then what the spec reads and the run's own
+    # directories are (and the root directory itself, which dyld lists to start any
+    # process), then the spec's hidden paths aren't. Denying data, not metadata, so tools
+    # that resolve their working path (git) still work. No Mach IPC or AppleEvents: they
+    # let a process ask launchd or another app to start something outside the sandbox. No
+    # signals beyond the sandbox: the judge and every other process of this user are
+    # outside it.
     return (
         f'(version 1)(allow default)(deny network*){loopback}(deny mach-lookup)'
-        '(deny appleevent-send)'
-        f'(deny file-read-data {paths(hide)})'
-        f'(allow file-read-data {paths([*expose, *writable])})'
-        f'(deny file-read-data {paths(rehide)})'
+        '(deny appleevent-send)(deny signal)(allow signal (target same-sandbox))'
+        '(deny file-read-data (subpath "/"))'
+        f'(allow file-read-data (literal "/") {paths([*spec["read"], *writable])})'
+        f'(deny file-read-data {paths(spec["hide"])})'
         f'(deny file-write*)(allow file-write* {paths(writable)} (literal "/dev/null"))'
-        # Without a separate user there is no reliable way to kill a child that
-        # calls setsid(), so no forking unless the caller needs subprocesses.
+        # Without a separate user nothing contains a child that calls setsid(), so the
+        # solution never forks (see run_solution); only a confined judge may.
         + ('' if allow_fork else '(deny process-fork)')
     )
+
+
+@functools.cache
+def _import_blocker() -> str:
+    """A module that refuses to import, bound over each hidden package's ``__init__.py``."""
+    path = os.path.join(os.path.dirname(_runtime()), '_hidden_package.py')
+    with open(path, 'w', encoding='utf-8') as handle:
+        handle.write("raise ImportError('this package is hidden from the solution')\n")
+    return path
 
 
 def _share_with_solution(workdir: str) -> None:
@@ -285,7 +299,8 @@ def _launch_argv(
     allow_fork: bool = False,
     loopback_port: int | None = None,
 ) -> list[str]:
-    """Wrap *command* to run as the isolated solution: empty env, writes only in *workdir*.
+    """Wrap *command* to run as the isolated solution: empty env, writes only in *workdir*,
+    reads only what the spec allows (see :func:`deepgym.judge.local_isolation`).
 
     *loopback_port* only matters on macOS, where the solution shares the judge's
     network stack; elsewhere :func:`_loopback` forwards the port. A ``none`` spec with
@@ -305,16 +320,21 @@ def _launch_argv(
         profile = _macos_profile(spec, writable, allow_fork, loopback_port)
         return ['sandbox-exec', '-p', profile, *clean, *command]
     if kind == 'bwrap':
-        argv = ['bwrap', '--ro-bind', '/', '/', '--dev', '/dev', '--proc', '/proc']
+        # A fresh root holding only what the spec reads; the rest of the host isn't there.
+        argv = ['bwrap']
+        for path in spec['read']:
+            link = os.path.islink(path)
+            argv += ['--symlink', os.readlink(path), path] if link else ['--ro-bind', path, path]
+        argv += ['--dev', '/dev', '--proc', '/proc']
         for path in spec['hide']:
             argv += ['--tmpfs', path]
-        for path in spec.get('expose', []):
-            argv += ['--ro-bind', path, path]
-        for path in spec.get('rehide', []):
-            argv += ['--tmpfs', path]
+            # An empty directory would still import, as a namespace package.
+            if os.path.isfile(init := os.path.join(path, '__init__.py')):
+                argv += ['--ro-bind', _import_blocker(), init]
         for path in writable:
             argv += ['--bind', path, path]
-        argv += ['--unshare-all', '--die-with-parent', '--new-session', '--chdir', workdir]
+        argv += ['--remount-ro', '/', '--unshare-all', '--die-with-parent', '--new-session']
+        argv += ['--chdir', workdir]
         return [*argv, *clean, *command]
     if spec.get('no_fork'):
         return [*clean, _python(), '-I', '-S', '-c', _NO_FORK, *command]
@@ -643,19 +663,26 @@ def run_solution(
     *cwd* (default: a fresh scratch directory) is the only place it may write;
     pass any output location inside it and read results back with
     :func:`read_output`. *env* adds variables to an otherwise empty environment.
-    Anything the script leaves running is killed when it exits. On macOS the
-    script can't start subprocesses unless *allow_subprocess* is set (a child
-    that detaches could outlive it there). *loopback_port* lets it connect to a
-    server the judge runs on 127.0.0.1 at that port; the rest of the network stays
-    unreachable.
+    Anything the script leaves running is killed when it exits. On macOS the script
+    can't start subprocesses, and *allow_subprocess* is refused: no local sandbox there
+    contains a child that detaches, which could outlive the script and change what the
+    judge reads next. *loopback_port* lets it connect to a server the judge runs on
+    127.0.0.1 at that port; the rest of the network stays unreachable.
 
     Raises:
         subprocess.TimeoutExpired: If it runs past *timeout* (default: the case timeout);
             a :class:`SolutionError` too.
         LaunchError: If the process can't be started, or never got Python going, before
-            any solution code has run; after that, a :class:`SolutionError`.
+            any solution code has run; after that, a :class:`SolutionError`. Also for
+            *allow_subprocess* in the macOS sandbox, whatever has run.
     """
     global _consulted
+    if allow_subprocess and _isolation()['kind'] == 'macos':
+        raise LaunchError(
+            'allow_subprocess needs a sandbox that contains every process the solution '
+            'starts, which sandbox-exec cannot: run this environment on Linux (bwrap) or '
+            'in a sandbox provider (docker, apple, daytona, modal, e2b)'
+        )
     path = os.path.abspath(solution_path)
     command = [_python(), '-B', path, *args]
     limit = _call_timeout() if timeout is None else min(timeout, _remaining())
@@ -708,9 +735,20 @@ def run_solution(
             raise _launch_failure('the solution process did not start')
         out.seek(0)
         err.seek(0)
-        stdout = out.read(_MAX_MESSAGE).decode('utf-8', 'replace')
-        stderr = err.read(_MAX_MESSAGE).decode('utf-8', 'replace')
+        stdout, stderr = _captured(out, 'stdout'), _captured(err, 'stderr')
     return subprocess.CompletedProcess(command, proc.returncode, stdout, stderr)
+
+
+def _captured(stream: Any, name: str) -> str:
+    """What a script printed to *name*, whole.
+
+    Raises:
+        SolutionError: If it printed more than :data:`_MAX_MESSAGE` bytes there.
+    """
+    data = stream.read(_MAX_MESSAGE + 1)
+    if len(data) > _MAX_MESSAGE:
+        raise SolutionError(f'the solution printed more than {_MAX_MESSAGE} bytes to {name}')
+    return data.decode('utf-8', 'replace')
 
 
 def _open_inside(path: str, root: str) -> int:
@@ -748,9 +786,17 @@ def read_output(path: str, root: str) -> str:
 
 
 def read_output_bytes(path: str, root: str, limit: int = _MAX_MESSAGE) -> bytes:
-    """Binary twin of :func:`read_output`, reading at most *limit* bytes."""
+    """Binary twin of :func:`read_output`, for a file of at most *limit* bytes.
+
+    Raises:
+        OSError: As :func:`read_output`, or (EFBIG) if the file holds more than *limit*
+            bytes: never just a prefix of it.
+    """
     with os.fdopen(_open_inside(path, root), 'rb') as handle:
-        return handle.read(limit)
+        data = handle.read(limit + 1)
+    if len(data) > limit:
+        raise OSError(errno.EFBIG, f'{path} holds more than {limit} bytes')
+    return data
 
 
 def solution_source(solution_path: str, name: str | None = None) -> str:

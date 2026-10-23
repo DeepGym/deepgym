@@ -206,19 +206,50 @@ def split_wrapped_output(output: str, marker: str) -> tuple[str, str]:
     return stdout, decoded.decode('utf-8', 'replace').strip()
 
 
-def parse_wrapped_output(output: str, marker: str, exit_code: int) -> ExecutionResult:
-    """Parse the verdict from the stdout of a command wrapped by :func:`wrap_stderr`.
+def parse_wrapped_output(
+    output: str, marker: str, exit_code: int, consulted_mark: str | None = None
+) -> ExecutionResult:
+    """Parse the verdict from the stdout of a command wrapped by :func:`wrap_stderr`, as
+    :func:`judge_verdict` does.
 
     Raises:
         InvalidScoreError: If the score is NaN, infinite, or outside [0, 1].
         VerifierError: If stdout has no protocol JSON.
     """
     stdout, stderr = split_wrapped_output(output, marker)
-    return ExecutionResult(
-        parse_verifier_output(stdout.strip(), f'exit_code={exit_code} stderr: {stderr!r}'),
-        stderr=stderr,
-        exit_code=exit_code,
-    )
+    return judge_verdict(stdout, stderr, exit_code, consulted_mark)
+
+
+def judge_verdict(
+    stdout: str, stderr: str, exit_code: int, consulted_mark: str | None = None
+) -> ExecutionResult:
+    """Parse the verdict a judge printed on *stdout*.
+
+    A judge that printed none after announcing the solution's start (*consulted_mark* in
+    its stdout), or that ended abnormally then (killed by a signal, or any exit but the
+    protocol's 0, 1 and 2), whatever it printed before, was ended through the solution,
+    the only untrusted code it ran: killed, starved of memory or processes. That is the
+    solution's judged 0 (``solution_error``), or ending its judge would dodge the score.
+    Before then, it has no verdict.
+
+    Raises:
+        InvalidScoreError: If the score is NaN, infinite, or outside [0, 1].
+        VerifierError: If stdout has no protocol JSON before the solution started.
+    """
+    consulted = consulted_mark is not None and consulted_mark in stdout
+    if consulted and exit_code not in (0, 1, 2):
+        details = f'The judge ended abnormally (exit {exit_code}) after the solution ran'
+        return _judged_zero(details, 'solution_error')
+    try:
+        verdict = parse_verifier_output(stdout.strip(), f'exit_code={exit_code} stderr: {stderr!r}')
+    except InvalidScoreError:
+        raise
+    except VerifierError as exc:
+        if not consulted:
+            raise
+        details = f'The judge ended without a verdict after the solution ran: {exc}'
+        return _judged_zero(details, 'solution_error')
+    return ExecutionResult(verdict, stderr=stderr, exit_code=exit_code)
 
 
 def _judged_zero(details: str, error_type: str) -> ExecutionResult:
@@ -297,7 +328,7 @@ def run_judge_in_sandbox(sandbox: Sandbox, job: JudgeJob) -> ExecutionResult:
         # The provider couldn't run the command or report back: an outage, not a verdict.
         raise SandboxError(f'Verifier execution failed: {exc}') from exc
     # Exit codes 0 (passed) and 1 (failed) are normal verifier outcomes, so parse regardless.
-    return parse_wrapped_output(response.output, marker, response.exit_code)
+    return parse_wrapped_output(response.output, marker, response.exit_code, job.consulted_mark)
 
 
 # ---------------------------------------------------------------------------
@@ -394,12 +425,7 @@ class LocalExecutor:
                 if job.consulted_mark in _printed(exc.stdout):
                     return solution_timeout(job.timeout)
                 raise TimeoutError(f'Local verifier exceeded {job.timeout}s') from exc
-        stderr = stderr.strip()
-        return ExecutionResult(
-            parse_verifier_output(stdout.strip(), f'stderr: {stderr!r}'),
-            stderr=stderr,
-            exit_code=proc.returncode,
-        )
+        return judge_verdict(stdout, stderr.strip(), proc.returncode, job.consulted_mark)
 
 
 class AsyncLocalExecutor:
@@ -451,11 +477,9 @@ class AsyncLocalExecutor:
                 if job.consulted_mark in _printed(bytes(stdout)):
                     return solution_timeout(job.timeout)
                 raise TimeoutError(f'Async local verifier exceeded {job.timeout}s') from exc
-        stderr_text = stderr.decode('utf-8', errors='replace').strip()
-        return ExecutionResult(
-            parse_verifier_output(
-                stdout.decode('utf-8', errors='replace').strip(), f'stderr: {stderr_text!r}'
-            ),
-            stderr=stderr_text,
-            exit_code=proc.returncode if proc.returncode is not None else -1,
+        return judge_verdict(
+            stdout.decode('utf-8', errors='replace'),
+            stderr.decode('utf-8', errors='replace').strip(),
+            proc.returncode if proc.returncode is not None else -1,
+            job.consulted_mark,
         )

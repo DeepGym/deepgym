@@ -17,6 +17,10 @@ import threading
 import time
 from pathlib import Path
 
+# The CLI's output stream, which the host keeps whole for the trace and its events: a run
+# that passes this is stopped as output_limit, its own termination reason, never an error.
+# Far above a normal run's stream.
+OUTPUT_LIMIT_BYTES = 256 * 1024 * 1024
 _LOOPBACK_NO_PROXY = 'localhost,localhost.,127.0.0.1,::1,[::1],0:0:0:0:0:0:0:1,[0:0:0:0:0:0:0:1]'
 
 
@@ -166,7 +170,7 @@ def _supervise(directory: Path) -> None:
                 status['stop_reason'] = _stop_reason(directory, deadline)
                 if status['stop_reason'] is not None:
                     break
-                if output.tell() > 32 * 1024 * 1024:
+                if output.tell() > OUTPUT_LIMIT_BYTES:
                     status['stop_reason'] = 'output_limit'
                     break
                 time.sleep(0.02)
@@ -247,13 +251,23 @@ def _check_version(config: dict, status: dict, deadline: float) -> None:
             'interpreter is executable on the same unprivileged PATH (for example '
             '/usr/local/bin/node); do not load interactive nvm profiles.'
         )
-    elif version != expected:
+    elif not cli_version_supported(version, expected):
         status['version_error'] = (
-            f'Unsupported {command} version {version or "unknown"}; supported: {expected}. '
-            'Install the pinned release using deepgym.agents.cli_install_command(), '
-            'or bump SUPPORTED_CLIS, record versioned fixtures, run '
-            'tests/agents/test_cli_compat.py, and rebuild sandbox images.'
+            f'Unsupported {command} version {version or "unknown"}; supported: {expected} or '
+            'a later compatible release. Install one using '
+            'deepgym.agents.cli_install_command().'
         )
+
+
+def cli_version_supported(version: str | None, tested: str) -> bool:
+    """Whether *version* is *tested* or a later compatible release, which keeps the flags
+    and stream events the adapters use: the same major version, or below 1.0 the same
+    minor version, since there a minor release may break them."""
+    if version is None:
+        return False
+    have, want = (tuple(map(int, release.split('.'))) for release in (version, tested))
+    line = 1 if want[0] else 2
+    return have[:line] == want[:line] and have >= want
 
 
 def _stop_reason(directory: Path, deadline: float) -> str | None:

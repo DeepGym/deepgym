@@ -150,13 +150,16 @@ def test_rejected_version_reaches_result_with_zero_spend() -> None:
                 version_error='Unsupported version; bump SUPPORTED_CLIS and rebuild images',
             )
 
+    session = UnsupportedSession('claude')
     result = ClaudeCodeAgent(model='m', api_key='fixture', allow_model_credentials=True).run(
-        cast(Session, UnsupportedSession('claude')),
+        cast(Session, session),
         Observation(content='', step=0),
         task='task',
         budget=Budget(),
     )
-    assert result.termination_reason == 'error'
+    # The model never started: nothing the policy did, so the episode gets no verdict.
+    assert result.termination_reason == 'setup_error'
+    assert [kind for kind, _ in session.abandoned] == ['setup_error']
     assert result.cli_version == '9.9.9'
     assert 'rebuild images' in result.error
     assert result.cost.usd == 0
@@ -197,3 +200,20 @@ def test_version_probe_deadline_preserves_budget_reason() -> None:
         budget=Budget(),
     )
     assert result.termination_reason == 'time_budget'
+
+
+@pytest.mark.parametrize(
+    ('version', 'tested', 'supported'),
+    [
+        ('2.1.302', '2.1.302', True),
+        ('2.1.309', '2.1.302', True),  # a later release in the major line
+        ('2.4.0', '2.1.302', True),
+        ('2.1.301', '2.1.302', False),  # older than tested
+        ('3.0.0', '2.1.302', False),  # a new major may change flags and events
+        ('0.162.4', '0.162.1', True),
+        ('0.163.0', '0.162.1', False),  # below 1.0 a minor release may break them
+        (None, '2.1.302', False),
+    ],
+)
+def test_supported_cli_versions(version, tested, supported) -> None:
+    assert _cli_worker.cli_version_supported(version, tested) is supported

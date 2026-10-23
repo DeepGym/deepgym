@@ -1,4 +1,4 @@
-"""Pin supported CLI releases in one place for adapters and image builders."""
+"""Name the supported CLI releases in one place for adapters and image builders."""
 
 import shlex
 from collections.abc import Mapping
@@ -9,7 +9,8 @@ from pydantic import BaseModel, ConfigDict
 
 
 class CliVersion(BaseModel):
-    """Describe one tested release; the supported range is this exact version."""
+    """Describe the tested release: the oldest supported, and the one image builders install.
+    Later releases in its major version are accepted too."""
 
     model_config = ConfigDict(frozen=True)
     command: str
@@ -28,7 +29,7 @@ SUPPORTED_CLIS: Mapping[Literal['anthropic', 'openai'], CliVersion] = MappingPro
 
 
 def cli_install_command() -> str:
-    """Return the pinned npm installation command for sandbox image builders.
+    """Return the npm installation command for the tested releases, for image builders.
 
     It installs under /usr/local, so the binaries land on the standard PATH the sandbox
     agent gets even when the image's Node comes from nvm or another custom prefix.

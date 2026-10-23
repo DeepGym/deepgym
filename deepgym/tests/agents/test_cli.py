@@ -331,6 +331,11 @@ class RecordingSession:
         self.trajectory = Trajectory()
         self.requests: list[CliRequest] = []
         self.finalizations = 0
+        self.abandoned: list[tuple[str, str]] = []
+
+    def abandon(self, error_type: str, detail: str) -> None:
+        self.abandoned.append((error_type, detail))
+        self.done = True
 
     def finalize_cli(self) -> None:
         self.finalizations += 1
@@ -799,3 +804,9 @@ def test_preflight_exception_cleans_setup_population(
     assert not backend.writer_alive
     assert session.done
     assert session.trajectory.steps == []
+
+
+@pytest.mark.parametrize('provider', ['anthropic', 'openai'])
+def test_a_cli_stopped_at_the_output_bound_says_so(provider: str) -> None:
+    """Stopped for printing more than the host keeps: shown as cut short, never an error."""
+    assert parser(provider).finish(-9, 'output_limit') == 'output_limit'

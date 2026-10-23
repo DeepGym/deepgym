@@ -62,7 +62,7 @@ def checked_score(value: object) -> float:
     except (TypeError, ValueError) as exc:
         raise InvalidScoreError(f'Verifier returned a non-numeric score: {value!r}') from exc
     if not -SCORE_TOLERANCE <= score <= 1 + SCORE_TOLERANCE:  # also False for NaN
-        logger.warning('Verifier returned invalid score %r; scoring 0', score)
+        logger.warning('Verifier returned invalid score %r; no verdict', score)
         raise InvalidScoreError(f'Verifier returned invalid score {score!r}; must be in [0, 1]')
     return min(1.0, max(0.0, score))
 

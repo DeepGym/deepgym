@@ -330,8 +330,11 @@ def test_anthropic_unfinished_stream_never_acts(app, monkeypatch, failure):
     session, initial = started(app)
     with session:
         result = AnthropicToolAgent('test').run(session, initial, task='T', budget=UNLIMITED)
+        grade = session.score()
 
-    assert result.termination_reason == 'error'
+    # The provider's stream was cut: nothing the policy did, so no verdict, never a 0.
+    assert result.termination_reason == 'provider_error'
+    assert not grade.has_verdict and grade.error_type == 'provider_error'
     assert not result.trajectory.steps and app.requests == []  # the received call never ran
     assert result.usage.input_tokens == 100  # the partial usage is kept
     assert result.cost.usd is None and 'billing unresolved' in result.cost.provenance
@@ -374,7 +377,8 @@ def test_anthropic_tool_calls_cut_short_never_run(app, monkeypatch, finished):
     with session:
         result = AnthropicToolAgent('test').run(session, initial, task='T', budget=UNLIMITED)
 
-    assert result.termination_reason == 'error'
+    # Stopped at the model's own output limit: the policy's, scored. Cut: the provider's.
+    assert result.termination_reason == ('error' if finished else 'provider_error')
     assert app.requests == [] and not result.trajectory.steps  # the cut call never ran
     payload = json.loads(result.messages[-1].content)
     assert payload['input_json'] == {'0': raw}  # every fragment received, kept
@@ -383,6 +387,21 @@ def test_anthropic_tool_calls_cut_short_never_run(app, monkeypatch, finished):
         assert payload['usage']['output_tokens'] == 5 and result.usage.output_tokens == 5
     else:
         assert payload['status'] == 'incomplete'
+
+
+def test_anthropic_overloaded_mid_stream_is_no_verdict(app, monkeypatch):
+    """A provider error event arrives under the stream's 200; it is still the provider's."""
+    error = {'type': 'error', 'error': {'type': 'overloaded_error', 'message': 'Overloaded'}}
+    body = f'event: message_start\ndata: {json.dumps(START)}\n\n'
+    body += f'event: error\ndata: {json.dumps(error)}\n\n'
+    anthropic(monkeypatch, body.encode())
+    session, initial = started(app)
+    with session:
+        result = AnthropicToolAgent('test').run(session, initial, task='T', budget=UNLIMITED)
+        grade = session.score()
+
+    assert result.termination_reason == 'provider_error'
+    assert not grade.has_verdict and grade.error_type == 'provider_error'
 
 
 def test_anthropic_delta_the_sdk_cannot_parse_is_kept_and_never_runs(app, monkeypatch):
@@ -555,3 +574,25 @@ def test_environment_without_tools_is_refused(agent):
     session = Session(MultiTurnEnvironment(task='T'), LocalBackend())
     with session, pytest.raises(ValueError, match='declares tools'):
         agent('test').run(session, session.start(), task='T', budget=UNLIMITED)
+
+
+@pytest.mark.parametrize('usage', [None, 'counted'])
+def test_openai_failed_response_is_no_verdict_with_or_without_usage(app, monkeypatch, usage):
+    """A failed response may carry no usage; it is still the provider's failure, never a 0."""
+    body = response(
+        function_call('tracker', GET_BUG),
+        status='failed',
+        error={'code': 'server_error', 'message': 'The server had an error'},
+    )
+    if usage is None:
+        body['usage'] = None
+    openai(monkeypatch, body)
+    session, initial = started(app)
+    with session:
+        result = OpenAIToolAgent('test').run(session, initial, task='T', budget=UNLIMITED)
+        grade = session.score()
+
+    assert result.termination_reason == 'provider_error'
+    assert not grade.has_verdict and grade.error_type == 'provider_error'
+    assert app.requests == [] and not result.trajectory.steps  # the failed call never ran
+    assert 'billing unresolved' in result.cost.provenance

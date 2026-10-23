@@ -21,7 +21,7 @@ from uuid import uuid4
 
 from pydantic import BaseModel, ConfigDict
 
-from deepgym.exceptions import SandboxDiedError, SandboxError
+from deepgym.exceptions import SandboxDiedError, SandboxError, SandboxUnreachableError
 from deepgym.sandboxes.protocol import (
     TIMEOUT_EXIT_CODES,
     TRUSTED_PATH,
@@ -131,9 +131,16 @@ class CliContainer:
     ) -> ExecResult:
         """Run *command* with sh in the container; output is stdout followed by stderr.
 
+        A CLI that gives no answer, or a failed exec, is the daemon's failure only if the
+        daemon can't list containers either: anything else, even an exec that couldn't
+        start, may come from what ran in the container before (processes or memory it
+        used up), so it stays the command's outcome.
+
         Raises:
             SandboxTimeoutError: If the command outruns *timeout* seconds.
             SandboxDiedError: If the container stopped during the command.
+            SandboxUnreachableError: If the CLI gave no answer or the exec failed, and the
+                daemon can't list containers.
         """
         argv = ['exec']
         if cwd:
@@ -148,10 +155,10 @@ class CliContainer:
         try:
             done = self._cli(*argv, timeout=(timeout or 3600) + 15)
         except subprocess.TimeoutExpired as exc:
-            printed = (exc.stdout or b'') + (exc.stderr or b'')
-            raise SandboxTimeoutError(
-                f'command exceeded {timeout}s', printed.decode('utf-8', 'replace')
-            ) from exc
+            printed = ((exc.stdout or b'') + (exc.stderr or b'')).decode('utf-8', 'replace')
+            if self._gone():
+                raise SandboxDiedError(f'Container {self.id} stopped', printed) from exc
+            raise SandboxTimeoutError(f'command exceeded {timeout}s', printed) from exc
         output = done.stdout.decode('utf-8', 'replace') + done.stderr.decode('utf-8', 'replace')
         if timeout and done.returncode in TIMEOUT_EXIT_CODES:
             if time.monotonic() - start >= timeout:
@@ -162,11 +169,16 @@ class CliContainer:
         return ExecResult(done.returncode, output)
 
     def _gone(self) -> bool:
-        """Whether the container no longer runs; False if the CLI can't list containers."""
+        """Whether the container no longer runs.
+
+        Raises:
+            SandboxUnreachableError: If the CLI can't list containers, so what it reported
+                about the command can't be trusted either.
+        """
         try:
             return all(box.id != self.id for box in self.running())
-        except SandboxError:
-            return False
+        except SandboxError as exc:
+            raise SandboxUnreachableError(f'{self.cli} cannot list containers: {exc}') from exc
 
     def booted_image(self) -> SandboxImage:
         """Return the image the container runs and its digest, as the CLI reports them.
@@ -213,6 +225,8 @@ class CliContainer:
                 input=content, timeout=120,
             )  # fmt: skip
         except subprocess.TimeoutExpired as exc:
+            if self._gone():
+                raise SandboxDiedError(f'Container {self.id} stopped uploading {path}') from exc
             raise SandboxError(f'Upload of {path} timed out') from exc
         if done.returncode != 0:
             message = f'Failed to upload {path}: {done.stderr.decode()[-500:]}'

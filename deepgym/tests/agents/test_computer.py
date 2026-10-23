@@ -101,6 +101,11 @@ class FakeSession:
         self.done = False
         self.trajectory = Trajectory()
         self.observation = Observation(content='', step=0, screenshot='aW1hZ2U=')
+        self.abandoned: list[tuple[str, str]] = []
+
+    def abandon(self, error_type: str, detail: str) -> None:
+        self.abandoned.append((error_type, detail))
+        self.done = True
 
     def step(self, action: Action, *, timeout=None):
         assert timeout > 0
@@ -445,8 +450,19 @@ def test_failed_openai_response_cannot_execute_actions(sdk):
     result = OpenAIComputerAgent('test').run(
         session, session.observation, task='Task', budget=Budget()
     )
-    assert result.termination_reason == 'error'
+    assert result.termination_reason == 'provider_error'
+    assert session.abandoned == [('provider_error', 'Response did not complete: failed')]
     assert not result.trajectory.steps
+
+
+def test_failed_openai_response_without_usage_is_still_no_verdict(sdk):
+    sdk('openai', [openai_response([], status='failed', usage=None)])
+    session = FakeSession()
+    result = OpenAIComputerAgent('test').run(
+        session, session.observation, task='Task', budget=Budget()
+    )
+    assert result.termination_reason == 'provider_error'
+    assert [kind for kind, _ in session.abandoned] == ['provider_error']
 
 
 def test_deadline_after_response_prevents_tool_execution(sdk, monkeypatch):
@@ -870,7 +886,8 @@ def test_anthropic_unfinished_stream_never_acts(monkeypatch, failure):
     result = AnthropicComputerAgent('test').run(
         session, session.observation, task='Task', budget=Budget()
     )
-    assert result.termination_reason == 'error'
+    assert result.termination_reason == 'provider_error'  # the provider cut it: no verdict
+    assert [kind for kind, _ in session.abandoned] == ['provider_error']
     assert not result.trajectory.steps  # the half-received click was not executed
     assert result.usage.input_tokens == (
         0 if failure == 'empty' else 100

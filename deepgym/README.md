@@ -295,8 +295,9 @@ scrolls and drags in screenshot pixels. More in [computer use][computer-use].
 
 ### Run Claude Code or Codex in the sandbox
 
-The CLI runs headless inside the session's sandbox as an unprivileged user, and DeepGym
-scores the state it leaves:
+`ClaudeCodeAgent` drives the Claude Code CLI (`claude -p`), not the Claude Agent SDK. The
+CLI runs headless inside the session's sandbox as an unprivileged user, and DeepGym scores
+the state it leaves:
 
 ```python
 from deepgym import DeepGym, MultiTurnEnvironment
@@ -456,7 +457,7 @@ verl loads DeepGym's reward function with one config line (see
 | What it is | RL training framework | RL environments and verifiable rewards |
 | Does the training | Yes: rollouts on vLLM/SGLang, updates on FSDP/Megatron, PPO, GRPO, DAPO and more | No, it plugs into verl, TRL, OpenRLHF or your own loop |
 | Tasks | You bring the dataset and write the reward function | 31 built-in environments; importers for HumanEval, MBPP, EvalPlus, BigCodeBench, SWE-bench Pro, MiMo, CyberGym and Harbor datasets such as Terminal-Bench 2.0 |
-| Running model code | Your reward function, or a remote code sandbox service | Daytona, Modal, E2B, Docker, Apple container, or locally under sandbox-exec/bwrap (without them, local runs get process separation and a warning) |
+| Running model code | Your reward function, or a remote code sandbox service | Daytona, Modal, E2B, Docker, Apple container, or locally under sandbox-exec/bwrap (without them, local runs refuse unless `DEEPGYM_ALLOW_UNSANDBOXED=1`) |
 | Reward hacking | Up to your reward function | The solution runs apart from the verifier with no network, so it can't read the expected answers or print a fake score; `deepgym qa` checks that empty and stub solutions earn nothing and reward-hack ones stay below 0.5 before you train |
 | Multi-turn agents | Agent loop and tool interface | One live sandbox per episode (shell or desktop), with a verl agent loop and session tool |
 | Computer use | Not built in | Desktop tasks, scored on the state the agent leaves behind |

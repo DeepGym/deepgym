@@ -9,6 +9,9 @@ _E2B_STATUS = re.compile(r'(\d{3}): ')
 
 _TRANSPORT_ERRORS = (
     ('httpx', ('TransportError',)),
+    ('httpx2', ('TransportError',)),  # the Anthropic and OpenAI SDKs' transport, newer releases
+    ('anthropic', ('APIConnectionError',)),
+    ('openai', ('APIConnectionError',)),
     (
         'urllib3.exceptions',
         ('ProtocolError', 'NewConnectionError', 'MaxRetryError', 'TimeoutError'),
@@ -18,7 +21,12 @@ _TRANSPORT_ERRORS = (
     ('daytona', ('DaytonaConnectionError', 'DaytonaSpotEvictedError', 'DaytonaQueueTimeoutError')),
     (
         'e2b.exceptions',
-        ('SandboxUnreachableException', 'ServiceBusyException', 'RateLimitException'),
+        (
+            'SandboxUnreachableException',
+            'ServiceBusyException',
+            'RateLimitException',
+            'AuthenticationException',  # our credentials refused; it carries no status
+        ),
     ),
     ('pyqwest', ('ReadError', 'WriteError', 'StreamError')),  # e2b's RPC transport
     (
@@ -29,6 +37,8 @@ _TRANSPORT_ERRORS = (
             'InternalFailure',
             'ResourceExhaustedError',
             'ServiceError',
+            'AuthError',  # our credentials refused; Modal's status is an Enum, not an int
+            'PermissionDeniedError',
         ),
     ),
 )
@@ -72,6 +82,12 @@ class SandboxDiedError(SandboxError):
     def __init__(self, message: str, output: str = '') -> None:
         super().__init__(message)
         self.output = output
+
+
+class SandboxUnreachableError(SandboxError):
+    """Raise when the provider gave no answer about a command, or none to trust: its daemon
+    hung or can't be reached, before the command started or while it ran. Infrastructure,
+    never the policy's doing (see :func:`is_infrastructure_failure`)."""
 
 
 class SandboxExpiredError(SandboxError):
@@ -136,7 +152,9 @@ def is_infrastructure_failure(exc: BaseException) -> bool:
     while exc is not None:
         if isinstance(exc, (TimeoutError, SandboxDiedError, *gone)):
             return False
-        if isinstance(exc, (ConnectionError, builtins.TimeoutError, *transport)):
+        if isinstance(exc, (ConnectionError, builtins.TimeoutError, SandboxUnreachableError)):
+            return True
+        if isinstance(exc, transport):
             return True
         status = _status_code(exc)
         if status is not None and (status >= 500 or status in (401, 403, 429)):

@@ -113,7 +113,7 @@ class _CliAgent(BaseModel):
                     + '; CLI failure: usage may be incomplete',
                 }
             )
-            reason = 'time_budget' if tracker.remaining_seconds <= 0 else 'error'
+            reason = tracker.failure(exc)
             result = tracker.result(session, reason, events.final_text, type(exc).__name__)
             if isinstance(exc, CliExecutionError):
                 result = result.model_copy(update={'cli_version': exc.cli_version})
@@ -123,7 +123,7 @@ class _CliAgent(BaseModel):
             reason = (
                 'time_budget'
                 if execution.stop_reason == 'time_budget' or tracker.remaining_seconds <= 0
-                else 'error'
+                else 'setup_error'
             )
             result = tracker.result(session, reason, error=execution.version_error)
         else:

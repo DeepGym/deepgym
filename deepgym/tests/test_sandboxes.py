@@ -26,6 +26,7 @@ from deepgym.exceptions import (
     DeepGymError,
     SandboxError,
     SandboxExpiredError,
+    SandboxUnreachableError,
     VerifierError,
     is_infrastructure_failure,
 )
@@ -51,7 +52,7 @@ from deepgym.sandboxes.apple import AppleContainer
 from deepgym.sandboxes.cli import DEFAULT_IMAGE
 from deepgym.sandboxes.daytona import cleanup_sandbox, snapshot_digest
 from deepgym.sandboxes.docker import DockerContainer
-from deepgym.session import _SEALED_PATH_CHECK, SandboxBackend, Session
+from deepgym.session import _SEALED_PATH_CHECK, SandboxBackend, Session, VerifierUploadError
 
 # Fake sandboxes pass session setup's check that only root can change TRUSTED_PATH.
 _SEALED_NEEDLE = 'root would run what others can change'
@@ -198,6 +199,70 @@ def test_cli_timeout_exit_becomes_timeout_error(monkeypatch: pytest.MonkeyPatch)
     monkeypatch.setattr('deepgym.sandboxes.cli.time.monotonic', lambda: next(clock))
     with pytest.raises(SandboxTimeoutError):
         box.exec('sleep 99', timeout=5)
+
+
+def _exec_answering(
+    monkeypatch: pytest.MonkeyPatch, exec_answer, listing: Exception | None = None
+) -> DockerContainer:
+    """Fake the docker CLI: exec runs *exec_answer*; the listing shows the container running,
+    or raises *listing* (a daemon that can't answer)."""
+
+    def fake_run(argv: list[str], **kwargs: object) -> subprocess.CompletedProcess:
+        if argv[1] == 'exec':
+            return exec_answer(argv)
+        return subprocess.CompletedProcess(argv, 0, b'', b'')
+
+    monkeypatch.setattr(subprocess, 'run', fake_run)
+    box = DockerContainer(image='img')
+
+    def running() -> list[types.SimpleNamespace]:
+        if listing is not None:
+            raise listing
+        return [types.SimpleNamespace(id=box.id)]
+
+    monkeypatch.setattr(box, 'running', running)
+    return box
+
+
+@pytest.mark.parametrize('daemon_answers', [True, False])
+def test_a_cli_that_gives_no_answer_is_ours_only_if_the_daemon_cannot_answer(
+    monkeypatch: pytest.MonkeyPatch, daemon_answers: bool
+) -> None:
+    """A daemon that still lists the running container was held by what ran in it (a child
+    left with the output open, processes or memory used up): the command's own timeout.
+    One that can't list containers failed itself: infrastructure, no verdict."""
+
+    def hang(argv: list[str]) -> subprocess.CompletedProcess:
+        raise subprocess.TimeoutExpired(argv, 20, output=b'partial')
+
+    listing = None if daemon_answers else SandboxError('docker could not list containers')
+    box = _exec_answering(monkeypatch, hang, listing)
+
+    with pytest.raises(
+        SandboxTimeoutError if daemon_answers else SandboxUnreachableError
+    ) as caught:
+        box.exec('work', timeout=5)
+    assert is_infrastructure_failure(caught.value) is not daemon_answers
+
+
+@pytest.mark.parametrize('daemon_answers', [True, False])
+def test_a_failed_exec_is_the_commands_unless_the_daemon_cannot_answer(
+    monkeypatch: pytest.MonkeyPatch, daemon_answers: bool
+) -> None:
+    """Even an exec that couldn't start (the container's process limit, used up by what ran
+    before) stays the command's outcome while the daemon answers."""
+
+    def fails(argv: list[str]) -> subprocess.CompletedProcess:
+        return subprocess.CompletedProcess(argv, 126, b'', b'cannot start: resource limit')
+
+    listing = None if daemon_answers else SandboxError('Cannot connect to the Docker daemon')
+    box = _exec_answering(monkeypatch, fails, listing)
+
+    if daemon_answers:
+        assert box.exec('work', timeout=5) == ExecResult(126, 'cannot start: resource limit')
+        return
+    with pytest.raises(SandboxUnreachableError):
+        box.exec('work', timeout=5)
 
 
 def test_cli_start_timeout_removes_the_container(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -638,7 +703,7 @@ def test_a_step_verifier_upload_the_provider_refuses_has_no_verdict(status: int)
             raise refused
 
     box.upload = upload  # type: ignore[method-assign]
-    with pytest.raises(VerifierError, match='Could not upload the verifier'):
+    with pytest.raises(VerifierUploadError, match='Could not upload the verifier'):
         session.step(Action(action_type='bash', content='echo hi'))
 
     result = session.score()
@@ -1000,9 +1065,11 @@ def test_a_cli_timeout_keeps_what_the_command_printed(monkeypatch: pytest.Monkey
         return subprocess.CompletedProcess(argv, 0, b'', b'')
 
     monkeypatch.setattr(subprocess, 'run', fake_run)
+    box = DockerContainer()
+    monkeypatch.setattr(box, 'running', lambda: [types.SimpleNamespace(id=box.id)])
 
     with pytest.raises(SandboxTimeoutError) as raised:
-        DockerContainer().exec('sleep 9', timeout=1)
+        box.exec('sleep 9', timeout=1)
     assert raised.value.output == 'printed first'
 
 
@@ -1295,9 +1362,10 @@ def test_the_consulted_mark_is_in_the_private_script_never_on_a_command_line() -
     assert not any('DEEPGYM_CONSULTED' in command for command in box.commands)
 
 
-def test_only_uploading_the_verifier_is_ours_whatever_the_provider_says() -> None:
-    """Its code to its own folder is ours alone. Its launch is not: it runs in the agent's
-    work directory, which the agent can move away."""
+def test_a_failed_verifier_upload_is_told_apart_from_its_launch() -> None:
+    """Its code goes to its own folder, on the disk the agent shares: a failed upload is a
+    VerifierUploadError, whose verdict turns on whether the agent acted (Session.score).
+    Its launch runs in the agent's work directory, which the agent can move away."""
     box = FakeSandbox(network_blocked=True, answers=[_USERS])
     backend = SandboxBackend(box)
     real_upload, real_exec = box.upload, box.exec
@@ -1306,7 +1374,7 @@ def test_only_uploading_the_verifier_is_ours_whatever_the_provider_says() -> Non
         raise _ProviderError('HTTP 400: bad request')
 
     box.upload = upload  # type: ignore[method-assign]
-    with pytest.raises(VerifierError, match='Could not upload the verifier'):
+    with pytest.raises(VerifierUploadError, match='Could not upload the verifier'):
         backend.verify('print(1)', timeout=5)
 
     def exec_(command: str, **kwargs: object) -> ExecResult:
@@ -1318,10 +1386,10 @@ def test_only_uploading_the_verifier_is_ours_whatever_the_provider_says() -> Non
     with pytest.raises(_ProviderError):
         backend.verify('print(1)', timeout=5)
 
-    # Docker and Apple report an ordinary failed upload as a SandboxError: still ours. A
-    # sandbox found stopped is not.
+    # Docker and Apple report an ordinary failed upload as a SandboxError. A sandbox found
+    # stopped stays that.
     for error, raised in (
-        (SandboxError('Failed to upload: no space left'), VerifierError),
+        (SandboxError('Failed to upload: no space left'), VerifierUploadError),
         (SandboxDiedError('the container stopped'), SandboxDiedError),
     ):
 

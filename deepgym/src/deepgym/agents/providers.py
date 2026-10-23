@@ -8,9 +8,18 @@ must have status completed.
 
 from __future__ import annotations
 
+import contextlib
 from typing import Any, Literal
 
-from deepgym.agents.base import Budget, BudgetTracker, Cost, TokenPrices, Usage
+from deepgym.agents.base import (
+    Budget,
+    BudgetTracker,
+    Cost,
+    TerminationReason,
+    TokenPrices,
+    Usage,
+    provider_failed,
+)
 
 # The SDK retries connection drops, 429s and 5xx with backoff; one blip shouldn't end an
 # hours-long episode. A retried request may be billed twice; usage counts only answers.
@@ -28,13 +37,16 @@ def _snapshot(stream: Any) -> Any:
         return None
 
 
-def _incomplete(
-    tracker: BudgetTracker, message: dict[str, Any], prices: TokenPrices | None
+def unresolved_usage(
+    tracker: BudgetTracker, data: object, provider: Literal['anthropic', 'openai']
 ) -> None:
-    """Keep the usage an unfinished stream reported, with the total bill marked unresolved."""
-    data = message.get('usage')
-    usage = _anthropic_usage(data) if isinstance(data, dict) else Usage()
-    unresolved = 'incomplete streamed response: partial usage, billing unresolved'
+    """Keep the usage an unfinished response reported, if any (a failed one may carry
+    none), with the total bill marked unresolved."""
+    usage = Usage()
+    if isinstance(data, dict):
+        with contextlib.suppress(KeyError, TypeError, ValueError):
+            usage = _anthropic_usage(data) if provider == 'anthropic' else _openai_usage(data)
+    unresolved = f'unfinished {provider} response: partial usage, billing unresolved'
     tracker.add_usage(usage, Cost(provenance=unresolved))
 
 
@@ -80,24 +92,29 @@ def anthropic_message(
     if fragments and message.get('stop_reason') != 'tool_use':
         message['input_json'] = fragments
     if failure is not None or not stopped or snapshot is None:
-        _incomplete(tracker, message, prices)
-        details = {'reason': 'Response stream ended before completion'}
+        unresolved_usage(tracker, message.get('usage'), 'anthropic')
+        # A stream that just ended was cut on the way; one that failed is the provider's
+        # failure only if it names one (a delta the SDK can't parse is the model's output).
+        details = {'reason': 'Response stream ended before completion', 'provider': True}
         if failure is not None:
             # Its text too: the SDK's error for a delta it can't parse quotes that delta,
             # which never reaches the snapshot or the fragments above.
             details = {
                 'reason': f'Response stream failed: {type(failure).__name__}',
                 'detail': str(failure),
+                'provider': provider_failed(failure),
             }
         return {**message, 'status': 'incomplete', 'incomplete_details': details}
     return message
 
 
-def anthropic_incomplete(message: dict[str, Any]) -> str | None:
-    """Why :func:`anthropic_message` returned *message* incomplete, or None if it completed."""
+def anthropic_incomplete(message: dict[str, Any]) -> tuple[TerminationReason, str] | None:
+    """How and why :func:`anthropic_message` returned *message* incomplete, or None if it
+    completed: ``provider_error`` when the provider or network cut it, else ``error``."""
     if message.get('status') != 'incomplete':
         return None
-    return message['incomplete_details']['reason']
+    details = message['incomplete_details']
+    return 'provider_error' if details['provider'] else 'error', details['reason']
 
 
 def anthropic_unfinished_calls(message: dict[str, Any]) -> str | None:
@@ -112,16 +129,20 @@ def anthropic_unfinished_calls(message: dict[str, Any]) -> str | None:
     return f'Response stopped ({stop}) before its tool calls were complete'
 
 
-def openai_incomplete(response: dict[str, Any]) -> str | None:
-    """Why an OpenAI response did not complete, or None if it did.
+def openai_incomplete(response: dict[str, Any]) -> tuple[TerminationReason, str] | None:
+    """How and why an OpenAI response did not complete, or None if it did.
 
-    Never act on, or blindly continue, a partial response; keep its reason.
+    Never act on, or blindly continue, a partial response; keep its reason. One
+    ``incomplete`` stopped at the model's own output limit or a content filter: the
+    policy's (``error``). Any other status (failed, cancelled) is the provider's
+    (``provider_error``).
     """
     if response.get('status') == 'completed':
         return None
     details = response.get('incomplete_details') or {}
     reason = details.get('reason') or response.get('status')
-    return f'Response did not complete: {reason}'
+    policy = response.get('status') == 'incomplete'
+    return 'error' if policy else 'provider_error', f'Response did not complete: {reason}'
 
 
 def account(

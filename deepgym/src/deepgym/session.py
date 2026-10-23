@@ -27,7 +27,7 @@ import threading
 import time
 from collections.abc import Callable, Mapping, Sequence
 from pathlib import Path, PurePosixPath
-from typing import TYPE_CHECKING, NamedTuple, Protocol
+from typing import TYPE_CHECKING, Literal, NamedTuple, Protocol
 from uuid import uuid4
 
 from pydantic import JsonValue
@@ -51,6 +51,7 @@ from deepgym.judge import (
     SOLVER_USER,
     ids_are_exclusive,
     local_isolation,
+    sandbox_python,
 )
 from deepgym.models import (
     Action,
@@ -150,6 +151,16 @@ except OSError as exc:
 with os.fdopen(fd, 'wb') as out:
     out.write(sys.stdin.buffer.read())
 """
+
+
+class VerifierUploadError(SandboxError):
+    """Raise when the provider fails to take a session verifier's code.
+
+    It goes to the verifier's own folder, but on the disk the agent shares, so once the
+    agent has acted it may be why (it filled the disk or its inodes): as for any write
+    after an action, that is its judged 0 unless the network or provider failed (see
+    :func:`failure_result`). Before any action, it is ours: no verdict.
+    """
 
 
 class StepResult(NamedTuple):
@@ -304,12 +315,14 @@ class LocalBackend:
     def verify(self, code: str, timeout: int, env: dict[str, str] | None = None) -> VerifierOutput:
         """Run verifier *code* inline; it shares the agent's user here.
 
-        Code it loads through ``deepgym_solution`` runs in the local judge's sandbox.
+        Code it loads through ``deepgym_solution`` runs in the local judge's sandbox, which
+        reads the runtime and the agent's working directory: the files the agent wrote.
         """
+        isolation = local_isolation([str(self._runtime.parent), str(self._dir)])
         runtime = {
-            'DEEPGYM_ISOLATION': json.dumps(local_isolation([str(self._runtime.parent)])),
+            'DEEPGYM_ISOLATION': json.dumps(isolation),
             'DEEPGYM_RUNTIME': str(self._runtime),
-            'DEEPGYM_PYTHON': sys.executable,
+            'DEEPGYM_PYTHON': sandbox_python(),
             'DEEPGYM_DEADLINE': str(time.time() + timeout),
             'DEEPGYM_POLICY_DIR': str(self._dir),
         }
@@ -791,8 +804,7 @@ class SandboxBackend:
         Raises:
             TimeoutError: If the verifier exceeds *timeout* seconds.
             SandboxError: If the sandbox stopped (see :class:`~deepgym.sandboxes.Sandbox`).
-            VerifierError: If the provider fails to take the verifier's code, which is ours
-                alone. A failed launch isn't: it runs in the agent's work directory.
+            VerifierUploadError: If the provider fails to take the verifier's code.
         """
         script = f'{_VERIFIER_DIR}/{uuid4().hex}.py'
         command, marker = wrap_stderr(
@@ -805,8 +817,7 @@ class SandboxBackend:
         except (SandboxDiedError, SandboxExpiredError):
             raise
         except Exception as exc:
-            # Our code to our own folder: the provider refusing it is never the agent's.
-            raise VerifierError(f'Could not upload the verifier: {exc}') from exc
+            raise VerifierUploadError(f'Could not upload the verifier: {exc}') from exc
         done = self._sandbox.exec(
             trusted(
                 f'{deadline}; {command}; status=$?; rm -f {script}; exit $status',
@@ -1249,6 +1260,28 @@ class Session:
                 self._obs = self._obs.model_copy(update={'done': True})
                 self._trajectory.final_observation = self._obs
 
+    def abandon(self, error_type: Literal['provider_error', 'setup_error'], detail: str) -> None:
+        """End the episode with no verdict: it stopped through nothing the policy did.
+
+        That is the model provider failing (``provider_error``) or the agent harness never
+        starting the model (``setup_error``). :meth:`score` then returns that result
+        without running the verifier: whatever state the policy reached, it didn't finish.
+        A step that failed first keeps its own result.
+        """
+        with self._lock:
+            if self._failed_result is None:
+                self._failed_result = RunResult(
+                    score=0.0,
+                    passed=False,
+                    output=f'Not graded: {detail}',
+                    stderr='',
+                    exit_code=1,
+                    execution_time_ms=0.0,
+                    sandbox_id=self.sandbox_id,
+                    error_type=error_type,
+                )
+            self._done = True
+
     def score(self) -> RunResult:
         """Run the final verifier against the current state.
 
@@ -1290,10 +1323,15 @@ class Session:
             start = time.perf_counter()
             acted = bool(self._trajectory.steps)
             try:
-                (exit_code, stdout, stderr), consulted = self._verify(self._env.final_verifier_code)
+                code = self._env.final_verifier_code
+                (exit_code, stdout, stderr), consulted = self._verify(code, acted=acted)
             except SandboxDiedError as exc:
                 if not acted:
                     return error_result(exc, self.sandbox_id)
+                return failure_result(exc, self.sandbox_id)
+            except VerifierUploadError as exc:
+                if not acted:
+                    raise VerifierError(str(exc)) from exc
                 return failure_result(exc, self.sandbox_id)
             except Exception as exc:
                 if acted and self._ran_out_the_clock(exc):
@@ -1564,7 +1602,9 @@ class Session:
         self._step_verdict = {**data, 'exit_code': exit_code}
         return score
 
-    def _verify(self, code: str, env: dict[str, str] | None = None) -> tuple[VerifierOutput, bool]:
+    def _verify(
+        self, code: str, env: dict[str, str] | None = None, *, acted: bool = True
+    ) -> tuple[VerifierOutput, bool]:
         """Run session verifier *code* against the sandbox as it stands.
 
         It gets a fresh ``DEEPGYM_CONSULTED`` mark in its code (see :func:`_guarded`). It
@@ -1577,13 +1617,16 @@ class Session:
         run, see :func:`~deepgym.sandbox.solution_timeout`), and so is the verifier being
         killed (``solution_error``). So is a timeout whose output the backend lost (no start
         line), since nothing then shows the verifier hadn't read the agent's output. A judged
-        0 comes back as if the verifier had printed it.
+        0 comes back as if the verifier had printed it. All of that needs an agent that has
+        *acted*: before any action, its work directory holds only what the environment put
+        there, so none of these failures is its doing (a :class:`VerifierError`).
 
         Returns:
             What the verifier printed, and whether it read the agent's output.
 
         Raises:
-            VerifierError: If the verifier timed out before the mark.
+            VerifierError: If the verifier timed out before the mark, or failed in any of
+                these ways before the agent acted.
         """
         mark = uuid4().hex
         consulted, started = f'\n{mark}\n', f'\n{mark}:start\n'
@@ -1591,6 +1634,10 @@ class Session:
         try:
             exit_code, stdout, stderr = self._backend.verify(_guarded(code, mark), timeout, env)
         except SandboxTimeoutError as exc:
+            if not acted:
+                raise VerifierError(
+                    f'The verifier timed out before the agent acted: {exc}'
+                ) from exc
             if consulted in exc.output:
                 return _reported(solution_timeout(timeout)), True
             if started not in exc.output:
@@ -1599,7 +1646,7 @@ class Session:
             raise VerifierError(
                 f"The verifier timed out before it read the agent's output: {exc}"
             ) from exc
-        read = consulted in stdout
+        read = acted and consulted in stdout
         if read and not 0 <= exit_code < 128:
             details = f"The verifier was killed (exit {exit_code}) handling the agent's output"
             return _reported(_judged_zero(details, 'solution_error')), True
@@ -1664,7 +1711,7 @@ def failure_result(exc: BaseException, sandbox_id: str, *, exhausted: bool = Fal
 
     * a network or provider failure, or the provider refusing our credentials (see
       :func:`~deepgym.exceptions.is_infrastructure_failure`);
-    * a verifier that couldn't run (its upload or launch failed), failed, or timed out
+    * a verifier that couldn't run (its launch failed), failed, or timed out
       before it read the agent's output (:class:`~deepgym.exceptions.VerifierError`; after,
       the verifier reports the agent's 0 itself, see :meth:`Session._verify`);
     * the provider retiring the sandbox at the end of its lifetime

@@ -64,3 +64,37 @@ def test_legacy_callable_cannot_silently_ignore_budget() -> None:
             lambda obs: Action(action_type='done'),
             budget=Budget(),
         )
+
+
+class StoppedAgent:
+    """An agent of the caller's own that builds its AgentResult directly."""
+
+    def __init__(self, reason: str) -> None:
+        self.reason = reason
+
+    def run(
+        self, session: Session, initial: Observation, *, task: str, budget: Budget
+    ) -> AgentResult:
+        session.step(Action(action_type='done'))
+        return AgentResult(
+            trajectory=session.trajectory, termination_reason=self.reason, error='stopped'
+        )
+
+
+@pytest.mark.parametrize('reason', ['provider_error', 'setup_error'])
+def test_any_agent_that_stopped_through_no_policy_fault_gets_no_verdict(reason: str) -> None:
+    """Enforced where every agent's run is scored, not only for agents that use our helper."""
+    env = MultiTurnEnvironment(task='finish', final_verifier_code='print(1.0)')
+
+    _, grade = DeepGym(mode='local').run_episode(env, StoppedAgent(reason), budget=Budget())
+
+    assert not grade.has_verdict and grade.error_type == reason
+
+
+def test_a_run_the_harness_cut_short_is_graded_as_truncated() -> None:
+    passes = 'import json\nprint(json.dumps({"score": 1.0, "passed": True}))'
+    env = MultiTurnEnvironment(task='finish', final_verifier_code=passes)
+
+    _, grade = DeepGym(mode='local').run_episode(env, StoppedAgent('output_limit'), budget=Budget())
+
+    assert grade.has_verdict and grade.truncated

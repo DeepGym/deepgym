@@ -112,7 +112,7 @@ def test_a_cleanup_the_solution_broke_is_its_failure(
     script = tmp_path / 'solution.py'
     script.write_text('print("ran")\n', encoding='utf-8')
 
-    def no_processes_left(proc: subprocess.Popen) -> None:
+    def no_processes_left(proc: subprocess.Popen, mark: str | None = None) -> None:
         proc.kill()
         raise OSError(errno.EAGAIN, 'Resource temporarily unavailable')
 
@@ -121,6 +121,24 @@ def test_a_cleanup_the_solution_broke_is_its_failure(
     with pytest.raises(solution_runtime.SolutionError, match='temporarily unavailable'):
         solution_runtime.run_solution(str(script))
     assert solution_runtime.consulted()
+
+
+def test_output_past_the_bound_is_the_solutions_failure_not_a_prefix(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A grader must never see a cut-off prefix of what the solution printed or wrote."""
+    from deepgym import solution_runtime
+
+    monkeypatch.setattr(solution_runtime, '_MAX_MESSAGE', 16)
+    script = tmp_path / 'solution.py'
+    script.write_text('print("right answer, then more")\n', encoding='utf-8')
+    with pytest.raises(solution_runtime.SolutionError, match='more than 16 bytes to stdout'):
+        solution_runtime.run_solution(str(script), cwd=str(tmp_path))
+
+    (tmp_path / 'out.bin').write_bytes(b'x' * 17)
+    with pytest.raises(OSError, match='more than 16 bytes'):
+        solution_runtime.read_output_bytes(str(tmp_path / 'out.bin'), str(tmp_path), limit=16)
+    assert solution_runtime.read_output_bytes(str(tmp_path / 'out.bin'), str(tmp_path), 17)
 
 
 def test_a_script_runs_only_once_the_watcher_knows_it(
@@ -250,16 +268,92 @@ def test_a_reader_that_cannot_start_is_a_launch_failure(
     assert started[-1].poll() is not None  # the server it started is gone
 
 
-def test_local_sandboxes_hide_host_bus_sockets(monkeypatch: pytest.MonkeyPatch) -> None:
+@pytest.mark.parametrize('kind', ['bwrap', 'macos'])
+def test_local_sandboxes_read_nothing_a_user_or_process_wrote(
+    kind: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Only system trees, the Python installation and the run's own directories are
+    readable: never home, temp directories (other runs) or daemon sockets."""
     import deepgym.judge
 
+    monkeypatch.setattr(deepgym.judge, 'local_isolation_kind', lambda: kind)
+
+    read = deepgym.judge.local_isolation(['/the/run'])['read']
+
+    pythons = {os.path.realpath(p) for p in (sys.prefix, sys.base_prefix, sys.exec_prefix)}
+    places = [Path.home(), Path(tempfile.gettempdir()), Path('/tmp'), Path('/run'), Path('/var')]
+    for place in (Path(os.path.realpath(p)) for p in places):
+        covering = [path for path in read if place.is_relative_to(os.path.realpath(path))]
+        assert not covering, (place, covering)
+    assert pythons <= set(read)
+    assert read[-1] == '/the/run'
+
+
+def test_every_deepgym_copy_on_the_path_stays_hidden(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A wheel installed next to a source checkout is as unreadable as the copy running."""
+    import deepgym.judge
+
+    copy = tmp_path / 'deepgym'
+    copy.mkdir()
+    (copy / '__init__.py').write_text('')
+    monkeypatch.setattr(sys, 'path', [*sys.path, str(tmp_path)])
     monkeypatch.setattr(deepgym.judge, 'local_isolation_kind', lambda: 'bwrap')
-    monkeypatch.setattr(deepgym.judge.os.path, 'exists', lambda path: True)
 
     hide = deepgym.judge.local_isolation([])['hide']
 
-    assert {'/run', os.path.realpath('/var/run')} <= set(hide)
-    assert len(hide) == len(set(hide))
+    assert os.path.realpath(copy) in hide
+    assert os.path.realpath(Path(deepgym.judge.__file__).parent) in hide
+
+
+def test_no_sandbox_refuses_to_run_unless_allowed(monkeypatch: pytest.MonkeyPatch) -> None:
+    import deepgym.judge
+
+    monkeypatch.setattr(deepgym.judge, 'local_isolation_kind', lambda: 'none')
+    monkeypatch.delenv(deepgym.judge.ALLOW_UNSANDBOXED_ENV, raising=False)
+    with pytest.raises(SandboxError, match='No working sandbox-exec or bwrap'):
+        DeepGym(mode='local').run(load_environment('coin_change'), WRONG)
+
+    monkeypatch.setenv(deepgym.judge.ALLOW_UNSANDBOXED_ENV, '1')
+    assert deepgym.judge.local_isolation([]) == {'kind': 'none'}
+
+
+_RUNS_ROOT_THEN = (
+    'import os, signal, sys, time\n'
+    'from deepgym.judge import local_runs_root\n'
+    'print(local_runs_root(), flush=True)\n'
+    'os.kill(os.getpid(), signal.SIGKILL) if sys.argv[1] == "die" else time.sleep(60)\n'
+)
+
+
+def test_a_killed_process_runs_root_is_removed_by_the_next(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A killed process never runs its exit cleanup; the next one removes what it left,
+    and never the root of a process still running."""
+    import deepgym.judge
+
+    env = {**os.environ, 'TMPDIR': str(tmp_path)}
+    live = subprocess.Popen(
+        [sys.executable, '-c', _RUNS_ROOT_THEN, 'live'], env=env, stdout=subprocess.PIPE, text=True
+    )
+    try:
+        live_root = Path(live.stdout.readline().strip())
+        dead = subprocess.run(
+            [sys.executable, '-c', _RUNS_ROOT_THEN, 'die'], env=env, capture_output=True, text=True
+        )
+        dead_root = Path(dead.stdout.strip())
+        assert dead_root.is_dir() and live_root.is_dir()
+        monkeypatch.setattr(tempfile, 'tempdir', str(tmp_path))
+
+        deepgym.judge._remove_stale_roots()
+
+        assert not dead_root.exists()
+        assert live_root.is_dir()
+    finally:
+        live.kill()
+        live.wait()
 
 
 _LAUNCHER = """
@@ -385,6 +479,33 @@ return {'score': 0.0 if leaks else 1.0, 'passed': not leaks, 'details': str(leak
         )
         result = dg.run(env, solution)
         assert result.passed, result.output
+
+    @needs_sandbox
+    def test_cannot_read_temp_files_or_other_runs(self, dg: DeepGym) -> None:
+        """Nothing outside its run is readable: a file in the temp directory, or another
+        DeepGym process's runs (another trainer worker's verifier copy)."""
+        other = Path(tempfile.mkdtemp(prefix='deepgym_runs_'))
+        loose = Path(tempfile.mkstemp()[1])
+        try:
+            (other / 'verifier.py').write_text('ANSWER = 42')
+            loose.write_text('answer key')
+            targets = [str(other / 'verifier.py'), str(loose)]
+            env = _env(
+                f'leaks = [path for path in {targets!r} if sol.read(path) is not None]\n'
+                "return {'score': float(not leaks), 'passed': not leaks, 'details': str(leaks)}"
+            )
+            solution = (
+                'def read(path):\n'
+                '    try:\n'
+                '        return open(path).read()\n'
+                '    except OSError:\n'
+                '        return None\n'
+            )
+            result = dg.run(env, solution)
+            assert result.passed, result.output
+        finally:
+            shutil.rmtree(other)
+            loose.unlink()
 
     def test_host_secrets_not_visible(self, dg: DeepGym, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.setenv('DG_TEST_SECRET', 'hunter2')
@@ -890,16 +1011,41 @@ except Exception:
         assert dg.run(env, solution).passed
 
     @macos_only
-    def test_scripts_fork_only_when_allowed(self, dg: DeepGym) -> None:
-        verifier = (
+    def test_scripts_cannot_fork_and_allow_subprocess_is_refused(self, dg: DeepGym) -> None:
+        """No macOS sandbox contains a child that detaches, so a script never forks there,
+        and asking for subprocesses ends the run with no verdict rather than allow it."""
+        blocked = (
             'from deepgym_solution import run_solution\n\n'
             'def verify(solution_path):\n'
-            '    blocked = run_solution(solution_path).returncode != 0\n'
-            '    allowed = run_solution(solution_path, allow_subprocess=True).returncode == 0\n'
-            '    return blocked and allowed\n'
+            '    return run_solution(solution_path).returncode != 0\n'
+        )
+        allowed = (
+            'from deepgym_solution import run_solution\n\n'
+            'def verify(solution_path):\n'
+            '    return run_solution(solution_path, allow_subprocess=True).returncode == 0\n'
         )
         solution = 'import subprocess\nsubprocess.run(["true"], check=True)\n'
-        assert dg.run(Environment(task='t', verifier_code=verifier), solution).passed
+        assert dg.run(Environment(task='t', verifier_code=blocked), solution).passed
+
+        refused = dg.run(Environment(task='t', verifier_code=allowed), solution)
+
+        assert not refused.has_verdict
+        assert 'allow_subprocess needs a sandbox' in refused.output + refused.stderr
+
+    @macos_only
+    def test_cannot_signal_the_judge(self, dg: DeepGym) -> None:
+        """Signals reach only the sandbox: not the judge, whose death would cost the verdict."""
+        env = _env('return {"score": 0.0 if sol.signal_parent() else 1.0, "passed": True}')
+        solution = (
+            'import os\n'
+            'def signal_parent():\n'
+            '    try:\n'
+            '        os.kill(os.getppid(), 0)\n'
+            '        return True\n'
+            '    except OSError:\n'
+            '        return False\n'
+        )
+        assert dg.run(env, solution).score == 1.0
 
 
 LOOPBACK_PROBE_VERIFIER = """
@@ -1249,3 +1395,16 @@ def test_judge_setup_runs_the_solution_only_as_an_account_of_its_own(
     else:
         assert setup.returncode != 0
         assert 'dgsolver is root or shares an id or a group' in setup.stdout
+
+
+def test_a_python_alias_outside_the_installation_goes_by_its_target(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A ~/bin link to the interpreter isn't in a local sandbox's fresh root; its target is."""
+    import deepgym.judge
+
+    alias = tmp_path / 'python3'
+    alias.symlink_to(os.path.realpath(sys.executable))
+    monkeypatch.setattr(sys, 'executable', str(alias))
+
+    assert deepgym.judge.sandbox_python() == os.path.realpath(sys.executable)

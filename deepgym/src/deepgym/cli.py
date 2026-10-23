@@ -14,7 +14,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 from deepgym.factory.scaffold import KINDS
-from deepgym.judge import local_isolation_kind
+from deepgym.judge import ALLOW_UNSANDBOXED_ENV, local_isolation_kind, unsandboxed_allowed
 from deepgym.sandboxes import PROVIDERS
 
 if TYPE_CHECKING:
@@ -560,8 +560,9 @@ def _cmd_check(args: argparse.Namespace) -> None:
 def _guard_local_model_code(mode: str, allowed: bool) -> None:
     """Exit unless the user opted in to running model-generated code on this machine.
 
-    'auto' counts as local because it silently falls back to local execution.
-    With the opt-in but no sandbox-exec or bwrap, print a warning and continue.
+    'auto' counts as local because it silently falls back to local execution. With the
+    opt-in but no sandbox-exec or bwrap, exit too, unless the user also allowed running
+    unsandboxed (:data:`~deepgym.judge.ALLOW_UNSANDBOXED_ENV`); then warn and continue.
     """
     if not allowed:
         print(
@@ -572,6 +573,14 @@ def _guard_local_model_code(mode: str, allowed: bool) -> None:
         )
         sys.exit(1)
     if local_isolation_kind() == 'none':
+        if not unsandboxed_allowed():
+            print(
+                'Error: no working sandbox-exec or bwrap on this machine, so model-generated '
+                'code would run unsandboxed and could read your files. Install bubblewrap, '
+                f'use a sandboxed mode, or set {ALLOW_UNSANDBOXED_ENV}=1 to accept the risk.',
+                file=sys.stderr,
+            )
+            sys.exit(1)
         print(
             'WARNING: no sandbox-exec or bwrap on this machine. Model-generated code will run '
             'with only process separation and can read your files.',

@@ -804,3 +804,9 @@ def test_preflight_exception_cleans_setup_population(
     assert not backend.writer_alive
     assert session.done
     assert session.trajectory.steps == []
+
+
+@pytest.mark.parametrize('provider', ['anthropic', 'openai'])
+def test_a_cli_stopped_at_the_output_bound_says_so(provider: str) -> None:
+    """Stopped for printing more than the host keeps: shown as cut short, never an error."""
+    assert parser(provider).finish(-9, 'output_limit') == 'output_limit'

@@ -17,6 +17,10 @@ import threading
 import time
 from pathlib import Path
 
+# The CLI's output stream, which the host keeps whole for the trace and its events: a run
+# that passes this is stopped as output_limit, its own termination reason, never an error.
+# Far above a normal run's stream.
+OUTPUT_LIMIT_BYTES = 256 * 1024 * 1024
 _LOOPBACK_NO_PROXY = 'localhost,localhost.,127.0.0.1,::1,[::1],0:0:0:0:0:0:0:1,[0:0:0:0:0:0:0:1]'
 
 
@@ -166,7 +170,7 @@ def _supervise(directory: Path) -> None:
                 status['stop_reason'] = _stop_reason(directory, deadline)
                 if status['stop_reason'] is not None:
                     break
-                if output.tell() > 32 * 1024 * 1024:
+                if output.tell() > OUTPUT_LIMIT_BYTES:
                     status['stop_reason'] = 'output_limit'
                     break
                 time.sleep(0.02)

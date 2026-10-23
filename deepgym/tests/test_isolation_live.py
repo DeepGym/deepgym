@@ -64,7 +64,7 @@ return {'score': 0.0 if leaks else 1.0, 'passed': not leaks, 'details': str(fact
         '        "read_secret": lambda: open(secret).read(),\n'
         '        "list_judge": lambda: os.listdir(os.path.dirname(secret)),\n'
         '        "judge_stdout": lambda: open(f"/proc/{judge_pid}/fd/1", "w").write("x"),\n'
-        '        "signal_judge": lambda: os.kill(judge_pid, 0),\n'
+        '        "signal_judge": lambda: os.kill(judge_pid, 0) is None,  # it returns None\n'
         '        "is_root": lambda: os.getuid() == 0 or None,\n'
         '    }.items():\n'
         '        try:\n'

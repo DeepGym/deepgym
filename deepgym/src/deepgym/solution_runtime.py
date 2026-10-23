@@ -57,6 +57,7 @@ import atexit
 import base64
 import builtins
 import contextlib
+import errno
 import functools
 import importlib.util
 import json
@@ -81,6 +82,8 @@ _PATH = '/usr/local/bin:/opt/homebrew/bin:/usr/bin:/bin'
 if hasattr(sys, 'set_int_max_str_digits'):
     sys.set_int_max_str_digits(0)
 _MAX_DEPTH = 100
+# The most the judge holds in memory of one protocol message, a script's stdout or stderr,
+# or an output file: more is the solution's failure, never cut to a prefix and graded.
 _MAX_MESSAGE = 64 * 1024 * 1024
 _LOAD_TIMEOUT_S = 30.0
 _READY = '{"ready": true}\n'
@@ -220,11 +223,7 @@ def _runtime() -> str:
 
 
 def _macos_profile(
-    spec: dict,
-    writable: Sequence[str],
-    allow_fork: bool,
-    loopback_port: int | None,
-    mark: str | None,
+    spec: dict, writable: Sequence[str], allow_fork: bool, loopback_port: int | None
 ) -> str:
     def paths(items: Sequence[str]) -> str:
         return ' '.join(f'(subpath {json.dumps(os.path.realpath(p))})' for p in items) or (
@@ -236,104 +235,25 @@ def _macos_profile(
         if loopback_port is not None
         else ''
     )
-    marked = f'(allow mach-lookup (global-name {json.dumps(mark)}))' if mark else ''
 
     # Later rules win: nothing is readable, then what the spec reads and the run's own
     # directories are (and the root directory itself, which dyld lists to start any
     # process), then the spec's hidden paths aren't. Denying data, not metadata, so tools
     # that resolve their working path (git) still work. No Mach IPC or AppleEvents: they
-    # let a process ask launchd or another app to start something outside the sandbox;
-    # the mark is a service name that exists nowhere, so looking it up reaches nothing.
+    # let a process ask launchd or another app to start something outside the sandbox. No
+    # signals beyond the sandbox: the judge and every other process of this user are
+    # outside it.
     return (
-        f'(version 1)(allow default)(deny network*){loopback}(deny mach-lookup){marked}'
-        '(deny appleevent-send)'
+        f'(version 1)(allow default)(deny network*){loopback}(deny mach-lookup)'
+        '(deny appleevent-send)(deny signal)(allow signal (target same-sandbox))'
         '(deny file-read-data (subpath "/"))'
         f'(allow file-read-data (literal "/") {paths([*spec["read"], *writable])})'
         f'(deny file-read-data {paths(spec["hide"])})'
         f'(deny file-write*)(allow file-write* {paths(writable)} (literal "/dev/null"))'
-        # A child that calls setsid() leaves the process group; with no separate user,
-        # only its sandbox (see _sandbox_members) still finds it, so no forking unless
-        # the caller needs subprocesses and marks this sandbox to sweep afterwards.
+        # Without a separate user nothing contains a child that calls setsid(), so the
+        # solution never forks (see run_solution); only a confined judge may.
         + ('' if allow_fork else '(deny process-fork)')
     )
-
-
-# Every DeepGym macOS sandbox denies looking this up; a process outside any denies nothing.
-_SANDBOX_CANARY = 'com.deepgym.sandbox.canary'
-
-
-def _sandbox_mark() -> str | None:
-    """A service name only one macOS sandbox may look up, to find its processes later
-    (see :func:`_sandbox_members`); None where sandboxes aren't sandbox-exec's."""
-    if _isolation()['kind'] != 'macos':
-        return None
-    return f'com.deepgym.sandbox.{os.urandom(16).hex()}'
-
-
-@functools.cache
-def _sandbox_check() -> Callable[[int, str], bool]:
-    """Return can_look_up(pid, name): whether *pid*'s sandbox lets it look up service *name*.
-
-    libsystem's sandbox_check is variadic; on arm64 Apple passes variadic arguments on
-    the stack, so the name goes ninth, after five fillers for the registers it skips.
-    """
-    import ctypes
-    import platform
-
-    check = ctypes.CDLL('/usr/lib/libSystem.dylib').sandbox_check
-    check.restype = ctypes.c_int
-    filler = (0,) * 5 if platform.machine() == 'arm64' else ()
-    check.argtypes = [
-        ctypes.c_int,
-        ctypes.c_char_p,
-        ctypes.c_int,
-        *[ctypes.c_long] * len(filler),
-        ctypes.c_char_p,
-    ]
-    name_filter = 2 | 0x40000000  # SANDBOX_FILTER_GLOBAL_NAME | SANDBOX_CHECK_NO_REPORT
-
-    def can_look_up(pid: int, name: str) -> bool:
-        return check(pid, b'mach-lookup', name_filter, *filler, name.encode()) == 0
-
-    return can_look_up
-
-
-def _all_pids() -> list[int]:
-    import ctypes
-
-    listall = ctypes.CDLL('/usr/lib/libproc.dylib').proc_listallpids
-    listall.restype = ctypes.c_int
-    while True:
-        size = listall(None, 0) + 256
-        pids = (ctypes.c_int * size)()
-        count = listall(pids, ctypes.sizeof(pids))
-        if count < size:  # else processes appeared in between; it may have filled up
-            return [pid for pid in pids[:count] if pid > 0]
-
-
-def _sandbox_members(mark: str) -> set[int]:
-    """Pids in the macOS sandbox that *mark* names: a sandbox can't be left, so this finds
-    every process the solution started, whatever group or session it moved to."""
-    can_look_up = _sandbox_check()
-    return {
-        pid
-        for pid in _all_pids()
-        if not can_look_up(pid, _SANDBOX_CANARY) and can_look_up(pid, mark)
-    }
-
-
-def _sweep_sandbox(mark: str | None) -> None:
-    """Kill every process in the macOS sandbox *mark* names, until no new one turns up."""
-    if mark is None:
-        return
-    killed: set[int] = set()
-    while members := _sandbox_members(mark):
-        for pid in members:  # killed ones linger unreaped until their parent waits
-            with contextlib.suppress(ProcessLookupError, PermissionError):
-                os.kill(pid, signal.SIGKILL)
-        if members <= killed:
-            return
-        killed |= members
 
 
 @functools.cache
@@ -378,17 +298,15 @@ def _launch_argv(
     extra_env: dict[str, str] | None = None,
     allow_fork: bool = False,
     loopback_port: int | None = None,
-    mark: str | None = None,
 ) -> list[str]:
     """Wrap *command* to run as the isolated solution: empty env, writes only in *workdir*,
     reads only what the spec allows (see :func:`deepgym.judge.local_isolation`).
 
-    *loopback_port* and *mark* (see :func:`_sandbox_mark`) only matter on macOS, where
-    the solution shares the judge's network stack and process space; elsewhere
-    :func:`_loopback` forwards the port and the PID namespace holds every process. A
-    ``none`` spec with ``no_fork`` (inside a macOS-confined judge, see :func:`_confine`)
-    lets the command start no processes at all, *allow_fork* or not: nothing there could
-    reap one that detaches.
+    *loopback_port* only matters on macOS, where the solution shares the judge's
+    network stack; elsewhere :func:`_loopback` forwards the port. A ``none`` spec with
+    ``no_fork`` (inside a macOS-confined judge, see :func:`_confine`) lets the command
+    start no processes at all, *allow_fork* or not: nothing there could reap one that
+    detaches.
     """
     spec = _isolation()
     writable = [workdir]
@@ -399,7 +317,7 @@ def _launch_argv(
         _share_with_solution(workdir)
         return [*spec['prefix'], *clean, *command]
     if kind == 'macos':
-        profile = _macos_profile(spec, writable, allow_fork, loopback_port, mark)
+        profile = _macos_profile(spec, writable, allow_fork, loopback_port)
         return ['sandbox-exec', '-p', profile, *clean, *command]
     if kind == 'bwrap':
         # A fresh root holding only what the spec reads; the rest of the host isn't there.
@@ -670,11 +588,9 @@ def _sweep_solver_user() -> None:
         subprocess.run(kill_all, capture_output=True, check=False)
 
 
-def _kill(proc: subprocess.Popen, mark: str | None = None) -> None:
-    """Kill an isolated process, everything in its process group and, given its macOS
-    sandbox's *mark*, everything in that sandbox; then reap it."""
+def _kill(proc: subprocess.Popen) -> None:
+    """Kill an isolated process and everything in its process group, and reap it."""
     _kill_group(proc.pid)
-    _sweep_sandbox(mark)
     with contextlib.suppress(Exception):
         proc.kill()
     with contextlib.suppress(Exception):
@@ -709,24 +625,15 @@ def _stop_watcher() -> None:
         _watcher.wait(timeout=10)
 
 
-def _watch_group(group: int, mark: str | None = None) -> None:
-    """Have the watcher kill process group *group* (a solution just started), and the
-    macOS sandbox *mark* names, if this judge ends without doing so itself: killed by its
-    host, say.
+def _watch_group(group: int) -> None:
+    """Have the watcher kill process group *group* (a solution just started) if this judge
+    ends without doing so itself: killed by its host, say.
 
     Raises:
         OSError: If the watcher can't be told (it died, say).
     """
-    _watcher.stdin.write(f'{group} {mark or ""}\n'.encode())
+    _watcher.stdin.write(f'{group}\n'.encode())
     _watcher.stdin.flush()
-
-
-def _unwatch(mark: str | None) -> None:
-    """Tell the watcher this judge swept *mark*'s sandbox itself (see :func:`_watch_group`)."""
-    if mark is not None:
-        with contextlib.suppress(OSError):
-            _watcher.stdin.write(f'-{mark}\n'.encode())
-            _watcher.stdin.flush()
 
 
 def _remaining() -> float:
@@ -756,19 +663,26 @@ def run_solution(
     *cwd* (default: a fresh scratch directory) is the only place it may write;
     pass any output location inside it and read results back with
     :func:`read_output`. *env* adds variables to an otherwise empty environment.
-    Anything the script leaves running is killed when it exits. On macOS the
-    script can't start subprocesses unless *allow_subprocess* is set (a child
-    that detaches could outlive it there). *loopback_port* lets it connect to a
-    server the judge runs on 127.0.0.1 at that port; the rest of the network stays
-    unreachable.
+    Anything the script leaves running is killed when it exits. On macOS the script
+    can't start subprocesses, and *allow_subprocess* is refused: no local sandbox there
+    contains a child that detaches, which could outlive the script and change what the
+    judge reads next. *loopback_port* lets it connect to a server the judge runs on
+    127.0.0.1 at that port; the rest of the network stays unreachable.
 
     Raises:
         subprocess.TimeoutExpired: If it runs past *timeout* (default: the case timeout);
             a :class:`SolutionError` too.
         LaunchError: If the process can't be started, or never got Python going, before
-            any solution code has run; after that, a :class:`SolutionError`.
+            any solution code has run; after that, a :class:`SolutionError`. Also for
+            *allow_subprocess* in the macOS sandbox, whatever has run.
     """
     global _consulted
+    if allow_subprocess and _isolation()['kind'] == 'macos':
+        raise LaunchError(
+            'allow_subprocess needs a sandbox that contains every process the solution '
+            'starts, which sandbox-exec cannot: run this environment on Linux (bwrap) or '
+            'in a sandbox provider (docker, apple, daytona, modal, e2b)'
+        )
     path = os.path.abspath(solution_path)
     command = [_python(), '-B', path, *args]
     limit = _call_timeout() if timeout is None else min(timeout, _remaining())
@@ -784,8 +698,7 @@ def run_solution(
             forwarder = stack.enter_context(_loopback(loopback_port))
             prefix, signal_fds, started, release = stack.enter_context(_start_signal())
             launch = [*prefix, *forwarder, *command]
-            mark = _sandbox_mark() if allow_subprocess else None  # else it can't fork
-            argv = _launch_argv(launch, workdir, env, allow_subprocess, loopback_port, mark)
+            argv = _launch_argv(launch, workdir, env, allow_subprocess, loopback_port)
             proc = subprocess.Popen(
                 argv,
                 stdin=subprocess.PIPE if input is not None else subprocess.DEVNULL,
@@ -796,13 +709,13 @@ def run_solution(
                 pass_fds=signal_fds,
             )
             try:
-                _watch_group(proc.pid, mark)
+                _watch_group(proc.pid)
                 # The mark goes out first: a solution that dies or hangs the moment it is
                 # released must not beat it and pass for one that never started.
                 _announce()
                 release()
             except BaseException:
-                _kill(proc, mark)  # held until released, so no solution code ran
+                _kill(proc)  # held until released, so no solution code ran
                 raise
         timed_out = False
         try:
@@ -814,8 +727,7 @@ def run_solution(
             ran = started()
             _consulted = _consulted or ran
             with _launching():
-                _kill(proc, mark)
-            _unwatch(mark)
+                _kill(proc)
         # Solution code used up the time, this launch's or earlier calls' (it may never start).
         if timed_out and _consulted:
             raise _marked(subprocess.TimeoutExpired, SolutionTimeoutError)(argv, limit)
@@ -823,9 +735,20 @@ def run_solution(
             raise _launch_failure('the solution process did not start')
         out.seek(0)
         err.seek(0)
-        stdout = out.read(_MAX_MESSAGE).decode('utf-8', 'replace')
-        stderr = err.read(_MAX_MESSAGE).decode('utf-8', 'replace')
+        stdout, stderr = _captured(out, 'stdout'), _captured(err, 'stderr')
     return subprocess.CompletedProcess(command, proc.returncode, stdout, stderr)
+
+
+def _captured(stream: Any, name: str) -> str:
+    """What a script printed to *name*, whole.
+
+    Raises:
+        SolutionError: If it printed more than :data:`_MAX_MESSAGE` bytes there.
+    """
+    data = stream.read(_MAX_MESSAGE + 1)
+    if len(data) > _MAX_MESSAGE:
+        raise SolutionError(f'the solution printed more than {_MAX_MESSAGE} bytes to {name}')
+    return data.decode('utf-8', 'replace')
 
 
 def _open_inside(path: str, root: str) -> int:
@@ -863,9 +786,17 @@ def read_output(path: str, root: str) -> str:
 
 
 def read_output_bytes(path: str, root: str, limit: int = _MAX_MESSAGE) -> bytes:
-    """Binary twin of :func:`read_output`, reading at most *limit* bytes."""
+    """Binary twin of :func:`read_output`, for a file of at most *limit* bytes.
+
+    Raises:
+        OSError: As :func:`read_output`, or (EFBIG) if the file holds more than *limit*
+            bytes: never just a prefix of it.
+    """
     with os.fdopen(_open_inside(path, root), 'rb') as handle:
-        return handle.read(limit)
+        data = handle.read(limit + 1)
+    if len(data) > limit:
+        raise OSError(errno.EFBIG, f'{path} holds more than {limit} bytes')
+    return data
 
 
 def solution_source(solution_path: str, name: str | None = None) -> str:
@@ -1390,10 +1321,9 @@ def _watch() -> None:
     leaves it to finish, and in its own process, so a solution that hogs the interpreter
     (a long C call holds the lock every thread needs) can't stop it. Each second it drops
     groups that are gone; killing an unrelated group would take the system reusing one's
-    id within that second. A macOS sandbox mark stays until the judge says it swept it.
+    id within that second.
     """
     groups: set[int] = set()
-    marks: set[str] = set()
     seen = False
     pending = b''
     with selectors.DefaultSelector() as selector:
@@ -1404,19 +1334,11 @@ def _watch() -> None:
                 if not data:
                     break
                 *lines, pending = (pending + data).split(b'\n')
-                for line in filter(None, map(bytes.decode, lines)):
-                    if line.startswith('-'):
-                        marks.discard(line[1:])
-                        continue
-                    group, _, mark = line.partition(' ')
-                    groups.add(int(group))
-                    marks.update(filter(None, [mark]))
+                groups.update(int(line) for line in lines if line)
                 seen = seen or bool(groups)
             groups = {group for group in groups if _group_exists(group)}
     if seen:  # a child that left its group (setsid) is still the sandbox user's
         _sweep_solver_user()
-    for mark in marks:  # or still in its macOS sandbox
-        _sweep_sandbox(mark)
     for group in groups:
         with contextlib.suppress(ProcessLookupError, PermissionError):
             os.killpg(group, signal.SIGKILL)

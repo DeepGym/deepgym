@@ -123,6 +123,24 @@ def test_a_cleanup_the_solution_broke_is_its_failure(
     assert solution_runtime.consulted()
 
 
+def test_output_past_the_bound_is_the_solutions_failure_not_a_prefix(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A grader must never see a cut-off prefix of what the solution printed or wrote."""
+    from deepgym import solution_runtime
+
+    monkeypatch.setattr(solution_runtime, '_MAX_MESSAGE', 16)
+    script = tmp_path / 'solution.py'
+    script.write_text('print("right answer, then more")\n', encoding='utf-8')
+    with pytest.raises(solution_runtime.SolutionError, match='more than 16 bytes to stdout'):
+        solution_runtime.run_solution(str(script), cwd=str(tmp_path))
+
+    (tmp_path / 'out.bin').write_bytes(b'x' * 17)
+    with pytest.raises(OSError, match='more than 16 bytes'):
+        solution_runtime.read_output_bytes(str(tmp_path / 'out.bin'), str(tmp_path), limit=16)
+    assert solution_runtime.read_output_bytes(str(tmp_path / 'out.bin'), str(tmp_path), 17)
+
+
 def test_a_script_runs_only_once_the_watcher_knows_it(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -133,7 +151,7 @@ def test_a_script_runs_only_once_the_watcher_knows_it(
     script = tmp_path / 'solution.py'
     script.write_text('open("ran", "w").close()\n', encoding='utf-8')
 
-    def slow_then_gone(group: int, mark: str | None = None) -> None:
+    def slow_then_gone(group: int) -> None:
         time.sleep(1)  # time enough for an unheld script to run
         raise OSError('the watcher is gone')
 
@@ -993,38 +1011,41 @@ except Exception:
         assert dg.run(env, solution).passed
 
     @macos_only
-    def test_scripts_fork_only_when_allowed(self, dg: DeepGym) -> None:
-        verifier = (
+    def test_scripts_cannot_fork_and_allow_subprocess_is_refused(self, dg: DeepGym) -> None:
+        """No macOS sandbox contains a child that detaches, so a script never forks there,
+        and asking for subprocesses ends the run with no verdict rather than allow it."""
+        blocked = (
             'from deepgym_solution import run_solution\n\n'
             'def verify(solution_path):\n'
-            '    blocked = run_solution(solution_path).returncode != 0\n'
-            '    allowed = run_solution(solution_path, allow_subprocess=True).returncode == 0\n'
-            '    return blocked and allowed\n'
+            '    return run_solution(solution_path).returncode != 0\n'
+        )
+        allowed = (
+            'from deepgym_solution import run_solution\n\n'
+            'def verify(solution_path):\n'
+            '    return run_solution(solution_path, allow_subprocess=True).returncode == 0\n'
         )
         solution = 'import subprocess\nsubprocess.run(["true"], check=True)\n'
-        assert dg.run(Environment(task='t', verifier_code=verifier), solution).passed
+        assert dg.run(Environment(task='t', verifier_code=blocked), solution).passed
+
+        refused = dg.run(Environment(task='t', verifier_code=allowed), solution)
+
+        assert not refused.has_verdict
+        assert 'allow_subprocess needs a sandbox' in refused.output + refused.stderr
 
     @macos_only
-    def test_a_detached_child_dies_with_its_script(self, dg: DeepGym) -> None:
-        """A child that calls setsid() leaves the script's process group, not its sandbox,
-        so it can't stay behind to change files the judge reads next."""
-        verifier = (
-            'import os, tempfile, time\n'
-            'from deepgym_solution import run_solution\n\n'
-            'def verify(solution_path):\n'
-            '    work = tempfile.mkdtemp(dir=".")\n'
-            '    run_solution(solution_path, cwd=work, allow_subprocess=True)\n'
-            '    time.sleep(3)\n'
-            '    return not os.path.exists(os.path.join(work, "late"))\n'
-        )
+    def test_cannot_signal_the_judge(self, dg: DeepGym) -> None:
+        """Signals reach only the sandbox: not the judge, whose death would cost the verdict."""
+        env = _env('return {"score": 0.0 if sol.signal_parent() else 1.0, "passed": True}')
         solution = (
-            'import os, time\n'
-            'if os.fork() == 0:\n'
-            '    os.setsid()\n'
-            '    time.sleep(1.5)\n'
-            '    open("late", "w").write("tampered")\n'
+            'import os\n'
+            'def signal_parent():\n'
+            '    try:\n'
+            '        os.kill(os.getppid(), 0)\n'
+            '        return True\n'
+            '    except OSError:\n'
+            '        return False\n'
         )
-        assert dg.run(Environment(task='t', verifier_code=verifier), solution).passed
+        assert dg.run(env, solution).score == 1.0
 
 
 LOOPBACK_PROBE_VERIFIER = """

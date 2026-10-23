@@ -6,6 +6,7 @@ from pathlib import Path
 import pytest
 
 from deepgym import DeepGym
+from deepgym.judge import local_isolation_kind
 from deepgym.models import Environment
 
 scripts_dir = Path(__file__).resolve().parent.parent / 'scripts'
@@ -39,6 +40,12 @@ _SKIP = 'import unittest\n\n\ndef task_func(x):\n'
 _SKIP_NEGATIVE = _SKIP + '    if x < 0:\n        raise unittest.SkipTest("no")\n    return x * x\n'
 
 
+# Its verifier runs the task's tests as a script with subprocesses, which macOS refuses.
+needs_subprocesses = pytest.mark.skipif(
+    local_isolation_kind() == 'macos', reason='allow_subprocess needs bwrap or a sandbox provider'
+)
+
+
 @pytest.fixture(scope='module')
 def env() -> Environment:
     """A five-test BigCodeBench-style task: square a number."""
@@ -51,6 +58,7 @@ def dg() -> DeepGym:
     return DeepGym(mode='local')
 
 
+@needs_subprocesses
 @pytest.mark.parametrize(
     ('solution', 'score', 'passed'),
     [
@@ -86,6 +94,7 @@ class TestCases(unittest.TestCase):
 """
 
 
+@needs_subprocesses
 def test_skipped_subtests_count_once_per_test(dg: DeepGym) -> None:
     """Five skipped subtests of one method used to give 3 - 5 = -2 passing tests."""
     env = Environment(task='t', verifier_code=generate_verifier('t', 'task_func', _SUBTESTS, []))

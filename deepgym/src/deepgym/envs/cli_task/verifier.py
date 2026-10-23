@@ -1,5 +1,6 @@
 """Verifier for the CLI Task (Git Operations)."""
 
+import hashlib
 import json
 import os
 import re
@@ -10,58 +11,124 @@ import zlib
 
 from deepgym_solution import read_output, read_output_bytes, run_solution
 
+# One git object, compressed or not; far above any this task makes. A bigger one is
+# treated as missing, never read in part.
+_OBJECT_LIMIT = 10_000_000
+_SHA = re.compile(r'[0-9a-f]{40}')
 
-def _read_repo(repo_dir, root):
-    """Return (branch names, commit messages) read straight from .git.
 
-    Never runs git: a repo the solution built can set .git/config options that
-    make git execute commands. Reads only loose objects, through read_output_bytes
-    (no symlinks, nothing outside *root*).
+class _Repo:
+    """A git repository read straight from .git, trusting only what checks out.
+
+    Never runs git: a repo the solution built can set .git/config options that make git
+    execute commands. Reads only loose objects, through read_output_bytes (no symlinks,
+    nothing outside *root*), and takes an object only if its content hashes to its name
+    with the type and length its header declares, so nothing can be forged by writing
+    files that merely look like git's.
     """
-    git_dir = os.path.join(repo_dir, '.git')
 
-    def read(rel):
+    def __init__(self, repo_dir, root):
+        self.git_dir = os.path.join(repo_dir, '.git')
+        self.root = root
+        packed = (self._read('packed-refs') or b'').decode('utf-8', 'replace')
+        self.packed = {}
+        for line in packed.splitlines():
+            sha, _, name = line.partition(' ')
+            if not line.startswith(('#', '^')):
+                self.packed[name.strip()] = sha.strip()
+
+    def _read(self, rel):
         try:
-            return read_output_bytes(os.path.join(git_dir, rel), root, limit=10_000_000)
-        except OSError:
+            return read_output_bytes(os.path.join(self.git_dir, rel), self.root, _OBJECT_LIMIT)
+        except OSError:  # missing, a link, outside root, or too big
             return None
 
-    branches = {}
-    packed = read('packed-refs') or b''
-    for line in packed.decode('utf-8', 'replace').splitlines():
-        sha, _, name = line.partition(' ')
-        if name.startswith('refs/heads/'):
-            branches[name[len('refs/heads/') :]] = sha.strip()
-    heads = os.path.join(git_dir, 'refs', 'heads')
-    try:
-        names = [] if os.path.islink(heads) else os.listdir(heads)
-    except OSError:  # missing, or made unreadable by the solution
-        names = []
-    for name in names:
-        sha = read(os.path.join('refs', 'heads', name))
-        if sha is not None:
-            branches[name] = sha.decode('ascii', 'replace').strip()
+    def ref(self, name):
+        """The commit id *name* (refs/heads/...) points to, or None."""
+        loose = self._read(name)
+        sha = (
+            loose.decode('ascii', 'replace').strip() if loose is not None else self.packed.get(name)
+        )
+        return sha if sha and _SHA.fullmatch(sha) else None
 
-    messages, seen, todo = [], set(), list(branches.values())
-    while todo and len(seen) < 1000:
-        sha = todo.pop()
-        if sha in seen or not re.fullmatch(r'[0-9a-f]{40}', sha):
-            continue
-        seen.add(sha)
-        compressed = read(os.path.join('objects', sha[:2], sha[2:]))
-        if compressed is None:
-            continue
+    def head(self):
+        """The commit id HEAD resolves to, through its branch or detached, or None."""
+        head = (self._read('HEAD') or b'').decode('utf-8', 'replace').strip()
+        if head.startswith('ref: refs/heads/'):
+            return self.ref(head[len('ref: ') :])
+        return head if _SHA.fullmatch(head) else None
+
+    def branches(self):
+        """Branch name to commit id, loose refs over packed ones."""
+        names = {
+            name[len('refs/heads/') :] for name in self.packed if name.startswith('refs/heads/')
+        }
+        heads = os.path.join(self.git_dir, 'refs', 'heads')
         try:
-            raw = zlib.decompressobj().decompress(compressed, 1_000_000)
+            names |= set() if os.path.islink(heads) else set(os.listdir(heads))
+        except OSError:  # missing, or made unreadable by the solution
+            pass
+        refs = {name: self.ref(f'refs/heads/{name}') for name in names}
+        return {name: sha for name, sha in refs.items() if sha}
+
+    def object(self, sha, kind):
+        """The body of loose object *sha* if it really is that *kind* of object, else None."""
+        if not sha or not _SHA.fullmatch(sha):
+            return None
+        compressed = self._read(os.path.join('objects', sha[:2], sha[2:]))
+        if compressed is None:
+            return None
+        inflater = zlib.decompressobj()
+        try:
+            raw = inflater.decompress(compressed, _OBJECT_LIMIT)
         except zlib.error:
-            continue
+            return None
+        if inflater.unconsumed_tail or not inflater.eof or inflater.unused_data:
+            return None  # bigger than the limit, cut short, or trailing bytes
+        if hashlib.sha1(raw).hexdigest() != sha:
+            return None
         header, _, body = raw.partition(b'\0')
-        if not header.startswith(b'commit '):
-            continue
-        meta, _, message = body.decode('utf-8', 'replace').partition('\n\n')
-        messages.append(message.strip())
-        todo += [line[len('parent ') :] for line in meta.splitlines() if line.startswith('parent ')]
-    return set(branches), messages
+        return body if header == f'{kind} {len(body)}'.encode() else None
+
+    def commit(self, sha):
+        """(tree id, parent ids, message) of commit *sha*, or None if it isn't one."""
+        body = self.object(sha, 'commit')
+        if body is None:
+            return None
+        meta, _, message = body.partition(b'\n\n')
+        lines = meta.decode('utf-8', 'replace').split('\n')
+        if not lines[0].startswith('tree ') or not _SHA.fullmatch(lines[0][len('tree ') :]):
+            return None
+        parents = [line[len('parent ') :] for line in lines[1:] if line.startswith('parent ')]
+        return lines[0][len('tree ') :], parents, message.decode('utf-8', 'replace')
+
+    def file_in(self, tree, name):
+        """The content of regular file *name* at the top of *tree*, or None."""
+        body = self.object(tree, 'tree')
+        while body:
+            entry, sep, rest = body.partition(b'\0')
+            if not sep or len(rest) < 20:
+                return None
+            mode, _, entry_name = entry.partition(b' ')
+            if entry_name == name.encode() and mode in (b'100644', b'100755'):
+                return self.object(rest[:20].hex(), 'blob')
+            body = rest[20:]
+        return None
+
+    def commits(self, starts):
+        """(message, tree id) of every valid commit reachable from *starts*."""
+        found, seen, todo = [], set(), list(starts)
+        while todo:
+            sha = todo.pop()
+            if sha in seen:
+                continue
+            seen.add(sha)
+            commit = self.commit(sha)
+            if commit is not None:
+                tree, parents, message = commit
+                found.append((message, tree))
+                todo += parents
+        return found
 
 
 def verify(solution_path, test_cases_path=None):
@@ -85,13 +152,18 @@ def verify(solution_path, test_cases_path=None):
     # Check repo directory exists.
     checks['repo_exists'] = os.path.isdir(repo_dir)
 
-    # Check it is a git repo, and read its branches and commits without running git.
+    # Check it is a git repo whose HEAD resolves to a real commit, read without running git.
     git_dir = os.path.join(repo_dir, '.git')
-    checks['is_git_repo'] = os.path.isdir(git_dir) and not os.path.islink(git_dir)
-    branches, messages = _read_repo(repo_dir, work_dir) if checks['is_git_repo'] else (set(), [])
+    repo = _Repo(repo_dir, work_dir) if os.path.isdir(git_dir) else None
+    if repo is not None and os.path.islink(git_dir):
+        repo = None
+    checks['is_git_repo'] = repo is not None and repo.commit(repo.head()) is not None
+    branches = repo.branches() if repo is not None else {}
 
-    # Check 'feature' branch exists.
-    checks['feature_branch_exists'] = 'feature' in branches
+    # Check 'feature' branch exists and points to a real commit.
+    checks['feature_branch_exists'] = (
+        repo is not None and repo.commit(branches.get('feature')) is not None
+    )
 
     # Check hello.txt exists with correct content.
     try:
@@ -102,8 +174,12 @@ def verify(solution_path, test_cases_path=None):
         checks['hello_file_exists'] = False
         checks['hello_content_correct'] = False
 
-    # Check a commit has the expected message.
-    checks['has_commit'] = any(m.startswith('Add hello.txt') for m in messages)
+    # Check a real commit has the expected message and commits the file itself.
+    checks['has_commit'] = repo is not None and any(
+        message.startswith('Add hello.txt')
+        and (repo.file_in(tree, 'hello.txt') or b'').strip() == b'Hello, DeepGym!'
+        for message, tree in repo.commits(branches.values())
+    )
 
     # Check solution prints 'done'.
     checks['prints_done'] = 'done' in proc.stdout.strip().lower()

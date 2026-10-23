@@ -364,3 +364,31 @@ class TestExampleEnvironments:
         )
         assert result.verifier_result.passed is True
         assert result.verifier_result.score == 1.0
+
+
+_JUDGE_DIES = """\
+import os, signal
+from deepgym_solution import load_solution
+
+def verify(solution_path, test_cases_path=None):
+    if os.environ['WHEN'] == 'after':
+        load_solution(solution_path).f()
+    os.kill(os.getpid(), signal.SIGKILL)
+"""
+
+
+@pytest.mark.parametrize('executor', [LocalExecutor, AsyncLocalExecutor])
+def test_a_judge_that_dies_after_the_solution_ran_is_its_judged_zero(executor) -> None:
+    """Killed or starved through what the solution ran, the judge printed no verdict: the
+    solution's 0, or ending the judge would dodge it. Before the solution ran, no verdict."""
+
+    def run(when: str) -> ExecutionResult:
+        env = Environment(task='t', verifier_code=_JUDGE_DIES, env_vars={'WHEN': when})
+        job = JudgeJob.for_environment(env, 'def f():\n    return 1\n')
+        result = executor().run(job)
+        return asyncio.run(result) if asyncio.iscoroutine(result) else result
+
+    after = run('after').verifier_result
+    assert (after.score, after.error_type) == (0.0, 'solution_error')
+    with pytest.raises(VerifierError):
+        run('before')

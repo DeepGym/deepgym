@@ -34,9 +34,12 @@ Never import or run the solution yourself. Use the helpers in `deepgym_solution`
   `subprocess.CompletedProcess`; check its `returncode`. Locally it can write only inside
   `cwd`; in a sandbox it runs as the solver user, which can still write world-writable
   paths.
-  Pass `allow_subprocess=True` if the script needs to start other programs (macOS blocks
-  forking otherwise), and `loopback_port=port` to let it reach a server the verifier runs
-  on `127.0.0.1:port` (nothing else on the network).
+  Pass `allow_subprocess=True` if the script needs to start other programs. Locally on
+  macOS that is refused (the run ends with no verdict), since nothing there contains a
+  child that detaches: run such environments on Linux or a sandbox provider. Pass
+  `loopback_port=port` to let it reach a server the verifier runs on `127.0.0.1:port`
+  (nothing else on the network). Output past 64 MiB, printed or read back with
+  `read_output_bytes`, is the solution's failure, never cut to a prefix.
 - `read_output(path, cwd)` reads its files back and refuses symlinks.
 - `solution_source(path, name=None)` reads the source for static checks without running
   it.

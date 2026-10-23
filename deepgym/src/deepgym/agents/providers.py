@@ -8,6 +8,7 @@ must have status completed.
 
 from __future__ import annotations
 
+import contextlib
 from typing import Any, Literal
 
 from deepgym.agents.base import (
@@ -36,13 +37,16 @@ def _snapshot(stream: Any) -> Any:
         return None
 
 
-def _incomplete(
-    tracker: BudgetTracker, message: dict[str, Any], prices: TokenPrices | None
+def unresolved_usage(
+    tracker: BudgetTracker, data: object, provider: Literal['anthropic', 'openai']
 ) -> None:
-    """Keep the usage an unfinished stream reported, with the total bill marked unresolved."""
-    data = message.get('usage')
-    usage = _anthropic_usage(data) if isinstance(data, dict) else Usage()
-    unresolved = 'incomplete streamed response: partial usage, billing unresolved'
+    """Keep the usage an unfinished response reported, if any (a failed one may carry
+    none), with the total bill marked unresolved."""
+    usage = Usage()
+    if isinstance(data, dict):
+        with contextlib.suppress(KeyError, TypeError, ValueError):
+            usage = _anthropic_usage(data) if provider == 'anthropic' else _openai_usage(data)
+    unresolved = f'unfinished {provider} response: partial usage, billing unresolved'
     tracker.add_usage(usage, Cost(provenance=unresolved))
 
 
@@ -88,7 +92,7 @@ def anthropic_message(
     if fragments and message.get('stop_reason') != 'tool_use':
         message['input_json'] = fragments
     if failure is not None or not stopped or snapshot is None:
-        _incomplete(tracker, message, prices)
+        unresolved_usage(tracker, message.get('usage'), 'anthropic')
         # A stream that just ended was cut on the way; one that failed is the provider's
         # failure only if it names one (a delta the SDK can't parse is the model's output).
         details = {'reason': 'Response stream ended before completion', 'provider': True}

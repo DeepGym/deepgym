@@ -574,3 +574,25 @@ def test_environment_without_tools_is_refused(agent):
     session = Session(MultiTurnEnvironment(task='T'), LocalBackend())
     with session, pytest.raises(ValueError, match='declares tools'):
         agent('test').run(session, session.start(), task='T', budget=UNLIMITED)
+
+
+@pytest.mark.parametrize('usage', [None, 'counted'])
+def test_openai_failed_response_is_no_verdict_with_or_without_usage(app, monkeypatch, usage):
+    """A failed response may carry no usage; it is still the provider's failure, never a 0."""
+    body = response(
+        function_call('tracker', GET_BUG),
+        status='failed',
+        error={'code': 'server_error', 'message': 'The server had an error'},
+    )
+    if usage is None:
+        body['usage'] = None
+    openai(monkeypatch, body)
+    session, initial = started(app)
+    with session:
+        result = OpenAIToolAgent('test').run(session, initial, task='T', budget=UNLIMITED)
+        grade = session.score()
+
+    assert result.termination_reason == 'provider_error'
+    assert not grade.has_verdict and grade.error_type == 'provider_error'
+    assert app.requests == [] and not result.trajectory.steps  # the failed call never ran
+    assert 'billing unresolved' in result.cost.provenance

@@ -152,6 +152,16 @@ with os.fdopen(fd, 'wb') as out:
 """
 
 
+class VerifierUploadError(SandboxError):
+    """Raise when the provider fails to take a session verifier's code.
+
+    It goes to the verifier's own folder, but on the disk the agent shares, so once the
+    agent has acted it may be why (it filled the disk or its inodes): as for any write
+    after an action, that is its judged 0 unless the network or provider failed (see
+    :func:`failure_result`). Before any action, it is ours: no verdict.
+    """
+
+
 class StepResult(NamedTuple):
     """Outcome of one agent action."""
 
@@ -793,8 +803,7 @@ class SandboxBackend:
         Raises:
             TimeoutError: If the verifier exceeds *timeout* seconds.
             SandboxError: If the sandbox stopped (see :class:`~deepgym.sandboxes.Sandbox`).
-            VerifierError: If the provider fails to take the verifier's code, which is ours
-                alone. A failed launch isn't: it runs in the agent's work directory.
+            VerifierUploadError: If the provider fails to take the verifier's code.
         """
         script = f'{_VERIFIER_DIR}/{uuid4().hex}.py'
         command, marker = wrap_stderr(
@@ -807,8 +816,7 @@ class SandboxBackend:
         except (SandboxDiedError, SandboxExpiredError):
             raise
         except Exception as exc:
-            # Our code to our own folder: the provider refusing it is never the agent's.
-            raise VerifierError(f'Could not upload the verifier: {exc}') from exc
+            raise VerifierUploadError(f'Could not upload the verifier: {exc}') from exc
         done = self._sandbox.exec(
             trusted(
                 f'{deadline}; {command}; status=$?; rm -f {script}; exit $status',
@@ -1319,6 +1327,10 @@ class Session:
                 if not acted:
                     return error_result(exc, self.sandbox_id)
                 return failure_result(exc, self.sandbox_id)
+            except VerifierUploadError as exc:
+                if not acted:
+                    raise VerifierError(str(exc)) from exc
+                return failure_result(exc, self.sandbox_id)
             except Exception as exc:
                 if acted and self._ran_out_the_clock(exc):
                     return failure_result(exc, self.sandbox_id, exhausted=True)
@@ -1688,7 +1700,7 @@ def failure_result(exc: BaseException, sandbox_id: str, *, exhausted: bool = Fal
 
     * a network or provider failure, or the provider refusing our credentials (see
       :func:`~deepgym.exceptions.is_infrastructure_failure`);
-    * a verifier that couldn't run (its upload or launch failed), failed, or timed out
+    * a verifier that couldn't run (its launch failed), failed, or timed out
       before it read the agent's output (:class:`~deepgym.exceptions.VerifierError`; after,
       the verifier reports the agent's 0 itself, see :meth:`Session._verify`);
     * the provider retiring the sandbox at the end of its lifetime

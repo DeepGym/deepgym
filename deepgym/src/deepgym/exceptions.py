@@ -77,6 +77,12 @@ class SandboxDiedError(SandboxError):
         self.output = output
 
 
+class SandboxUnreachableError(SandboxError):
+    """Raise when the provider gave no answer about a command, or none to trust: its daemon
+    hung or can't be reached, before the command started or while it ran. Infrastructure,
+    never the policy's doing (see :func:`is_infrastructure_failure`)."""
+
+
 class SandboxExpiredError(SandboxError):
     """Raise when the provider retired the sandbox at the end of its lifetime, whatever ran
     in it. Not the policy's doing unless its own actions ran the clock out (see
@@ -139,7 +145,9 @@ def is_infrastructure_failure(exc: BaseException) -> bool:
     while exc is not None:
         if isinstance(exc, (TimeoutError, SandboxDiedError, *gone)):
             return False
-        if isinstance(exc, (ConnectionError, builtins.TimeoutError, *transport)):
+        if isinstance(exc, (ConnectionError, builtins.TimeoutError, SandboxUnreachableError)):
+            return True
+        if isinstance(exc, transport):
             return True
         status = _status_code(exc)
         if status is not None and (status >= 500 or status in (401, 403, 429)):

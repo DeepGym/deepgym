@@ -166,7 +166,8 @@ class CliEvents:
             The observed episode termination reason.
         """
         reason = self.stop_reason or stop_reason
-        if reason not in ('turn_budget', 'time_budget', 'cost_budget', 'provider_error', 'error'):
+        passthrough = ('turn_budget', 'time_budget', 'cost_budget', 'output_limit')
+        if reason not in (*passthrough, 'provider_error', 'error'):
             if self.error is None and exit_code != 0:
                 self.error = f'{self.provider} CLI exited with code {exit_code}'
             if self.error is None and not self.completed:

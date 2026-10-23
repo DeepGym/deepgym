@@ -26,6 +26,7 @@ from deepgym.exceptions import (
     DeepGymError,
     SandboxError,
     SandboxExpiredError,
+    SandboxUnreachableError,
     VerifierError,
     is_infrastructure_failure,
 )
@@ -51,7 +52,7 @@ from deepgym.sandboxes.apple import AppleContainer
 from deepgym.sandboxes.cli import DEFAULT_IMAGE
 from deepgym.sandboxes.daytona import cleanup_sandbox, snapshot_digest
 from deepgym.sandboxes.docker import DockerContainer
-from deepgym.session import _SEALED_PATH_CHECK, SandboxBackend, Session
+from deepgym.session import _SEALED_PATH_CHECK, SandboxBackend, Session, VerifierUploadError
 
 # Fake sandboxes pass session setup's check that only root can change TRUSTED_PATH.
 _SEALED_NEEDLE = 'root would run what others can change'
@@ -164,10 +165,11 @@ def test_docker_runs_offline_and_removes_with_rm(cli_calls: list[list[str]]) -> 
     box.delete()
     run, exec_, upload, delete = cli_calls
     assert run[:2] == ['docker', 'run'] and {'--network', '--pids-limit', '--memory'} <= set(run)
-    assert exec_ == [
+    assert exec_[:12] == [
         'docker', 'exec', '--workdir', '/w', '--env', 'A=1', box.id,
-        '/usr/bin/timeout', '--kill-after=2', '5', '/bin/sh', '-c', 'echo hi',
+        '/usr/bin/timeout', '--kill-after=2', '5', '/bin/sh', '-c',
     ]  # fmt: skip
+    assert exec_[13].startswith('deepgym-started-') and exec_[14:] == ['echo hi']
     assert upload[:3] == ['docker', 'exec', '--interactive']
     assert delete == ['docker', 'rm', '--force', box.id]
     assert box.network_blocked
@@ -198,6 +200,71 @@ def test_cli_timeout_exit_becomes_timeout_error(monkeypatch: pytest.MonkeyPatch)
     monkeypatch.setattr('deepgym.sandboxes.cli.time.monotonic', lambda: next(clock))
     with pytest.raises(SandboxTimeoutError):
         box.exec('sleep 99', timeout=5)
+
+
+def _started(argv: list[str]) -> bytes:
+    """The start line the container's shell prints before the command (see exec)."""
+    return next(arg for arg in argv if arg.startswith('deepgym-started-')).encode() + b'\n'
+
+
+def _exec_answering(
+    monkeypatch: pytest.MonkeyPatch, exec_answer, listing: tuple[int, str] | None = None
+) -> DockerContainer:
+    """Fake the docker CLI: exec runs *exec_answer(started_line)*; ps answers *listing*."""
+
+    def fake_run(argv: list[str], **kwargs: object) -> subprocess.CompletedProcess:
+        if argv[1] == 'exec':
+            return exec_answer(argv, _started(argv))
+        if argv[1] == 'ps' and listing is not None:
+            return subprocess.CompletedProcess(argv, listing[0], listing[1].encode(), b'')
+        return subprocess.CompletedProcess(argv, 0, b'', b'')
+
+    monkeypatch.setattr(subprocess, 'run', fake_run)
+    return DockerContainer(image='img')
+
+
+@pytest.mark.parametrize('ran', [False, True])
+def test_a_cli_that_gives_no_answer_is_ours_only_if_the_command_never_started(
+    monkeypatch: pytest.MonkeyPatch, ran: bool
+) -> None:
+    """Started, the command held the CLI (a child it left with the output open): its own
+    timeout. Not started, the daemon never ran it: infrastructure, no verdict."""
+
+    def hang(argv: list[str], started: bytes) -> subprocess.CompletedProcess:
+        raise subprocess.TimeoutExpired(argv, 20, output=started + b'partial' if ran else b'')
+
+    box = _exec_answering(monkeypatch, hang)
+
+    with pytest.raises(SandboxTimeoutError if ran else SandboxUnreachableError) as caught:
+        box.exec('work', timeout=5)
+    assert is_infrastructure_failure(caught.value) is not ran
+    if ran:
+        assert caught.value.output == 'partial'  # the start line is never the command's
+
+
+def test_a_failed_exec_the_cli_cannot_vouch_for_is_infrastructure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def fails(argv: list[str], started: bytes) -> subprocess.CompletedProcess:
+        return subprocess.CompletedProcess(argv, 1, b'', b'Cannot connect to the Docker daemon')
+
+    box = _exec_answering(monkeypatch, fails, listing=(1, ''))
+
+    with pytest.raises(SandboxUnreachableError):
+        box.exec('work', timeout=5)
+
+
+def test_a_command_that_fails_on_its_own_returns_its_exit_code(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def fails(argv: list[str], started: bytes) -> subprocess.CompletedProcess:
+        return subprocess.CompletedProcess(argv, 3, started + b'out', b'err')
+
+    box = _exec_answering(monkeypatch, fails)
+    listing = json.dumps({'Names': box.id, 'Image': 'img', 'State': 'running', 'CreatedAt': ''})
+    _exec_answering(monkeypatch, fails, listing=(0, listing))
+
+    assert box.exec('work', timeout=5) == ExecResult(3, 'outerr')
 
 
 def test_cli_start_timeout_removes_the_container(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -638,7 +705,7 @@ def test_a_step_verifier_upload_the_provider_refuses_has_no_verdict(status: int)
             raise refused
 
     box.upload = upload  # type: ignore[method-assign]
-    with pytest.raises(VerifierError, match='Could not upload the verifier'):
+    with pytest.raises(VerifierUploadError, match='Could not upload the verifier'):
         session.step(Action(action_type='bash', content='echo hi'))
 
     result = session.score()
@@ -996,7 +1063,8 @@ def test_a_verifier_run_cut_short_is_the_solutions_only_after_it_started(
 def test_a_cli_timeout_keeps_what_the_command_printed(monkeypatch: pytest.MonkeyPatch) -> None:
     def fake_run(argv: list[str], **kwargs: object) -> subprocess.CompletedProcess:
         if argv[1] == 'exec':
-            raise subprocess.TimeoutExpired(argv, 16, output=b'printed', stderr=b' first')
+            printed = _started(argv) + b'printed'
+            raise subprocess.TimeoutExpired(argv, 16, output=printed, stderr=b' first')
         return subprocess.CompletedProcess(argv, 0, b'', b'')
 
     monkeypatch.setattr(subprocess, 'run', fake_run)
@@ -1019,7 +1087,7 @@ def test_cli_container_that_dies(
             died.append(True)
             return subprocess.CompletedProcess(argv, 137, _printed(announced).encode(), b'')
         if argv[1] == 'exec' and 'false' in command:  # fails, but the container still runs
-            return subprocess.CompletedProcess(argv, 1, b'', b'')
+            return subprocess.CompletedProcess(argv, 1, _started(argv), b'')
         output = _SETUP_OUTPUT.encode() if 'useradd' in command else b''
         return subprocess.CompletedProcess(argv, 0, output, b'')
 
@@ -1295,9 +1363,10 @@ def test_the_consulted_mark_is_in_the_private_script_never_on_a_command_line() -
     assert not any('DEEPGYM_CONSULTED' in command for command in box.commands)
 
 
-def test_only_uploading_the_verifier_is_ours_whatever_the_provider_says() -> None:
-    """Its code to its own folder is ours alone. Its launch is not: it runs in the agent's
-    work directory, which the agent can move away."""
+def test_a_failed_verifier_upload_is_told_apart_from_its_launch() -> None:
+    """Its code goes to its own folder, on the disk the agent shares: a failed upload is a
+    VerifierUploadError, whose verdict turns on whether the agent acted (Session.score).
+    Its launch runs in the agent's work directory, which the agent can move away."""
     box = FakeSandbox(network_blocked=True, answers=[_USERS])
     backend = SandboxBackend(box)
     real_upload, real_exec = box.upload, box.exec
@@ -1306,7 +1375,7 @@ def test_only_uploading_the_verifier_is_ours_whatever_the_provider_says() -> Non
         raise _ProviderError('HTTP 400: bad request')
 
     box.upload = upload  # type: ignore[method-assign]
-    with pytest.raises(VerifierError, match='Could not upload the verifier'):
+    with pytest.raises(VerifierUploadError, match='Could not upload the verifier'):
         backend.verify('print(1)', timeout=5)
 
     def exec_(command: str, **kwargs: object) -> ExecResult:
@@ -1318,10 +1387,10 @@ def test_only_uploading_the_verifier_is_ours_whatever_the_provider_says() -> Non
     with pytest.raises(_ProviderError):
         backend.verify('print(1)', timeout=5)
 
-    # Docker and Apple report an ordinary failed upload as a SandboxError: still ours. A
-    # sandbox found stopped is not.
+    # Docker and Apple report an ordinary failed upload as a SandboxError. A sandbox found
+    # stopped stays that.
     for error, raised in (
-        (SandboxError('Failed to upload: no space left'), VerifierError),
+        (SandboxError('Failed to upload: no space left'), VerifierUploadError),
         (SandboxDiedError('the container stopped'), SandboxDiedError),
     ):
 

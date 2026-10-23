@@ -421,7 +421,7 @@ class AsyncDeepGym:
             # Daytona returns nothing the verifier printed, so even a sandbox that died
             # can't be shown to have died after the solution started: no verdict.
             raise SandboxError(f'Verifier execution failed: {exc}') from exc
-        return parse_wrapped_output(response.result, marker, response.exit_code)
+        return parse_wrapped_output(response.result, marker, response.exit_code, job.consulted_mark)
 
     async def _cleanup_sandbox(self, sandbox: Sandbox) -> None:
         """Safely destroy a sandbox, swallowing errors."""

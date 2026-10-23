@@ -42,6 +42,7 @@ from deepgym.agents.providers import (
     anthropic_unfinished_calls,
     api_error,
     openai_incomplete,
+    unresolved_usage,
     validate_budget,
 )
 from deepgym.exceptions import ActionError, DeepGymError
@@ -356,6 +357,12 @@ class OpenAIToolAgent:
                     timeout=tracker.request_timeout,
                 ).model_dump(exclude_none=True)
                 episode.say('assistant', response)
+                incomplete = openai_incomplete(response)
+                if incomplete and incomplete[0] == 'provider_error':
+                    # The provider's failure whatever else the response holds, which may be
+                    # no usage at all: classified before accounting can fail on that.
+                    unresolved_usage(tracker, response.get('usage'), 'openai')
+                    return episode.result('provider_error', error=incomplete[1])
                 account(tracker, response.get('usage'), self.prices, 'openai')
                 previous = response['id']
                 output = response['output']
@@ -369,7 +376,7 @@ class OpenAIToolAgent:
                 if refusal:
                     return episode.result('refusal', refusal)
                 text = ' '.join(part['text'] for part in parts if part['type'] == 'output_text')
-                if incomplete := openai_incomplete(response):
+                if incomplete:
                     reason, error = incomplete
                     return episode.result(reason, error=error)
                 calls = [item for item in output if item['type'] == 'function_call']

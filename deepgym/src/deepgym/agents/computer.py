@@ -30,6 +30,7 @@ from deepgym.agents.providers import (
     anthropic_unfinished_calls,
     api_error,
     openai_incomplete,
+    unresolved_usage,
     validate_budget,
 )
 from deepgym.exceptions import ActionError, DeepGymError
@@ -278,6 +279,12 @@ class OpenAIComputerAgent:
                     **({'reasoning': {'effort': self.effort}} if self.effort else {}),
                     timeout=tracker.request_timeout,
                 ).model_dump(exclude_none=True)
+                incomplete = openai_incomplete(response)
+                if incomplete and incomplete[0] == 'provider_error':
+                    # The provider's failure whatever else the response holds, which may be
+                    # no usage at all: classified before accounting can fail on that.
+                    unresolved_usage(tracker, response.get('usage'), 'openai')
+                    return tracker.result(session, 'provider_error', error=incomplete[1])
                 account(tracker, response.get('usage'), self.prices, 'openai')
                 previous = response['id']
                 output = response['output']
@@ -298,7 +305,7 @@ class OpenAIComputerAgent:
                         'safety_check',
                         error=('Provider safety checks require approval; no actions executed'),
                     )
-                if incomplete := openai_incomplete(response):
+                if incomplete:
                     reason, error = incomplete
                     return tracker.result(session, reason, error=error)
                 if not calls:

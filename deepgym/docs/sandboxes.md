@@ -81,9 +81,11 @@ one for anything shared or untrusted.
 - **Locally:** the answer runs under `sandbox-exec` (macOS) or `bwrap` (Linux) and can
   read only the operating system, the software trees a Python links against, the Python
   installation and its own run's files: not your home directory, temp directories
-  (another run's verifier), daemon sockets or any deepgym package. On macOS, a script
-  allowed to start subprocesses has every process left in its sandbox killed when it
-  ends, even one that left its process group. Where neither sandbox works, local runs
+  (another run's verifier), daemon sockets or any deepgym package, and on macOS it can't
+  signal anything outside its sandbox, its judge included. macOS has no way to contain a
+  child that detaches, so there the answer never starts subprocesses and
+  `run_solution(..., allow_subprocess=True)` ends the run with no verdict: run such
+  environments on Linux or a sandbox provider. Where neither sandbox works, local runs
   refuse unless you set `DEEPGYM_ALLOW_UNSANDBOXED=1`.
   `DeepGym(mode='local', confine_local_judge=True)` also runs each whole judge inside the
   local sandbox, for verifiers that might run code in-process; `deepgym qa --mutants`

@@ -455,6 +455,16 @@ def test_failed_openai_response_cannot_execute_actions(sdk):
     assert not result.trajectory.steps
 
 
+def test_failed_openai_response_without_usage_is_still_no_verdict(sdk):
+    sdk('openai', [openai_response([], status='failed', usage=None)])
+    session = FakeSession()
+    result = OpenAIComputerAgent('test').run(
+        session, session.observation, task='Task', budget=Budget()
+    )
+    assert result.termination_reason == 'provider_error'
+    assert [kind for kind, _ in session.abandoned] == ['provider_error']
+
+
 def test_deadline_after_response_prevents_tool_execution(sdk, monkeypatch):
     clock = [0.0]
     monkeypatch.setattr('deepgym.agents.base.time.monotonic', lambda: clock[0])

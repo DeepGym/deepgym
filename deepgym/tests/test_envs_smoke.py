@@ -6,12 +6,21 @@ from pathlib import Path
 import pytest
 
 from deepgym.core import DeepGym
+from deepgym.judge import local_isolation_kind
 from deepgym.qa import QAOptions, run_qa
 
 ENVS_DIR = Path(__file__).resolve().parent.parent / 'src' / 'deepgym' / 'envs'
 
 _BUILTIN = json.loads((ENVS_DIR / 'registry.json').read_text(encoding='utf-8'))['environments']
-_SINGLE_TURN_ENVS = [entry['path'] for entry in _BUILTIN if entry.get('type') != 'computer-use']
+# cli_task's verifier runs the solution with subprocesses (git), which macOS refuses.
+_NEEDS_SUBPROCESSES = pytest.mark.skipif(
+    local_isolation_kind() == 'macos', reason='allow_subprocess needs bwrap or a sandbox provider'
+)
+_SINGLE_TURN_ENVS = [
+    pytest.param(entry['path'], marks=_NEEDS_SUBPROCESSES if entry['path'] == 'cli_task' else ())
+    for entry in _BUILTIN
+    if entry.get('type') != 'computer-use'
+]
 
 
 @pytest.fixture(scope='module')

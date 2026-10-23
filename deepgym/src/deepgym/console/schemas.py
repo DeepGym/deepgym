@@ -89,6 +89,14 @@ class RunSummary(BaseModel):
     finished_at: str | None = None
 
 
+class RunPage(BaseModel):
+    """One page of the runs table, newest first."""
+
+    runs: list[RunSummary]
+    total: int
+    """Matching runs across every page."""
+
+
 class RunDetail(RunSummary):
     """A run with its solution, error and full verifier result."""
 

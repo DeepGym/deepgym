@@ -10,7 +10,7 @@ from fastapi.testclient import TestClient
 
 from deepgym.console.db import connect
 from deepgym.console.run_store import RunStore
-from deepgym.console.schemas import RunSpec
+from deepgym.console.schemas import RunSpec, RunSummary
 from deepgym.models import RunResult
 from deepgym.qa.report import QACheck, QAReport, write_report
 from deepgym.sandboxes.apple import AppleContainer
@@ -35,6 +35,12 @@ def _wait_finished(client: TestClient, run_id: str, timeout_s: float = 60) -> di
             return run
         time.sleep(0.2)
     raise AssertionError(f'run {run_id} did not finish in {timeout_s}s')
+
+
+def _queue(db: Path, environment: str, count: int) -> list[RunSummary]:
+    """Queue *count* runs of *environment* as one eval; return them newest first."""
+    spec = RunSpec(environment=environment, solution='pass', reference=True)
+    return RunStore(db).create_group([spec] * count, 'local', 'local')[::-1]
 
 
 class TestEnvironments:
@@ -114,10 +120,10 @@ class TestRuns:
 
         for run in queued:
             _wait_finished(client, run['id'])
-        listed = client.get(f'/api/runs?group_id={queued[0]["group_id"]}').json()
+        listed = client.get(f'/api/runs?group_id={queued[0]["group_id"]}').json()['runs']
 
         assert sorted(run['environment'] for run in listed) == ['fizzbuzz', 'reverse_string']
-        assert client.get('/api/runs?status=completed').json()
+        assert client.get('/api/runs?status=completed').json()['total'] == 2
 
     @pytest.mark.parametrize(
         ('body', 'code'),
@@ -126,10 +132,38 @@ class TestRuns:
     )  # fmt: skip
     def test_rejected_requests(self, client: TestClient, body: dict, code: int) -> None:
         assert client.post('/api/runs', json=body).status_code == code
-        assert client.get('/api/runs').json() == []
+        assert client.get('/api/runs').json() == {'runs': [], 'total': 0}
 
     def test_unknown_run_is_404(self, client: TestClient) -> None:
         assert client.get('/api/runs/nope').status_code == 404
+
+    def test_every_run_is_reachable_a_page_at_a_time(self, tmp_path: Path) -> None:
+        newest_first = [run.id for run in _queue(tmp_path / 'console.db', 'fizzbuzz', 201)]
+        client = make_client(tmp_path)
+
+        everything = client.get('/api/runs').json()
+        first = client.get('/api/runs?limit=25').json()
+        last = client.get('/api/runs?offset=200&limit=25').json()
+
+        assert everything['total'] == 201
+        assert [r['id'] for r in everything['runs']] == newest_first
+        assert (first['total'], [r['id'] for r in first['runs']]) == (201, newest_first[:25])
+        assert (last['total'], [r['id'] for r in last['runs']]) == (201, newest_first[200:])
+
+    def test_filters_apply_to_the_page_and_the_total(self, tmp_path: Path) -> None:
+        db = tmp_path / 'console.db'
+        _queue(db, 'fizzbuzz', 201)
+        evaluation = _queue(db, 'two_sum', 30)
+        two_sum = [run.id for run in evaluation]
+        client = make_client(tmp_path)  # fails the queued runs, as left by a stopped console
+
+        by_env = client.get('/api/runs?environment=two_sum&status=failed&offset=25').json()
+        by_group = client.get(f'/api/runs?group_id={evaluation[0].group_id}&limit=10').json()
+        none = client.get('/api/runs?environment=two_sum&status=completed&limit=10').json()
+
+        assert (by_env['total'], [r['id'] for r in by_env['runs']]) == (30, two_sum[25:])
+        assert (by_group['total'], [r['id'] for r in by_group['runs']]) == (30, two_sum[:10])
+        assert none == {'runs': [], 'total': 0}
 
     def test_restart_fails_unfinished_runs(self, tmp_path: Path) -> None:
         spec = RunSpec(environment='fizzbuzz', solution='pass', reference=False)
@@ -265,7 +299,7 @@ class TestLocalExecPolicy:
         assert response.status_code == 400
         assert '--allow-local-exec' in response.json()['detail']
         assert 'docker' in response.json()['detail']
-        assert client.get('/api/runs').json() == []
+        assert client.get('/api/runs').json() == {'runs': [], 'total': 0}
 
     def test_reference_still_runs_locally(self, tmp_path: Path) -> None:
         client = make_client(tmp_path)

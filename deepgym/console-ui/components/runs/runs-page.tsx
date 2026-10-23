@@ -2,6 +2,7 @@
 
 import { RiAddLine, RiCloseLine } from '@remixicon/react';
 import { useRouter } from 'next/navigation';
+import { useState } from 'react';
 import { Chip } from '@/components/base/badges/chip';
 import { Button } from '@/components/base/buttons/button';
 import {
@@ -15,16 +16,16 @@ import { RangeControl, useRange } from '@/components/ui/range-control';
 import { Stat } from '@/components/ui/stat';
 import { useApi } from '@/lib/api';
 import { RANGES } from '@/lib/stats';
-import { RUN_MODES, type RunStats, type RunSummary } from '@/lib/types';
+import { RUN_MODES, type RunPage, type RunStats } from '@/lib/types';
 import { useHotkey } from '@/lib/use-hotkey';
 import { useQueryParam } from '@/lib/use-query-param';
-import { isActive } from '@/lib/verdict';
 import { NewRunDialog } from './new-run-dialog';
 import { FailureModes, KpiTiles, ScoreDistribution } from './run-stats';
 import { RunsTable } from './runs-table';
 
 const STATUSES = ['all', 'queued', 'running', 'completed', 'failed'] as const;
 const PROVIDERS = RUN_MODES.filter((mode) => mode !== 'auto');
+const PAGE_SIZE = 25;
 
 function FilterChip({ label, onClear }: { label: string; onClear: () => void }) {
   return (
@@ -43,8 +44,8 @@ function FilterChip({ label, onClear }: { label: string; onClear: () => void }) 
 }
 
 /**
- * Stats for the chosen window (?range=) with deltas, and the runs table with status, provider,
- * environment and eval-group filters, plus the New run dialog (?new=).
+ * Stats for the chosen window (?range=) with deltas, and the runs table, a server page at a time,
+ * with status, provider, environment and eval-group filters, plus the New run dialog (?new=).
  */
 export function RunsPage() {
   const router = useRouter();
@@ -62,13 +63,19 @@ export function RunsPage() {
   if (provider) filters.set('provider', provider);
   if (environment) filters.set('environment', environment);
   if (group) filters.set('group_id', group);
-  const { data, error } = useApi<RunSummary[]>(`/runs?${filters}&limit=500`, 2500);
+  const query = filters.toString();
+  // Kept with the filters it pages through, so a new filter starts at the first page.
+  const [page, setPage] = useState({ query, index: 0 });
+  const pageIndex = page.query === query ? page.index : 0;
+  const { data, error } = useApi<RunPage>(
+    `/runs?${query}&offset=${pageIndex * PAGE_SIZE}&limit=${PAGE_SIZE}`,
+    2500,
+  );
   // An eval group is one batch, so its stats cover all of it rather than a time window.
   const { data: stats } = useApi<RunStats>(
     `/runs/stats?${filters}${group ? '' : `&hours=${RANGES[range]}`}`,
     5000,
   );
-  const runs = data ?? [];
 
   return (
     <>
@@ -85,7 +92,11 @@ export function RunsPage() {
         }
       />
       <KpiTiles stats={stats} range={group ? null : range}>
-        <Stat label="In flight" value={String(runs.filter(isActive).length)} hint="queued or running" />
+        <Stat
+          label="In flight"
+          value={stats ? String(stats.current.runs - stats.current.finished) : '-'}
+          hint="queued or running"
+        />
       </KpiTiles>
       <div className="mt-3 grid grid-cols-1 gap-3 lg:grid-cols-2">
         <ScoreDistribution bins={stats?.score_bins} />
@@ -113,11 +124,16 @@ export function RunsPage() {
           {environment && <FilterChip label={environment} onClear={() => setEnvironment(null)} />}
           {group && <FilterChip label={`eval ${group}`} onClear={() => setGroup(null)} />}
           <span className="ms-auto font-mono text-caption-1-medium text-text-tertiary">
-            {runs.length} runs
+            {data?.total ?? 0} runs
           </span>
         </div>
         <RunsTable
-          runs={runs}
+          runs={data?.runs ?? []}
+          paging={{
+            pageIndex,
+            pageCount: Math.ceil((data?.total ?? 0) / PAGE_SIZE),
+            onPageChange: (index) => setPage({ query, index }),
+          }}
           loading={!data && !error}
           error={error}
           onOpen={(run) => router.push(`/runs/detail/?id=${run.id}`)}

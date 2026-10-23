@@ -15,6 +15,7 @@ from deepgym.console.schemas import (
     ErrorTypeCount,
     RunDetail,
     RunMode,
+    RunPage,
     RunSpec,
     RunStats,
     RunSummary,
@@ -26,7 +27,7 @@ _SUMMARY_COLUMNS = (
     'id, group_id, environment, mode, provider, reference, status, score, passed, '
     'error_type, duration_ms, created_at, finished_at'
 )
-# Columns list() and stats() may filter on; keys are code-defined, values are bound parameters.
+# Columns page() and stats() may filter on; keys are code-defined, values are bound parameters.
 _FILTER_COLUMNS = frozenset({'status', 'environment', 'provider', 'group_id'})
 _FINISHED = "status IN ('completed', 'failed')"
 # Select list of RunTotals; SUM over no rows is NULL, hence the COALESCEs. A finished run
@@ -136,30 +137,33 @@ class RunStore:
             )
             return cursor.rowcount
 
-    def list(self, filters: dict[str, str | None], limit: int = 200) -> list[RunSummary]:
-        """Return the newest runs matching every non-None filter.
+    def page(self, filters: dict[str, str | None], offset: int, limit: int | None) -> RunPage:
+        """Return one page of the runs matching every non-None filter, newest first.
 
         Args:
             filters: Column -> value, for status, environment, provider or group_id.
-            limit: Maximum number of runs to return.
+            offset: How many of the newest matching runs to skip.
+            limit: Most runs to return; None returns every one after *offset*.
 
         Returns:
-            Runs, newest first.
+            The page, with the total count of matching runs.
         """
         where, params = _where(filters)
         with connect(self._path) as conn:
+            total = conn.execute(f'SELECT COUNT(*) FROM runs WHERE {where}', params).fetchone()[0]
             rows = conn.execute(
                 f'SELECT {_SUMMARY_COLUMNS} FROM runs WHERE {where} '
-                'ORDER BY created_at DESC, rowid DESC LIMIT ?',
-                (*params, limit),
+                'ORDER BY created_at DESC, rowid DESC LIMIT ? OFFSET ?',
+                (*params, -1 if limit is None else limit, offset),  # SQLite: LIMIT -1 is none
             ).fetchall()
-        return [RunSummary.model_validate(dict(row)) for row in rows]
+        runs = [RunSummary.model_validate(dict(row)) for row in rows]
+        return RunPage(runs=runs, total=total)
 
     def stats(self, filters: dict[str, str | None], hours: int | None) -> RunStats:
         """Aggregate the runs matching every non-None filter, started in the last *hours*.
 
         Args:
-            filters: Column -> value, as for :meth:`list`.
+            filters: Column -> value, as for :meth:`page`.
             hours: Window length; the window just before it is totalled too, for deltas.
                 None aggregates every run and has no previous window.
 

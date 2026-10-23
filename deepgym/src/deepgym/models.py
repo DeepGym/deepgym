@@ -372,8 +372,9 @@ class RunResult(BaseModel):
 
     isolation: Literal['macos', 'bwrap', 'none'] | None = None
     """How a local run isolated the solution: ``sandbox-exec``, ``bwrap``, or ``none`` when
-    ``DEEPGYM_ALLOW_UNSANDBOXED`` let it run unsandboxed. None for a run in a sandbox
-    provider, where the solution always runs as a separate user."""
+    ``DEEPGYM_ALLOW_UNSANDBOXED`` let it run unsandboxed. A local session's agent actions
+    always run unsandboxed (``none``). None for a run in a sandbox provider, where the
+    solution and the agent always run as a separate user."""
 
     @property
     def has_verdict(self) -> bool:

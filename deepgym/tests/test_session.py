@@ -1002,3 +1002,17 @@ class TestCloseOnExit:
 
         with pytest.raises(SandboxError, match='Could not delete'):
             session.close()
+
+
+def test_a_local_session_result_records_its_unsandboxed_actions(dg: DeepGym) -> None:
+    """A local session runs the agent's actions as plain host processes: its results say
+    so, fixed ones too, whatever its verifier isolates."""
+    env = MultiTurnEnvironment(task='t', max_steps=1, final_verifier_code=PASS_VERIFIER)
+
+    _, graded = dg.run_episode(env, lambda obs: Action(action_type='done'))
+    with dg.session(env) as session:
+        session.start()
+        session.abandon('provider_error', 'lost')
+        fixed = session.score()
+
+    assert graded.isolation == fixed.isolation == 'none'

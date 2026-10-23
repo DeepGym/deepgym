@@ -475,7 +475,7 @@ class SandboxBackend:
                 timeout=_TRANSFER_TIMEOUT_S,
             )
             if users.exit_code != 0:
-                raise SandboxError(f'Could not create the session users: {users.output[-500:]}')
+                raise SandboxError(f'Could not create the session users: {users.output}')
             *_, ids, real = users.output.strip().splitlines()
             (agent_uid, agent_gid, verifier_uid, verifier_gid, solver, solver_uid, solver_gid,
              setpriv, nsenter, sudo) = ids.split()[-10:]  # fmt: skip
@@ -495,7 +495,7 @@ class SandboxBackend:
                 timeout=_TRANSFER_TIMEOUT_S,
             )
             if owned.exit_code != 0:
-                raise SandboxError(f'Could not hand over {self._workdir}: {owned.output[-500:]}')
+                raise SandboxError(f'Could not hand over {self._workdir}: {owned.output}')
             # Root and verifiers run what TRUSTED_PATH finds, so only root may change any of
             # it. Checked once the agent owns its work directory, which no folder on it may
             # lead into; anything but a clean pass refuses the sandbox.
@@ -507,7 +507,7 @@ class SandboxBackend:
                 timeout=60,
             )
             if sealed.exit_code != 0 or sealed.output.strip() != sealed_path.SEALED:
-                raise SandboxError(f'Refusing the sandbox: {sealed.output[-500:]}')
+                raise SandboxError(f'Refusing the sandbox: {sealed.output}')
             self._as_agent = _drop_to(setpriv, agent_uid, agent_gid)
             self._agent_drop = self._as_agent
             self._agent_namespace = ''
@@ -609,7 +609,7 @@ class SandboxBackend:
         if made.exit_code != 0:
             raise SandboxError(
                 'Could not isolate the session network; the image needs util-linux '
-                f'(unshare, nsenter, mount): {made.output[-500:]}'
+                f'(unshare, nsenter, mount): {made.output}'
             )
 
     def exec(self, command: str, timeout: int, env: dict[str, str] | None = None) -> ExecResult:
@@ -727,7 +727,7 @@ class SandboxBackend:
             timeout=_TRANSFER_TIMEOUT_S,
         )
         if packed.exit_code != 0:
-            raise ActionError(f'Failed to archive {self._workdir}: {packed.output[-500:]}')
+            raise ActionError(f'Failed to archive {self._workdir}: {packed.output}')
         encoded = self._sandbox.exec(
             trusted(f'base64 {staged}; status=$?; rm -f {staged}; exit $status'),
             env=self._clear,
@@ -735,7 +735,7 @@ class SandboxBackend:
         )
         try:
             if encoded.exit_code != 0:
-                raise ValueError(encoded.output[-500:])
+                raise ValueError(encoded.output)
             return base64.b64decode(''.join(encoded.output.split()), validate=True)
         except ValueError as exc:
             raise SandboxError(f'Failed to read the archive: {exc}') from exc
@@ -765,7 +765,7 @@ class SandboxBackend:
             timeout=_TRANSFER_TIMEOUT_S,
         )
         if done.exit_code != 0:
-            raise SandboxError(f'Failed to restore {self._workdir}: {done.output[-500:]}')
+            raise SandboxError(f'Failed to restore {self._workdir}: {done.output}')
 
     def write_file(self, path: str, content: bytes) -> None:
         """Write *content* to *path* under the work directory, as the session user.
@@ -789,9 +789,9 @@ class SandboxBackend:
             timeout=60,
         )
         if done.exit_code == 3:
-            raise ActionError(f'Failed to write {path}: {done.output[-500:]}')
+            raise ActionError(f'Failed to write {path}: {done.output}')
         if done.exit_code != 0:
-            raise SandboxError(f'Failed to write {path}: {done.output[-500:]}')
+            raise SandboxError(f'Failed to write {path}: {done.output}')
 
     def verify(self, code: str, timeout: int, env: dict[str, str] | None = None) -> VerifierOutput:
         """Run verifier *code* as the verifier user, from a file only that user can read.
@@ -1780,7 +1780,7 @@ def _kill_group(group: int) -> None:
 def _checked(what: str, result: ExecResult) -> str:
     """Return *result*'s output, or raise if the command failed."""
     if result.exit_code != 0:
-        raise SandboxError(f'{what} exited {result.exit_code}: {result.output[-2000:]}')
+        raise SandboxError(f'{what} exited {result.exit_code}: {result.output}')
     return result.output
 
 

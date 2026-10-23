@@ -122,7 +122,7 @@ def _clone(url: str, target: Path) -> None:
         except (OSError, subprocess.TimeoutExpired) as exc:
             raise DeepGymError(f'Could not clone {url}: {exc}') from exc
         if done.returncode != 0:
-            raise DeepGymError(f'Could not clone {url}: {done.stderr.strip()[-500:]}')
+            raise DeepGymError(f'Could not clone {url}: {done.stderr.strip()}')
         try:
             clone.rename(target)
         except OSError as exc:

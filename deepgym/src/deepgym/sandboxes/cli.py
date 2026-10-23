@@ -74,7 +74,7 @@ class CliContainer:
             self.delete()
             raise SandboxError(f'Container did not start within {_START_TIMEOUT_S}s') from exc
         if started.returncode != 0:
-            raise SandboxError(f'Failed to start container: {started.stderr.decode()[-1000:]}')
+            raise SandboxError(f'Failed to start container: {started.stderr.decode()}')
 
     @classmethod
     def build(cls, context: Path) -> str:
@@ -107,7 +107,7 @@ class CliContainer:
         except subprocess.TimeoutExpired as exc:
             raise SandboxError(f'Building {context} took over {_BUILD_TIMEOUT_S}s') from exc
         if built.returncode != 0:
-            raise SandboxError(f'Failed to build {context}: {built.stderr.decode()[-1000:]}')
+            raise SandboxError(f'Failed to build {context}: {built.stderr.decode()}')
         return tag
 
     @classmethod
@@ -165,7 +165,7 @@ class CliContainer:
                 raise SandboxTimeoutError(f'command exceeded {timeout}s', output)
         # A failed exec may mean the container itself is gone; only the listing can tell.
         if done.returncode != 0 and self._gone():
-            raise SandboxDiedError(f'Container {self.id} stopped: {output[-500:]}', output)
+            raise SandboxDiedError(f'Container {self.id} stopped: {output}', output)
         return ExecResult(done.returncode, output)
 
     def _gone(self) -> bool:
@@ -208,7 +208,7 @@ class CliContainer:
         """
         done = cls._cli(*args, timeout=30)
         if done.returncode != 0:
-            raise SandboxError(done.stderr.decode('utf-8', 'replace').strip()[-500:])
+            raise SandboxError(done.stderr.decode('utf-8', 'replace').strip())
         return done.stdout.decode('utf-8', 'replace')
 
     def upload(self, content: bytes, path: str) -> None:
@@ -229,7 +229,7 @@ class CliContainer:
                 raise SandboxDiedError(f'Container {self.id} stopped uploading {path}') from exc
             raise SandboxError(f'Upload of {path} timed out') from exc
         if done.returncode != 0:
-            message = f'Failed to upload {path}: {done.stderr.decode()[-500:]}'
+            message = f'Failed to upload {path}: {done.stderr.decode()}'
             raise SandboxDiedError(message) if self._gone() else SandboxError(message)
 
     def delete(self) -> bool:
@@ -260,7 +260,7 @@ class CliContainer:
         except subprocess.TimeoutExpired as exc:
             raise SandboxError(f'Removing {name} timed out') from exc
         if done.returncode != 0:
-            raise SandboxError(f'Failed to remove {name}: {done.stderr.decode().strip()[-500:]}')
+            raise SandboxError(f'Failed to remove {name}: {done.stderr.decode().strip()}')
 
     @classmethod
     def running(cls) -> list[RunningSandbox]:
@@ -274,7 +274,7 @@ class CliContainer:
         except subprocess.TimeoutExpired as exc:
             raise SandboxError(f'{cls.cli} did not list containers within 30s') from exc
         if done.returncode != 0:
-            detail = done.stderr.decode().strip()[-500:]
+            detail = done.stderr.decode().strip()
             raise SandboxError(f'{cls.cli} could not list containers: {detail}')
         listed = cls._parse_listing(done.stdout.decode())
         return [box for box in listed if box.id.startswith(_NAME_PREFIX)]

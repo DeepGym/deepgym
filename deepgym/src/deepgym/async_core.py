@@ -396,7 +396,7 @@ class AsyncDeepGym:
         try:
             setup = await sandbox.process.exec(f'bash -c {shlex.quote(SANDBOX_SETUP)}', timeout=60)
             if setup.exit_code != 0:
-                raise SandboxError(f'Judge setup failed: {setup.result[-2000:]}')
+                raise SandboxError(f'Judge setup failed: {setup.result}')
             for content, path in sandbox_uploads(job):
                 await sandbox.fs.upload_file(content, path)
         except SandboxError:

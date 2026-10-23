@@ -4,11 +4,12 @@ from pathlib import Path
 
 import pytest
 
+from deepgym.adversarial import fingerprint_verifier
 from deepgym.benchmark_ops import build_benchmark_audit, load_environments_from_dir
 from deepgym.core import DeepGym
 from deepgym.exploit_db import ExploitDB
 from deepgym.models import Environment
-from deepgym.reward_qa import RewardAuditor, fingerprint_verifier
+from deepgym.reward_qa import RewardAuditor
 from tests.test_adversarial import CRASHING_VERIFIER, ROBUST_VERIFIER
 
 STANDALONE_PASSING_VERIFIER = (

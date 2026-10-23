@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import ast
 import builtins
+import hashlib
 import json
 import keyword
 import logging
@@ -38,6 +39,11 @@ logger = logging.getLogger(__name__)
 # says so in its error, and the request is made again at that size.
 _CLAUDE_MAX_TOKENS = 128_000
 _STATED_MAX = re.compile(r'> (\d+), which is the maximum allowed number of output tokens')
+
+
+def fingerprint_verifier(verifier_code: str) -> str:
+    """Return a stable short hash for a verifier: its id unless the caller names one."""
+    return hashlib.sha256(verifier_code.encode('utf-8')).hexdigest()[:16]
 
 
 def claude_reply(client: Any, model: str, prompt: str) -> str:
@@ -284,7 +290,7 @@ class AdversarialReport(BaseModel):
         exploits = sum(result.exploited for result in results)
         inconclusive = sum(result.inconclusive for result in results)
         return cls(
-            environment=env.task[:120],
+            environment=env.task,
             attacks_run=len(results),
             exploits_found=exploits,
             inconclusive=inconclusive,
@@ -687,9 +693,9 @@ class AdversarialTester:
             f'error_type={result.error_type}'
         ]
         if result.output:
-            detail_lines.append(result.output[:500])
+            detail_lines.append(result.output)
         if result.stderr:
-            detail_lines.append(f'stderr: {result.stderr[:300]}')
+            detail_lines.append(f'stderr: {result.stderr}')
         details = '\n'.join(detail_lines)
         if result.error_type in inconclusive_errors:
             return _not_run(strategy, f'Attack did not reach the verifier: {details}')
@@ -1184,7 +1190,7 @@ class BlackBoxAdversarialTester:
             problems.append('no attempt ran')
         status = 'exploitable' if exploitable else 'inconclusive' if problems else 'robust'
         return BlackBoxReport(
-            verifier_id=env.task[:80],
+            verifier_id=fingerprint_verifier(env.verifier_source),
             status=status,
             exploitable=exploitable,
             problems=problems,

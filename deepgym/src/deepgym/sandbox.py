@@ -320,7 +320,7 @@ def run_judge_in_sandbox(sandbox: Sandbox, job: JudgeJob) -> ExecutionResult:
     try:
         setup = sandbox.exec(f'bash -c {shlex.quote(SANDBOX_SETUP)}', timeout=60)
         if setup.exit_code != 0:
-            raise SandboxError(f'Judge setup failed: {setup.output[-2000:]}')
+            raise SandboxError(f'Judge setup failed: {setup.output}')
         for content, path in sandbox_uploads(job):
             sandbox.upload(content, path)
     except SandboxError:

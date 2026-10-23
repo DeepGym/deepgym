@@ -100,8 +100,7 @@ class Mutant(BaseModel):
 
 
 def _short(node: ast.AST) -> str:
-    text = ast.unparse(node).split('\n', 1)[0]
-    return text if len(text) <= 60 else text[:57] + '...'
+    return ast.unparse(node)
 
 
 def _kind(node: ast.expr | None) -> str | None:
@@ -311,7 +310,7 @@ def mutation_check(env: Environment, reference: str, dg: DeepGym) -> QACheck:
     if not (control.has_verdict and solved(control)):
         details = (
             f'the reference re-printed without comments or formatting scores {control.score:.2f} '
-            f'in a confined run ({control.output.strip()[:120]}); the verifier depends on '
+            f'in a confined run ({control.output.strip()}); the verifier depends on '
             'formatting, or on something the run cannot reach (writes outside its temp '
             'directory, the network, new processes on macOS), so mutants of it cannot be '
             'judged'

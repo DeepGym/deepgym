@@ -211,7 +211,7 @@ class DaytonaSandbox:
         stage = probe.output.strip()
         if probe.exit_code != 0 or not stage:
             self.delete()
-            raise SandboxError(f'Could not prepare sandbox {self.id}: {probe.output[-500:]}')
+            raise SandboxError(f'Could not prepare sandbox {self.id}: {probe.output}')
         if stage != 'root':
             self._sudo, self._stage = '/usr/bin/sudo -n -E ', stage
 
@@ -323,7 +323,7 @@ class DaytonaSandbox:
             timeout=60,
         )
         if moved.exit_code != 0:
-            raise SandboxError(f'Failed to upload {path}: {moved.output[-500:]}')
+            raise SandboxError(f'Failed to upload {path}: {moved.output}')
 
     def delete(self) -> bool:
         """Delete the sandbox; errors are logged. Return False if Daytona reported a failure."""

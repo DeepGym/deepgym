@@ -71,7 +71,7 @@ def grade(sandbox: Sandbox, task: HarborTask, workspace: bytes, workdir: str) ->
             timeout=120,
         )
         if staged.exit_code != 0:
-            raise SandboxError(f'Failed to stage the tests: {staged.output[-500:]}')
+            raise SandboxError(f'Failed to stage the tests: {staged.output}')
         tests = backend.exec_root(
             f'{TESTS_DIR}/test.sh',
             math.ceil(task.verifier_timeout_sec),

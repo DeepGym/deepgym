@@ -3,14 +3,13 @@
 from __future__ import annotations
 
 import contextlib
-import hashlib
 from collections.abc import Iterator
 from pathlib import Path
 from typing import Literal
 
 from pydantic import BaseModel, Field
 
-from deepgym.adversarial import AdversarialReport, AdversarialTester
+from deepgym.adversarial import AdversarialReport, AdversarialTester, fingerprint_verifier
 from deepgym.exploit_db import ExploitDB, ExploitRecord
 from deepgym.models import Environment
 
@@ -38,11 +37,6 @@ class VerifierAuditReport(BaseModel):
     exploits_found: int = Field(ge=0)
     report: AdversarialReport
     stored: bool = False
-
-
-def fingerprint_verifier(verifier_code: str) -> str:
-    """Return a stable short hash for a verifier."""
-    return hashlib.sha256(verifier_code.encode('utf-8')).hexdigest()[:16]
 
 
 def classify_patterns(
@@ -211,7 +205,7 @@ class RewardAuditor:
     ) -> VerifierAuditReport:
         """Run a verifier audit and return a structured QA report."""
         verifier_source = env.verifier_source
-        resolved_verifier_id = verifier_id or env.task[:80]
+        resolved_verifier_id = verifier_id or fingerprint_verifier(env.verifier_source)
         verifier_hash = fingerprint_verifier(verifier_source)
         if persist:
             # Before the retest, as the scanners do: a stored result for a changed verifier

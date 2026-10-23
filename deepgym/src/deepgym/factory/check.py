@@ -206,7 +206,7 @@ def protocol_check(results: Sequence[RunResult]) -> QACheck:
     """
     broken = [result for result in results if result.error_type in _PROTOCOL_ERRORS]
     if broken:
-        details = f'verifier output breaks the protocol: {broken[0].output.strip()[:300]}'
+        details = f'verifier output breaks the protocol: {broken[0].output.strip()}'
         return QACheck(name='protocol', status='fail', details=details)
     if not results[0].cases:
         details = (

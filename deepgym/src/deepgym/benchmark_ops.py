@@ -9,8 +9,8 @@ from typing import Literal
 
 from pydantic import BaseModel, Field
 
+from deepgym.adversarial import fingerprint_verifier
 from deepgym.models import Environment
-from deepgym.reward_qa import fingerprint_verifier
 
 BenchmarkSplit = Literal['public_train', 'public_eval', 'private_holdout', 'canary']
 

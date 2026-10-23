@@ -135,10 +135,10 @@ def reward_result(listing: str, tests: ExecResult) -> VerifierResult:
             )
         else:
             raise VerifierError(
-                f'tests/test.sh wrote no reward (exit {tests.exit_code}): {tests.output[-500:]}'
+                f'tests/test.sh wrote no reward (exit {tests.exit_code}): {tests.output}'
             )
     except (ValueError, TypeError, AttributeError) as exc:
-        raise VerifierError(f'Unreadable {name}: {body[:200]!r}') from exc
+        raise VerifierError(f'Unreadable {name}: {body!r}') from exc
     score = checked_score(score)
     return VerifierResult(
         score=score,

@@ -475,18 +475,22 @@ def create_session(
         raise HTTPException(
             status_code=status.HTTP_429_TOO_MANY_REQUESTS, detail='Session limit reached'
         )
-    try:
-        with _http_errors(fallback_status=status.HTTP_400_BAD_REQUEST):
+    with _http_errors(fallback_status=status.HTTP_400_BAD_REQUEST):
+        try:
             session = dg.session(env)
-            try:
-                observation = session.start()
-            except BaseException:
-                session.close()
-                raise
-    except BaseException:
-        _session_slots.release()
-        raise
-    session_id = uuid.uuid4().hex
+        except BaseException:
+            _session_slots.release()
+            raise
+        session_id = uuid.uuid4().hex
+        try:
+            observation = session.start()
+        except BaseException:
+            # Its sandbox exists, so it is closed like a deleted session: a failed delete
+            # keeps the slot for the sweep to retry, and one given up on counts as leaked.
+            with _store_lock:
+                _closing[session_id] = session
+            _close_logged(session_id)
+            raise
     with _store_lock:
         _sessions[session_id] = session
         _last_used[session_id] = time.monotonic()

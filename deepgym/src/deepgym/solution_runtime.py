@@ -336,6 +336,15 @@ def _sweep_sandbox(mark: str | None) -> None:
         killed |= members
 
 
+@functools.cache
+def _import_blocker() -> str:
+    """A module that refuses to import, bound over each hidden package's ``__init__.py``."""
+    path = os.path.join(os.path.dirname(_runtime()), '_hidden_package.py')
+    with open(path, 'w', encoding='utf-8') as handle:
+        handle.write("raise ImportError('this package is hidden from the solution')\n")
+    return path
+
+
 def _share_with_solution(workdir: str) -> None:
     """Let the solution user write in *workdir* and read what the judge put there.
 
@@ -401,6 +410,9 @@ def _launch_argv(
         argv += ['--dev', '/dev', '--proc', '/proc']
         for path in spec['hide']:
             argv += ['--tmpfs', path]
+            # An empty directory would still import, as a namespace package.
+            if os.path.isfile(init := os.path.join(path, '__init__.py')):
+                argv += ['--ro-bind', _import_blocker(), init]
         for path in writable:
             argv += ['--bind', path, path]
         argv += ['--remount-ro', '/', '--unshare-all', '--die-with-parent', '--new-session']

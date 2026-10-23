@@ -2,7 +2,9 @@
 
 import ast
 import os
+import random
 import signal
+import subprocess
 import time
 from pathlib import Path
 
@@ -317,21 +319,29 @@ def test_a_confined_run_takes_down_what_the_judge_left_running() -> None:
         '    exec(open(solution_path).read(), namespace)\n'
         "    return {'score': 1.0, 'passed': True, 'details': str(namespace['start']())}\n"
     )
-    worker = 'import subprocess\n\ndef start():\n    return subprocess.Popen(["sleep", "60"]).pid\n'
+    # Found by its unique command line: under bwrap the pid it reports is its namespace's.
+    command = f'sleep {60 + random.random():.6f}'
+    worker = (
+        f'import subprocess\n\ndef start():\n    return subprocess.Popen({command.split()!r}).pid\n'
+    )
     env = Environment(task='t', verifier_code=verifier)
 
-    result = DeepGym(mode='local', confine_local_judge=True).run(env, worker)
+    DeepGym(mode='local', confine_local_judge=True).run(env, worker)
 
-    pid = int(result.output)
     for _ in range(50):  # the kill is sent before run() returns; give the OS a moment
-        try:
-            os.kill(pid, 0)
-        except ProcessLookupError:
+        if not (left := _pids_running(command)):
             break
         time.sleep(0.1)
     else:
-        os.kill(pid, signal.SIGKILL)
-        pytest.fail(f'worker {pid} outlived its confined run')
+        for pid in left:
+            os.kill(pid, signal.SIGKILL)
+        pytest.fail(f'worker {left} outlived its confined run')
+
+
+def _pids_running(command: str) -> list[int]:
+    listing = subprocess.run(['ps', '-axo', 'pid=,args='], capture_output=True, text=True).stdout
+    rows = (line.strip().split(None, 1) for line in listing.splitlines())
+    return [int(row[0]) for row in rows if len(row) == 2 and row[1] == command]
 
 
 @pytest.mark.skipif(local_isolation_kind() != 'macos', reason='sandbox-exec only')

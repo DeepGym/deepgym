@@ -4,11 +4,12 @@ from pathlib import Path
 
 import pytest
 
+from deepgym.adversarial import environment_id, grading_fingerprint
 from deepgym.benchmark_ops import build_benchmark_audit, load_environments_from_dir
 from deepgym.core import DeepGym
 from deepgym.exploit_db import ExploitDB
 from deepgym.models import Environment
-from deepgym.reward_qa import RewardAuditor, fingerprint_verifier
+from deepgym.reward_qa import RewardAuditor
 from tests.test_adversarial import CRASHING_VERIFIER, ROBUST_VERIFIER
 
 STANDALONE_PASSING_VERIFIER = (
@@ -43,7 +44,7 @@ class TestRewardAuditor:
         assert report.verifier_id == 'weak-verifier'
         assert report.exploitable is True
         assert report.risk_level in {'high', 'critical'}
-        assert report.verifier_hash == fingerprint_verifier(STANDALONE_PASSING_VERIFIER)
+        assert report.verifier_hash == grading_fingerprint(env)
         assert 'few-test-cases' in report.patterns
         assert report.recommendations
         assert report.stored is False
@@ -175,3 +176,37 @@ def test_an_audit_that_judged_nothing_has_no_risk_rating(tmp_path: Path, dg: Dee
 
     assert report.status == 'inconclusive'
     assert (report.risk_score, report.risk_level) == (None, None)  # never a reassuring LOW
+
+
+def test_audit_ids_are_identity_and_hashes_cover_all_grading() -> None:
+    """Two tasks sharing a verifier keep their own ids and grade differently; a changed
+    verifier keeps its task's id, so its old stored result is found and dropped."""
+    verifier = 'return 1.0\n'
+    first = Environment(name='first', task='t', verifier_code=verifier, test_cases=[{'x': 1}])
+    second = first.model_copy(update={'name': 'second', 'test_cases': [{'x': 2}]})
+    changed = first.model_copy(update={'verifier_code': verifier + '# edited\n'})
+    prefix = 'x' * 80
+    unnamed = [Environment(task=prefix + end, verifier_code=verifier) for end in ('a', 'b')]
+
+    assert environment_id(first) != environment_id(second)
+    assert grading_fingerprint(first) != grading_fingerprint(second)
+    assert environment_id(changed) == environment_id(first)
+    assert grading_fingerprint(changed) != grading_fingerprint(first)
+    assert environment_id(unnamed[0]) != environment_id(unnamed[1])  # no 80-character prefix
+
+
+def test_a_harbor_task_whose_tests_change_is_a_new_version() -> None:
+    """Harbor grades with its test scripts, not its placeholder verifier: changing them must
+    invalidate a stored result, or an old robust verdict outlives an unjudged retest."""
+    from pathlib import Path
+
+    from deepgym.harbor.environment import HarborEnvironment
+
+    env = HarborEnvironment.from_dir(Path(__file__).parent / 'fixtures/harbor/tasks/hello')
+    tests = {name: body + b'\n# changed\n' for name, body in env.harbor_task.tests.items()}
+    changed = env.model_copy(
+        update={'harbor_task': env.harbor_task.model_copy(update={'tests': tests})}
+    )
+
+    assert environment_id(changed) == environment_id(env)
+    assert grading_fingerprint(changed) != grading_fingerprint(env)

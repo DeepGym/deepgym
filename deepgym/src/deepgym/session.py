@@ -12,6 +12,7 @@ from __future__ import annotations
 import base64
 import contextlib
 import errno
+import functools
 import json
 import logging
 import math
@@ -39,6 +40,7 @@ from deepgym.exceptions import (
     SandboxDiedError,
     SandboxError,
     SandboxExpiredError,
+    SessionClosedError,
     TimeoutError,
     VerifierError,
     is_infrastructure_failure,
@@ -232,6 +234,16 @@ class SessionBackend(Protocol):
         ...
 
 
+@functools.cache
+def _warn_unisolated_actions() -> None:
+    """Say once per process that local sessions run agent actions on the host unsandboxed
+    (their results record it as ``isolation='none'``)."""
+    logger.warning(
+        'A local session runs agent actions on this machine with no sandbox; use a sandbox '
+        'provider for any agent you do not trust'
+    )
+
+
 class LocalBackend:
     """Run actions in a host temp directory. Dev/testing only: no isolation, no desktop."""
 
@@ -239,6 +251,7 @@ class LocalBackend:
     python = shlex.quote(sys.executable)
 
     def __init__(self) -> None:
+        _warn_unisolated_actions()
         self._dir = Path(tempfile.mkdtemp(prefix='deepgym_session_'))
         self._groups: set[int] = set()
         # deepgym_solution for verifiers, outside the work directory the agent writes to.
@@ -474,7 +487,7 @@ class SandboxBackend:
                 timeout=_TRANSFER_TIMEOUT_S,
             )
             if users.exit_code != 0:
-                raise SandboxError(f'Could not create the session users: {users.output[-500:]}')
+                raise SandboxError(f'Could not create the session users: {users.output}')
             *_, ids, real = users.output.strip().splitlines()
             (agent_uid, agent_gid, verifier_uid, verifier_gid, solver, solver_uid, solver_gid,
              setpriv, nsenter, sudo) = ids.split()[-10:]  # fmt: skip
@@ -494,7 +507,7 @@ class SandboxBackend:
                 timeout=_TRANSFER_TIMEOUT_S,
             )
             if owned.exit_code != 0:
-                raise SandboxError(f'Could not hand over {self._workdir}: {owned.output[-500:]}')
+                raise SandboxError(f'Could not hand over {self._workdir}: {owned.output}')
             # Root and verifiers run what TRUSTED_PATH finds, so only root may change any of
             # it. Checked once the agent owns its work directory, which no folder on it may
             # lead into; anything but a clean pass refuses the sandbox.
@@ -506,7 +519,7 @@ class SandboxBackend:
                 timeout=60,
             )
             if sealed.exit_code != 0 or sealed.output.strip() != sealed_path.SEALED:
-                raise SandboxError(f'Refusing the sandbox: {sealed.output[-500:]}')
+                raise SandboxError(f'Refusing the sandbox: {sealed.output}')
             self._as_agent = _drop_to(setpriv, agent_uid, agent_gid)
             self._agent_drop = self._as_agent
             self._agent_namespace = ''
@@ -608,7 +621,7 @@ class SandboxBackend:
         if made.exit_code != 0:
             raise SandboxError(
                 'Could not isolate the session network; the image needs util-linux '
-                f'(unshare, nsenter, mount): {made.output[-500:]}'
+                f'(unshare, nsenter, mount): {made.output}'
             )
 
     def exec(self, command: str, timeout: int, env: dict[str, str] | None = None) -> ExecResult:
@@ -726,7 +739,7 @@ class SandboxBackend:
             timeout=_TRANSFER_TIMEOUT_S,
         )
         if packed.exit_code != 0:
-            raise ActionError(f'Failed to archive {self._workdir}: {packed.output[-500:]}')
+            raise ActionError(f'Failed to archive {self._workdir}: {packed.output}')
         encoded = self._sandbox.exec(
             trusted(f'base64 {staged}; status=$?; rm -f {staged}; exit $status'),
             env=self._clear,
@@ -734,7 +747,7 @@ class SandboxBackend:
         )
         try:
             if encoded.exit_code != 0:
-                raise ValueError(encoded.output[-500:])
+                raise ValueError(encoded.output)
             return base64.b64decode(''.join(encoded.output.split()), validate=True)
         except ValueError as exc:
             raise SandboxError(f'Failed to read the archive: {exc}') from exc
@@ -764,7 +777,7 @@ class SandboxBackend:
             timeout=_TRANSFER_TIMEOUT_S,
         )
         if done.exit_code != 0:
-            raise SandboxError(f'Failed to restore {self._workdir}: {done.output[-500:]}')
+            raise SandboxError(f'Failed to restore {self._workdir}: {done.output}')
 
     def write_file(self, path: str, content: bytes) -> None:
         """Write *content* to *path* under the work directory, as the session user.
@@ -788,9 +801,9 @@ class SandboxBackend:
             timeout=60,
         )
         if done.exit_code == 3:
-            raise ActionError(f'Failed to write {path}: {done.output[-500:]}')
+            raise ActionError(f'Failed to write {path}: {done.output}')
         if done.exit_code != 0:
-            raise SandboxError(f'Failed to write {path}: {done.output[-500:]}')
+            raise SandboxError(f'Failed to write {path}: {done.output}')
 
     def verify(self, code: str, timeout: int, env: dict[str, str] | None = None) -> VerifierOutput:
         """Run verifier *code* as the verifier user, from a file only that user can read.
@@ -1005,6 +1018,8 @@ class Session:
         self._unsettled: list[JsonValue] = []
         # One sandbox, one actor at a time: concurrent step/score/close calls queue up.
         self._lock = threading.Lock()
+        # Set by close() whether or not the delete succeeds (see _check_open).
+        self._closed = False
 
     @property
     def done(self) -> bool:
@@ -1049,11 +1064,12 @@ class Session:
         """Write files, start the desktop, run setup, and return the first observation.
 
         Raises:
-            DeepGymError: If the session was already started.
+            DeepGymError: If the session was already started or is closed.
             SandboxError: If setup exits non-zero.
             TimeoutError: If setup exceeds ``setup_timeout``.
         """
         with self._lock:
+            self._check_open()
             if self._obs is not None:
                 raise DeepGymError('Session already started; open a new session per episode')
             env = self._env
@@ -1106,7 +1122,7 @@ class Session:
         separate; provider transport can take its own cleanup grace after a deadline.
 
         Raises:
-            DeepGymError: If the session is not running.
+            DeepGymError: If the session is not running or is closed.
             ActionError: If the action is not allowed here, names no declared tool or has
                 arguments its tool rejects, the desktop rejects it, or the agent's own files
                 are in the way of a write (the episode goes on, unless they blocked the
@@ -1120,6 +1136,7 @@ class Session:
             raise ValueError('Step timeout must be finite and positive')
         deadline = time.monotonic() + timeout if timeout is not None else None
         with self._lock:
+            self._check_open()
             if self._obs is None or self._done:
                 raise DeepGymError('Session is not running; call start() or open a new session')
             if action.action_type not in self._env.allowed_actions:
@@ -1179,11 +1196,12 @@ class Session:
             Captured stdout, events, exit code, and any budget stop reason.
 
         Raises:
-            DeepGymError: If the session is not running.
+            DeepGymError: If the session is not running or is closed.
             ActionError: If the environment disallows shell execution or CLI provider egress.
             SandboxError: If the backend cannot isolate or supervise the CLI safely.
         """
         with self._lock:
+            self._check_open()
             if self._obs is None or self._done:
                 raise DeepGymError('Session is not running; call start() or open a new session')
             if not {'bash', 'cli'} & self._env.allowed_actions:
@@ -1240,10 +1258,12 @@ class Session:
         Already-ended episodes retain their terminal observation, including unknown state.
 
         Raises:
+            DeepGymError: If the session is closed.
             SandboxError: If containment is unavailable or cannot be stopped.
                 The stored failure has no verdict and prevents subsequent verification.
         """
         with self._lock:
+            self._check_open()
             if self._cli_finalized:
                 return
             was_done = self._done
@@ -1298,6 +1318,7 @@ class Session:
         (``unsettled_write``), whatever the verifier would say, and the verifier doesn't run.
 
         Raises:
+            DeepGymError: If the session is closed.
             VerifierError: If, before it read the agent's output, the verifier timed out or
                 its output is not valid protocol JSON or isn't backed by its exit code; or its
                 code couldn't be uploaded. After, any of these is the agent's judged 0
@@ -1305,57 +1326,76 @@ class Session:
             TimeoutError: If the verifier timed out and the provider returned nothing.
         """
         with self._lock:
-            if self._failed_result is not None:
-                return self._failed_result
-            if not self._env.final_verifier_code:
-                return RunResult(
-                    score=0.0,
-                    passed=False,
-                    output='No final verifier provided',
-                    stderr='',
-                    exit_code=0,
-                    execution_time_ms=0.0,
-                    sandbox_id=self.sandbox_id,
-                    error_type='no_verifier',
-                )
-            if unsettled := self._settle():
-                return _unsettled_result(unsettled, self._unsettled, self.sandbox_id)
-            start = time.perf_counter()
-            acted = bool(self._trajectory.steps)
-            try:
-                code = self._env.final_verifier_code
-                (exit_code, stdout, stderr), consulted = self._verify(code, acted=acted)
-            except SandboxDiedError as exc:
-                if not acted:
-                    return error_result(exc, self.sandbox_id)
-                return failure_result(exc, self.sandbox_id)
-            except VerifierUploadError as exc:
-                if not acted:
-                    raise VerifierError(str(exc)) from exc
-                return failure_result(exc, self.sandbox_id)
-            except Exception as exc:
-                if acted and self._ran_out_the_clock(exc):
-                    return failure_result(exc, self.sandbox_id, exhausted=True)
+            return self._stamped(self._score())
+
+    def _score(self) -> RunResult:
+        """:meth:`score`, under its lock."""
+        if self._failed_result is not None:  # fixed already: no sandbox needed
+            return self._failed_result
+        self._check_open()
+        if not self._env.final_verifier_code:
+            return RunResult(
+                score=0.0,
+                passed=False,
+                output='No final verifier provided',
+                stderr='',
+                exit_code=0,
+                execution_time_ms=0.0,
+                sandbox_id=self.sandbox_id,
+                error_type='no_verifier',
+            )
+        if unsettled := self._settle():
+            return _unsettled_result(unsettled, self._unsettled, self.sandbox_id)
+        start = time.perf_counter()
+        acted = bool(self._trajectory.steps)
+        try:
+            code = self._env.final_verifier_code
+            (exit_code, stdout, stderr), consulted = self._verify(code, acted=acted)
+        except SandboxDiedError as exc:
+            if not acted:
+                return error_result(exc, self.sandbox_id)
+            return failure_result(exc, self.sandbox_id)
+        except VerifierUploadError as exc:
+            if not acted:
+                raise VerifierError(str(exc)) from exc
+            return failure_result(exc, self.sandbox_id)
+        except Exception as exc:
+            if acted and self._ran_out_the_clock(exc):
+                return failure_result(exc, self.sandbox_id, exhausted=True)
+            raise
+        stderr = stderr.strip()
+        elapsed_ms = (time.perf_counter() - start) * 1000
+        try:
+            verdict = parse_verifier_output(stdout, f'exit_code={exit_code} stderr: {stderr!r}')
+            result = build_run_result(
+                verdict, elapsed_ms, self.sandbox_id, stderr=stderr, exit_code=exit_code
+            )
+        except VerifierError as exc:
+            if not consulted or _launch_failed(stdout):
                 raise
-            stderr = stderr.strip()
-            elapsed_ms = (time.perf_counter() - start) * 1000
-            try:
-                verdict = parse_verifier_output(stdout, f'exit_code={exit_code} stderr: {stderr!r}')
-                result = build_run_result(
-                    verdict, elapsed_ms, self.sandbox_id, stderr=stderr, exit_code=exit_code
-                )
-            except VerifierError as exc:
-                if not consulted or _launch_failed(stdout):
-                    raise
-                result = _failed_after_reading(exc, elapsed_ms, self.sandbox_id, stderr)
-            if consulted and not result.has_verdict and result.error_type != 'sandbox_error':
-                detail = VerifierError(f'{result.error_type}: {result.output}')
-                return _failed_after_reading(detail, elapsed_ms, self.sandbox_id, stderr)
-            return result
+            result = _failed_after_reading(exc, elapsed_ms, self.sandbox_id, stderr)
+        if consulted and not result.has_verdict and result.error_type != 'sandbox_error':
+            detail = VerifierError(f'{result.error_type}: {result.output}')
+            return _failed_after_reading(detail, elapsed_ms, self.sandbox_id, stderr)
+        return result
+
+    def _stamped(self, result: RunResult) -> RunResult:
+        """*result*, with how the agent's actions were isolated: a :class:`LocalBackend`
+        runs them as plain host processes (``none``), whatever its verifier isolates. A
+        sandbox provider's result keeps None: there they run as a separate user."""
+        if isinstance(self._backend, LocalBackend):
+            return result.model_copy(update={'isolation': 'none'})
+        return result
 
     def close(self) -> None:
-        """Release the backend, waiting for any in-flight step to finish."""
+        """Release the backend, waiting for any in-flight step to finish.
+
+        The session counts as closed from here on, even if the delete fails, so a call
+        queued behind this one is refused (see :meth:`_check_open`). Calling close() again
+        retries a failed delete.
+        """
         with self._lock:
+            self._closed = True
             self._backend.close()
 
     def __enter__(self) -> Session:
@@ -1372,6 +1412,16 @@ class Session:
             logger.warning(
                 'Could not delete sandbox %s; it may still exist', self.sandbox_id, exc_info=True
             )
+
+    def _check_open(self) -> None:
+        """Refuse to use the backend after close(): its sandbox may be deleted, and a step
+        failing there would be scored as the agent's doing when it was the host's.
+
+        Raises:
+            SessionClosedError: If the session is closed.
+        """
+        if self._closed:
+            raise SessionClosedError('Session is closed; open a new session')
 
     def _apply(
         self,
@@ -1754,7 +1804,7 @@ def _kill_group(group: int) -> None:
 def _checked(what: str, result: ExecResult) -> str:
     """Return *result*'s output, or raise if the command failed."""
     if result.exit_code != 0:
-        raise SandboxError(f'{what} exited {result.exit_code}: {result.output[-2000:]}')
+        raise SandboxError(f'{what} exited {result.exit_code}: {result.output}')
     return result.output
 
 

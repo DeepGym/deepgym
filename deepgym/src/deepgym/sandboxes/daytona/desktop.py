@@ -216,7 +216,7 @@ def _confirm(step: str, done: ExecResult) -> None:
         SandboxError: Otherwise.
     """
     if done.exit_code != 0 or done.output.split()[-1:] != [_LOCKED]:
-        raise SandboxError(f'Refusing the desktop, its {step} failed: {done.output[-500:]}')
+        raise SandboxError(f'Refusing the desktop, its {step} failed: {done.output}')
 
 
 class DaytonaDesktop:

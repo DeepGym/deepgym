@@ -100,6 +100,10 @@ class TimeoutError(DeepGymError):
     """Raise when execution exceeds the configured timeout."""
 
 
+class SessionClosedError(DeepGymError):
+    """Raise when a session is used after close(): its sandbox may already be deleted."""
+
+
 class ActionError(DeepGymError):
     """Raise when the environment rejects an agent's action (not allowed, unknown key)."""
 

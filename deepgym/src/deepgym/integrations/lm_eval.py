@@ -9,7 +9,10 @@ Usage::
     from deepgym import load_environment
     from deepgym.integrations.lm_eval import make_lm_eval_task
 
-    tasks = [make_lm_eval_task(load_environment(name), name) for name in ('coin_change', 'two_sum')]
+    tasks = [
+        make_lm_eval_task(load_environment(name), name, max_gen_toks=8192)
+        for name in ('coin_change', 'two_sum')
+    ]
     results = lm_eval.simple_evaluate(
         model='hf', model_args='pretrained=Qwen/Qwen2.5-0.5B-Instruct', tasks=tasks
     )
@@ -22,6 +25,10 @@ Task interface:
       one document is the environment's ``task`` string, given to the model as the prompt.
     - The last fenced code block of the generation (or all of it) is run by the
       environment's verifier, as in the TRL and verl adapters.
+    - Generation runs to the model's own maximum output, which the caller passes as
+      ``max_gen_toks`` (lm-eval needs a number, and its backends would default to 256).
+      lm-eval hands ``process_results`` the text alone, so a generation that reached it
+      can't be told from one that ended, and is scored as written.
     - Metrics: ``deepgym_score`` (0.0-1.0) and ``deepgym_pass`` (0 or 1), averaged over the
       documents that got a verdict, and ``deepgym_verdict``, the fraction that did. A
       sandbox or verifier failure counts in neither score nor pass, instead of as a wrong
@@ -49,7 +56,7 @@ logger = logging.getLogger(__name__)
 
 
 def make_lm_eval_task(
-    env: Environment, task_name: str, dg: DeepGym | None = None
+    env: Environment, task_name: str, dg: DeepGym | None = None, *, max_gen_toks: int
 ) -> ConfigurableTask:
     """Create an lm-eval task for a DeepGym environment.
 
@@ -60,6 +67,9 @@ def make_lm_eval_task(
         task_name: Short name used in lm-eval (e.g. ``'coin_change'``).
             The task is named ``deepgym_{task_name}``.
         dg: DeepGym client that runs the verifier (auto-created if None).
+        max_gen_toks: The model's maximum output, in tokens. lm-eval needs a number (its
+            backends would otherwise cut every answer at 256), and only the caller knows
+            the model's real maximum, so there is no default.
 
     Returns:
         A ConfigurableTask (lm-evaluation-harness 0.4.9+) with one document.
@@ -101,14 +111,15 @@ def make_lm_eval_task(
             'doc_to_text': 'task',
             'doc_to_target': '',
             'output_type': 'generate_until',
-            # No stop strings (code has blank lines): generation ends at EOS or max_gen_toks.
-            'generation_kwargs': {'until': [], 'max_gen_toks': 1024, 'do_sample': False},
+            # No stop strings (code has blank lines): generation ends at EOS or the model's
+            # own maximum, which the caller states.
+            'generation_kwargs': {'until': [], 'max_gen_toks': max_gen_toks, 'do_sample': False},
             'process_results': process_results,
             'metric_list': [
                 {'metric': 'deepgym_score', 'aggregation': 'nanmean', 'higher_is_better': True},
                 {'metric': 'deepgym_pass', 'aggregation': 'nanmean', 'higher_is_better': True},
                 {'metric': 'deepgym_verdict', 'aggregation': 'mean', 'higher_is_better': True},
             ],
-            'metadata': {'version': 2},
+            'metadata': {'version': 3},
         }
     )

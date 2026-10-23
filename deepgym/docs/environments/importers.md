@@ -185,7 +185,8 @@ deepgym harbor import ./my-tasks --register mine
 deepgym qa mine/hello-world --mode docker   # reference solve.sh passes, no-op fails
 ```
 
-Remote datasets are shallow-cloned once into `~/.deepgym/benchmarks/harbor/` and reused.
+Remote datasets are shallow-cloned once into `~/.deepgym/benchmarks/harbor/`, one folder
+per URL, and reused only while git confirms the folder is a clone of that URL.
 Each task is an environment whose model output is a bash script:
 
 ```python

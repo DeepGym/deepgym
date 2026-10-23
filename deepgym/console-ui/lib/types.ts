@@ -66,6 +66,13 @@ export interface RunSummary {
   finished_at: string | null;
 }
 
+export interface RunPage {
+  /** Newest first. */
+  runs: RunSummary[];
+  /** Matching runs across every page. */
+  total: number;
+}
+
 export interface RunDetail extends RunSummary {
   solution: string;
   error: string | null;
@@ -98,9 +105,21 @@ export interface EpisodeSummary {
   environment: string;
   steps: number;
   total_reward: number;
+  /** Null when recorded without a result, or its result has no verdict. */
   score: number | null;
   passed: boolean | null;
+  /** False when the verifier or sandbox failed instead of judging; null when recorded without a result. */
+  has_verdict: boolean | null;
+  /** Always set when there is no verdict. */
+  error_type: string | null;
   created_at: string;
+}
+
+export interface EpisodePage {
+  /** Newest first. */
+  episodes: EpisodeSummary[];
+  /** Matching episodes across every page. */
+  total: number;
 }
 
 export interface EpisodeDetail extends EpisodeSummary {

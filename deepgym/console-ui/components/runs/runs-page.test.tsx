@@ -1,6 +1,6 @@
-import { afterEach, beforeEach, expect, test } from 'bun:test';
+import { afterEach, beforeEach, expect, jest, test } from 'bun:test';
 import { act } from 'react';
-import type { EnvironmentSummary, RunSummary } from '@/lib/types';
+import type { EnvironmentSummary, RunPage, RunSummary } from '@/lib/types';
 import { cleanup, fakeFetch, render, settle } from '@/test/dom';
 import { navigation } from '@/test/navigation';
 
@@ -38,7 +38,9 @@ const created = (id: string, environment: string): RunSummary => ({
   finished_at: null,
 });
 
-/** The console API: POST /runs starts one run per environment; stats never arrive. */
+const page = (runs: RunSummary[], total: number) => Response.json({ runs, total } satisfies RunPage);
+
+/** The console API: POST /runs starts one run per environment; none are listed; stats never arrive. */
 function serve() {
   const posts: string[][] = [];
   fakeFetch((url, init) => {
@@ -50,7 +52,7 @@ function serve() {
     if (url.startsWith('/api/environments')) return Response.json([env('echo'), env('reverse')]);
     if (url === '/api/runs/config') return Response.json({ local_custom_code: false });
     if (url.startsWith('/api/runs/stats')) return undefined;
-    return Response.json([]);
+    return page([], 0);
   });
   return posts;
 }
@@ -98,4 +100,64 @@ test('cancel closes the dialog without starting anything', async () => {
   expect(posts).toEqual([]);
   expect(navigation.router.replace.mock.calls).toEqual([['/runs/', { scroll: false }]]);
   expect(navigation.router.push).not.toHaveBeenCalled();
+});
+
+const rowText = (text: string) =>
+  [...document.querySelectorAll('[role="row"]')].find((row) => row.textContent?.includes(text))?.textContent;
+
+test('every run is reachable: the pager fetches the next page, and a new filter starts at the first', async () => {
+  navigation.reset('/runs/');
+  const newest = Array.from({ length: 25 }, (_, index) => created(`r${index}`, `new${index}`));
+  const requested: string[] = [];
+  fakeFetch((url) => {
+    if (!url.startsWith('/api/runs?')) return undefined;
+    requested.push(url);
+    return url.includes('offset=25') ? page([created('r25', 'oldest')], 26) : page(newest, 26);
+  });
+  const { rerender } = await render(<RunsPage />);
+  await settle();
+  expect(rowText('oldest')).toBeUndefined();
+
+  await click(document.querySelector('button[aria-label="Go to page 2"]'));
+  expect(rowText('oldest')).toContain('oldest');
+  expect(rowText('new0')).toBeUndefined();
+
+  navigation.search = new URLSearchParams('status=failed');
+  await rerender(<RunsPage />);
+  await settle();
+
+  expect(requested).toEqual([
+    '/api/runs?offset=0&limit=25',
+    '/api/runs?offset=25&limit=25',
+    '/api/runs?status=failed&offset=0&limit=25',
+  ]);
+});
+
+test('a poll that leaves the page shown past the last one moves back to the last page', async () => {
+  jest.useFakeTimers();
+  navigation.reset('/runs/', 'status=running');
+  const running = Array.from({ length: 26 }, (_, index) => created(`r${index}`, `env${index}`));
+  const requested: string[] = [];
+  fakeFetch((url) => {
+    if (!url.startsWith('/api/runs?')) return undefined;
+    requested.push(url);
+    const offset = Number(new URL(url, 'http://localhost').searchParams.get('offset'));
+    return page(running.slice(offset, offset + 25), running.length);
+  });
+  await render(<RunsPage />);
+  await settle();
+  await click(document.querySelector('button[aria-label="Go to page 2"]'));
+  expect(rowText('env25')).toContain('env25');
+
+  // One run finishes, so the next poll of page 2 finds it empty, with one page left.
+  running.pop();
+  await act(async () => jest.advanceTimersByTime(2500));
+  await settle();
+
+  expect(requested.slice(-2)).toEqual([
+    '/api/runs?status=running&offset=25&limit=25',
+    '/api/runs?status=running&offset=0&limit=25',
+  ]);
+  expect(document.querySelectorAll('[role="row"]')).toHaveLength(26);
+  expect(rowText('env0')).toContain('env0');
 });

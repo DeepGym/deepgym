@@ -25,7 +25,7 @@ from deepgym.async_core import AsyncDeepGym
 from deepgym.core import DeepGym
 from deepgym.exceptions import SandboxError
 from deepgym.models import Environment, Job, JobStatus, RunResult
-from deepgym.session import Session
+from deepgym.session import LocalBackend, Session
 
 try:
     import tomllib
@@ -449,6 +449,7 @@ FILE_CHECK_ENV = {
         'print(json.dumps({"score": float(ok), "passed": ok}))\n'
     ),
 }
+BAD_SETUP_ENV = {**FILE_CHECK_ENV, 'setup_script': 'exit 1'}
 
 
 def _open_session(app_client: TestClient) -> str:
@@ -458,18 +459,19 @@ def _open_session(app_client: TestClient) -> str:
     return created.json()['session_id']
 
 
-def _fail_first_close(monkeypatch: pytest.MonkeyPatch, session: Session) -> None:
-    """Make *session*'s first close fail like a provider outage; later ones really close."""
-    real_close = session.close
-    calls: list[int] = []
+def _fail_deletes(monkeypatch: pytest.MonkeyPatch, failures: int = 1) -> None:
+    """Make the next *failures* sandbox deletes fail like a provider outage; later ones
+    really delete."""
+    real_close = LocalBackend.close
+    failed: list[LocalBackend] = []
 
-    def close() -> None:
-        calls.append(1)
-        if len(calls) == 1:
+    def close(backend: LocalBackend) -> None:
+        if len(failed) < failures:
+            failed.append(backend)
             raise SandboxError('Could not delete sandbox: provider unavailable')
-        real_close()
+        real_close(backend)
 
-    monkeypatch.setattr(session, 'close', close)
+    monkeypatch.setattr(LocalBackend, 'close', close)
 
 
 class TestSessions:
@@ -628,7 +630,7 @@ class TestSessions:
         """S2/H7: a failed delete keeps the session's id and slot; DELETE can be retried."""
         monkeypatch.setattr(routes, '_session_slots', threading.BoundedSemaphore(1))
         session_id = _open_session(client)
-        _fail_first_close(monkeypatch, routes._sessions[session_id])
+        _fail_deletes(monkeypatch)
 
         assert client.delete(f'/v1/sessions/{session_id}').status_code == 502
         assert client.post('/v1/sessions', json={'environment': FILE_CHECK_ENV}).status_code == 429
@@ -642,7 +644,7 @@ class TestSessions:
         """S1/S2: a close that fails during a sweep keeps its slot and is retried next sweep."""
         monkeypatch.setattr(routes, '_session_slots', threading.BoundedSemaphore(1))
         session_id = _open_session(client)
-        _fail_first_close(monkeypatch, routes._sessions[session_id])
+        _fail_deletes(monkeypatch)
         routes._last_used[session_id] -= routes._SESSION_IDLE_TTL_S + 1
 
         routes.sweep_sessions()
@@ -679,6 +681,67 @@ class TestSessions:
         assert client.delete(f'/v1/sessions/{session_id}').status_code == 404
         assert client.post('/v1/sessions', json={'environment': FILE_CHECK_ENV}).status_code == 201
         real_close()
+
+    @pytest.mark.parametrize(
+        ('route', 'body'),
+        [('step', {'action_type': 'bash', 'content': 'echo hello > out.txt'}), ('score', None)],
+    )
+    def test_a_request_that_loses_the_race_with_delete_is_refused(
+        self, client: TestClient, monkeypatch: pytest.MonkeyPatch, route: str, body: dict | None
+    ) -> None:
+        """A5: a request whose route looked the session up just before a DELETE closed it
+        never reaches the deleted sandbox, so the host's delete is not scored as the agent's
+        zero."""
+        session_id = _open_session(client)
+        session = routes._sessions[session_id]
+        real_get_session = routes._get_session
+
+        def get_then_delete(sid: str) -> Session:
+            found = real_get_session(sid)
+            routes.close_session(sid)  # the DELETE lands between the lookup and the request
+            return found
+
+        monkeypatch.setattr(routes, '_get_session', get_then_delete)
+
+        response = client.post(f'/v1/sessions/{session_id}/{route}', json=body)
+
+        assert response.status_code == 409
+        assert 'closed' in response.json()['detail']
+        assert not session.trajectory.steps and session.failed_result is None
+
+    def test_a_failed_start_whose_delete_fails_is_retried_by_the_sweep(
+        self, client: TestClient, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A6: a sandbox whose setup and first delete both fail keeps its slot until the
+        sweep deletes it, like a failed DELETE."""
+        monkeypatch.setattr(routes, '_session_slots', threading.BoundedSemaphore(1))
+        _fail_deletes(monkeypatch)
+
+        assert client.post('/v1/sessions', json={'environment': BAD_SETUP_ENV}).status_code == 502
+        assert client.post('/v1/sessions', json={'environment': FILE_CHECK_ENV}).status_code == 429
+
+        routes.sweep_sessions()
+
+        assert not routes._closing
+        assert client.post('/v1/sessions', json={'environment': FILE_CHECK_ENV}).status_code == 201
+
+    def test_a_failed_start_whose_delete_never_succeeds_is_reported_leaked(
+        self, client: TestClient, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A6: a sandbox whose setup failed and that can't be deleted is given up on like any
+        other: reported as leaked, with its slot freed."""
+        monkeypatch.setattr(routes, '_session_slots', threading.BoundedSemaphore(1))
+        monkeypatch.setattr(routes, '_MAX_CLOSE_ATTEMPTS', 2)
+        _fail_deletes(monkeypatch, failures=2)
+
+        assert client.post('/v1/sessions', json={'environment': BAD_SETUP_ENV}).status_code == 502
+        [session] = routes._closing.values()
+        routes.sweep_sessions()  # the second failed attempt: given up
+
+        assert list(routes._leaked_sandboxes) == [session.sandbox_id]
+        assert client.get('/health').json()['leaked_sandboxes'] == 1
+        assert client.post('/v1/sessions', json={'environment': FILE_CHECK_ENV}).status_code == 201
+        session.close()
 
     def test_bad_variant_is_404(self, client: TestClient) -> None:
         resp = client.post('/v1/sessions', json={'environment': 'todo_list', 'variant': 99})

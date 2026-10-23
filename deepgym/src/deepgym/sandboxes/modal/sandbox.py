@@ -89,7 +89,7 @@ class ModalSandbox:
                 raise stopped_error(message, self._expires_at) from exc
             raise
         if exit_code != 0 and self._stopped():
-            message = f'Modal sandbox {self.id} was terminated: {output[-500:]}'
+            message = f'Modal sandbox {self.id} was terminated: {output}'
             raise stopped_error(message, self._expires_at, output)
         # Modal kills an exec at its timeout and reports only a failed exit.
         if timeout and exit_code != 0 and time.monotonic() - start >= timeout:

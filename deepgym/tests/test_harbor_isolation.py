@@ -222,6 +222,15 @@ def test_grader_restores_then_uploads_tests_then_reads_the_reward_separately() -
     assert box.deleted
 
 
+def test_grader_keeps_every_line_the_tests_print() -> None:
+    output = ''.join(f'test {n} passed\n' for n in range(5000))
+    box = _box(_PASS, (_RUN_TESTS, output))
+
+    result = grade(box, HarborTask.from_dir(HELLO), _WORKSPACE, '/app')
+
+    assert result.stderr == output
+
+
 def test_grader_without_a_reward_is_a_verifier_error_and_still_cleans_up() -> None:
     box = _box(('for name in reward.json', 'none'))
     with pytest.raises(VerifierError, match='no reward'):

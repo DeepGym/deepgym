@@ -4,6 +4,7 @@ Sandbox isolation is in test_harbor_isolation.py, export in test_harbor_export.p
 real-container runs in test_harbor_live.py.
 """
 
+import re
 import shutil
 import subprocess
 import sys
@@ -44,6 +45,17 @@ def _task_copy(tmp_path: Path, source: Path = HELLO, name: str | None = None) ->
     target = tmp_path / (name or source.name)
     shutil.copytree(source, target)
     return target
+
+
+def _git_repo(path: Path, *tasks: Path) -> Path:
+    """Commit a copy of each of *tasks* to a new git repository at *path*."""
+    for task in tasks:
+        shutil.copytree(task, path / task.name)
+    git = ['git', '-C', str(path), '-c', 'user.name=t', '-c', 'user.email=t@example.com']
+    subprocess.run(['git', 'init', '-q', str(path)], check=True)
+    subprocess.run([*git, 'add', '.'], check=True)
+    subprocess.run([*git, 'commit', '-q', '-m', 'tasks'], check=True)
+    return path
 
 
 # ---------------------------------------------------------------------------
@@ -256,12 +268,7 @@ def test_dataset_root_rejects_unknown_sources(source: str) -> None:
 def test_dataset_root_clones_a_git_repository_once(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    repo = tmp_path / 'repo'
-    shutil.copytree(TASKS, repo)
-    git = ['git', '-C', str(repo), '-c', 'user.name=t', '-c', 'user.email=t@example.com']
-    subprocess.run(['git', 'init', '-q', str(repo)], check=True)
-    subprocess.run([*git, 'add', '.'], check=True)
-    subprocess.run([*git, 'commit', '-q', '-m', 'tasks'], check=True)
+    repo = _git_repo(tmp_path / 'repo', HELLO, BUILT)
     monkeypatch.setattr('deepgym.harbor.loader._cache_dir', lambda: tmp_path / 'cache')
 
     root = dataset_root(f'file://{repo}')
@@ -269,6 +276,41 @@ def test_dataset_root_clones_a_git_repository_once(
 
     assert root.parent == tmp_path / 'cache'
     assert [task.name for task in load_tasks(f'file://{repo}')] == ['hello', 'hello-built']
+
+
+def test_dataset_root_gives_urls_with_one_readable_name_their_own_clones(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Both read <tmp>_team_one_task once separators become underscores.
+    one = _git_repo(tmp_path / 'team_one' / 'task', HELLO)
+    other = _git_repo(tmp_path / 'team' / 'one_task', BUILT)
+    monkeypatch.setattr('deepgym.harbor.loader._cache_dir', lambda: tmp_path / 'cache')
+
+    assert [task.name for task in load_tasks(f'file://{one}')] == ['hello']
+    assert [task.name for task in load_tasks(f'file://{other}')] == ['hello-built']
+    assert dataset_root(f'file://{one}') != dataset_root(f'file://{other}')
+
+
+def test_dataset_root_never_reuses_a_folder_git_does_not_tie_to_the_url(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    url = f'file://{_git_repo(tmp_path / "repo", HELLO)}'
+    cache = tmp_path / 'cache'
+    monkeypatch.setattr('deepgym.harbor.loader._cache_dir', lambda: cache)
+    legacy = cache / re.sub(r'[^\w.-]+', '_', url.split('://')[-1])  # the old, unkeyed name
+    shutil.copytree(BUILT, legacy / BUILT.name)
+
+    root = dataset_root(url)
+    assert root != legacy
+    assert [task.name for task in load_tasks(url)] == ['hello']
+
+    set_url = ['git', '-C', str(root), 'remote', 'set-url', 'origin', 'file:///other']
+    subprocess.run(set_url, check=True)
+    with pytest.raises(DeepGymError, match='is not a clone of'):
+        dataset_root(url)
+    shutil.rmtree(root / '.git')
+    with pytest.raises(DeepGymError, match='is not a clone of'):
+        dataset_root(url)
 
 
 # ---------------------------------------------------------------------------

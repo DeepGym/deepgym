@@ -566,7 +566,7 @@ def _preflight() -> None:
         start_new_session=True,
     )
     if probe.returncode != 0:
-        error = probe.stderr.decode('utf-8', 'replace')[-500:]
+        error = probe.stderr.decode('utf-8', 'replace')
         raise OSError(f'the isolation launcher exited {probe.returncode}: {error}')
     _preflight_passed = True
 
@@ -889,7 +889,7 @@ def _apply_hunks(name: str, text: str, lines: list[str], index: int) -> tuple[st
                 new_left -= 1
                 continue
             if tag not in ' -':
-                raise ValueError(f'{name}: unexpected line in hunk: {line[:80]!r}')
+                raise ValueError(f'{name}: unexpected line in hunk: {line!r}')
             if pos >= len(source) or source[pos].rstrip('\r\n') != body:
                 raise ValueError(f'{name}: hunk does not match line {pos + 1}')
             if tag == ' ':
@@ -900,7 +900,7 @@ def _apply_hunks(name: str, text: str, lines: list[str], index: int) -> tuple[st
         if old_left < 0 or new_left < 0:
             raise ValueError(f'{name}: hunk line counts do not match its header')
     if index < len(lines) and lines[index].startswith('@@ -'):
-        raise ValueError(f'{name}: malformed hunk header {lines[index][:80]!r}')
+        raise ValueError(f'{name}: malformed hunk header {lines[index]!r}')
     if index == first:
         raise ValueError(f'{name}: no hunk follows the file header')
     return ''.join(output + source[pos:]), index
@@ -1293,7 +1293,7 @@ def _serve(solution_path: str, root: str | None = None) -> None:
                 'id': message.get('id'),
                 'ok': False,
                 'type': type(exc).__name__,
-                'message': str(exc)[:2000],
+                'message': str(exc),
             }
         replies.write(json.dumps(reply) + '\n')
         replies.flush()

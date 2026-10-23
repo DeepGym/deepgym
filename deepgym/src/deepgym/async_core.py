@@ -34,6 +34,7 @@ from deepgym.sandbox import (
     _validate_env_vars,
     build_run_result,
     error_result,
+    local_run_result,
     parse_wrapped_output,
     wrap_stderr,
 )
@@ -341,13 +342,7 @@ class AsyncDeepGym:
         assert self._local_executor is not None
         start = time.perf_counter()
         exec_result = await self._local_executor.run(JudgeJob.for_environment(env, model_output))
-        return build_run_result(
-            exec_result.verifier_result,
-            (time.perf_counter() - start) * 1000.0,
-            'local',
-            stderr=exec_result.stderr,
-            exit_code=exec_result.exit_code,
-        )
+        return local_run_result(exec_result, (time.perf_counter() - start) * 1000.0)
 
     def _sync_client(self) -> DeepGym:
         """A sync client on the same backend, for runners that are sync-only."""
@@ -401,7 +396,7 @@ class AsyncDeepGym:
         try:
             setup = await sandbox.process.exec(f'bash -c {shlex.quote(SANDBOX_SETUP)}', timeout=60)
             if setup.exit_code != 0:
-                raise SandboxError(f'Judge setup failed: {setup.result[-2000:]}')
+                raise SandboxError(f'Judge setup failed: {setup.result}')
             for content, path in sandbox_uploads(job):
                 await sandbox.fs.upload_file(content, path)
         except SandboxError:

@@ -9,13 +9,40 @@ source of truth.
 from __future__ import annotations
 
 import os
-from collections.abc import Sequence
-from typing import Any
+from collections.abc import Callable, Sequence
+from pathlib import Path
+from typing import Any, Literal
 
 import httpx
+from pydantic import BaseModel, ConfigDict
 
 _DEFAULT_BASE_URL = 'https://api.z.ai/api/paas/v4'
 _DEFAULT_MODEL = 'glm-5.1'
+# Reaching the endpoint, not generating: a reply itself has no time limit by default.
+_CONNECT_TIMEOUT_S = 30.0
+
+
+class Completion(BaseModel):
+    """The assistant's reply to one chat-completions request, and why generation stopped."""
+
+    model_config = ConfigDict(frozen=True)
+
+    text: str
+    """The reply's content; empty if the endpoint returned none."""
+    finish_reason: str | None
+    """The endpoint's ``finish_reason``: ``'stop'`` at a natural end, ``'length'`` when an
+    output limit cut the reply off, ``'content_filter'`` when the endpoint withheld some of
+    it. None if the endpoint gave none."""
+
+    @property
+    def whole(self) -> bool | None:
+        """Whether this is the model's whole answer: True only for a natural end
+        (``'stop'``), False when a limit or filter cut it (``'length'``,
+        ``'content_filter'``), None when unknown (no reason, or one this client doesn't
+        know). Only a whole answer may be scored as the model's."""
+        if self.finish_reason == 'stop':
+            return True
+        return False if self.finish_reason in ('length', 'content_filter') else None
 
 
 class ZaiChatClient:
@@ -27,15 +54,24 @@ class ZaiChatClient:
         *,
         base_url: str = _DEFAULT_BASE_URL,
         model: str = _DEFAULT_MODEL,
-        timeout: float = 120.0,
+        timeout: float | None = None,
         transport: httpx.BaseTransport | None = None,
     ) -> None:
+        """Args:
+        api_key: The endpoint's API key.
+        base_url: The OpenAI-compatible endpoint.
+        model: The model to ask.
+        timeout: Seconds to wait for a reply; None (the default) waits as long as the
+            model generates, since a full-length reply can take many minutes. Only
+            connecting is bounded then (:data:`_CONNECT_TIMEOUT_S`).
+        transport: An httpx transport, for tests.
+        """
         if not api_key:
             raise ValueError('api_key must be non-empty')
         self._api_key = api_key
         self.base_url = base_url.rstrip('/')
         self.model = model
-        self.timeout = timeout
+        self.timeout = httpx.Timeout(timeout, connect=_CONNECT_TIMEOUT_S)
         self._transport = transport
 
     @classmethod
@@ -61,21 +97,24 @@ class ZaiChatClient:
         self,
         messages: Sequence[dict[str, str]],
         *,
-        max_tokens: int = 4096,
+        max_tokens: int | None = None,
         temperature: float = 0.2,
         thinking: str | None = 'enabled',
-    ) -> str:
-        """Return the assistant message content for a chat-completions request.
+    ) -> Completion:
+        """Return the assistant's reply to a chat-completions request, with its finish reason.
 
+        No output limit is sent unless *max_tokens* is given, so the model may answer up to
+        its own maximum; check ``Completion.whole`` before scoring the reply as the model's.
         Pass ``thinking=None`` to omit the Z.ai-specific field for other
         OpenAI-compatible endpoints.
         """
         payload: dict[str, Any] = {
             'model': self.model,
             'messages': list(messages),
-            'max_tokens': max_tokens,
             'temperature': temperature,
         }
+        if max_tokens is not None:
+            payload['max_tokens'] = max_tokens
         if thinking is not None:
             payload['thinking'] = {'type': thinking}
         headers = {
@@ -90,17 +129,17 @@ class ZaiChatClient:
             )
             response.raise_for_status()
             data = response.json()
-        return _extract_message_content(data)
+        return _completion(data)
 
     def complete_prompt(
         self,
         prompt: str,
         *,
         system: str | None = None,
-        max_tokens: int = 4096,
+        max_tokens: int | None = None,
         temperature: float = 0.2,
         thinking: str | None = 'enabled',
-    ) -> str:
+    ) -> Completion:
         """Convenience wrapper for a single user prompt."""
         messages: list[dict[str, str]] = []
         if system:
@@ -114,12 +153,39 @@ class ZaiChatClient:
         )
 
 
-def _extract_message_content(data: dict[str, Any]) -> str:
-    """Extract assistant content from an OpenAI-compatible response payload."""
+def _completion(data: dict[str, Any]) -> Completion:
+    """Read the assistant's reply and finish reason from an OpenAI-compatible response."""
     try:
-        content = data['choices'][0]['message']['content']
+        choice = data['choices'][0]
+        content = choice['message']['content']
     except (KeyError, IndexError, TypeError) as exc:
         raise ValueError(f'Unexpected Z.ai response shape: {data!r}') from exc
-    if content is None:
-        return ''
-    return str(content)
+    text = '' if content is None else str(content)
+    return Completion(text=text, finish_reason=choice.get('finish_reason'))
+
+
+def cached_completion(
+    cache_path: Path, complete: Callable[[], Completion], *, refresh: bool = False
+) -> tuple[Completion, Literal['cache', 'model']]:
+    """Return a completion from the cache at *cache_path*, else *complete*'s, cached with its
+    finish reason in ``<cache_path>.completion.json``.
+
+    A legacy cache (the answer text alone, at *cache_path* itself) is read as opaque text,
+    never parsed, so an answer that looks like a cache record can't pass for one; it comes
+    back with ``finish_reason`` None: unknown, not known to be whole.
+
+    Returns:
+        The completion, and where it came from.
+    """
+    record = cache_path.with_name(cache_path.name + '.completion.json')
+    if not refresh:
+        if record.exists():
+            return Completion.model_validate_json(record.read_text(encoding='utf-8')), 'cache'
+        if cache_path.exists():
+            return Completion(
+                text=cache_path.read_text(encoding='utf-8'), finish_reason=None
+            ), 'cache'
+    completion = complete()
+    record.parent.mkdir(parents=True, exist_ok=True)
+    record.write_text(completion.model_dump_json(), encoding='utf-8')
+    return completion, 'model'

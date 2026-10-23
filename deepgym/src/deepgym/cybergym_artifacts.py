@@ -392,7 +392,7 @@ def file_header(chunk):
         elif line.startswith('+++ '):
             new_path = strip_prefix(line[4:].split('\t')[0])
         elif line.startswith(('+', '-', ' ')):
-            raise ValueError(f'changed line outside a hunk: {line.strip()[:80]}')
+            raise ValueError(f'changed line outside a hunk: {line.strip()}')
     return old_path, new_path, len(chunk)
 
 

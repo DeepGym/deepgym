@@ -1408,3 +1408,27 @@ def test_a_python_alias_outside_the_installation_goes_by_its_target(
     monkeypatch.setattr(sys, 'executable', str(alias))
 
     assert deepgym.judge.sandbox_python() == os.path.realpath(sys.executable)
+
+
+@needs_sandbox
+def test_a_local_result_records_how_its_solution_was_isolated(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """A stray DEEPGYM_ALLOW_UNSANDBOXED can't run a job unsandboxed without a trace: every
+    result says so, and the process warns once."""
+    import logging
+
+    import deepgym.judge
+
+    env = load_environment('coin_change')
+    assert DeepGym(mode='local').run(env, WRONG).isolation == local_isolation_kind()
+
+    for module in ('deepgym.judge', 'deepgym.sandbox'):
+        monkeypatch.setattr(f'{module}.local_isolation_kind', lambda: 'none')
+    monkeypatch.setenv(deepgym.judge.ALLOW_UNSANDBOXED_ENV, '1')
+    deepgym.judge._warn_unsandboxed.cache_clear()
+    with caplog.at_level(logging.WARNING, logger='deepgym.judge'):
+        results = [DeepGym(mode='local').run(env, WRONG) for _ in range(2)]
+
+    assert [result.isolation for result in results] == ['none', 'none']
+    assert sum('run unsandboxed' in record.message for record in caplog.records) == 1

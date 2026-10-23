@@ -89,6 +89,14 @@ class RunSummary(BaseModel):
     finished_at: str | None = None
 
 
+class RunPage(BaseModel):
+    """One page of the runs table, newest first."""
+
+    runs: list[RunSummary]
+    total: int
+    """Matching runs across every page."""
+
+
 class RunDetail(RunSummary):
     """A run with its solution, error and full verifier result."""
 
@@ -172,8 +180,25 @@ class EpisodeSummary(BaseModel):
     steps: int
     total_reward: float
     score: float | None = None
+    """None when the episode was recorded without a result, or its result has no verdict."""
+
     passed: bool | None = None
+    has_verdict: bool | None = None
+    """Whether the verifier judged the episode (``RunResult.has_verdict``); None when it was
+    recorded without a result."""
+
+    error_type: str | None = None
+    """The result's error type; always set when it has no verdict."""
+
     created_at: str
+
+
+class EpisodePage(BaseModel):
+    """One page of the episodes table, newest first."""
+
+    episodes: list[EpisodeSummary]
+    total: int
+    """Matching episodes across every page."""
 
 
 class Frame(BaseModel):

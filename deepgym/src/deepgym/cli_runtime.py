@@ -214,7 +214,7 @@ def execute_cli(
 def _checked(backend: SandboxBackend, command: str) -> str:
     result = backend.exec_trusted(command, 30)
     if result.exit_code:
-        raise SandboxError(f'CLI supervisor operation failed: {result.output[-300:]}')
+        raise SandboxError(f'CLI supervisor operation failed: {result.output}')
     return result.output
 
 

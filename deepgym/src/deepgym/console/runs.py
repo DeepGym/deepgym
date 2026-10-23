@@ -12,6 +12,7 @@ from deepgym.console.schemas import (
     RunConfig,
     RunCreate,
     RunDetail,
+    RunPage,
     RunSpec,
     RunStats,
     RunStatus,
@@ -85,12 +86,15 @@ def run_filters(
 RunFiltersDep = Annotated[dict[str, str | None], Depends(run_filters)]
 
 
-@router.get('', response_model=list[RunSummary])
+@router.get('', response_model=RunPage)
 def list_runs(
-    runs: RunStoreDep, filters: RunFiltersDep, limit: int = Query(200, ge=1, le=1000)
-) -> list[RunSummary]:
-    """List the newest runs matching every given filter."""
-    return runs.list(filters, limit)
+    runs: RunStoreDep,
+    filters: RunFiltersDep,
+    offset: int = Query(0, ge=0),
+    limit: int | None = Query(None, ge=1),
+) -> RunPage:
+    """List the newest matching runs a page at a time (every one without *limit*) and the total."""
+    return runs.page(filters, offset, limit)
 
 
 @router.get('/stats', response_model=RunStats)

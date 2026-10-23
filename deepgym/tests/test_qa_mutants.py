@@ -152,7 +152,7 @@ def test_a_weak_verifier_fails_the_mutation_check(tmp_path: Path, local_dg: Deep
 
     assert check.status == 'fail'
     assert 'survived: ' in check.details
-    assert 'line 6: dropped `if not values:`' in check.details  # [1, 2, 3] never tests []
+    assert 'line 6: dropped `if not values:\n    return 0`' in check.details  # never tests []
 
 
 @needs_sandbox

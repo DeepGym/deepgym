@@ -7,10 +7,11 @@ import { Card } from '@/components/ui/card';
 import { DataTable } from '@/components/ui/data-table';
 import { EmptyState } from '@/components/ui/empty-state';
 import { PageHeader } from '@/components/ui/page-header';
-import { PassBadge } from '@/components/ui/status-badge';
+import { VerdictBadge } from '@/components/ui/status-badge';
 import { useApi } from '@/lib/api';
 import { formatScore, timeAgo } from '@/lib/format';
-import type { EpisodeDetail, EpisodeSummary } from '@/lib/types';
+import type { EpisodeDetail, EpisodePage, EpisodeSummary } from '@/lib/types';
+import { usePagedApi } from '@/lib/use-paged-api';
 import { useQueryParam } from '@/lib/use-query-param';
 import { EpisodeReplay } from './episode-replay';
 
@@ -38,16 +39,15 @@ const columns: ColumnDef<EpisodeSummary>[] = [
   { id: 'steps', accessorKey: 'steps', header: 'Steps', meta: { align: 'end', className: 'font-mono' } },
   {
     id: 'score',
-    accessorFn: (episode) => episode.score ?? -1,
+    accessorKey: 'score',
     header: 'Score',
     cell: ({ row }) => formatScore(row.original.score),
     meta: { align: 'end', className: 'font-mono' },
   },
   {
-    id: 'passed',
+    id: 'verdict',
     header: '',
-    enableSorting: false,
-    cell: ({ row }) => <PassBadge passed={row.original.passed} />,
+    cell: ({ row }) => <VerdictBadge verdict={row.original} />,
   },
 ];
 
@@ -63,11 +63,10 @@ function Replay({ id }: { id: string }) {
   return <EpisodeReplay key={id} episode={data} />;
 }
 
-/** Recorded episodes on the left; the selected one (?id=) replays on the right. */
+/** Recorded episodes on the left, a server page at a time; the selected one (?id=) replays on the right. */
 export function EpisodesPage() {
-  const { data, error } = useApi<EpisodeSummary[]>('/episodes', 10_000);
+  const { data, error, paging } = usePagedApi<EpisodePage>('/episodes', 10_000);
   const [selected, setSelected] = useQueryParam('id');
-  const episodes = data ?? [];
 
   return (
     <>
@@ -75,7 +74,7 @@ export function EpisodesPage() {
         title="Episodes"
         description="Recorded multi-turn and computer-use trajectories, replayed step by step."
       />
-      {data && episodes.length === 0 ? (
+      {data?.total === 0 ? (
         <Card>
           <EmptyState icon={RiFilmLine} title="No episodes recorded yet">
             Store a finished episode from your agent loop and it shows up here:
@@ -87,10 +86,10 @@ export function EpisodesPage() {
           <Card title="Recorded" flush className="self-start">
             <DataTable
               label="Episodes"
-              data={episodes}
+              data={data?.episodes ?? []}
               columns={columns}
               onRowAction={(episode) => setSelected(episode.id)}
-              pageSize={25}
+              serverPaging={paging}
               empty={
                 <EmptyState icon={RiFilmLine} title={error ? 'Could not load episodes' : 'Loading episodes'}>
                   {error}

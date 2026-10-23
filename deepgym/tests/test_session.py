@@ -5,6 +5,7 @@ import errno
 import os
 import threading
 import time
+from collections.abc import Callable
 from pathlib import Path
 
 import pytest
@@ -12,6 +13,7 @@ from pydantic import ValidationError
 
 from deepgym import AsyncDeepGym, ComputerUseEnvironment, DeepGym
 from deepgym import session as session_module
+from deepgym.cli_runtime import CliRequest
 from deepgym.exceptions import (
     ActionError,
     DeepGymError,
@@ -32,6 +34,14 @@ FILE_VERIFIER = (
     'import json, pathlib\n'
     'ok = pathlib.Path("notes/out.txt").read_text() == "hello"\n'
     'print(json.dumps({"score": float(ok), "passed": ok}))\n'
+)
+
+CLI_REQUEST = CliRequest(
+    argv=('claude', '-p', 'task'),
+    env={'ANTHROPIC_API_KEY': 'test-key'},
+    provider='anthropic',
+    timeout=5,
+    allow_model_credentials=True,
 )
 
 
@@ -907,6 +917,31 @@ class TestSessionGuards:
             with pytest.raises(DeepGymError, match='already started'):
                 session.start()
 
+    @pytest.mark.parametrize(
+        'operation',
+        [
+            lambda session: session.start(),
+            lambda session: session.step(Action(action_type='bash', content='echo hi')),
+            lambda session: session.run_cli(CLI_REQUEST, lambda event: None),
+            lambda session: session.finalize_cli(),
+            lambda session: session.score(),
+        ],
+        ids=['start', 'step', 'run_cli', 'finalize_cli', 'score'],
+    )
+    def test_a_closed_session_refuses_to_touch_its_sandbox(
+        self, dg: DeepGym, operation: Callable[[Session], object]
+    ) -> None:
+        """A5: a call queued behind close() would hit a sandbox that may be deleted and be
+        scored as the agent's failure; it is refused instead, and nothing is recorded."""
+        session = dg.session(MultiTurnEnvironment(task='t', final_verifier_code=PASS_VERIFIER))
+        session.start()
+        session.close()
+
+        with pytest.raises(DeepGymError, match='closed'):
+            operation(session)
+
+        assert not session.trajectory.steps and session.failed_result is None
+
     def test_desktop_needs_daytona(self, dg: DeepGym) -> None:
         with dg.session(ComputerUseEnvironment(task='t')) as session:
             with pytest.raises(DeepGymError, match='Daytona'):
@@ -967,3 +1002,17 @@ class TestCloseOnExit:
 
         with pytest.raises(SandboxError, match='Could not delete'):
             session.close()
+
+
+def test_a_local_session_result_records_its_unsandboxed_actions(dg: DeepGym) -> None:
+    """A local session runs the agent's actions as plain host processes: its results say
+    so, fixed ones too, whatever its verifier isolates."""
+    env = MultiTurnEnvironment(task='t', max_steps=1, final_verifier_code=PASS_VERIFIER)
+
+    _, graded = dg.run_episode(env, lambda obs: Action(action_type='done'))
+    with dg.session(env) as session:
+        session.start()
+        session.abandon('provider_error', 'lost')
+        fixed = session.score()
+
+    assert graded.isolation == fixed.isolation == 'none'

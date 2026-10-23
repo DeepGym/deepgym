@@ -25,7 +25,13 @@ from deepgym.models import (
     Trajectory,
     VerdictTotals,
 )
-from deepgym.sandbox import LocalExecutor, build_run_result, error_result, run_judge_in_sandbox
+from deepgym.sandbox import (
+    LocalExecutor,
+    build_run_result,
+    error_result,
+    local_run_result,
+    run_judge_in_sandbox,
+)
 from deepgym.sandboxes import PROVIDERS, Provider, Sandbox, check_provider, open_sandbox
 from deepgym.sandboxes.daytona import DaytonaDesktop, DaytonaSandbox
 from deepgym.session import LocalBackend, SandboxBackend, Session, run_episode
@@ -162,13 +168,7 @@ class DeepGym:
         assert self._local_executor is not None
         start = time.perf_counter()
         exec_result = self._local_executor.run(JudgeJob.for_environment(env, model_output))
-        return build_run_result(
-            exec_result.verifier_result,
-            (time.perf_counter() - start) * 1000,
-            'local',
-            stderr=exec_result.stderr,
-            exit_code=exec_result.exit_code,
-        )
+        return local_run_result(exec_result, (time.perf_counter() - start) * 1000)
 
     def _run_in(self, sandbox: Sandbox, env: Environment, model_output: str) -> RunResult:
         """Execute in a fresh *sandbox*, deleted afterwards."""

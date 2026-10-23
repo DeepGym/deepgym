@@ -43,7 +43,7 @@ def test_cross_origin_writes_are_refused(tmp_path: Path) -> None:
         ).status_code
         == 403
     )
-    assert client.get('/api/runs').json() == []
+    assert client.get('/api/runs').json() == {'runs': [], 'total': 0}
 
 
 def test_same_origin_writes_pass(tmp_path: Path) -> None:

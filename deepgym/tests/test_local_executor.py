@@ -299,7 +299,7 @@ async def test_no_solution_process_outlives_its_run(tmp_path: Path, call: str, e
     )
     if ending == 'cancel':
         run = asyncio.ensure_future(AsyncLocalExecutor().run(job))
-        while not mark.exists():
+        while not (mark.exists() and mark.read_text()):  # created before it is written
             await asyncio.sleep(0.05)
         run.cancel()
         with pytest.raises(asyncio.CancelledError):
@@ -308,6 +308,7 @@ async def test_no_solution_process_outlives_its_run(tmp_path: Path, call: str, e
         with contextlib.suppress(DeepGymError):  # a crash or timeout has no verdict
             await asyncio.to_thread(LocalExecutor().run, job)
     solution_path = mark.read_text()
+    assert solution_path  # an empty one would match, and kill, every process
     try:
         deadline = time.monotonic() + 5
         while _processes_running(solution_path) and time.monotonic() < deadline:

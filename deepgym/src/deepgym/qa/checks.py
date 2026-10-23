@@ -55,9 +55,9 @@ def stub_solution(reference: str) -> str:
 
 
 def _summary(result: RunResult) -> str:
-    """Score plus the first line of the verifier's details, for a check's details."""
-    first_line = (result.output or result.stderr).strip().split('\n', 1)[0][:120]
-    return f'score {result.score:.2f}' + (f' ({first_line})' if first_line else '')
+    """Score plus the verifier's details, whole, for a check's details."""
+    details = (result.output or result.stderr).strip()
+    return f'score {result.score:.2f}' + (f' ({details})' if details else '')
 
 
 def earns_nothing(name: str, result: RunResult) -> QACheck:
@@ -216,7 +216,7 @@ def hack_resistant(env: Environment, dg: DeepGym, strategies: list[str] | None =
         )
         return QACheck(name='hack_resistant', status='skip', details=details)
     if not_run:
-        reasons = ', '.join(f'{r.strategy} ({r.details[:120]})' for r in not_run)
+        reasons = ', '.join(f'{r.strategy} ({r.details})' for r in not_run)
         details = f'{len(not_run)} of {report.attacks_run} attacks got no verdict: {reasons}'
         return QACheck(name='hack_resistant', status='inconclusive', details=details)
     top = max(result.score for result in report.results)

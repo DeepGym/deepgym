@@ -219,5 +219,5 @@ def api_error(exc: Exception) -> str:
     error = body.get('error', body) if isinstance(body, dict) else None
     detail = error.get('message') if isinstance(error, dict) else None
     status_text = f' {status}' if status else ''
-    detail_text = f': {str(detail)[:300]}' if detail else ''
+    detail_text = f': {detail}' if detail else ''
     return f'{type(exc).__name__}{status_text}{detail_text}'

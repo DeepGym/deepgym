@@ -13,7 +13,7 @@ import { PageHeader } from '@/components/ui/page-header';
 import { VerdictBanner } from '@/components/ui/verdict-banner';
 import { api, errorText, useApi } from '@/lib/api';
 import { formatScore, timeAgo } from '@/lib/format';
-import type { RunDetail, RunSummary } from '@/lib/types';
+import type { RunDetail, RunPage, RunSummary } from '@/lib/types';
 import { useQueryParam } from '@/lib/use-query-param';
 import { failuresFirst, isActive, runTaskStatus, verdictLine } from '@/lib/verdict';
 import { RunProgress } from './run-progress';
@@ -22,9 +22,10 @@ import { RunSummary as RunSummaryStrip } from './run-summary';
 import { ScoreBreakdown } from './score-breakdown';
 
 function GroupRuns({ run }: { run: RunDetail }) {
-  const { data } = useApi<RunSummary[]>(`/runs?group_id=${run.group_id}`, 2500, (runs) =>
+  const { data: page } = useApi<RunPage>(`/runs?group_id=${run.group_id}`, 2500, ({ runs }) =>
     runs.some(isActive),
   );
+  const data = page?.runs;
   if (!data || data.length < 2) return null;
   const running = data.filter(isActive).length;
   const failed = data.filter((item) => !isActive(item) && !item.passed).length;

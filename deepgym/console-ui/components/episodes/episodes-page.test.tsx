@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, expect, test } from 'bun:test';
+import { afterEach, beforeEach, expect, jest, test } from 'bun:test';
 import { act } from 'react';
 import type { EpisodeDetail, EpisodePage, EpisodeSummary } from '@/lib/types';
 import { cleanup, fakeFetch, render, settle } from '@/test/dom';
@@ -106,4 +106,34 @@ test('every episode is reachable: the pager fetches the next page from the serve
   expect(requested).toEqual(['/api/episodes?offset=0&limit=25', '/api/episodes?offset=25&limit=25']);
   expect(rowText('env-oldest')).toContain('env-oldest');
   expect(rowText('env-new0')).toBeUndefined();
+});
+
+test('a poll that leaves the page shown past the last one moves back to the last page', async () => {
+  jest.useFakeTimers();
+  const recorded = Array.from({ length: 26 }, (_, index) => episode(`e${index}`));
+  const requested: string[] = [];
+  fakeFetch((url) => {
+    requested.push(url);
+    const offset = Number(new URL(url, 'http://localhost').searchParams.get('offset'));
+    return page(recorded.slice(offset, offset + 25), recorded.length);
+  });
+  await render(<EpisodesPage />);
+  await settle();
+  const next = document.querySelector<HTMLButtonElement>('button[aria-label="Go to page 2"]');
+  if (!next) throw new Error('no pager');
+  await act(async () => next.click());
+  await settle();
+  expect(rowText('env-e25')).toContain('env-e25');
+
+  // One episode is deleted, so the next poll of page 2 finds it empty, with one page left.
+  recorded.pop();
+  await act(async () => jest.advanceTimersByTime(10_000));
+  await settle();
+
+  expect(requested.slice(-2)).toEqual([
+    '/api/episodes?offset=25&limit=25',
+    '/api/episodes?offset=0&limit=25',
+  ]);
+  expect(document.querySelectorAll('[role="row"]')).toHaveLength(26);
+  expect(rowText('env-e0')).toContain('env-e0');
 });

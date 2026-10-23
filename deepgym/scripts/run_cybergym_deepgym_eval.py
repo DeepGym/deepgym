@@ -25,11 +25,13 @@ SRC = ROOT / 'src'
 if str(SRC) not in sys.path:
     sys.path.insert(0, str(SRC))
 
+from _eval_summary import summarize  # noqa: E402
+
 from deepgym import DeepGym, Environment  # noqa: E402
 from deepgym.cyberbench import classify_vulnerability_family  # noqa: E402
-from deepgym.integrations.zai import ZaiChatClient  # noqa: E402
+from deepgym.integrations.zai import Completion, ZaiChatClient, cached_completion  # noqa: E402
 
-_VERIFIER_CODE = r'''
+_VERIFIER_CODE = r"""
 import json
 import re
 
@@ -124,7 +126,7 @@ if __name__ == '__main__':
 
     test_cases_path = sys.argv[2] if len(sys.argv) > 2 else None
     print(json.dumps(verify(sys.argv[1], test_cases_path)))
-'''
+"""
 
 
 def _load_dotenv(path: Path) -> None:
@@ -206,47 +208,33 @@ def _completion_cache_path(cache_dir: Path, task_id: str) -> Path:
     return cache_dir / f'{safe}.txt'
 
 
-def _call_glm(client: ZaiChatClient, env: Environment, *, cache_path: Path, args: argparse.Namespace) -> tuple[str, str]:
-    if cache_path.exists() and not args.refresh_cache:
-        return cache_path.read_text(encoding='utf-8'), 'cache'
+def _call_glm(
+    client: ZaiChatClient, env: Environment, *, cache_path: Path, args: argparse.Namespace
+) -> tuple[Completion, str]:
     prompt = (
-        'Solve this defensive/local CyberBench-RL task. Return strict JSON only.\n\n'
-        + env.task
+        'Solve this defensive/local CyberBench-RL task. Return strict JSON only.\n\n' + env.task
     )
-    last_error = ''
-    for attempt in range(args.retries + 1):
-        try:
-            answer = client.complete_prompt(
-                prompt,
-                system='You are a defensive cybersecurity benchmark solver. Return strict JSON only.',
-                max_tokens=args.max_tokens,
-                temperature=args.temperature,
-                thinking=args.thinking,
-            ).text
-            cache_path.parent.mkdir(parents=True, exist_ok=True)
-            cache_path.write_text(answer, encoding='utf-8')
-            return answer, 'glm'
-        except Exception as exc:
-            last_error = f'{type(exc).__name__}: {exc}'
-            if attempt < args.retries:
-                time.sleep(args.retry_sleep * (attempt + 1))
-    raise RuntimeError(last_error)
 
+    def complete() -> Completion:
+        attempt = 0
+        while True:
+            try:
+                return client.complete_prompt(
+                    prompt,
+                    system=(
+                        'You are a defensive cybersecurity benchmark solver. Return strict JSON only.'
+                    ),
+                    max_tokens=args.max_tokens,
+                    temperature=args.temperature,
+                    thinking=args.thinking,
+                )
+            except Exception:
+                if attempt == args.retries:
+                    raise
+                attempt += 1
+                time.sleep(args.retry_sleep * attempt)
 
-def _fallback_answer(expected: dict[str, Any], error: str) -> str:
-    return json.dumps(
-        {
-            'task_id': expected['task_id'],
-            'project': expected['project'],
-            'language': expected['language'],
-            'family': expected['family'],
-            'vulnerability_class': expected['family'],
-            'evidence': expected['description'],
-            'remediation': 'Patch the synthetic vulnerable code, add regression tests, validate inputs and bounds, and keep the task local-only.',
-            'glm_error': error,
-        },
-        ensure_ascii=False,
-    )
+    return cached_completion(cache_path, complete, refresh=args.refresh_cache)
 
 
 def main() -> int:
@@ -262,90 +250,71 @@ def main() -> int:
     parser.add_argument('--max-tokens', type=int)
     parser.add_argument('--temperature', type=float, default=0.1)
     parser.add_argument('--thinking', choices=['enabled', 'disabled'], default='enabled')
-    parser.add_argument('--zai-timeout', type=float, default=45.0)
+    parser.add_argument('--zai-timeout', type=float, help='seconds; default: no limit')
     parser.add_argument('--retries', type=int, default=1)
     parser.add_argument('--retry-sleep', type=float, default=8.0)
-    parser.add_argument('--fallback-on-glm-error', action='store_true')
-    parser.add_argument('--max-glm-calls', type=int, default=1000000)
     args = parser.parse_args()
 
     _load_dotenv(ROOT / '.env')
     rows = _load_rows(args.repo_id, args.split, args.count, args.start_index)
     client = ZaiChatClient.from_env()
-    client.timeout = args.zai_timeout
-    glm_calls = 0
-    glm_attempts = 0
+    if args.zai_timeout is not None:
+        client.timeout = args.zai_timeout
     dg = DeepGym(mode=args.mode)
     output_path = ROOT / args.output
     output_path.parent.mkdir(parents=True, exist_ok=True)
     cache_dir = ROOT / args.cache_dir
 
-    passed = 0
-    total_score = 0.0
-    glm_errors = 0
+    records: list[dict[str, Any]] = []
     with output_path.open('w', encoding='utf-8') as out:
         for local_index, row in enumerate(rows):
             index = args.start_index + local_index
             env, expected = _make_task(row, index)
-            cache_path = _completion_cache_path(cache_dir, expected['task_id'])
-            source = 'glm'
-            error = ''
-            try:
-                if glm_attempts >= args.max_glm_calls and not cache_path.exists():
-                    raise RuntimeError('GLM call cap reached; using deterministic fallback')
-                if not cache_path.exists():
-                    glm_attempts += 1
-                answer, source = _call_glm(client, env, cache_path=cache_path, args=args)
-                if source == 'glm':
-                    glm_calls += 1
-            except Exception as exc:
-                glm_errors += 1
-                error = str(exc)
-                if not args.fallback_on_glm_error:
-                    record = {
-                        'index': index,
-                        'task_id': expected['task_id'],
-                        'glm_error': error,
-                        'score': 0.0,
-                        'passed': False,
-                    }
-                    out.write(json.dumps(record, ensure_ascii=False) + '\n')
-                    print(json.dumps(record, ensure_ascii=False), flush=True)
-                    continue
-                answer = _fallback_answer(expected, error)
-                source = 'fallback'
-
-            result = dg.run(env, answer)
-            passed += int(result.passed)
-            total_score += result.score
-            record = {
+            record: dict[str, Any] = {
                 'index': index,
                 'task_id': expected['task_id'],
                 'project': expected['project'],
                 'language': expected['language'],
                 'family': expected['family'],
-                'answer_source': source,
-                'glm_error': error,
-                'score': result.score,
-                'passed': result.passed,
-                'details': result.output,
-                'reward_components': result.reward_components,
-                'cases': [case.model_dump() for case in result.cases] if result.cases else [],
+                'glm_error': '',
+                'finish_reason': None,
+                'complete': None,
+                'score': None,
+                'passed': None,
+                'has_verdict': False,
             }
+            try:
+                cache_path = _completion_cache_path(cache_dir, expected['task_id'])
+                completion, record['answer_source'] = _call_glm(
+                    client, env, cache_path=cache_path, args=args
+                )
+            except Exception as exc:  # no answer, no run: a failed call is never a scored 0
+                record['glm_error'] = f'{type(exc).__name__}: {exc}'
+            else:
+                finish_reason = completion.finish_reason
+                result = dg.run(env, completion.text)
+                record |= {
+                    'finish_reason': finish_reason,
+                    'complete': None if finish_reason is None else not completion.truncated,
+                    'score': result.score,
+                    'passed': result.passed,
+                    'has_verdict': result.has_verdict,
+                    'error_type': result.error_type,
+                    'details': result.output,
+                    'reward_components': result.reward_components,
+                    'cases': [case.model_dump() for case in result.cases] if result.cases else [],
+                }
+            records.append(record)
             out.write(json.dumps(record, ensure_ascii=False) + '\n')
             print(json.dumps(record, ensure_ascii=False), flush=True)
 
     summary = {
+        **summarize(records),
         'repo_id': args.repo_id,
         'split': args.split,
         'start_index': args.start_index,
-        'count': len(rows),
         'mode': args.mode,
-        'passed': passed,
-        'avg_score': round(total_score / len(rows), 4) if rows else 0.0,
-        'glm_errors': glm_errors,
-        'glm_calls': glm_calls,
-        'glm_attempts': glm_attempts,
+        'glm_errors': sum(bool(record['glm_error']) for record in records),
         'output': str(output_path),
     }
     print(json.dumps({'summary': summary}, ensure_ascii=False, indent=2))

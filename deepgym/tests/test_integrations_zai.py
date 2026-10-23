@@ -97,3 +97,20 @@ def test_zai_client_sends_an_output_limit_only_when_asked() -> None:
 
     assert client.complete_prompt('solve task', max_tokens=50).finish_reason is None
     assert seen['payload']['max_tokens'] == 50
+
+
+def test_a_cached_completion_keeps_its_finish_reason(tmp_path) -> None:
+    """A reply cut off at the output limit stays marked so from the cache; one cached as
+    text alone, before finish reasons were kept, comes back unknown, not whole."""
+    from deepgym.integrations.zai import Completion, cached_completion
+
+    cut = Completion(text='partial answer', finish_reason='length')
+    path = tmp_path / 'task.txt'
+
+    assert cached_completion(path, lambda: cut) == (cut, 'model')
+    assert cached_completion(path, lambda: pytest.fail('cached')) == (cut, 'cache')
+    assert cached_completion(path, lambda: cut, refresh=True) == (cut, 'model')
+
+    path.write_text('an old cache: text only', encoding='utf-8')
+    legacy, source = cached_completion(path, lambda: pytest.fail('cached'))
+    assert (legacy.text, legacy.finish_reason, source) == ('an old cache: text only', None, 'cache')

@@ -9,8 +9,9 @@ source of truth.
 from __future__ import annotations
 
 import os
-from collections.abc import Sequence
-from typing import Any
+from collections.abc import Callable, Sequence
+from pathlib import Path
+from typing import Any, Literal
 
 import httpx
 from pydantic import BaseModel, ConfigDict
@@ -155,3 +156,26 @@ def _completion(data: dict[str, Any]) -> Completion:
         raise ValueError(f'Unexpected Z.ai response shape: {data!r}') from exc
     text = '' if content is None else str(content)
     return Completion(text=text, finish_reason=choice.get('finish_reason'))
+
+
+def cached_completion(
+    cache_path: Path, complete: Callable[[], Completion], *, refresh: bool = False
+) -> tuple[Completion, Literal['cache', 'model']]:
+    """Return a completion from *cache_path*, else *complete*'s, cached with its finish reason.
+
+    A cache written before finish reasons were kept holds only the text; it comes back
+    with ``finish_reason`` None: unknown, not known to be whole.
+
+    Returns:
+        The completion, and where it came from.
+    """
+    if cache_path.exists() and not refresh:
+        raw = cache_path.read_text(encoding='utf-8')
+        try:
+            return Completion.model_validate_json(raw), 'cache'
+        except ValueError:
+            return Completion(text=raw, finish_reason=None), 'cache'
+    completion = complete()
+    cache_path.parent.mkdir(parents=True, exist_ok=True)
+    cache_path.write_text(completion.model_dump_json(), encoding='utf-8')
+    return completion, 'model'

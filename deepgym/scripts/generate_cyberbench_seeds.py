@@ -70,14 +70,14 @@ def main() -> int:
     parser.add_argument('--use-zai', action='store_true', help='Use Z.ai/GLM to enrich specs')
     parser.add_argument('--temperature', type=float, default=0.2)
     parser.add_argument('--max-tokens', type=int)
-    parser.add_argument('--zai-timeout', type=float, default=30.0)
+    parser.add_argument('--zai-timeout', type=float, help='seconds; default: no limit')
     parser.add_argument('--fail-on-invalid', action='store_true')
     args = parser.parse_args()
 
     _load_dotenv(ROOT / '.env')
     rows = _load_hf_rows(args.repo_id, args.split, args.count)
     client = ZaiChatClient.from_env() if args.use_zai else None
-    if client is not None:
+    if client is not None and args.zai_timeout is not None:
         client.timeout = args.zai_timeout
 
     specs = []
@@ -97,8 +97,10 @@ def main() -> int:
                     max_tokens=args.max_tokens,
                     temperature=args.temperature,
                     thinking='enabled',
-                ).text
-                spec = spec_from_glm_json(response, row=row, index=index)
+                )
+                if response.truncated:
+                    raise ValueError('the reply was cut off at the output limit')
+                spec = spec_from_glm_json(response.text, row=row, index=index)
             except Exception as exc:
                 spec = cyber_seed_from_hf_row(row, index=index)
                 zai_errors.append(
@@ -121,8 +123,8 @@ def main() -> int:
         'repo_id': args.repo_id,
         'rows_read': len(rows),
         'specs_written': len(specs),
-        'invalid': invalid[:10],
-        'zai_errors': zai_errors[:10],
+        'invalid': invalid,
+        'zai_errors': zai_errors,
         'output': str(output),
         'used_zai': client is not None,
         'zai_successes': len(rows) - len(zai_errors) if client is not None else 0,

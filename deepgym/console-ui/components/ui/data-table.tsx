@@ -32,7 +32,7 @@ declare module '@tanstack/react-table' {
 }
 
 /** Which page is shown, out of how many, and how to move to another. */
-interface Paging {
+export interface Paging {
   pageIndex: number;
   pageCount: number;
   onPageChange: (pageIndex: number) => void;

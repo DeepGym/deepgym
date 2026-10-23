@@ -13,7 +13,7 @@ import { RangeControl, useRange } from '@/components/ui/range-control';
 import { useApi } from '@/lib/api';
 import { timeAgo } from '@/lib/format';
 import { RANGES } from '@/lib/stats';
-import type { QAReport, RunStats, RunSummary } from '@/lib/types';
+import type { QAReport, RunPage, RunStats } from '@/lib/types';
 import { recentActivity } from '@/lib/verdict';
 import { EnvHealth } from './env-health';
 
@@ -22,9 +22,9 @@ export function OverviewPage() {
   const router = useRouter();
   const [range, setRange] = useRange();
   const { data: stats, error } = useApi<RunStats>(`/runs/stats?hours=${RANGES[range]}`, 5000);
-  const { data: runs } = useApi<RunSummary[]>('/runs?limit=10', 5000);
+  const { data: latest } = useApi<RunPage>('/runs?limit=10', 5000);
   const { data: reports } = useApi<QAReport[]>('/qa', 15_000);
-  const activity = recentActivity(runs ?? [], reports ?? [], 10);
+  const activity = recentActivity(latest?.runs ?? [], reports ?? [], 10);
 
   return (
     <>
@@ -58,8 +58,8 @@ export function OverviewPage() {
           {activity.length ? (
             <TaskRows rows={activity.map((item) => ({ ...item, meta: timeAgo(item.at) }))} />
           ) : (
-            <EmptyState icon={RiPulseLine} title={runs && reports ? 'No activity yet' : 'Loading activity'}>
-              {runs && reports ? 'Runs and QA verdicts show up here as they happen.' : null}
+            <EmptyState icon={RiPulseLine} title={latest && reports ? 'No activity yet' : 'Loading activity'}>
+              {latest && reports ? 'Runs and QA verdicts show up here as they happen.' : null}
             </EmptyState>
           )}
         </Card>

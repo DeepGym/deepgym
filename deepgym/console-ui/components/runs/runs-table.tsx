@@ -3,7 +3,7 @@
 import { RiPlayCircleLine } from '@remixicon/react';
 import type { ColumnDef } from '@tanstack/react-table';
 import { Chip } from '@/components/base/badges/chip';
-import { DataTable } from '@/components/ui/data-table';
+import { DataTable, type Paging } from '@/components/ui/data-table';
 import { EmptyState } from '@/components/ui/empty-state';
 import { ScoreBar } from '@/components/ui/score-bar';
 import { PassBadge, RunStatusBadge } from '@/components/ui/status-badge';
@@ -27,13 +27,13 @@ const columns: ColumnDef<RunSummary>[] = [
   },
   {
     id: 'score',
-    accessorFn: (run) => run.score ?? -1,
+    accessorKey: 'score',
     header: 'Score',
     cell: ({ row }) => <ScoreBar score={row.original.score} />,
   },
   {
     id: 'passed',
-    accessorFn: (run) => (run.passed === null ? -1 : Number(run.passed)),
+    accessorKey: 'passed',
     header: 'Result',
     cell: ({ row }) => <PassBadge passed={row.original.passed} />,
   },
@@ -65,7 +65,7 @@ const columns: ColumnDef<RunSummary>[] = [
   },
   {
     id: 'duration',
-    accessorFn: (run) => run.duration_ms ?? -1,
+    accessorKey: 'duration_ms',
     header: 'Duration',
     cell: ({ row }) => formatDuration(row.original.duration_ms),
     meta: { align: 'end', className: 'font-mono text-text-secondary' },
@@ -81,21 +81,21 @@ const columns: ColumnDef<RunSummary>[] = [
 
 interface RunsTableProps {
   runs: RunSummary[];
+  paging: Paging;
   loading: boolean;
   error?: string;
   onOpen: (run: RunSummary) => void;
 }
 
-/** Runs, newest first; Enter or click opens the run. */
-export function RunsTable({ runs, loading, error, onOpen }: RunsTableProps) {
+/** One server page of runs, newest first; Enter or click opens the run. */
+export function RunsTable({ runs, paging, loading, error, onOpen }: RunsTableProps) {
   return (
     <DataTable
       label="Runs"
       data={runs}
       columns={columns}
       onRowAction={onOpen}
-      initialSort={[{ id: 'created', desc: true }]}
-      pageSize={50}
+      serverPaging={paging}
       empty={
         <EmptyState
           icon={RiPlayCircleLine}

@@ -4,17 +4,17 @@ import { Card } from '@/components/ui/card';
 import { useApi } from '@/lib/api';
 import { formatDuration } from '@/lib/format';
 import { etaNote, medianDuration } from '@/lib/stats';
-import type { RunDetail, RunSummary } from '@/lib/types';
+import type { RunDetail, RunPage } from '@/lib/types';
 import { cx } from '@/utils/cx';
 
 export const KEEPS_GOING = 'You can leave this page, the run keeps going.';
 
 /** Median duration of the latest finished runs of `environment` (null while loading or with none). */
 export function useTypicalDuration(environment: string | null): number | null {
-  const { data } = useApi<RunSummary[]>(
+  const { data } = useApi<RunPage>(
     environment ? `/runs?environment=${encodeURIComponent(environment)}&status=completed&limit=20` : null,
   );
-  return data ? medianDuration(data) : null;
+  return data ? medianDuration(data.runs) : null;
 }
 
 /**

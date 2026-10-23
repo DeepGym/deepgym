@@ -66,6 +66,13 @@ export interface RunSummary {
   finished_at: string | null;
 }
 
+export interface RunPage {
+  /** Newest first. */
+  runs: RunSummary[];
+  /** Matching runs across every page. */
+  total: number;
+}
+
 export interface RunDetail extends RunSummary {
   solution: string;
   error: string | null;

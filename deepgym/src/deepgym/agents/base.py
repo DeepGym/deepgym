@@ -8,7 +8,7 @@ from typing import Literal, Protocol, runtime_checkable
 
 from pydantic import BaseModel, ConfigDict, Field
 
-from deepgym.exceptions import DeepGymError
+from deepgym.exceptions import DeepGymError, is_infrastructure_failure
 from deepgym.models import Observation, Trajectory
 from deepgym.session import Session
 from deepgym.traces.schema import TraceMessage
@@ -23,7 +23,31 @@ TerminationReason = Literal[
     'safety_check',
     'error',
     'provider_error',
+    'setup_error',
 ]
+"""Why an agent stopped. ``provider_error`` (the model or sandbox provider, or the network,
+failed) and ``setup_error`` (the harness never started the model: its CLI missing or
+refused) are nothing the policy did, so the episode gets no verdict (see
+:meth:`BudgetTracker.result`). Every other reason is scored."""
+
+
+# Error types a provider names in an error body, mid-stream too (sent under the stream's 200).
+_PROVIDER_ERROR_TYPES = frozenset(
+    {'api_error', 'overloaded_error', 'rate_limit_error', 'timeout_error', 'server_error'}
+)
+
+
+def provider_failed(exc: BaseException) -> bool:
+    """Whether *exc* is the provider's or the network's failure rather than the policy's.
+
+    That is a failure :func:`~deepgym.exceptions.is_infrastructure_failure` names (transport,
+    5xx, 429, our credentials refused), or a provider error body naming one of its own
+    failures (overloaded, say), which a stream reports mid-way under a 200 status.
+    """
+    body = getattr(exc, 'body', None)
+    error = body.get('error', body) if isinstance(body, dict) else None
+    kind = error.get('type') if isinstance(error, dict) else None
+    return kind in _PROVIDER_ERROR_TYPES or is_infrastructure_failure(exc)
 
 
 class Budget(BaseModel):
@@ -185,6 +209,13 @@ class BudgetTracker:
             provenance='; '.join(source for source in sources if source != 'no provider calls'),
         )
 
+    def failure(self, exc: BaseException) -> TerminationReason:
+        """Why an episode that *exc* ended stopped: ``time_budget`` once the clock ran out,
+        ``provider_error`` if :func:`provider_failed`, else ``error``."""
+        if self.remaining_seconds <= 0:
+            return 'time_budget'
+        return 'provider_error' if provider_failed(exc) else 'error'
+
     def result(
         self,
         session: Session,
@@ -192,7 +223,13 @@ class BudgetTracker:
         final_text: str = '',
         error: str | None = None,
     ) -> AgentResult:
-        """Snapshot accounting and the session's real actions without grading."""
+        """Snapshot accounting and the session's real actions without grading.
+
+        A reason that is nothing the policy did (``provider_error``, ``setup_error``)
+        also abandons the session, so whoever scores it gets no verdict, not a 0.
+        """
+        if reason in ('provider_error', 'setup_error'):
+            session.abandon(reason, error or reason)
         return AgentResult(
             trajectory=session.trajectory.model_copy(deep=True),
             usage=self.usage,

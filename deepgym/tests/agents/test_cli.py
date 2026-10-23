@@ -331,6 +331,11 @@ class RecordingSession:
         self.trajectory = Trajectory()
         self.requests: list[CliRequest] = []
         self.finalizations = 0
+        self.abandoned: list[tuple[str, str]] = []
+
+    def abandon(self, error_type: str, detail: str) -> None:
+        self.abandoned.append((error_type, detail))
+        self.done = True
 
     def finalize_cli(self) -> None:
         self.finalizations += 1

@@ -142,8 +142,9 @@ class AnthropicComputerAgent:
                     messages=messages,
                     timeout=tracker.request_timeout,
                 )
-                if error := anthropic_incomplete(response):
-                    return tracker.result(session, 'error', error=error)
+                if incomplete := anthropic_incomplete(response):
+                    reason, error = incomplete
+                    return tracker.result(session, reason, error=error)
                 account(tracker, response.get('usage'), self.prices, 'anthropic')
                 content = response['content']
                 messages.append({'role': 'assistant', 'content': content})
@@ -204,13 +205,13 @@ class AnthropicComputerAgent:
         except BudgetExceeded as exc:
             return tracker.result(session, exc.reason)
         except DeepGymError as exc:
-            reason = 'time_budget' if tracker.remaining_seconds <= 0 else 'error'
+            reason = tracker.failure(exc)
             return tracker.result(
                 session, reason, error=f'Session step failed: {type(exc).__name__}'
             )
         except anthropic.APIError as exc:
             tracker.add_usage(Usage(), Cost(provenance='Anthropic failed request; billing unknown'))
-            reason = 'time_budget' if tracker.remaining_seconds <= 0 else 'error'
+            reason = tracker.failure(exc)
             return tracker.result(session, reason, error=f'Anthropic {api_error(exc)}')
         except (ValueError, KeyError, TypeError) as exc:
             return tracker.result(session, 'error', error=f'Invalid Anthropic response: {exc}')
@@ -297,8 +298,9 @@ class OpenAIComputerAgent:
                         'safety_check',
                         error=('Provider safety checks require approval; no actions executed'),
                     )
-                if error := openai_incomplete(response):
-                    return tracker.result(session, 'error', error=error)
+                if incomplete := openai_incomplete(response):
+                    reason, error = incomplete
+                    return tracker.result(session, reason, error=error)
                 if not calls:
                     return tracker.result(session, 'completed', text)
                 items = []
@@ -338,13 +340,13 @@ class OpenAIComputerAgent:
         except BudgetExceeded as exc:
             return tracker.result(session, exc.reason)
         except DeepGymError as exc:
-            reason = 'time_budget' if tracker.remaining_seconds <= 0 else 'error'
+            reason = tracker.failure(exc)
             return tracker.result(
                 session, reason, error=f'Session step failed: {type(exc).__name__}'
             )
         except openai.APIError as exc:
             tracker.add_usage(Usage(), Cost(provenance='OpenAI failed request; billing unknown'))
-            reason = 'time_budget' if tracker.remaining_seconds <= 0 else 'error'
+            reason = tracker.failure(exc)
             return tracker.result(session, reason, error=f'OpenAI {api_error(exc)}')
         except (ValueError, KeyError, TypeError) as exc:
             return tracker.result(session, 'error', error=f'Invalid OpenAI response: {exc}')

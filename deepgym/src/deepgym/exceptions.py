@@ -9,6 +9,9 @@ _E2B_STATUS = re.compile(r'(\d{3}): ')
 
 _TRANSPORT_ERRORS = (
     ('httpx', ('TransportError',)),
+    ('httpx2', ('TransportError',)),  # the Anthropic and OpenAI SDKs' transport, newer releases
+    ('anthropic', ('APIConnectionError',)),
+    ('openai', ('APIConnectionError',)),
     (
         'urllib3.exceptions',
         ('ProtocolError', 'NewConnectionError', 'MaxRetryError', 'TimeoutError'),

@@ -230,8 +230,9 @@ class AnthropicToolAgent:
                     timeout=tracker.request_timeout,
                 )
                 episode.say('assistant', response)
-                if error := anthropic_incomplete(response):
-                    return episode.result('error', error=error)
+                if incomplete := anthropic_incomplete(response):
+                    reason, error = incomplete
+                    return episode.result(reason, error=error)
                 account(tracker, response.get('usage'), self.prices, 'anthropic')
                 content = response['content']
                 messages.append({'role': 'assistant', 'content': content})
@@ -270,11 +271,11 @@ class AnthropicToolAgent:
         except BudgetExceeded as exc:
             return episode.result(exc.reason)
         except DeepGymError as exc:
-            reason = 'time_budget' if tracker.remaining_seconds <= 0 else 'error'
+            reason = tracker.failure(exc)
             return episode.result(reason, error=f'Session step failed: {type(exc).__name__}')
         except anthropic.APIError as exc:
             tracker.add_usage(Usage(), Cost(provenance='Anthropic failed request; billing unknown'))
-            reason = 'time_budget' if tracker.remaining_seconds <= 0 else 'error'
+            reason = tracker.failure(exc)
             return episode.result(reason, error=f'Anthropic {api_error(exc)}')
         except (ValueError, KeyError, TypeError) as exc:
             return episode.result('error', error=f'Invalid Anthropic response: {exc}')
@@ -368,8 +369,9 @@ class OpenAIToolAgent:
                 if refusal:
                     return episode.result('refusal', refusal)
                 text = ' '.join(part['text'] for part in parts if part['type'] == 'output_text')
-                if error := openai_incomplete(response):
-                    return episode.result('error', error=error)
+                if incomplete := openai_incomplete(response):
+                    reason, error = incomplete
+                    return episode.result(reason, error=error)
                 calls = [item for item in output if item['type'] == 'function_call']
                 if not calls:
                     items = [{'role': 'user', 'content': _NO_CALL}]
@@ -389,11 +391,11 @@ class OpenAIToolAgent:
         except BudgetExceeded as exc:
             return episode.result(exc.reason)
         except DeepGymError as exc:
-            reason = 'time_budget' if tracker.remaining_seconds <= 0 else 'error'
+            reason = tracker.failure(exc)
             return episode.result(reason, error=f'Session step failed: {type(exc).__name__}')
         except openai.APIError as exc:
             tracker.add_usage(Usage(), Cost(provenance='OpenAI failed request; billing unknown'))
-            reason = 'time_budget' if tracker.remaining_seconds <= 0 else 'error'
+            reason = tracker.failure(exc)
             return episode.result(reason, error=f'OpenAI {api_error(exc)}')
         except (ValueError, KeyError, TypeError) as exc:
             return episode.result('error', error=f'Invalid OpenAI response: {exc}')

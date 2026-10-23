@@ -19,7 +19,7 @@ import time
 from collections.abc import Callable, Sequence
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import TextIO, TypeVar
+from typing import Literal, TextIO, TypeVar
 from uuid import uuid4
 
 from deepgym.cli_runtime import CliExecution, CliExecutionError, CliRequest, EventObserver
@@ -194,6 +194,12 @@ class TracedSession:
             (),
             lambda: self._session.run_cli(request, on_event),
         )
+
+    def abandon(self, error_type: Literal['provider_error', 'setup_error'], detail: str) -> None:
+        """End the episode with no verdict, as :meth:`Session.abandon`; :meth:`score` records it."""
+        with self._lock:
+            self._check_open()
+            self._session.abandon(error_type, detail)
 
     def finalize_cli(self) -> None:
         """Finalize CLI containment without inventing an action in the trace.

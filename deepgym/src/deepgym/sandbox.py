@@ -31,6 +31,7 @@ from deepgym.judge import (
     DEADLINE_GRACE_S,
     SANDBOX_SETUP,
     JudgeJob,
+    local_isolation_kind,
     local_judge,
     sandbox_judge,
     sandbox_uploads,
@@ -82,6 +83,22 @@ class ExecutionResult:
         self.verifier_result = verifier_result
         self.stderr = stderr
         self.exit_code = exit_code
+
+
+def local_run_result(executed: ExecutionResult, elapsed_ms: float) -> RunResult:
+    """Build the RunResult of a local run, recording how its solution was isolated.
+
+    Raises:
+        VerifierError: If the exit code doesn't back the result (see :func:`check_exit`).
+    """
+    result = build_run_result(
+        executed.verifier_result,
+        elapsed_ms,
+        'local',
+        stderr=executed.stderr,
+        exit_code=executed.exit_code,
+    )
+    return result.model_copy(update={'isolation': local_isolation_kind()})
 
 
 def check_exit(exit_code: int, score: float, passed: bool | None) -> None:

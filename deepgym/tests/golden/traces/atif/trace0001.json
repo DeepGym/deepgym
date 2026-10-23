@@ -220,7 +220,8 @@
         "seed": null,
         "truncated": false,
         "error_type": null,
-        "cases": null
+        "cases": null,
+        "isolation": null
       },
       "prior_results": [],
       "error": null,

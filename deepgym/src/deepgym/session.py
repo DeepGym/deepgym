@@ -1314,9 +1314,9 @@ class Session:
             TimeoutError: If the verifier timed out and the provider returned nothing.
         """
         with self._lock:
-            self._check_open()
-            if self._failed_result is not None:
+            if self._failed_result is not None:  # fixed already: no sandbox needed
                 return self._failed_result
+            self._check_open()
             if not self._env.final_verifier_code:
                 return RunResult(
                     score=0.0,

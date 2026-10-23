@@ -370,6 +370,11 @@ class RunResult(BaseModel):
     cases: list[CaseResult] | None = None
     """Per-test-case breakdown passed through from the verifier."""
 
+    isolation: Literal['macos', 'bwrap', 'none'] | None = None
+    """How a local run isolated the solution: ``sandbox-exec``, ``bwrap``, or ``none`` when
+    ``DEEPGYM_ALLOW_UNSANDBOXED`` let it run unsandboxed. None for a run in a sandbox
+    provider, where the solution always runs as a separate user."""
+
     @property
     def has_verdict(self) -> bool:
         """False when the verifier or sandbox failed instead of judging the solution.

@@ -311,6 +311,17 @@ def sandbox_python() -> str:
     return os.path.realpath(executable)
 
 
+@functools.cache
+def _warn_unsandboxed() -> None:
+    """Say once per process that local solutions run unsandboxed, so a stray
+    :data:`ALLOW_UNSANDBOXED_ENV` never goes unnoticed (results also record it)."""
+    logger.warning(
+        '%s is set and no sandbox works: local solutions run unsandboxed and can read '
+        'every file you can, verifiers included',
+        ALLOW_UNSANDBOXED_ENV,
+    )
+
+
 def local_isolation(expose: list[str]) -> dict:
     """Isolation spec for a local run: what its solution may read.
 
@@ -325,6 +336,7 @@ def local_isolation(expose: list[str]) -> dict:
     kind = local_isolation_kind()
     if kind == 'none':
         if unsandboxed_allowed():
+            _warn_unsandboxed()
             return {'kind': 'none'}
         raise SandboxError(
             'No working sandbox-exec or bwrap on this machine, so a local solution could '

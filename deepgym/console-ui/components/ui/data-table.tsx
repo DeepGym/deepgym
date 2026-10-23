@@ -31,6 +31,13 @@ declare module '@tanstack/react-table' {
   }
 }
 
+/** Which page is shown, out of how many, and how to move to another. */
+interface Paging {
+  pageIndex: number;
+  pageCount: number;
+  onPageChange: (pageIndex: number) => void;
+}
+
 interface DataTableProps<T extends { id: string }> {
   label: string;
   data: T[];
@@ -40,6 +47,11 @@ interface DataTableProps<T extends { id: string }> {
   initialSort?: SortingState;
   /** Rows per page; omit to show every row. */
   pageSize?: number;
+  /**
+   * Pages fetched from the server, instead of `pageSize`: `data` is the page at `pageIndex`.
+   * Sorting is off, since it could only reorder that one page.
+   */
+  serverPaging?: Paging;
   empty?: ReactNode;
 }
 
@@ -54,6 +66,7 @@ export function DataTable<T extends { id: string }>({
   onRowAction,
   initialSort = [],
   pageSize,
+  serverPaging,
   empty,
 }: DataTableProps<T>) {
   const [sorting, setSorting] = useState<SortingState>(initialSort);
@@ -62,6 +75,7 @@ export function DataTable<T extends { id: string }>({
     columns,
     state: { sorting },
     onSortingChange: setSorting,
+    enableSorting: !serverPaging,
     getRowId: (row) => row.id,
     getCoreRowModel: getCoreRowModel(),
     getSortedRowModel: getSortedRowModel(),
@@ -71,7 +85,11 @@ export function DataTable<T extends { id: string }>({
     autoResetPageIndex: true,
   });
   const sort = sorting[0];
-  const pages = table.getPageCount();
+  const paging: Paging = serverPaging ?? {
+    pageIndex: table.getState().pagination.pageIndex,
+    pageCount: table.getPageCount(),
+    onPageChange: (pageIndex) => table.setPageIndex(pageIndex),
+  };
 
   return (
     <div>
@@ -135,12 +153,12 @@ export function DataTable<T extends { id: string }>({
           )}
         </TableBody>
       </Table>
-      {pages > 1 && (
+      {paging.pageCount > 1 && (
         <div className="border-t border-separator-border px-3 py-2.5">
           <Pagination
-            page={table.getState().pagination.pageIndex + 1}
-            totalPages={pages}
-            onChange={(page) => table.setPageIndex(page - 1)}
+            page={paging.pageIndex + 1}
+            totalPages={paging.pageCount}
+            onChange={(page) => paging.onPageChange(page - 1)}
           />
         </div>
       )}

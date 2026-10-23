@@ -9,7 +9,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from uuid import uuid4
 
-from deepgym.console.db import connect, init_db, utc_now
+from deepgym.console.db import connect, init_db, utc_now, verdict_columns
 from deepgym.console.schemas import (
     EnvironmentStats,
     ErrorTypeCount,
@@ -100,17 +100,15 @@ class RunStore:
         """Record the verifier result of a run that finished.
 
         A result without a verdict (``RunResult.has_verdict`` False) keeps no score or
-        pass: the mean score counts it as 0, the judged totals leave it out, and its error
-        type counts it as an error.
+        pass (see :func:`verdict_columns`): the mean score counts it as 0, the judged
+        totals leave it out, and its error type counts it as an error.
         """
-        judged = result.has_verdict
         with connect(self._path) as conn:
             conn.execute(
                 "UPDATE runs SET status = 'completed', score = ?, passed = ?, error_type = ?, "
                 'result = ?, duration_ms = ?, finished_at = ? WHERE id = ?',
-                (result.score if judged else None, result.passed if judged else None,
-                 result.error_type or (None if judged else 'verifier_error'),
-                 result.model_dump_json(), duration_ms, utc_now(), run_id),
+                (*verdict_columns(result), result.model_dump_json(), duration_ms, utc_now(),
+                 run_id),
             )  # fmt: skip
 
     def fail(self, run_id: str, error_type: str, error: str, duration_ms: float) -> None:

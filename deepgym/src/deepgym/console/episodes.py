@@ -4,10 +4,10 @@ from __future__ import annotations
 
 import binascii
 
-from fastapi import APIRouter, HTTPException, Response, status
+from fastapi import APIRouter, HTTPException, Query, Response, status
 
 from deepgym.console.deps import EpisodeStoreDep
-from deepgym.console.schemas import EpisodeCreate, EpisodeDetail, EpisodeSummary
+from deepgym.console.schemas import EpisodeCreate, EpisodeDetail, EpisodePage, EpisodeSummary
 
 router = APIRouter(prefix='/episodes', tags=['episodes'])
 
@@ -24,12 +24,15 @@ def create_episode(body: EpisodeCreate, episodes: EpisodeStoreDep) -> EpisodeSum
         ) from exc
 
 
-@router.get('', response_model=list[EpisodeSummary])
+@router.get('', response_model=EpisodePage)
 def list_episodes(
-    episodes: EpisodeStoreDep, environment: str | None = None
-) -> list[EpisodeSummary]:
-    """List the newest episodes, optionally for one environment."""
-    return episodes.list(environment)
+    episodes: EpisodeStoreDep,
+    environment: str | None = None,
+    offset: int = Query(0, ge=0),
+    limit: int | None = Query(None, ge=1),
+) -> EpisodePage:
+    """List the newest episodes a page at a time (every one without *limit*), with the total."""
+    return episodes.page(environment, offset, limit)
 
 
 @router.get('/{episode_id}', response_model=EpisodeDetail)

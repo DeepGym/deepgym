@@ -5,7 +5,17 @@
 `run(session, initial, *, task, budget) -> AgentResult`. Start the Session first;
 the caller owns grading and cleanup. `DeepGym.run_episode(env, agent, budget=...)`
 does that lifecycle and returns `(AgentResult, RunResult)`. Its existing callable
-interface still returns `(Trajectory, RunResult)`.
+interface still returns `(Trajectory, RunResult)`. `ClaudeCodeAgent` and `CodexAgent`
+drive the Claude Code and Codex CLIs inside the sandbox; there is no Claude Agent SDK
+integration.
+
+An episode that stops through nothing the policy did gets no verdict, never a 0:
+`termination_reason` is `provider_error` when the model provider or the network failed (a
+dropped or cut stream, a 5xx, 429 or overloaded error, our credentials refused) and
+`setup_error` when the harness never started the model (its CLI missing or refused). The
+session is then abandoned, so `run_episode`, or `score()` under `dg.trace()`, returns
+`has_verdict=False` with that `error_type`, whatever state the policy reached. Every other
+reason is scored, including a response the model itself cut at its output limit.
 
 Computer agents need the `anthropic` or `openai` optional extra, respectively.
 Imports stay lazy. Choose a model supporting Anthropic's
@@ -141,9 +151,10 @@ its `stop_reason`, usage and `input_json`, each call's input exactly as it strea
 ## CLI isolation and its exposure
 
 CLIs must already be installed in the sandbox image; the library installs nothing.
-Supported releases are pinned in `deepgym.agents.SUPPORTED_CLIS`. Each run checks
-the installed version inside the sandbox before launching the task; unsupported
-versions are refused. The observed version is retained in result and trace
+The tested releases are in `deepgym.agents.SUPPORTED_CLIS`. Each run checks the
+installed version inside the sandbox before launching the task: the tested release or a
+later one in its major version (below 1.0, its minor version) runs; anything else is
+refused as a `setup_error`. The observed version is retained in result and trace
 provenance. Their flags must match the adapters. The environment
 must allow `bash` or `cli`, and its backend must retain a separate network
 namespace. LocalBackend and provider-only network blocking without that namespace
@@ -223,13 +234,14 @@ environments can retain it.
 ## Upgrading the CLIs
 
 `deepgym.agents.SUPPORTED_CLIS` is the sole source of supported versions and npm
-package names. Phase 1 supports one exact release per CLI. Image builders can
-generate the installation command without maintaining their own pins:
+package names. The tested release is the oldest supported one; later compatible releases
+run too. Image builders can generate the installation command for the tested releases
+without maintaining their own pins:
 
 ```python
 from deepgym.agents import SUPPORTED_CLIS, cli_install_command
 
-print(cli_install_command())  # npm install -g, with both packages pinned
+print(cli_install_command())  # npm install -g, both tested releases
 print({name: release.version for name, release in SUPPORTED_CLIS.items()})
 ```
 

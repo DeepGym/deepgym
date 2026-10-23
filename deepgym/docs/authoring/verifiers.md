@@ -51,6 +51,12 @@ verifier as a `deepgym_solution.SolutionError`, still of the builtin type the so
 error, so a solution can't dodge its score by breaking the verifier. Load test data before
 starting the solution: a verifier that crashes after that scores 0 too.
 
+When the verifier itself can't judge (a fixture it needs is missing, a service it checks
+against is down), it must raise, never return 0. Raised before it starts the solution, the
+run ends with no verdict, which trainers mask; a returned 0 is a real verdict that training
+learns from. So check what you need before starting the solution: after that, a crash is
+the solution's 0, as above.
+
 When the machine can't start the solution before any solution code has run (out of
 processes, say), these raise `LaunchError`. It isn't an `Exception`, so `except Exception`
 doesn't catch it. Let it propagate: the run ends with `sandbox_error` and no verdict. Once
@@ -67,9 +73,12 @@ makes the whole run a judged 0.
 - **Sandboxes (Daytona, Modal, E2B, Docker, Apple container):** the solution runs as a
   separate Linux user that can't read the judge's files, touch the judge's process, or
   write to its output, with no network.
-- **Locally:** it runs under `sandbox-exec` on macOS or `bwrap` on Linux, with the judge
-  directory, the deepgym package, your home directory and `/run` (daemon sockets) hidden.
-  If neither is available, you still get process separation and a warning.
+- **Locally:** it runs under `sandbox-exec` on macOS or `bwrap` on Linux and can read only
+  the operating system, the software trees a Python links against (Homebrew's, say), the
+  Python installation and its own run's files. Your home directory, temp directories
+  (another run's verifier, an answer key under `/tmp`) and daemon sockets aren't
+  readable, and no deepgym package is. Where neither sandbox works, local runs refuse
+  unless you set `DEEPGYM_ALLOW_UNSANDBOXED=1`; the solution can then read your files.
 
 What this blocks:
 

@@ -1,5 +1,14 @@
 # Changelog
 
+## Unreleased
+
+- **Local sandbox reads only what a run needs:** under `sandbox-exec` and `bwrap`, a solution can read the operating system, the software trees a Python links against, the Python installation and its own run's files, and nothing else. Before, only the home directory, this process's runs and daemon sockets were hidden, so a solution could read files under `/tmp` and `$TMPDIR`, including another DeepGym process's verifier copies. Every deepgym package on the import path stays unreadable, not just the one running. Runs roots that a killed process left behind are removed by the next process.
+- **Detached children die on macOS:** a script run with `allow_subprocess=True` has every process left in its sandbox killed when it ends, including one that called `setsid()`, and the watcher does the same if the judge dies.
+- **No sandbox, no local run:** where neither `sandbox-exec` nor `bwrap` works, local runs raise `SandboxError` instead of running with a warning. Set `DEEPGYM_ALLOW_UNSANDBOXED=1` to run unsandboxed anyway.
+- **Provider failures get no verdict:** an agent episode that the model provider or the network ended (a cut or dropped stream, a 5xx, 429 or overloaded error, refused credentials) stops with `provider_error`. One whose harness never started the model (CLI missing or refused) stops with the new `setup_error`. Either way the session is abandoned (`Session.abandon`), so the grade has no verdict instead of a 0. Connection errors from the anthropic and openai SDKs' `httpx2` transport now count as infrastructure failures too.
+- **CLI versions:** `ClaudeCodeAgent` and `CodexAgent` accept the tested CLI release or a later one in its major version (below 1.0, its minor version), instead of only the exact release.
+- **Docs:** verifiers that can't judge must raise, not return 0. `ClaudeCodeAgent` drives the Claude Code CLI; there is no Claude Agent SDK integration.
+
 ## 0.6.0 (2026-10-23)
 
 - **Agent harnesses:** `deepgym.agents` adds `AnthropicComputerAgent`, `OpenAIComputerAgent`, `ClaudeCodeAgent` and `CodexAgent`, each driving a live session. `DeepGym.run_episode(env, agent, budget=...)` runs the episode and returns `(AgentResult, RunResult)`; the callable interface still returns `(Trajectory, RunResult)`. The Claude Code and Codex CLIs are installed at pinned versions and checked in the sandbox. See `docs/agents.md`.

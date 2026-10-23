@@ -78,9 +78,13 @@ one for anything shared or untrusted.
   (run any command as its sudoer) on loopback, so on both DeepGym gives untrusted code its
   own offline network namespace; that needs util-linux in the image, and a judge run fails
   rather than run online without it.
-- **Locally:** the answer runs under `sandbox-exec` (macOS) or `bwrap` (Linux), with the
-  judge directory, the deepgym package, your home directory and `/run` (daemon sockets)
-  hidden. If neither is available, you still get process separation and a warning.
+- **Locally:** the answer runs under `sandbox-exec` (macOS) or `bwrap` (Linux) and can
+  read only the operating system, the software trees a Python links against, the Python
+  installation and its own run's files: not your home directory, temp directories
+  (another run's verifier), daemon sockets or any deepgym package. On macOS, a script
+  allowed to start subprocesses has every process left in its sandbox killed when it
+  ends, even one that left its process group. Where neither sandbox works, local runs
+  refuse unless you set `DEEPGYM_ALLOW_UNSANDBOXED=1`.
   `DeepGym(mode='local', confine_local_judge=True)` also runs each whole judge inside the
   local sandbox, for verifiers that might run code in-process; `deepgym qa --mutants`
   uses it. Sandboxes don't nest, so the answer then runs as plain child processes that

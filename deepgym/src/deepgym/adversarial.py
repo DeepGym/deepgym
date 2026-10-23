@@ -42,19 +42,41 @@ _STATED_MAX = re.compile(r'> (\d+), which is the maximum allowed number of outpu
 
 
 def fingerprint_verifier(verifier_code: str) -> str:
-    """Return a stable short hash for a verifier: its id unless the caller names one."""
+    """Return a stable short hash of a verifier's code."""
     return hashlib.sha256(verifier_code.encode('utf-8')).hexdigest()[:16]
+
+
+def environment_id(env: Environment) -> str:
+    """Return a stable id for *env*: its name, else a digest of its whole task.
+
+    Its identity, not its content: a changed verifier keeps the id, so a result stored for
+    the old one is found and dropped (see :func:`grading_fingerprint` for the version).
+    """
+    return env.name or hashlib.sha256(env.task.encode('utf-8')).hexdigest()[:16]
+
+
+def grading_fingerprint(env: Environment) -> str:
+    """Return a short hash of everything that grades *env*: its verifier, test cases and
+    support files. Two environments can share a verifier and grade differently."""
+    grading = {
+        'verifier': env.verifier_source,
+        'test_cases': env.test_cases,
+        'support_files': env.support_files,
+    }
+    return hashlib.sha256(json.dumps(grading, sort_keys=True).encode('utf-8')).hexdigest()[:16]
 
 
 def claude_reply(client: Any, model: str, prompt: str) -> str:
     """Return Claude's whole reply to *prompt*, generated up to the model's own maximum.
 
-    Streamed, as the SDK requires for long outputs. A model whose maximum is below
-    Opus 5.5's is asked again at the maximum its error states.
+    Streamed, as the SDK requires for long outputs, and taken only once message_stop
+    arrives: a stream that just ends leaves the SDK a partial message. A model whose
+    maximum is below Opus 5.5's is asked again at the maximum its error states.
 
     Raises:
-        DeepGymError: If the request fails, or the reply stopped at the output limit (a
-            list cut off there isn't the model's whole answer).
+        DeepGymError: If the request fails, the stream ended before message_stop, or the
+            reply stopped at the output limit (a list cut off either way isn't the model's
+            whole answer).
     """
     max_tokens = _CLAUDE_MAX_TOKENS
     try:
@@ -65,6 +87,7 @@ def claude_reply(client: Any, model: str, prompt: str) -> str:
                     max_tokens=max_tokens,
                     messages=[{'role': 'user', 'content': prompt}],
                 ) as stream:
+                    events = [event.type for event in stream]  # all of them: a whole message
                     message = stream.get_final_message()
                 break
             except Exception as exc:
@@ -74,6 +97,8 @@ def claude_reply(client: Any, model: str, prompt: str) -> str:
                 max_tokens = int(stated.group(1))
     except Exception as exc:
         raise DeepGymError(f'Anthropic API call failed: {type(exc).__name__}: {exc}') from exc
+    if 'message_stop' not in events:
+        raise DeepGymError(f'The {model} reply stream ended before it completed')
     if message.stop_reason == 'max_tokens':
         raise DeepGymError(f'{model} stopped at its {max_tokens}-token output limit mid-reply')
     return ''.join(block.text for block in message.content if block.type == 'text')
@@ -1190,7 +1215,7 @@ class BlackBoxAdversarialTester:
             problems.append('no attempt ran')
         status = 'exploitable' if exploitable else 'inconclusive' if problems else 'robust'
         return BlackBoxReport(
-            verifier_id=fingerprint_verifier(env.verifier_source),
+            verifier_id=environment_id(env),
             status=status,
             exploitable=exploitable,
             problems=problems,

@@ -346,7 +346,17 @@ class _ScriptedLLM:
             raise reply
         text = types.SimpleNamespace(type='text', text=reply)
         message = types.SimpleNamespace(content=[text], stop_reason=self.stop)
-        yield types.SimpleNamespace(get_final_message=lambda: message)
+        events = ['message_start', 'content_block_delta']
+        events += [] if self.stop == 'cut' else ['message_stop']
+        yield _Stream([types.SimpleNamespace(type=kind) for kind in events], message)
+
+
+class _Stream(list):
+    """A finished (or cut) SDK message stream: its events, then the message they built."""
+
+    def __init__(self, events: list[object], message: object) -> None:
+        super().__init__(events)
+        self.get_final_message = lambda: message
 
 
 def test_claude_is_asked_for_its_maximum_and_a_smaller_one_is_read_from_its_error() -> None:
@@ -367,6 +377,15 @@ def test_a_reply_cut_off_at_the_output_limit_is_refused() -> None:
 
     with pytest.raises(DeepGymError, match='output limit'):
         claude_reply(_ScriptedLLM(['half a list'], stop='max_tokens'), 'm', 'p')
+
+
+def test_a_stream_that_ends_before_message_stop_certifies_nothing() -> None:
+    """A dropped stream leaves the SDK a partial message: one parseable attack of five
+    must make the audit inconclusive, never an apparently complete, robust result."""
+    from deepgym.adversarial import claude_reply
+
+    with pytest.raises(DeepGymError, match='ended before it completed'):
+        claude_reply(_ScriptedLLM(['---EXPLOIT 1: x---\nprint(1)'], stop='cut'), 'm', 'p')
 
 
 @pytest.mark.parametrize(

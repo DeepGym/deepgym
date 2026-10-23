@@ -228,7 +228,11 @@ import lm_eval
 from deepgym import load_environment
 from deepgym.integrations.lm_eval import make_lm_eval_task
 
-tasks = [make_lm_eval_task(load_environment(n), n) for n in ['coin_change', 'two_sum']]
+# max_gen_toks: your model's maximum output (Qwen2.5 generates up to 8K tokens).
+tasks = [
+    make_lm_eval_task(load_environment(n), n, max_gen_toks=8192)
+    for n in ['coin_change', 'two_sum']
+]
 results = lm_eval.simple_evaluate(
     model='hf', model_args='pretrained=Qwen/Qwen2.5-0.5B-Instruct', tasks=tasks
 )

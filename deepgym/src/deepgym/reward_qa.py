@@ -9,7 +9,12 @@ from typing import Literal
 
 from pydantic import BaseModel, Field
 
-from deepgym.adversarial import AdversarialReport, AdversarialTester, fingerprint_verifier
+from deepgym.adversarial import (
+    AdversarialReport,
+    AdversarialTester,
+    environment_id,
+    grading_fingerprint,
+)
 from deepgym.exploit_db import ExploitDB, ExploitRecord
 from deepgym.models import Environment
 
@@ -205,8 +210,8 @@ class RewardAuditor:
     ) -> VerifierAuditReport:
         """Run a verifier audit and return a structured QA report."""
         verifier_source = env.verifier_source
-        resolved_verifier_id = verifier_id or fingerprint_verifier(env.verifier_source)
-        verifier_hash = fingerprint_verifier(verifier_source)
+        resolved_verifier_id = verifier_id or environment_id(env)
+        verifier_hash = grading_fingerprint(env)
         if persist:
             # Before the retest, as the scanners do: a stored result for a changed verifier
             # is dropped, or an inconclusive retest (never saved) would leave it standing.

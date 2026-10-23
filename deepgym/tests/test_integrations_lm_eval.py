@@ -40,7 +40,7 @@ def lm_eval() -> ModuleType:
 def test_raises_import_error_when_lm_eval_missing(env: Environment) -> None:
     with patch('builtins.__import__', side_effect=ImportError('no lm_eval')):
         with pytest.raises(ImportError, match='lm-evaluation-harness'):
-            make_lm_eval_task(env, task_name='reverse_string')
+            make_lm_eval_task(env, task_name='reverse_string', max_gen_toks=8192)
 
 
 def _evaluate(
@@ -85,7 +85,7 @@ def test_fenced_answer_is_scored_by_the_verifier(
     results, requests = _evaluate(
         lm_eval,
         f'Sure:\n```python\n{GOOD_SOLUTION}```',
-        make_lm_eval_task(env, 'reverse_string', local_dg),
+        make_lm_eval_task(env, 'reverse_string', local_dg, max_gen_toks=8192),
     )
 
     metrics = results['deepgym_reverse_string']
@@ -98,20 +98,18 @@ def test_fenced_answer_is_scored_by_the_verifier(
     assert generation_kwargs['until'] == []
 
 
-def test_generation_length_is_the_callers(
+def test_generation_runs_to_the_maximum_the_caller_states(
     lm_eval: ModuleType, env: Environment, local_dg: DeepGym
 ) -> None:
-    """The task sets no length limit of its own; one the caller passes reaches the model."""
-    _, requests = _evaluate(lm_eval, GOOD_SOLUTION, make_lm_eval_task(env, 'r', local_dg))
-    assert 'max_gen_toks' not in requests[0].args[1]  # the model's own setting applies
+    """No length of ours or lm-eval's 256 default: the model's maximum, stated by the
+    caller, reaches the model, and there is no default to fall back on."""
+    task = make_lm_eval_task(env, 'r', local_dg, max_gen_toks=32768)
 
-    _, requests = _evaluate(
-        lm_eval,
-        GOOD_SOLUTION,
-        make_lm_eval_task(env, 'r', local_dg),
-        gen_kwargs={'max_gen_toks': 32768},
-    )
+    _, requests = _evaluate(lm_eval, GOOD_SOLUTION, task)
+
     assert requests[0].args[1]['max_gen_toks'] == 32768
+    with pytest.raises(TypeError, match='max_gen_toks'):
+        make_lm_eval_task(env, 'r', local_dg)  # type: ignore[call-arg]
 
 
 def test_a_verifier_failure_is_not_a_wrong_answer(
@@ -122,8 +120,8 @@ def test_a_verifier_failure_is_not_a_wrong_answer(
     results, _ = _evaluate(
         lm_eval,
         GOOD_SOLUTION,
-        make_lm_eval_task(env, 'reverse_string', local_dg),
-        make_lm_eval_task(broken, 'broken', local_dg),
+        make_lm_eval_task(env, 'reverse_string', local_dg, max_gen_toks=8192),
+        make_lm_eval_task(broken, 'broken', local_dg, max_gen_toks=8192),
     )
 
     assert results['deepgym_reverse_string']['deepgym_score,none'] == 1.0
@@ -136,7 +134,9 @@ def test_a_verifier_failure_is_not_a_wrong_answer(
 def test_a_wrong_answer_scores_zero_with_a_verdict(
     lm_eval: ModuleType, env: Environment, local_dg: DeepGym
 ) -> None:
-    results, _ = _evaluate(lm_eval, 'pass\n', make_lm_eval_task(env, 'reverse_string', local_dg))
+    results, _ = _evaluate(
+        lm_eval, 'pass\n', make_lm_eval_task(env, 'reverse_string', local_dg, max_gen_toks=8192)
+    )
 
     metrics = results['deepgym_reverse_string']
     assert metrics['deepgym_score,none'] == 0.0

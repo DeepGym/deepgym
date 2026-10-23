@@ -17,6 +17,8 @@ from pydantic import BaseModel, ConfigDict
 
 _DEFAULT_BASE_URL = 'https://api.z.ai/api/paas/v4'
 _DEFAULT_MODEL = 'glm-5.1'
+# Reaching the endpoint, not generating: a reply itself has no time limit by default.
+_CONNECT_TIMEOUT_S = 30.0
 
 
 class Completion(BaseModel):
@@ -45,15 +47,24 @@ class ZaiChatClient:
         *,
         base_url: str = _DEFAULT_BASE_URL,
         model: str = _DEFAULT_MODEL,
-        timeout: float = 120.0,
+        timeout: float | None = None,
         transport: httpx.BaseTransport | None = None,
     ) -> None:
+        """Args:
+        api_key: The endpoint's API key.
+        base_url: The OpenAI-compatible endpoint.
+        model: The model to ask.
+        timeout: Seconds to wait for a reply; None (the default) waits as long as the
+            model generates, since a full-length reply can take many minutes. Only
+            connecting is bounded then (:data:`_CONNECT_TIMEOUT_S`).
+        transport: An httpx transport, for tests.
+        """
         if not api_key:
             raise ValueError('api_key must be non-empty')
         self._api_key = api_key
         self.base_url = base_url.rstrip('/')
         self.model = model
-        self.timeout = timeout
+        self.timeout = httpx.Timeout(timeout, connect=_CONNECT_TIMEOUT_S)
         self._transport = transport
 
     @classmethod

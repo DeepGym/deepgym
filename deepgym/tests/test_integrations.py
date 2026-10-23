@@ -723,7 +723,7 @@ class TestOpenRLHFIntegration:
     @pytest.mark.parametrize('infra_failure_score', ['zero', 'nan'])
     @pytest.mark.parametrize(
         ('second', 'budget'),
-        [(ConnectionError('still unavailable'), 150.0), (2.0, 0.5)],
+        [(ConnectionError('still unavailable'), 150.0), (4.0, 2.0)],
         ids=['fails_too', 'out_of_time'],
     )
     def test_a_second_grading_that_fails_gets_the_infrastructure_score(
@@ -734,7 +734,8 @@ class TestOpenRLHFIntegration:
         second: BaseException | float,
         budget: float,
     ) -> None:
-        """Failing again, or passing too late (2 s against 0.5 s), is never a pass or an error.
+        """Failing again, or passing too late (4 s against 2 s, so the retry surely starts
+        in time on a busy runner), is never a pass or an error.
 
         0 in zero mode; NaN in nan mode, which OpenRLHF's dynamic filtering drops.
         """

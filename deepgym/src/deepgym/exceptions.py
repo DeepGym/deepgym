@@ -21,7 +21,12 @@ _TRANSPORT_ERRORS = (
     ('daytona', ('DaytonaConnectionError', 'DaytonaSpotEvictedError', 'DaytonaQueueTimeoutError')),
     (
         'e2b.exceptions',
-        ('SandboxUnreachableException', 'ServiceBusyException', 'RateLimitException'),
+        (
+            'SandboxUnreachableException',
+            'ServiceBusyException',
+            'RateLimitException',
+            'AuthenticationException',  # our credentials refused; it carries no status
+        ),
     ),
     ('pyqwest', ('ReadError', 'WriteError', 'StreamError')),  # e2b's RPC transport
     (
@@ -32,6 +37,8 @@ _TRANSPORT_ERRORS = (
             'InternalFailure',
             'ResourceExhaustedError',
             'ServiceError',
+            'AuthError',  # our credentials refused; Modal's status is an Enum, not an int
+            'PermissionDeniedError',
         ),
     ),
 )

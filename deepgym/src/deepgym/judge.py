@@ -296,6 +296,21 @@ def _deepgym_packages() -> list[str]:
     return list(dict.fromkeys([here, *others]))
 
 
+def sandbox_python() -> str:
+    """This Python, by a path a local sandbox has (see :func:`local_isolation`).
+
+    The sandbox holds the installation's real directories, so an alias outside them (a
+    ``~/bin`` link, a profile link) goes by its target. A venv keeps its own directory, by
+    its real path, so the venv and its packages stay in use.
+    """
+    executable = os.path.abspath(sys.executable)
+    folder = os.path.realpath(os.path.dirname(executable))
+    prefixes = {os.path.realpath(p) for p in (sys.prefix, sys.exec_prefix)}
+    if any(Path(folder).is_relative_to(prefix) for prefix in prefixes):
+        return os.path.join(folder, os.path.basename(executable))
+    return os.path.realpath(executable)
+
+
 def local_isolation(expose: list[str]) -> dict:
     """Isolation spec for a local run: what its solution may read.
 
@@ -371,17 +386,18 @@ def local_judge(
             if local_isolation_kind() == 'none':  # never unsandboxed, opt-in or not
                 raise SandboxError('confining the judge needs sandbox-exec or bwrap')
             outer = local_isolation([run_dir])
+            python = sandbox_python()
             env = {
                 'PATH': os.environ.get('PATH', os.defpath),
-                **job.runtime_env(outer, runtime_path, sys.executable, solution_dir),
+                **job.runtime_env(outer, runtime_path, python, solution_dir),
                 **deadline,
             }
             confine = [sys.executable, '-I', '-B', runtime_path, '--confine', tmp_dir]
-            yield [*confine, *judge], env, judge_dir
+            yield [*confine, python, *judge[1:]], env, judge_dir
             return
         isolation = local_isolation([runtime_dir, solution_dir])
         # Verifier temp files (and solution scratch dirs) stay inside this run.
-        runtime_env = job.runtime_env(isolation, runtime_path, sys.executable, solution_dir)
+        runtime_env = job.runtime_env(isolation, runtime_path, sandbox_python(), solution_dir)
         env = {**os.environ, **runtime_env, **deadline}
         yield judge, env, judge_dir
     finally:

@@ -15,7 +15,7 @@ from deepgym import _cli_worker, cli_runtime
 from deepgym.cli_runtime import CliExecution, CliRequest
 from deepgym.exceptions import ActionError, SandboxError, VerifierError
 from deepgym.models import Action, MultiTurnEnvironment
-from deepgym.sandboxes import ExecResult
+from deepgym.sandboxes import ExecResult, SandboxTimeoutError
 from deepgym.session import LocalBackend, SandboxBackend, Session
 from tests.test_sandboxes import _USERS, FakeSandbox
 
@@ -577,6 +577,30 @@ def test_a_verifier_upload_the_agent_may_have_blocked(monkeypatch, acted: bool) 
 
     if not acted:
         with pytest.raises(VerifierError, match='Could not upload the verifier'):
+            session.score()
+        return
+    result = session.score()
+    assert (result.has_verdict, result.error_type) == (True, 'policy_sandbox_failure')
+
+
+@pytest.mark.parametrize('acted', [False, True])
+def test_a_verifier_timeout_with_no_output_blames_only_an_agent_that_acted(
+    monkeypatch, acted: bool
+) -> None:
+    """Before any action the work directory holds only the environment's files: a verifier
+    timeout whose output was lost is ours then, not a policy zero."""
+    backend = SandboxBackend(FakeSandbox(False, [_USERS]))
+    session = Session(MultiTurnEnvironment(task='task', final_verifier_code='print(1)'), backend)
+    session.start()
+    if acted:
+        session.step(Action(action_type='bash', content='true'))
+
+    def lost(*args, **kwargs):
+        raise SandboxTimeoutError('verifier exceeded 30s', '')
+
+    monkeypatch.setattr(backend, 'verify', lost)
+    if not acted:
+        with pytest.raises(VerifierError, match='before the agent acted'):
             session.score()
         return
     result = session.score()

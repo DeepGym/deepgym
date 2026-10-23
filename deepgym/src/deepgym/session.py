@@ -51,6 +51,7 @@ from deepgym.judge import (
     SOLVER_USER,
     ids_are_exclusive,
     local_isolation,
+    sandbox_python,
 )
 from deepgym.models import (
     Action,
@@ -321,7 +322,7 @@ class LocalBackend:
         runtime = {
             'DEEPGYM_ISOLATION': json.dumps(isolation),
             'DEEPGYM_RUNTIME': str(self._runtime),
-            'DEEPGYM_PYTHON': sys.executable,
+            'DEEPGYM_PYTHON': sandbox_python(),
             'DEEPGYM_DEADLINE': str(time.time() + timeout),
             'DEEPGYM_POLICY_DIR': str(self._dir),
         }
@@ -1322,7 +1323,8 @@ class Session:
             start = time.perf_counter()
             acted = bool(self._trajectory.steps)
             try:
-                (exit_code, stdout, stderr), consulted = self._verify(self._env.final_verifier_code)
+                code = self._env.final_verifier_code
+                (exit_code, stdout, stderr), consulted = self._verify(code, acted=acted)
             except SandboxDiedError as exc:
                 if not acted:
                     return error_result(exc, self.sandbox_id)
@@ -1600,7 +1602,9 @@ class Session:
         self._step_verdict = {**data, 'exit_code': exit_code}
         return score
 
-    def _verify(self, code: str, env: dict[str, str] | None = None) -> tuple[VerifierOutput, bool]:
+    def _verify(
+        self, code: str, env: dict[str, str] | None = None, *, acted: bool = True
+    ) -> tuple[VerifierOutput, bool]:
         """Run session verifier *code* against the sandbox as it stands.
 
         It gets a fresh ``DEEPGYM_CONSULTED`` mark in its code (see :func:`_guarded`). It
@@ -1613,13 +1617,16 @@ class Session:
         run, see :func:`~deepgym.sandbox.solution_timeout`), and so is the verifier being
         killed (``solution_error``). So is a timeout whose output the backend lost (no start
         line), since nothing then shows the verifier hadn't read the agent's output. A judged
-        0 comes back as if the verifier had printed it.
+        0 comes back as if the verifier had printed it. All of that needs an agent that has
+        *acted*: before any action, its work directory holds only what the environment put
+        there, so none of these failures is its doing (a :class:`VerifierError`).
 
         Returns:
             What the verifier printed, and whether it read the agent's output.
 
         Raises:
-            VerifierError: If the verifier timed out before the mark.
+            VerifierError: If the verifier timed out before the mark, or failed in any of
+                these ways before the agent acted.
         """
         mark = uuid4().hex
         consulted, started = f'\n{mark}\n', f'\n{mark}:start\n'
@@ -1627,6 +1634,10 @@ class Session:
         try:
             exit_code, stdout, stderr = self._backend.verify(_guarded(code, mark), timeout, env)
         except SandboxTimeoutError as exc:
+            if not acted:
+                raise VerifierError(
+                    f'The verifier timed out before the agent acted: {exc}'
+                ) from exc
             if consulted in exc.output:
                 return _reported(solution_timeout(timeout)), True
             if started not in exc.output:
@@ -1635,7 +1646,7 @@ class Session:
             raise VerifierError(
                 f"The verifier timed out before it read the agent's output: {exc}"
             ) from exc
-        read = consulted in stdout
+        read = acted and consulted in stdout
         if read and not 0 <= exit_code < 128:
             details = f"The verifier was killed (exit {exit_code}) handling the agent's output"
             return _reported(_judged_zero(details, 'solution_error')), True

@@ -226,20 +226,26 @@ def judge_verdict(
     """Parse the verdict a judge printed on *stdout*.
 
     A judge that printed none after announcing the solution's start (*consulted_mark* in
-    its stdout) was ended through the solution, the only untrusted code it ran: killed,
-    starved of memory or processes. That is the solution's judged 0 (``solution_error``),
-    or ending its judge would dodge the score. Before then, it has no verdict.
+    its stdout), or that ended abnormally then (killed by a signal, or any exit but the
+    protocol's 0, 1 and 2), whatever it printed before, was ended through the solution,
+    the only untrusted code it ran: killed, starved of memory or processes. That is the
+    solution's judged 0 (``solution_error``), or ending its judge would dodge the score.
+    Before then, it has no verdict.
 
     Raises:
         InvalidScoreError: If the score is NaN, infinite, or outside [0, 1].
         VerifierError: If stdout has no protocol JSON before the solution started.
     """
+    consulted = consulted_mark is not None and consulted_mark in stdout
+    if consulted and exit_code not in (0, 1, 2):
+        details = f'The judge ended abnormally (exit {exit_code}) after the solution ran'
+        return _judged_zero(details, 'solution_error')
     try:
         verdict = parse_verifier_output(stdout.strip(), f'exit_code={exit_code} stderr: {stderr!r}')
     except InvalidScoreError:
         raise
     except VerifierError as exc:
-        if consulted_mark is None or consulted_mark not in stdout:
+        if not consulted:
             raise
         details = f'The judge ended without a verdict after the solution ran: {exc}'
         return _judged_zero(details, 'solution_error')

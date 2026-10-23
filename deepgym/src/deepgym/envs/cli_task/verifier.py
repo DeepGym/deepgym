@@ -11,10 +11,10 @@ import zlib
 
 from deepgym_solution import read_output, read_output_bytes, run_solution
 
-# One git object, compressed or not; far above any this task makes. A bigger one is
-# treated as missing, never read in part.
-_OBJECT_LIMIT = 10_000_000
 _SHA = re.compile(r'[0-9a-f]{40}')
+# The most of one file the judge holds in memory, as deepgym_solution's read_output_bytes:
+# an object that inflates past it isn't read at all (a zip bomb would exhaust the judge).
+_JUDGE_HOLDS = 64 * 1024 * 1024
 
 
 class _Repo:
@@ -39,8 +39,8 @@ class _Repo:
 
     def _read(self, rel):
         try:
-            return read_output_bytes(os.path.join(self.git_dir, rel), self.root, _OBJECT_LIMIT)
-        except OSError:  # missing, a link, outside root, or too big
+            return read_output_bytes(os.path.join(self.git_dir, rel), self.root)
+        except OSError:  # missing, a link, outside root, or more than the judge holds
             return None
 
     def ref(self, name):
@@ -80,40 +80,52 @@ class _Repo:
             return None
         inflater = zlib.decompressobj()
         try:
-            raw = inflater.decompress(compressed, _OBJECT_LIMIT)
+            raw = inflater.decompress(compressed, _JUDGE_HOLDS)
         except zlib.error:
             return None
         if inflater.unconsumed_tail or not inflater.eof or inflater.unused_data:
-            return None  # bigger than the limit, cut short, or trailing bytes
+            return None  # more than the judge holds, cut short, or trailing bytes
         if hashlib.sha1(raw).hexdigest() != sha:
             return None
         header, _, body = raw.partition(b'\0')
         return body if header == f'{kind} {len(body)}'.encode() else None
 
     def commit(self, sha):
-        """(tree id, parent ids, message) of commit *sha*, or None if it isn't one."""
+        """(tree id, parent ids, message) of commit *sha*, or None unless it is one whose
+        tree is a real, well-formed tree."""
         body = self.object(sha, 'commit')
         if body is None:
             return None
         meta, _, message = body.partition(b'\n\n')
         lines = meta.decode('utf-8', 'replace').split('\n')
-        if not lines[0].startswith('tree ') or not _SHA.fullmatch(lines[0][len('tree ') :]):
+        tree = lines[0][len('tree ') :]
+        if not lines[0].startswith('tree ') or self.entries(tree) is None:
             return None
         parents = [line[len('parent ') :] for line in lines[1:] if line.startswith('parent ')]
-        return lines[0][len('tree ') :], parents, message.decode('utf-8', 'replace')
+        return tree, parents, message.decode('utf-8', 'replace')
 
-    def file_in(self, tree, name):
-        """The content of regular file *name* at the top of *tree*, or None."""
+    def entries(self, tree):
+        """{name: (mode, object id)} of *tree*, or None unless every entry is well formed:
+        an octal mode, a name, a NUL and a 20-byte id, as git itself parses it."""
         body = self.object(tree, 'tree')
+        if body is None:
+            return None
+        found = {}
         while body:
             entry, sep, rest = body.partition(b'\0')
-            if not sep or len(rest) < 20:
+            mode, space, name = entry.partition(b' ')
+            if not sep or not space or not name or len(rest) < 20 or b'/' in name:
                 return None
-            mode, _, entry_name = entry.partition(b' ')
-            if entry_name == name.encode() and mode in (b'100644', b'100755'):
-                return self.object(rest[:20].hex(), 'blob')
+            if not mode or any(c not in b'01234567' for c in mode) or name in found:
+                return None
+            found[name] = (mode, rest[:20].hex())
             body = rest[20:]
-        return None
+        return found
+
+    def file_in(self, tree, name):
+        """The content of regular file *name* at the top of well-formed *tree*, or None."""
+        mode, sha = (self.entries(tree) or {}).get(name.encode(), (None, None))
+        return self.object(sha, 'blob') if mode in (b'100644', b'100755') else None
 
     def commits(self, starts):
         """(message, tree id) of every valid commit reachable from *starts*."""

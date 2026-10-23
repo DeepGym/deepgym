@@ -14,7 +14,7 @@ from deepgym import DeepGym
 from deepgym.exceptions import DeepGymError, SandboxError, TimeoutError, VerifierError
 from deepgym.judge import JudgeJob
 from deepgym.models import Environment, VerifierResult
-from deepgym.sandbox import AsyncLocalExecutor, ExecutionResult, LocalExecutor
+from deepgym.sandbox import AsyncLocalExecutor, ExecutionResult, LocalExecutor, judge_verdict
 
 ENVS_DIR = Path(__file__).resolve().parent.parent / 'src' / 'deepgym' / 'envs'
 
@@ -392,3 +392,16 @@ def test_a_judge_that_dies_after_the_solution_ran_is_its_judged_zero(executor) -
     assert (after.score, after.error_type) == (0.0, 'solution_error')
     with pytest.raises(VerifierError):
         run('before')
+
+
+def test_a_judge_killed_after_an_earlier_report_is_still_the_solutions_zero() -> None:
+    """A report printed before a later solution call can't make the judge's death after it
+    anyone else's: the abnormal exit decides, whatever was printed."""
+    stdout = 'mark\n{"score": 1.0, "passed": true}\n'
+
+    killed = judge_verdict(stdout, '', -9, 'mark').verifier_result
+
+    assert (killed.score, killed.error_type) == (0.0, 'solution_error')
+    assert judge_verdict(stdout, '', 0, 'mark').verifier_result.score == 1.0
+    with pytest.raises(VerifierError):
+        judge_verdict('', '', -9, 'mark')  # nothing announced: the solution never ran

@@ -326,3 +326,37 @@ def test_cli_task_takes_no_forged_git_files(tmp_path: Path) -> None:
     assert read.branches() == {'feature': '0' * 40}
     assert read.commit('0' * 40) is None  # its content doesn't hash to its name
     assert read.commits(read.branches().values()) == []
+
+
+def _store(git: Path, kind: str, body: bytes) -> str:
+    """Write a loose object as git does, under its true id; return the id."""
+    import hashlib
+    import zlib
+
+    raw = f'{kind} {len(body)}'.encode() + b'\0' + body
+    sha = hashlib.sha1(raw).hexdigest()
+    (git / 'objects' / sha[:2]).mkdir(parents=True, exist_ok=True)
+    (git / 'objects' / sha[:2] / sha[2:]).write_bytes(zlib.compress(raw))
+    return sha
+
+
+def test_cli_task_takes_no_malformed_or_missing_tree(tmp_path: Path) -> None:
+    """Objects stored under their true ids still prove nothing if git can't parse them: a
+    tree with a malformed entry after hello.txt, or a commit whose tree doesn't exist."""
+    verifier = _cli_task_verifier()
+    git = tmp_path / 'my_repo' / '.git'
+    blob = _store(git, 'blob', b'Hello, DeepGym!')
+    entry = b'100644 hello.txt\0' + bytes.fromhex(blob)
+    good = _store(git, 'tree', entry)
+    bad = _store(git, 'tree', entry + b'not a valid tree entry')
+    who = b'author t <t@t> 0 +0000\ncommitter t <t@t> 0 +0000\n\nAdd hello.txt\n'
+    with_good = _store(git, 'commit', f'tree {good}\n'.encode() + who)
+    with_bad = _store(git, 'commit', f'tree {bad}\n'.encode() + who)
+    with_none = _store(git, 'commit', f'tree {"1" * 40}\n'.encode() + who)
+
+    read = verifier._Repo(str(tmp_path / 'my_repo'), str(tmp_path))
+
+    assert read.file_in(good, 'hello.txt') == b'Hello, DeepGym!'
+    assert read.commit(with_good) is not None
+    assert read.entries(bad) is None and read.file_in(bad, 'hello.txt') is None
+    assert read.commit(with_bad) is None and read.commit(with_none) is None

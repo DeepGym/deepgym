@@ -1395,3 +1395,16 @@ def test_judge_setup_runs_the_solution_only_as_an_account_of_its_own(
     else:
         assert setup.returncode != 0
         assert 'dgsolver is root or shares an id or a group' in setup.stdout
+
+
+def test_a_python_alias_outside_the_installation_goes_by_its_target(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A ~/bin link to the interpreter isn't in a local sandbox's fresh root; its target is."""
+    import deepgym.judge
+
+    alias = tmp_path / 'python3'
+    alias.symlink_to(os.path.realpath(sys.executable))
+    monkeypatch.setattr(sys, 'executable', str(alias))
+
+    assert deepgym.judge.sandbox_python() == os.path.realpath(sys.executable)

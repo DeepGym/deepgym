@@ -21,9 +21,14 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / 'src'))
 
 from deepgym import DeepGym, Environment
-from deepgym.adversarial import PASS_THRESHOLD, BlackBoxAdversarialTester, BlackBoxReport
+from deepgym.adversarial import (
+    PASS_THRESHOLD,
+    BlackBoxAdversarialTester,
+    BlackBoxReport,
+    fingerprint_verifier,
+    grading_fingerprint,
+)
 from deepgym.exploit_db import ExploitDB, ExploitRecord
-from deepgym.reward_qa import fingerprint_verifier
 
 logger = logging.getLogger(__name__)
 
@@ -70,7 +75,7 @@ def _scan_one(
         A status line: skipped, INCONCLUSIVE (not saved, so the next scan retries it),
         EXPLOITABLE or ROBUST.
     """
-    verifier_hash = fingerprint_verifier(env.verifier_source)
+    verifier_hash = grading_fingerprint(env)
     config = _attack_config(tester, env.task)
     if db.current(
         name,
@@ -84,7 +89,7 @@ def _scan_one(
     report = tester.test(env)
     elapsed = time.time() - start
     if report.status == 'inconclusive':
-        return f'INCONCLUSIVE, not saved ({"; ".join(report.problems[:3])}, {elapsed:.1f}s)'
+        return f'INCONCLUSIVE, not saved ({"; ".join(report.problems)}, {elapsed:.1f}s)'
     db.save(_blackbox_record(name, benchmark, report, verifier_hash, config))
     return (
         f'{report.status.upper()} (best={report.best_exploit_score:.2f}, '

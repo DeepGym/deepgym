@@ -1,5 +1,14 @@
 # Changelog
 
+## Unreleased
+
+- **Unsandboxed runs leave a trace:** every local `RunResult` records how its solution was isolated (`isolation`: `macos`, `bwrap`, or `none` under `DEEPGYM_ALLOW_UNSANDBOXED`), and the process logs a warning once when local solutions run unsandboxed.
+- **Closed sessions stay closed:** once `close()` runs (even if the delete fails), `start`, `step`, `run_cli`, `finalize_cli` and `score` raise the new `SessionClosedError` before touching the sandbox; `score()` still returns a result a failed step already fixed. The API answers a request that raced a DELETE with 409, so a host-deleted sandbox is never scored as the agent's 0. A session whose setup fails is closed through the same pipeline as a DELETE, so a failed delete keeps its slot, is retried by the sweep and is reported in `leaked_sandboxes` if it never succeeds.
+- **Harbor:** remote datasets are cached in a folder keyed by a digest of the full URL and reused only while git confirms the folder is a clone of that URL; two URLs that read alike no longer share tasks. Test output is kept whole in results and reward errors.
+- **Console:** episodes with no verdict show as unscored (`has_verdict` and `error_type` are stored, and existing rows are migrated from their saved results) instead of as a failed 0. Episodes and runs are paged on the server with a total, with no 200-row default and no upper bound.
+- **No generation caps:** the Z.ai client sends no `max_tokens` unless asked, has no read timeout by default and returns a `Completion` with its `finish_reason`; the QA difficulty probe is inconclusive when a sample was cut off, never `too_hard`. Breaking: `make_lm_eval_task` takes a required `max_gen_toks`, the model's maximum output (lm-eval needs one and would otherwise default to 256). Claude calls in the adversarial tester and RL exploit discovery stream at the model's maximum output, read a smaller model's maximum from its error, and refuse a reply cut off at that limit.
+- **No trimmed output:** errors, adversarial and exploit reports, and QA and `deepgym check` details carry command output, code and details whole. Verifier ids default to a digest of the verifier (`fingerprint_verifier`, now in `deepgym.adversarial`) instead of the task's first 80 characters, which two tasks could share.
+
 ## 0.6.1 (2026-10-23)
 
 - **Local sandbox reads only what a run needs:** under `sandbox-exec` and `bwrap`, a solution can read the operating system, the software trees a Python links against, the Python installation and its own run's files, and nothing else. Before, only the home directory, this process's runs and daemon sockets were hidden, so a solution could read files under `/tmp` and `$TMPDIR`, including another DeepGym process's verifier copies. Every deepgym package on the import path stays unreadable, not just the one running. Runs roots that a killed process left behind are removed by the next process.

@@ -14,7 +14,7 @@ import { Kbd } from '@/components/base/kbd/kbd';
 import { useApi } from '@/lib/api';
 import { timeAgo } from '@/lib/format';
 import { NAV } from '@/lib/nav';
-import type { EnvironmentSummary, EpisodeSummary, RunSummary } from '@/lib/types';
+import type { EnvironmentSummary, EpisodePage, RunSummary } from '@/lib/types';
 
 interface PaletteItemProps {
   value: string;
@@ -50,7 +50,7 @@ export function CommandPalette({
   const router = useRouter();
   const envs = useApi<EnvironmentSummary[]>(open ? '/environments' : null);
   const runs = useApi<RunSummary[]>(open ? '/runs?limit=20' : null);
-  const episodes = useApi<EpisodeSummary[]>(open ? '/episodes' : null);
+  const episodes = useApi<EpisodePage>(open ? '/episodes?limit=20' : null);
 
   const go = (href: string) => {
     onOpenChange(false);
@@ -121,7 +121,7 @@ export function CommandPalette({
           ))}
         </Command.Group>
         <Command.Group heading="Episodes" className={groupClass}>
-          {episodes.data?.slice(0, 20).map((episode) => (
+          {episodes.data?.episodes.map((episode) => (
             <PaletteItem
               key={episode.id}
               value={`episode ${episode.id} ${episode.environment}`}

@@ -10,7 +10,7 @@ import { Kbd } from '@/components/base/kbd/kbd';
 import { CodeBlock } from '@/components/primitives/code-block';
 import { ThinkingTrace } from '@/components/primitives/thinking-trace';
 import { Card } from '@/components/ui/card';
-import { PassBadge } from '@/components/ui/status-badge';
+import { VerdictBadge } from '@/components/ui/status-badge';
 import { formatScore } from '@/lib/format';
 import type { EpisodeDetail } from '@/lib/types';
 import { useHotkey } from '@/lib/use-hotkey';
@@ -140,9 +140,9 @@ export function EpisodeReplay({ episode }: { episode: EpisodeDetail }) {
             <Card title="Final score">
               <div className="flex items-center gap-3">
                 <span className="font-mono text-title-2-semibold text-text-primary">
-                  {formatScore(episode.result.score)}
+                  {formatScore(episode.score)}
                 </span>
-                <PassBadge passed={episode.result.passed} />
+                <VerdictBadge verdict={episode} />
               </div>
               {episode.result.output && (
                 <p className="mt-1.5 text-body-2-regular text-text-secondary">{episode.result.output}</p>

@@ -1,6 +1,6 @@
 import { Chip, type ChipProps } from '@/components/base/badges/chip';
 import { formatScore } from '@/lib/format';
-import type { EnvKind, RunStatus } from '@/lib/types';
+import type { EnvKind, EpisodeSummary, RunStatus } from '@/lib/types';
 import { scoreTone, type Tone } from '@/lib/verdict';
 import { cx } from '@/utils/cx';
 
@@ -31,6 +31,26 @@ export function PassBadge({ passed }: { passed: boolean | null }) {
     <Chip variant="caption" color={passed ? 'lime' : 'rose'}>
       {passed ? 'pass' : 'fail'}
     </Chip>
+  );
+}
+
+/**
+ * Pass/fail pill, or "no verdict" and its error type when the verifier or sandbox failed instead
+ * of judging, so that 0 is never shown as a fail.
+ */
+export function VerdictBadge({
+  verdict,
+}: {
+  verdict: Pick<EpisodeSummary, 'passed' | 'has_verdict' | 'error_type'>;
+}) {
+  if (verdict.has_verdict !== false) return <PassBadge passed={verdict.passed} />;
+  return (
+    <span className="inline-flex flex-wrap items-center gap-x-1.5 gap-y-0.5">
+      <Chip variant="caption" color="yellow">
+        no verdict
+      </Chip>
+      <span className="font-mono text-caption-1-medium text-text-error-primary">{verdict.error_type}</span>
+    </span>
   );
 }
 

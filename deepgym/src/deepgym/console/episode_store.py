@@ -11,12 +11,20 @@ import json
 from pathlib import Path
 from uuid import uuid4
 
-from deepgym.console.db import DEFAULT_DB_PATH, connect, init_db, utc_now
-from deepgym.console.schemas import EpisodeCreate, EpisodeDetail, EpisodeSummary, Frame
+from deepgym.console.db import DEFAULT_DB_PATH, connect, init_db, utc_now, verdict_columns
+from deepgym.console.schemas import (
+    EpisodeCreate,
+    EpisodeDetail,
+    EpisodePage,
+    EpisodeSummary,
+    Frame,
+)
 from deepgym.models import RunResult, Trajectory
 from deepgym.traces import Trace
 
-_SUMMARY_COLUMNS = 'id, environment, steps, total_reward, score, passed, created_at'
+_SUMMARY_COLUMNS = (
+    'id, environment, steps, total_reward, score, passed, has_verdict, error_type, created_at'
+)
 
 
 class EpisodeStore:
@@ -36,21 +44,27 @@ class EpisodeStore:
         """
         frames, screenshots = split_frames(episode.trajectory)
         result = episode.result
+        score, passed, error_type = (
+            (None, None, None) if result is None else verdict_columns(result)
+        )
         summary = EpisodeSummary(
             id=uuid4().hex[:12],
             environment=episode.environment,
             steps=len(episode.trajectory.steps),
             total_reward=episode.trajectory.total_reward,
-            score=None if result is None else result.score,
-            passed=None if result is None else result.passed,
+            score=score,
+            passed=passed,
+            has_verdict=None if result is None else result.has_verdict,
+            error_type=error_type,
             created_at=utc_now(),
         )
         with connect(self._path) as conn:
             conn.execute(
                 'INSERT INTO episodes (id, environment, steps, total_reward, score, passed, '
-                'frames, result, created_at, trace) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
+                'has_verdict, error_type, frames, result, created_at, trace) '
+                'VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
                 (summary.id, summary.environment, summary.steps, summary.total_reward,
-                 summary.score, summary.passed,
+                 summary.score, summary.passed, summary.has_verdict, summary.error_type,
                  json.dumps([frame.model_dump(mode='json') for frame in frames]),
                  None if result is None else result.model_dump_json(), summary.created_at,
                  None if trace is None else trace.model_dump_json()),
@@ -61,16 +75,27 @@ class EpisodeStore:
             )
         return summary
 
-    def list(self, environment: str | None = None, limit: int = 200) -> list[EpisodeSummary]:
-        """Return the newest episodes, optionally only those of *environment*."""
+    def page(self, environment: str | None, offset: int, limit: int | None) -> EpisodePage:
+        """Return one page of the episodes, newest first, and how many there are in all.
+
+        Args:
+            environment: Only this environment's episodes, if given.
+            offset: How many of the newest episodes to skip.
+            limit: Most episodes to return; None returns every one after *offset*.
+
+        Returns:
+            The page, with the total count of matching episodes.
+        """
         where, params = ('WHERE environment = ?', (environment,)) if environment else ('', ())
         with connect(self._path) as conn:
+            total = conn.execute(f'SELECT COUNT(*) FROM episodes {where}', params).fetchone()[0]
             rows = conn.execute(
                 f'SELECT {_SUMMARY_COLUMNS} FROM episodes {where} '
-                'ORDER BY created_at DESC, rowid DESC LIMIT ?',
-                (*params, limit),
+                'ORDER BY created_at DESC, rowid DESC LIMIT ? OFFSET ?',
+                (*params, -1 if limit is None else limit, offset),  # SQLite: LIMIT -1 is none
             ).fetchall()
-        return [EpisodeSummary.model_validate(dict(row)) for row in rows]
+        episodes = [EpisodeSummary.model_validate(dict(row)) for row in rows]
+        return EpisodePage(episodes=episodes, total=total)
 
     def traces(self) -> tuple[list[Trace], int]:
         """Return the stored traces, and how many episodes were recorded without one."""

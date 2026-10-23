@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.6.1 (2026-10-23)
 
 - **Local sandbox reads only what a run needs:** under `sandbox-exec` and `bwrap`, a solution can read the operating system, the software trees a Python links against, the Python installation and its own run's files, and nothing else. Before, only the home directory, this process's runs and daemon sockets were hidden, so a solution could read files under `/tmp` and `$TMPDIR`, including another DeepGym process's verifier copies. Every deepgym package on the import path stays unreadable, not just the one running. Runs roots that a killed process left behind are removed by the next process.
 - **macOS sandbox:** a solution can't signal anything outside its sandbox, its judge included. Nothing on macOS contains a child that detaches, so `run_solution(..., allow_subprocess=True)` is refused there (no verdict); run such environments on Linux or a sandbox provider.

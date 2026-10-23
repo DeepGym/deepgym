@@ -2,7 +2,6 @@
 
 import { RiAddLine, RiCloseLine } from '@remixicon/react';
 import { useRouter } from 'next/navigation';
-import { useState } from 'react';
 import { Chip } from '@/components/base/badges/chip';
 import { Button } from '@/components/base/buttons/button';
 import {
@@ -18,6 +17,7 @@ import { useApi } from '@/lib/api';
 import { RANGES } from '@/lib/stats';
 import { RUN_MODES, type RunPage, type RunStats } from '@/lib/types';
 import { useHotkey } from '@/lib/use-hotkey';
+import { usePagedApi } from '@/lib/use-paged-api';
 import { useQueryParam } from '@/lib/use-query-param';
 import { NewRunDialog } from './new-run-dialog';
 import { FailureModes, KpiTiles, ScoreDistribution } from './run-stats';
@@ -25,7 +25,6 @@ import { RunsTable } from './runs-table';
 
 const STATUSES = ['all', 'queued', 'running', 'completed', 'failed'] as const;
 const PROVIDERS = RUN_MODES.filter((mode) => mode !== 'auto');
-const PAGE_SIZE = 25;
 
 function FilterChip({ label, onClear }: { label: string; onClear: () => void }) {
   return (
@@ -63,14 +62,7 @@ export function RunsPage() {
   if (provider) filters.set('provider', provider);
   if (environment) filters.set('environment', environment);
   if (group) filters.set('group_id', group);
-  const query = filters.toString();
-  // Kept with the filters it pages through, so a new filter starts at the first page.
-  const [page, setPage] = useState({ query, index: 0 });
-  const pageIndex = page.query === query ? page.index : 0;
-  const { data, error } = useApi<RunPage>(
-    `/runs?${query}&offset=${pageIndex * PAGE_SIZE}&limit=${PAGE_SIZE}`,
-    2500,
-  );
+  const { data, error, paging } = usePagedApi<RunPage>('/runs', 2500, filters.toString());
   // An eval group is one batch, so its stats cover all of it rather than a time window.
   const { data: stats } = useApi<RunStats>(
     `/runs/stats?${filters}${group ? '' : `&hours=${RANGES[range]}`}`,
@@ -129,11 +121,7 @@ export function RunsPage() {
         </div>
         <RunsTable
           runs={data?.runs ?? []}
-          paging={{
-            pageIndex,
-            pageCount: Math.ceil((data?.total ?? 0) / PAGE_SIZE),
-            onPageChange: (index) => setPage({ query, index }),
-          }}
+          paging={paging}
           loading={!data && !error}
           error={error}
           onOpen={(run) => router.push(`/runs/detail/?id=${run.id}`)}

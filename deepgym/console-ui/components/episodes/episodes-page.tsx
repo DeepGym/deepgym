@@ -2,7 +2,6 @@
 
 import { RiFilmLine } from '@remixicon/react';
 import type { ColumnDef } from '@tanstack/react-table';
-import { useState } from 'react';
 import { CodeBlock } from '@/components/primitives/code-block';
 import { Card } from '@/components/ui/card';
 import { DataTable } from '@/components/ui/data-table';
@@ -12,6 +11,7 @@ import { VerdictBadge } from '@/components/ui/status-badge';
 import { useApi } from '@/lib/api';
 import { formatScore, timeAgo } from '@/lib/format';
 import type { EpisodeDetail, EpisodePage, EpisodeSummary } from '@/lib/types';
+import { usePagedApi } from '@/lib/use-paged-api';
 import { useQueryParam } from '@/lib/use-query-param';
 import { EpisodeReplay } from './episode-replay';
 
@@ -51,8 +51,6 @@ const columns: ColumnDef<EpisodeSummary>[] = [
   },
 ];
 
-const PAGE_SIZE = 25;
-
 function Replay({ id }: { id: string }) {
   const { data, error } = useApi<EpisodeDetail>(`/episodes/${id}`);
   if (error)
@@ -67,11 +65,7 @@ function Replay({ id }: { id: string }) {
 
 /** Recorded episodes on the left, a server page at a time; the selected one (?id=) replays on the right. */
 export function EpisodesPage() {
-  const [pageIndex, setPageIndex] = useState(0);
-  const { data, error } = useApi<EpisodePage>(
-    `/episodes?offset=${pageIndex * PAGE_SIZE}&limit=${PAGE_SIZE}`,
-    10_000,
-  );
+  const { data, error, paging } = usePagedApi<EpisodePage>('/episodes', 10_000);
   const [selected, setSelected] = useQueryParam('id');
 
   return (
@@ -95,11 +89,7 @@ export function EpisodesPage() {
               data={data?.episodes ?? []}
               columns={columns}
               onRowAction={(episode) => setSelected(episode.id)}
-              serverPaging={{
-                pageIndex,
-                pageCount: Math.ceil((data?.total ?? 0) / PAGE_SIZE),
-                onPageChange: setPageIndex,
-              }}
+              serverPaging={paging}
               empty={
                 <EmptyState icon={RiFilmLine} title={error ? 'Could not load episodes' : 'Loading episodes'}>
                   {error}

@@ -165,11 +165,10 @@ def test_docker_runs_offline_and_removes_with_rm(cli_calls: list[list[str]]) -> 
     box.delete()
     run, exec_, upload, delete = cli_calls
     assert run[:2] == ['docker', 'run'] and {'--network', '--pids-limit', '--memory'} <= set(run)
-    assert exec_[:12] == [
+    assert exec_ == [
         'docker', 'exec', '--workdir', '/w', '--env', 'A=1', box.id,
-        '/usr/bin/timeout', '--kill-after=2', '5', '/bin/sh', '-c',
+        '/usr/bin/timeout', '--kill-after=2', '5', '/bin/sh', '-c', 'echo hi',
     ]  # fmt: skip
-    assert exec_[13].startswith('deepgym-started-') and exec_[14:] == ['echo hi']
     assert upload[:3] == ['docker', 'exec', '--interactive']
     assert delete == ['docker', 'rm', '--force', box.id]
     assert box.network_blocked
@@ -202,69 +201,68 @@ def test_cli_timeout_exit_becomes_timeout_error(monkeypatch: pytest.MonkeyPatch)
         box.exec('sleep 99', timeout=5)
 
 
-def _started(argv: list[str]) -> bytes:
-    """The start line the container's shell prints before the command (see exec)."""
-    return next(arg for arg in argv if arg.startswith('deepgym-started-')).encode() + b'\n'
-
-
 def _exec_answering(
-    monkeypatch: pytest.MonkeyPatch, exec_answer, listing: tuple[int, str] | None = None
+    monkeypatch: pytest.MonkeyPatch, exec_answer, listing: Exception | None = None
 ) -> DockerContainer:
-    """Fake the docker CLI: exec runs *exec_answer(started_line)*; ps answers *listing*."""
+    """Fake the docker CLI: exec runs *exec_answer*; the listing shows the container running,
+    or raises *listing* (a daemon that can't answer)."""
 
     def fake_run(argv: list[str], **kwargs: object) -> subprocess.CompletedProcess:
         if argv[1] == 'exec':
-            return exec_answer(argv, _started(argv))
-        if argv[1] == 'ps' and listing is not None:
-            return subprocess.CompletedProcess(argv, listing[0], listing[1].encode(), b'')
+            return exec_answer(argv)
         return subprocess.CompletedProcess(argv, 0, b'', b'')
 
     monkeypatch.setattr(subprocess, 'run', fake_run)
-    return DockerContainer(image='img')
+    box = DockerContainer(image='img')
+
+    def running() -> list[types.SimpleNamespace]:
+        if listing is not None:
+            raise listing
+        return [types.SimpleNamespace(id=box.id)]
+
+    monkeypatch.setattr(box, 'running', running)
+    return box
 
 
-@pytest.mark.parametrize('ran', [False, True])
-def test_a_cli_that_gives_no_answer_is_ours_only_if_the_command_never_started(
-    monkeypatch: pytest.MonkeyPatch, ran: bool
+@pytest.mark.parametrize('daemon_answers', [True, False])
+def test_a_cli_that_gives_no_answer_is_ours_only_if_the_daemon_cannot_answer(
+    monkeypatch: pytest.MonkeyPatch, daemon_answers: bool
 ) -> None:
-    """Started, the command held the CLI (a child it left with the output open): its own
-    timeout. Not started, the daemon never ran it: infrastructure, no verdict."""
+    """A daemon that still lists the running container was held by what ran in it (a child
+    left with the output open, processes or memory used up): the command's own timeout.
+    One that can't list containers failed itself: infrastructure, no verdict."""
 
-    def hang(argv: list[str], started: bytes) -> subprocess.CompletedProcess:
-        raise subprocess.TimeoutExpired(argv, 20, output=started + b'partial' if ran else b'')
+    def hang(argv: list[str]) -> subprocess.CompletedProcess:
+        raise subprocess.TimeoutExpired(argv, 20, output=b'partial')
 
-    box = _exec_answering(monkeypatch, hang)
+    listing = None if daemon_answers else SandboxError('docker could not list containers')
+    box = _exec_answering(monkeypatch, hang, listing)
 
-    with pytest.raises(SandboxTimeoutError if ran else SandboxUnreachableError) as caught:
+    with pytest.raises(
+        SandboxTimeoutError if daemon_answers else SandboxUnreachableError
+    ) as caught:
         box.exec('work', timeout=5)
-    assert is_infrastructure_failure(caught.value) is not ran
-    if ran:
-        assert caught.value.output == 'partial'  # the start line is never the command's
+    assert is_infrastructure_failure(caught.value) is not daemon_answers
 
 
-def test_a_failed_exec_the_cli_cannot_vouch_for_is_infrastructure(
-    monkeypatch: pytest.MonkeyPatch,
+@pytest.mark.parametrize('daemon_answers', [True, False])
+def test_a_failed_exec_is_the_commands_unless_the_daemon_cannot_answer(
+    monkeypatch: pytest.MonkeyPatch, daemon_answers: bool
 ) -> None:
-    def fails(argv: list[str], started: bytes) -> subprocess.CompletedProcess:
-        return subprocess.CompletedProcess(argv, 1, b'', b'Cannot connect to the Docker daemon')
+    """Even an exec that couldn't start (the container's process limit, used up by what ran
+    before) stays the command's outcome while the daemon answers."""
 
-    box = _exec_answering(monkeypatch, fails, listing=(1, ''))
+    def fails(argv: list[str]) -> subprocess.CompletedProcess:
+        return subprocess.CompletedProcess(argv, 126, b'', b'cannot start: resource limit')
 
+    listing = None if daemon_answers else SandboxError('Cannot connect to the Docker daemon')
+    box = _exec_answering(monkeypatch, fails, listing)
+
+    if daemon_answers:
+        assert box.exec('work', timeout=5) == ExecResult(126, 'cannot start: resource limit')
+        return
     with pytest.raises(SandboxUnreachableError):
         box.exec('work', timeout=5)
-
-
-def test_a_command_that_fails_on_its_own_returns_its_exit_code(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    def fails(argv: list[str], started: bytes) -> subprocess.CompletedProcess:
-        return subprocess.CompletedProcess(argv, 3, started + b'out', b'err')
-
-    box = _exec_answering(monkeypatch, fails)
-    listing = json.dumps({'Names': box.id, 'Image': 'img', 'State': 'running', 'CreatedAt': ''})
-    _exec_answering(monkeypatch, fails, listing=(0, listing))
-
-    assert box.exec('work', timeout=5) == ExecResult(3, 'outerr')
 
 
 def test_cli_start_timeout_removes_the_container(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -1063,14 +1061,15 @@ def test_a_verifier_run_cut_short_is_the_solutions_only_after_it_started(
 def test_a_cli_timeout_keeps_what_the_command_printed(monkeypatch: pytest.MonkeyPatch) -> None:
     def fake_run(argv: list[str], **kwargs: object) -> subprocess.CompletedProcess:
         if argv[1] == 'exec':
-            printed = _started(argv) + b'printed'
-            raise subprocess.TimeoutExpired(argv, 16, output=printed, stderr=b' first')
+            raise subprocess.TimeoutExpired(argv, 16, output=b'printed', stderr=b' first')
         return subprocess.CompletedProcess(argv, 0, b'', b'')
 
     monkeypatch.setattr(subprocess, 'run', fake_run)
+    box = DockerContainer()
+    monkeypatch.setattr(box, 'running', lambda: [types.SimpleNamespace(id=box.id)])
 
     with pytest.raises(SandboxTimeoutError) as raised:
-        DockerContainer().exec('sleep 9', timeout=1)
+        box.exec('sleep 9', timeout=1)
     assert raised.value.output == 'printed first'
 
 
@@ -1087,7 +1086,7 @@ def test_cli_container_that_dies(
             died.append(True)
             return subprocess.CompletedProcess(argv, 137, _printed(announced).encode(), b'')
         if argv[1] == 'exec' and 'false' in command:  # fails, but the container still runs
-            return subprocess.CompletedProcess(argv, 1, _started(argv), b'')
+            return subprocess.CompletedProcess(argv, 1, b'', b'')
         output = _SETUP_OUTPUT.encode() if 'useradd' in command else b''
         return subprocess.CompletedProcess(argv, 0, output, b'')
 

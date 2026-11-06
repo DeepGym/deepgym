@@ -1636,6 +1636,33 @@ async def test_async_daytona_sweep_deletes_a_sandbox_daytona_finishes_later(
     assert deleted == ['late']
 
 
+async def test_async_daytona_aclose_waits_for_a_sweep_then_closes_the_client(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Closing (or leaving ``async with``) finishes a leak sweep before the client goes."""
+    pytest.importorskip('daytona')
+    events: list[str] = []
+
+    class Client:
+        async def close(self) -> None:
+            events.append('closed')
+
+    monkeypatch.setattr(AsyncDeepGym, '_init_daytona', staticmethod(lambda *args: Client()))
+
+    async def sweep() -> bool:
+        await asyncio.sleep(0)
+        events.append('swept')
+        return True
+
+    async with AsyncDeepGym(mode='daytona') as dg:
+        task = asyncio.create_task(sweep())
+        dg._sweeps.add(task)
+        task.add_done_callback(dg._sweeps.discard)
+
+    assert events == ['swept', 'closed']
+    assert dg._daytona is None
+
+
 def test_daytona_session_runs_agent_and_verifier_as_separate_users(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

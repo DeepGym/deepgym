@@ -15,13 +15,13 @@ import subprocess
 import sys
 import time
 import types
-from collections.abc import Mapping
+from collections.abc import AsyncIterator, Mapping
 from pathlib import Path
 
 import httpx
 import pytest
 
-from deepgym import ComputerUseEnvironment, DeepGym
+from deepgym import AsyncDeepGym, ComputerUseEnvironment, DeepGym
 from deepgym.exceptions import (
     DeepGymError,
     SandboxError,
@@ -1522,6 +1522,38 @@ def _daytona_client(
     client = FakeDaytona([_STAGE, _DAYTONA_USERS, *answers])
     monkeypatch.setattr(DeepGym, '_init_daytona', staticmethod(lambda *args: client))
     return DeepGym(mode='daytona'), client
+
+
+async def test_async_daytona_finds_and_deletes_a_sandbox_a_failed_create_left(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Daytona can allocate a sandbox and still fail the create (a 502): the async client
+    labels every sandbox, as the sync one does, so that one is found and deleted."""
+    pytest.importorskip('daytona')
+    allocated: list[types.SimpleNamespace] = []
+    deleted: list[str] = []
+
+    class Client:
+        async def create(self, params: object, **kwargs: object) -> None:
+            allocated.append(types.SimpleNamespace(id='left', labels=params.labels))
+            raise RuntimeError('502 Bad Gateway')
+
+        async def list(self, query: object) -> AsyncIterator[types.SimpleNamespace]:
+            for box in allocated:
+                if query.labels.items() <= box.labels.items():
+                    yield box
+
+        async def delete(self, sandbox: types.SimpleNamespace, **kwargs: object) -> None:
+            deleted.append(sandbox.id)
+
+    monkeypatch.setattr(AsyncDeepGym, '_init_daytona', staticmethod(lambda *args: Client()))
+    env = Environment(task='t', verifier_code='return 1.0')
+
+    with pytest.raises(SandboxError, match='502'):
+        await AsyncDeepGym(mode='daytona').run(env, 'x = 1\n')
+
+    assert 'deepgym_sandbox' in allocated[0].labels
+    assert deleted == ['left']
 
 
 def test_daytona_session_runs_agent_and_verifier_as_separate_users(

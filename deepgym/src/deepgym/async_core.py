@@ -9,6 +9,7 @@ import shlex
 import time
 from collections.abc import Awaitable, Callable, Sequence
 from typing import TYPE_CHECKING, Any, Literal
+from uuid import uuid4
 
 import httpx
 
@@ -375,12 +376,24 @@ class AsyncDeepGym:
         return AsyncDaytona(config) if config else AsyncDaytona()
 
     async def _create_sandbox(self, env: Environment) -> Sandbox:
-        """Create an ephemeral sandbox from the env's snapshot or image."""
+        """Create an ephemeral sandbox from the env's snapshot or image.
+
+        Labelled, as the sync client's are, so one a failed create still allocated is found
+        and deleted rather than left running.
+        """
         assert self._daytona is not None
-        params = create_params(env)
+        label = {'deepgym_sandbox': uuid4().hex}
+        params = create_params(env).model_copy(update={'labels': label})
         try:
             return await self._daytona.create(params)
         except Exception as exc:
+            from daytona import ListSandboxesQuery
+
+            try:
+                async for sandbox in self._daytona.list(ListSandboxesQuery(labels=label)):
+                    await self._cleanup_sandbox(sandbox)
+            except Exception:
+                logger.warning('Could not check for leaked sandboxes labelled %s', label)
             raise SandboxError(f'Failed to create async sandbox: {exc}') from exc
 
     async def _run_judge(self, sandbox: Sandbox, job: JudgeJob) -> ExecutionResult:

@@ -1524,6 +1524,30 @@ def _daytona_client(
     return DeepGym(mode='daytona'), client
 
 
+def test_daytona_replaces_a_sandbox_that_booted_without_coreutils(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Daytona sometimes boots its default snapshot as a busybox rootfs with no coreutils
+    (about 1 in 16 on 2026-11-06): the first command can't start, nothing of the policy has
+    run, so that sandbox is deleted and one other is created before giving up."""
+    dg, client = _daytona_client(monkeypatch)
+    real_create = client.create
+
+    def create(params: object, timeout: float = 60) -> types.SimpleNamespace:
+        box = real_create(params, timeout)
+        if len(client.boxes) == 1:
+            box.process.exec = lambda command, **kwargs: types.SimpleNamespace(
+                exit_code=127, result='/bin/sh: /usr/bin/timeout: not found'
+            )
+        return box
+
+    monkeypatch.setattr(client, 'create', create)
+    with dg.session(MultiTurnEnvironment(task='t')) as session:
+        session.start()
+    assert len(client.boxes) == 2
+    assert 'deleted' in client.boxes[0].events
+
+
 async def test_async_daytona_finds_and_deletes_a_sandbox_a_failed_create_left(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

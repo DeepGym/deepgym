@@ -190,28 +190,35 @@ class DaytonaSandbox:
         self._image = env.image
         self._session = isinstance(env, MultiTurnEnvironment)
         params = _session_params(env) if self._session else create_params(env)
-        # A label lets us find and delete the sandbox if create() fails after allocating it.
-        label = {'deepgym_sandbox': uuid4().hex}
-        try:
-            self._sandbox = daytona.create(
-                params.model_copy(update={'labels': label}),
-                timeout=env.setup_timeout if self._session else 60,
-            )
-        except Exception as exc:
-            _delete_labelled(daytona, label)
-            raise SandboxError(f'Failed to create sandbox: {exc}') from exc
-        self.id = str(getattr(self._sandbox, 'id', 'unknown'))
-        self._sudo = ''
-        self._stage = ''
-        try:
-            probe = self.exec('[ "$(id -u)" = 0 ] && echo root || mktemp -d', timeout=30)
-        except Exception as exc:
+        # Daytona sometimes boots its default snapshot as a busybox rootfs with no coreutils,
+        # where the first command can't start. Nothing of the policy has run yet, so that
+        # sandbox is replaced once before the run ends without a verdict.
+        for attempt in (1, 2):
+            # A label lets us find and delete the sandbox if create() fails after allocating it.
+            label = {'deepgym_sandbox': uuid4().hex}
+            try:
+                self._sandbox = daytona.create(
+                    params.model_copy(update={'labels': label}),
+                    timeout=env.setup_timeout if self._session else 60,
+                )
+            except Exception as exc:
+                _delete_labelled(daytona, label)
+                raise SandboxError(f'Failed to create sandbox: {exc}') from exc
+            self.id = str(getattr(self._sandbox, 'id', 'unknown'))
+            self._sudo = ''
+            self._stage = ''
+            try:
+                probe = self.exec('[ "$(id -u)" = 0 ] && echo root || mktemp -d', timeout=30)
+            except Exception as exc:
+                self.delete()
+                raise SandboxError(f'Sandbox {self.id} is not reachable: {exc}') from exc
+            stage = probe.output.strip()
+            if probe.exit_code == 0 and stage:
+                break
             self.delete()
-            raise SandboxError(f'Sandbox {self.id} is not reachable: {exc}') from exc
-        stage = probe.output.strip()
-        if probe.exit_code != 0 or not stage:
-            self.delete()
-            raise SandboxError(f'Could not prepare sandbox {self.id}: {probe.output}')
+            if attempt == 2:
+                raise SandboxError(f'Could not prepare sandbox {self.id}: {probe.output}')
+            logger.warning('Replacing sandbox %s, which could not run: %s', self.id, stage)
         if stage != 'root':
             self._sudo, self._stage = '/usr/bin/sudo -n -E ', stage
 

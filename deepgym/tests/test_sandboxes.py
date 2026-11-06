@@ -50,7 +50,7 @@ from deepgym.sandboxes import (
 )
 from deepgym.sandboxes.apple import AppleContainer
 from deepgym.sandboxes.cli import DEFAULT_IMAGE
-from deepgym.sandboxes.daytona import cleanup_sandbox, snapshot_digest
+from deepgym.sandboxes.daytona import cleanup_sandbox, snapshot_digest, sweep_labelled
 from deepgym.sandboxes.docker import DockerContainer
 from deepgym.session import _SEALED_PATH_CHECK, SandboxBackend, Session, VerifierUploadError
 
@@ -626,6 +626,35 @@ def test_daytona_delete_reports_failures_but_not_missing_sandboxes() -> None:
     assert cleanup_sandbox(box, Client()) is False
     assert cleanup_sandbox(box, Client()) is True
     assert cleanup_sandbox(box, Client()) is True
+
+
+def test_daytona_sweep_deletes_a_sandbox_daytona_finishes_after_a_failed_create() -> None:
+    """A create the client gave up on can finish on Daytona later, and Daytona refuses to
+    delete a sandbox still being created: the sweep keeps looking until the delete lands."""
+    pytest.importorskip('daytona')
+    box = types.SimpleNamespace(id='late')
+    listings = iter([[], [box], [box]])  # not listed yet, then being created, then started
+    deletes = iter([RuntimeError('409: sandbox is being created'), None])
+    deleted: list[str] = []
+
+    class Client:
+        def list(self, query: object) -> list[types.SimpleNamespace]:
+            return next(listings)
+
+        def delete(self, sandbox: types.SimpleNamespace, wait: bool = False) -> None:
+            if (outcome := next(deletes)) is not None:
+                raise outcome
+            deleted.append(sandbox.id)
+
+    assert sweep_labelled(Client(), {'deepgym_sandbox': 'x'}, seconds=5, every=0) is True
+    assert deleted == ['late']
+
+    class Empty:
+        def list(self, query: object) -> list[types.SimpleNamespace]:
+            return []
+
+    # A create that never allocated anything leaves nothing to delete, and no warning.
+    assert sweep_labelled(Empty(), {'deepgym_sandbox': 'y'}, seconds=0, every=0) is None
 
 
 def test_session_runs_as_agent_and_joins_netns_only_when_needed() -> None:
@@ -1578,6 +1607,33 @@ async def test_async_daytona_finds_and_deletes_a_sandbox_a_failed_create_left(
 
     assert 'deepgym_sandbox' in allocated[0].labels
     assert deleted == ['left']
+
+
+async def test_async_daytona_sweep_deletes_a_sandbox_daytona_finishes_later(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The async twin of the sync sweep: retried until Daytona accepts the delete."""
+    pytest.importorskip('daytona')
+    box = types.SimpleNamespace(id='late')
+    listings = iter([[], [box], [box]])
+    deletes = iter([RuntimeError('409: sandbox is being created'), None])
+    deleted: list[str] = []
+
+    class Client:
+        async def list(self, query: object) -> AsyncIterator[types.SimpleNamespace]:
+            for found in next(listings):
+                yield found
+
+        async def delete(self, sandbox: types.SimpleNamespace, **kwargs: object) -> None:
+            if (outcome := next(deletes)) is not None:
+                raise outcome
+            deleted.append(sandbox.id)
+
+    monkeypatch.setattr(AsyncDeepGym, '_init_daytona', staticmethod(lambda *args: Client()))
+    dg = AsyncDeepGym(mode='daytona')
+
+    assert await dg._sweep_labelled({'deepgym_sandbox': 'x'}, seconds=5, every=0) is True
+    assert deleted == ['late']
 
 
 def test_daytona_session_runs_agent_and_verifier_as_separate_users(

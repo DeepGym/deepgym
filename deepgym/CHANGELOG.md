@@ -1,5 +1,13 @@
 # Changelog
 
+## Unreleased
+
+- **Daytona sessions run in the work directory:** since 0.6.0, agent commands and CLI agents in a Daytona session ran from `/` after entering the session's mount namespace, so shell steps couldn't find their files. They now change to the work directory after dropping to the agent user.
+- **Verifier crashes on Python 3.14:** a session verifier that crashed was scored as the agent's 0 (`solution_error`) when formatting its own traceback read a file in the agent's work directory, which Python 3.14 does. The crash guard now decides before formatting, so such a crash before the agent acts has no verdict.
+- **Local verifiers get a minimal environment:** an unconfined local verifier inherited the whole host environment, provider keys included. It now keeps only `PATH`, `HOME`, `LANG`, `LC_ALL`, `LC_CTYPE`, `TERM` and `TZ`, plus the run's own variables. A verifier that needs another host variable (an LLM-judge key, `SSL_CERT_FILE` behind a proxy) must declare it in `Environment.env_vars`.
+- **No leaked Daytona sandboxes:** async runs label their sandboxes, as sync runs do. Daytona can finish a create after the client gave up on it and refuses to delete a sandbox while it is being created, so a failed create now keeps looking for its sandbox for up to 5 minutes and deletes it (sync and async).
+- **Broken Daytona boots are replaced:** a sandbox Daytona boots without coreutils (5 of 80 from its default snapshot in our runs) is deleted and replaced once, before anything of the policy runs.
+
 ## 0.6.2 (2026-10-23)
 
 - **Unsandboxed runs leave a trace:** every local `RunResult` records how its solution was isolated (`isolation`: `macos`, `bwrap`, or `none` under `DEEPGYM_ALLOW_UNSANDBOXED`), and the process logs a warning once when local solutions run unsandboxed. A local session's results record `none`, since its agent actions run on the host, and creating one warns once.

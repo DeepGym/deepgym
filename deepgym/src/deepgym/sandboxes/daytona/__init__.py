@@ -6,6 +6,7 @@ from deepgym.sandboxes.daytona.sandbox import (
     create_sandbox,
     is_timeout,
     snapshot_digest,
+    sweep_labelled,
 )
 
 __all__ = [
@@ -16,4 +17,5 @@ __all__ = [
     'create_sandbox',
     'is_timeout',
     'snapshot_digest',
+    'sweep_labelled',
 ]

@@ -41,6 +41,7 @@ from deepgym.sandbox import (
 )
 from deepgym.sandboxes import PROVIDERS, Provider
 from deepgym.sandboxes.daytona import create_params, is_timeout
+from deepgym.sandboxes.daytona.sandbox import LEAK_SWEEP_EVERY_S, LEAK_SWEEP_S
 
 if TYPE_CHECKING:
     from daytona import AsyncDaytona, Sandbox
@@ -48,6 +49,8 @@ if TYPE_CHECKING:
     from deepgym.core import DeepGym
 
 logger = logging.getLogger(__name__)
+# Sweeps for sandboxes a failed create may still leave, held so they run to the end.
+_SWEEPS: set[asyncio.Task[bool | None]] = set()
 
 
 class AsyncDeepGym:
@@ -387,14 +390,47 @@ class AsyncDeepGym:
         try:
             return await self._daytona.create(params)
         except Exception as exc:
-            from daytona import ListSandboxesQuery
-
-            try:
-                async for sandbox in self._daytona.list(ListSandboxesQuery(labels=label)):
-                    await self._cleanup_sandbox(sandbox)
-            except Exception:
-                logger.warning('Could not check for leaked sandboxes labelled %s', label)
+            if await self._delete_labelled(label) is not True:
+                # Daytona may still be making it: keep looking (see LEAK_SWEEP_S).
+                sweep = asyncio.create_task(self._sweep_labelled(label))
+                _SWEEPS.add(sweep)
+                sweep.add_done_callback(_SWEEPS.discard)
             raise SandboxError(f'Failed to create async sandbox: {exc}') from exc
+
+    async def _delete_labelled(self, label: dict[str, str]) -> bool | None:
+        """Delete every sandbox carrying *label*.
+
+        Returns:
+            None if no sandbox carries it, True once every one that does is deleted, False
+            if the listing or a delete failed.
+        """
+        from daytona import ListSandboxesQuery
+
+        assert self._daytona is not None
+        try:
+            query = ListSandboxesQuery(labels=label)
+            found = [sandbox async for sandbox in self._daytona.list(query)]
+        except Exception:
+            return False
+        if not found:
+            return None
+        return all([await self._cleanup_sandbox(sandbox) for sandbox in found])
+
+    async def _sweep_labelled(
+        self,
+        label: dict[str, str],
+        seconds: float = LEAK_SWEEP_S,
+        every: float = LEAK_SWEEP_EVERY_S,
+    ) -> bool | None:
+        """Async twin of :func:`deepgym.sandboxes.daytona.sweep_labelled`."""
+        end = time.monotonic() + seconds
+        outcome = await self._delete_labelled(label)
+        while outcome is not True and time.monotonic() < end:
+            await asyncio.sleep(every)
+            outcome = await self._delete_labelled(label)
+        if outcome is False:
+            logger.warning('Could not delete a sandbox labelled %s; Daytona auto-stops it', label)
+        return outcome
 
     async def _run_judge(self, sandbox: Sandbox, job: JudgeJob) -> ExecutionResult:
         """Async twin of :func:`deepgym.sandbox.run_judge_in_sandbox`.
@@ -431,16 +467,25 @@ class AsyncDeepGym:
             raise SandboxError(f'Verifier execution failed: {exc}') from exc
         return parse_wrapped_output(response.result, marker, response.exit_code, job.consulted_mark)
 
-    async def _cleanup_sandbox(self, sandbox: Sandbox) -> None:
-        """Safely destroy a sandbox, swallowing errors."""
+    async def _cleanup_sandbox(self, sandbox: Sandbox) -> bool:
+        """Safely destroy a sandbox, swallowing errors.
+
+        Returns:
+            False if Daytona reported a failure; True once the sandbox is gone, including
+            when Daytona no longer knows it (404).
+        """
         try:
             assert self._daytona is not None
             await self._daytona.delete(sandbox)
-        except Exception:
+        except Exception as exc:
+            if getattr(exc, 'status_code', None) == 404:
+                return True
             logger.debug(
                 'Failed to clean up async sandbox %s (ignored)',
                 getattr(sandbox, 'id', '?'),
             )
+            return False
+        return True
 
     async def _run_http(self, env: Environment, model_output: str) -> RunResult:
         """Execute a run via the remote DeepGym API server."""

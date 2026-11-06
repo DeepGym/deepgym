@@ -62,11 +62,6 @@ _CONTAINED_AGENT_PREFIX = (
     '/usr/bin/nsenter --pid=/opt/deepgym-staging/agent-processes/pid '
     '--mount=/opt/deepgym-staging/agent-processes/mnt -- /usr/bin/setpriv'
 )
-# Joining a mount namespace moves a process to its root, so agent commands meant for the work
-# directory change back to it inside, before dropping to the agent.
-_CONTAINED_AGENT_IN_WORKDIR = _CONTAINED_AGENT_PREFIX.replace(
-    ' -- /usr/bin/setpriv', ' -- /usr/bin/env --chdir=/tmp/deepgym /usr/bin/setpriv'
-)
 
 
 class FakeSandbox:
@@ -642,7 +637,21 @@ def test_session_runs_as_agent_and_joins_netns_only_when_needed() -> None:
     open_ = FakeSandbox(network_blocked=False, answers=[_USERS])
     SandboxBackend(open_).exec('ls', timeout=5)
     assert any('mount --bind /proc/$pid/ns/net /opt/deepgym-netns' in c for c in open_.commands)
-    assert open_.commands[-1].startswith(_CONTAINED_AGENT_IN_WORKDIR)
+    assert open_.commands[-1].startswith(_CONTAINED_AGENT_PREFIX)
+
+
+def test_contained_agent_commands_enter_the_work_directory_as_the_agent() -> None:
+    """Joining the agent's mount namespace moves a process to its root, so commands meant for
+    the work directory change back to it inside, after the drop to the agent: root never
+    follows a link the agent put there."""
+    box = FakeSandbox(network_blocked=False, answers=[_USERS])
+    backend = SandboxBackend(box)
+    backend.exec('ls', timeout=5)
+    backend.exec_input('cat', 'data', timeout=5)
+    for command in box.commands[-2:]:
+        drop = command.index('/usr/bin/setpriv --reuid=997')
+        enter = command.index(' -- /usr/bin/env --chdir=/tmp/deepgym ')
+        assert command.index('--mount=/opt/deepgym-staging/agent-processes/mnt') < drop < enter
 
 
 def test_session_verifier_runs_as_its_own_user_from_a_private_file() -> None:
@@ -1528,7 +1537,7 @@ def test_daytona_session_runs_agent_and_verifier_as_separate_users(
     box = client.boxes[0]
     step = next(c for c in box.events if 'step-marker' in c)
     assert step.startswith('/usr/bin/sudo -n -E /bin/sh -c')
-    assert f'{_CONTAINED_AGENT_IN_WORKDIR} --reuid=997' in step
+    assert f'{_CONTAINED_AGENT_PREFIX} --reuid=997' in step
     assert not any('SECRET' in c for c in box.events), 'verifier code must not be in a command'
     score = next(c for c in box.events if '/opt/deepgym-verifier/' in c and 'python3' in c)
     assert '--reuid=996' in score

@@ -584,9 +584,10 @@ class SandboxBackend:
         )
         self._as_agent = self._agent_namespace + self._agent_drop
         # Joining a mount namespace moves a process to its root (setns(2)), past the cwd the
-        # provider set, so commands meant for the work directory change back to it inside.
-        self._chdir = f'/usr/bin/env --chdir={shlex.quote(self._workdir)} '
-        self._as_agent_in_workdir = self._agent_namespace + self._chdir + self._agent_drop
+        # provider set, so commands meant for the work directory change back to it inside,
+        # as the agent: root never follows a link the agent put there.
+        self._chdir = f'/usr/bin/env --chdir={shlex.quote(self._workdir)}'
+        self._as_agent_in_workdir = f'{self._as_agent} {self._chdir}'
 
     def stop_agent(self) -> None:
         """Destroy all setup and CLI descendants before grading; refuse uncertain cleanup.

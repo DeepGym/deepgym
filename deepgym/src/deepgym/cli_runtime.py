@@ -108,7 +108,7 @@ def execute_cli(
         'timeout': request.timeout,
         'namespace': shlex.split(backend._offline),
         'prefix': [
-            *shlex.split(backend._offline + backend._agent_namespace),
+            *shlex.split(backend._offline + backend._agent_namespace + backend._chdir),
             '/usr/bin/unshare',
             '--pid',
             '--fork',

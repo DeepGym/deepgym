@@ -523,6 +523,7 @@ class SandboxBackend:
             self._as_agent = _drop_to(setpriv, agent_uid, agent_gid)
             self._agent_drop = self._as_agent
             self._agent_namespace = ''
+            self._as_agent_in_workdir = self._as_agent
             self._nsenter = nsenter
             self._agent_uid = int(agent_uid)
             self._as_verifier = _drop_to(
@@ -582,6 +583,10 @@ class SandboxBackend:
             f'{shlex.quote(self._nsenter)} --pid={directory}/pid --mount={directory}/mnt -- '
         )
         self._as_agent = self._agent_namespace + self._agent_drop
+        # Joining a mount namespace moves a process to its root (setns(2)), past the cwd the
+        # provider set, so commands meant for the work directory change back to it inside.
+        self._chdir = f'/usr/bin/env --chdir={shlex.quote(self._workdir)} '
+        self._as_agent_in_workdir = self._agent_namespace + self._chdir + self._agent_drop
 
     def stop_agent(self) -> None:
         """Destroy all setup and CLI descendants before grading; refuse uncertain cleanup.
@@ -631,7 +636,7 @@ class SandboxBackend:
             TimeoutError: If the command exceeds *timeout* seconds.
         """
         return self._sandbox.exec(
-            f'{self._offline}{self._as_agent} bash -c {shlex.quote(command)}',
+            f'{self._offline}{self._as_agent_in_workdir} bash -c {shlex.quote(command)}',
             cwd=self._workdir,
             env={**self._clear, **self._agent_env, **(env or {})},
             timeout=timeout,
@@ -652,7 +657,7 @@ class SandboxBackend:
         self._sandbox.upload(data.encode('utf-8'), staged)
         return self._sandbox.exec(
             trusted(
-                f'{self._offline}{self._as_agent} {command} < {staged}; '
+                f'{self._offline}{self._as_agent_in_workdir} {command} < {staged}; '
                 f'status=$?; rm -f {staged}; exit $status'
             ),
             cwd=self._workdir,

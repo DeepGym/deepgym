@@ -1,0 +1,54 @@
+name: DeepGym live (Daytona)
+
+# The live sandbox suite against real Daytona, nightly and on demand. Never on pull requests:
+# it needs the DAYTONA_API_KEY secret, which fork code must not reach.
+on:
+  schedule:
+    - cron: '17 2 * * *'
+  workflow_dispatch:
+
+concurrency:
+  group: deepgym-live-daytona
+  cancel-in-progress: false
+
+defaults:
+  run:
+    working-directory: deepgym
+
+jobs:
+  live:
+    name: Live sandboxes (Daytona)
+    runs-on: blacksmith-4vcpu-ubuntu-2404
+    timeout-minutes: 90
+    env:
+      DAYTONA_API_KEY: ${{ secrets.DAYTONA_API_KEY }}
+      DEEPGYM_LIVE_PROVIDERS: daytona
+      DEEPGYM_NO_AUTH: 'true'
+
+    steps:
+      - uses: useblacksmith/checkout@v1
+
+      - name: Note the start, for the leak sweep
+        run: echo "LIVE_START=$(date -u +%Y-%m-%dT%H:%M:%S+00:00)" >> "$GITHUB_ENV"
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: pip
+          cache-dependency-path: deepgym/pyproject.toml
+
+      - name: Install dependencies
+        run: pip install -e ".[dev,daytona]"
+
+      # A failure Daytona caused (a 502, a create timeout) is a no-verdict run, which these
+      # tests still fail; failures are run once more and both runs stay in the log.
+      - name: Live suite
+        run: |
+          pytest --tb=short -q -n 4 --dist loadgroup \
+            tests/test_sandboxes_live.py tests/test_isolation_live.py \
+          || pytest --tb=short -q -n 4 --dist loadgroup --last-failed --last-failed-no-failures none \
+            tests/test_sandboxes_live.py tests/test_isolation_live.py
+
+      - name: Delete leftover sandboxes (a leak fails the job)
+        if: always()
+        run: python scripts/sweep_daytona.py "$LIVE_START"

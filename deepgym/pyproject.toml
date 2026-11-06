@@ -41,7 +41,9 @@ lm_eval = ["lm_eval>=0.4.9"]
 traces = ["pyarrow>=14"]
 anthropic = ["anthropic>=0.68"]
 openai = ["openai>=2"]
-dev = ["pytest", "pytest-asyncio", "pytest-xdist", "ruff", "fastapi>=0.100", "uvicorn[standard]>=0.20", "pyarrow>=14"]
+# pytest 9.2 stops xdist's --dist loadgroup from grouping (pytest-dev/pytest-xdist#1386),
+# which the live container leak checks rely on.
+dev = ["pytest<9.2", "pytest-asyncio", "pytest-xdist", "ruff", "fastapi>=0.100", "uvicorn[standard]>=0.20", "pyarrow>=14"]
 all = ["daytona>=0.223", "modal>=1.6", "e2b>=2.55", "fastapi>=0.100", "uvicorn[standard]>=0.20", "datasets>=2.16", "huggingface_hub>=0.20", "pyarrow>=14", "pytest", "pytest-asyncio", "ruff"]
 
 [project.urls]

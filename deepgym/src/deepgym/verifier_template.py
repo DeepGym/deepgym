@@ -255,9 +255,21 @@ def _dg_audit(event, args):
         hit = _dg_inside(cwd) or any(_dg_inside(arg) for arg in absolute)
     else:
         return
-    if hit:
+    if hit and not _dg_formatting_a_trace():
         _dg_touched = True
         _dg_announce()
+
+
+def _dg_formatting_a_trace():
+    """Whether a traceback or a warning is being formatted: its source lines (a session
+    verifier's own file is in the agent's folder) and, on Python 3.13+, '<unknown>' in the
+    working folder are read for the report, not to consult the policy."""
+    frame = _dg_sys._getframe(2)
+    while frame is not None:
+        if frame.f_globals.get("__name__") in ("traceback", "linecache"):
+            return True
+        frame = frame.f_back
+    return False
 
 
 _dg_sys.addaudithook(_dg_audit)
@@ -272,15 +284,10 @@ def _dg_consulted():
 def _dg_crashed(kind, value, tb):
     """Report an uncaught exception: a judged 0 once the policy's output is in play, else a
     verifier error."""
-    global _dg_policy
-    consulted = _dg_consulted()
-    # What formatting the trace reads (source lines, '<unknown>' in the working folder on
-    # Python 3.13+) is the report's doing, not the verifier's: it no longer counts.
-    _dg_policy = ()
     trace = "".join(_dg_traceback.format_exception(kind, value, tb))
     runtime = _dg_sys.modules.get("deepgym_solution")
     launch = runtime is not None and issubclass(kind, runtime.LaunchError)
-    if consulted and not launch:
+    if _dg_consulted() and not launch:
         details = f"The verifier crashed handling the solution: {kind.__name__}: {value}"
         timeout = runtime is not None and isinstance(value, runtime.SolutionTimeoutError)
         error_type = "solution_timeout" if timeout else "solution_error"  # still a verdict

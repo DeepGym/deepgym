@@ -1253,6 +1253,39 @@ def test_reporting_a_crash_is_not_reading_the_policys_output(tmp_path: Path) -> 
     assert json.loads(run.stdout.splitlines()[-1])['error_type'] == 'runtime_error'
 
 
+def test_a_verifier_formatting_its_own_traceback_is_not_reading_the_policys_output(
+    tmp_path: Path,
+) -> None:
+    """A verifier that logs a caught error with its traceback before touching the agent's
+    output, then crashes, gets no verdict: the trace's source reads aren't the policy's. A
+    session verifier runs from a file in the agent's work directory, so those reads land there."""
+    policy = tmp_path / 'workdir'
+    policy.mkdir()
+    script = policy / 'verifier.py'
+    body = (
+        'import traceback\n'
+        'try:\n'
+        '    {}["missing"]\n'
+        'except KeyError:\n'
+        '    traceback.print_exc()\n'
+        'raise RuntimeError("verifier bug")\n'
+    )
+    script.write_text(guard_crashes(body))
+
+    run = subprocess.run(
+        [sys.executable, '-I', str(script)],
+        cwd=policy,
+        env={**os.environ, 'DEEPGYM_POLICY_DIR': str(policy), 'DEEPGYM_CONSULTED': 'MARK'},
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+
+    assert run.returncode == 2, run.stdout + run.stderr
+    assert 'MARK' not in run.stdout
+    assert json.loads(run.stdout.splitlines()[-1])['error_type'] == 'runtime_error'
+
+
 @pytest.mark.parametrize('solution_ran', [False, True], ids=['before', 'after_the_solution_ran'])
 def test_a_full_disk_while_preparing_a_run(tmp_path: Path, solution_ran: bool) -> None:
     """Before any solution code runs, a full disk is the sandbox's (a LaunchError: no

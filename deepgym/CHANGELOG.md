@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.6.4 (2026-11-07)
 
 - **Verifier tracebacks never count as reading the agent's output:** a verifier that printed a caught exception's traceback before it read the agent's output, then crashed, was scored as the agent's 0, because formatting the traceback reads the verifier's own file, which a session keeps in the agent's work directory. Reads made while formatting a traceback no longer count, so that crash has no verdict.
 - **`AsyncDeepGym` closes its Daytona client:** use `async with AsyncDeepGym() as dg:` or `await dg.aclose()`. Closing first waits for any sweep still deleting a sandbox a failed create left. A failed async delete is now logged as a warning, not at debug level.

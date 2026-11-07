@@ -355,6 +355,12 @@ def local_isolation(expose: list[str]) -> dict:
     }
 
 
+# What an unconfined local verifier keeps of the host's environment: where its tools are, its
+# home and locale. Not the rest (provider keys, tokens): on macOS the solution it starts can
+# read the verifier's environment back from its process arguments (KERN_PROCARGS2).
+_LOCAL_JUDGE_KEEP = ('PATH', 'HOME', 'LANG', 'LC_ALL', 'LC_CTYPE', 'TERM', 'TZ')
+
+
 @contextlib.contextmanager
 def local_judge(
     job: JudgeJob, *, confined: bool = False
@@ -410,7 +416,8 @@ def local_judge(
         isolation = local_isolation([runtime_dir, solution_dir])
         # Verifier temp files (and solution scratch dirs) stay inside this run.
         runtime_env = job.runtime_env(isolation, runtime_path, sandbox_python(), solution_dir)
-        env = {**os.environ, **runtime_env, **deadline}
+        kept = {name: os.environ[name] for name in _LOCAL_JUDGE_KEEP if name in os.environ}
+        env = {'PATH': os.defpath, **kept, **runtime_env, **deadline}
         yield judge, env, judge_dir
     finally:
         shutil.rmtree(run_dir, ignore_errors=True)

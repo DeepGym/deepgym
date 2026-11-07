@@ -272,10 +272,15 @@ def _dg_consulted():
 def _dg_crashed(kind, value, tb):
     """Report an uncaught exception: a judged 0 once the policy's output is in play, else a
     verifier error."""
+    global _dg_policy
+    consulted = _dg_consulted()
+    # What formatting the trace reads (source lines, '<unknown>' in the working folder on
+    # Python 3.13+) is the report's doing, not the verifier's: it no longer counts.
+    _dg_policy = ()
     trace = "".join(_dg_traceback.format_exception(kind, value, tb))
     runtime = _dg_sys.modules.get("deepgym_solution")
     launch = runtime is not None and issubclass(kind, runtime.LaunchError)
-    if _dg_consulted() and not launch:
+    if consulted and not launch:
         details = f"The verifier crashed handling the solution: {kind.__name__}: {value}"
         timeout = runtime is not None and isinstance(value, runtime.SolutionTimeoutError)
         error_type = "solution_timeout" if timeout else "solution_error"  # still a verdict

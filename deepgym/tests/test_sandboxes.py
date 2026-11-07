@@ -15,13 +15,13 @@ import subprocess
 import sys
 import time
 import types
-from collections.abc import Mapping
+from collections.abc import AsyncIterator, Mapping
 from pathlib import Path
 
 import httpx
 import pytest
 
-from deepgym import ComputerUseEnvironment, DeepGym
+from deepgym import AsyncDeepGym, ComputerUseEnvironment, DeepGym
 from deepgym.exceptions import (
     DeepGymError,
     SandboxError,
@@ -50,7 +50,7 @@ from deepgym.sandboxes import (
 )
 from deepgym.sandboxes.apple import AppleContainer
 from deepgym.sandboxes.cli import DEFAULT_IMAGE
-from deepgym.sandboxes.daytona import cleanup_sandbox, snapshot_digest
+from deepgym.sandboxes.daytona import cleanup_sandbox, snapshot_digest, sweep_labelled
 from deepgym.sandboxes.docker import DockerContainer
 from deepgym.session import _SEALED_PATH_CHECK, SandboxBackend, Session, VerifierUploadError
 
@@ -628,6 +628,35 @@ def test_daytona_delete_reports_failures_but_not_missing_sandboxes() -> None:
     assert cleanup_sandbox(box, Client()) is True
 
 
+def test_daytona_sweep_deletes_a_sandbox_daytona_finishes_after_a_failed_create() -> None:
+    """A create the client gave up on can finish on Daytona later, and Daytona refuses to
+    delete a sandbox still being created: the sweep keeps looking until the delete lands."""
+    pytest.importorskip('daytona')
+    box = types.SimpleNamespace(id='late')
+    listings = iter([[], [box], [box]])  # not listed yet, then being created, then started
+    deletes = iter([RuntimeError('409: sandbox is being created'), None])
+    deleted: list[str] = []
+
+    class Client:
+        def list(self, query: object) -> list[types.SimpleNamespace]:
+            return next(listings)
+
+        def delete(self, sandbox: types.SimpleNamespace, wait: bool = False) -> None:
+            if (outcome := next(deletes)) is not None:
+                raise outcome
+            deleted.append(sandbox.id)
+
+    assert sweep_labelled(Client(), {'deepgym_sandbox': 'x'}, seconds=5, every=0) is True
+    assert deleted == ['late']
+
+    class Empty:
+        def list(self, query: object) -> list[types.SimpleNamespace]:
+            return []
+
+    # A create that never allocated anything leaves nothing to delete, and no warning.
+    assert sweep_labelled(Empty(), {'deepgym_sandbox': 'y'}, seconds=0, every=0) is None
+
+
 def test_session_runs_as_agent_and_joins_netns_only_when_needed() -> None:
     blocked = FakeSandbox(network_blocked=True, answers=[_USERS])
     SandboxBackend(blocked).exec('ls', timeout=5)
@@ -638,6 +667,20 @@ def test_session_runs_as_agent_and_joins_netns_only_when_needed() -> None:
     SandboxBackend(open_).exec('ls', timeout=5)
     assert any('mount --bind /proc/$pid/ns/net /opt/deepgym-netns' in c for c in open_.commands)
     assert open_.commands[-1].startswith(_CONTAINED_AGENT_PREFIX)
+
+
+def test_contained_agent_commands_enter_the_work_directory_as_the_agent() -> None:
+    """Joining the agent's mount namespace moves a process to its root, so commands meant for
+    the work directory change back to it inside, after the drop to the agent: root never
+    follows a link the agent put there."""
+    box = FakeSandbox(network_blocked=False, answers=[_USERS])
+    backend = SandboxBackend(box)
+    backend.exec('ls', timeout=5)
+    backend.exec_input('cat', 'data', timeout=5)
+    for command in box.commands[-2:]:
+        drop = command.index('/usr/bin/setpriv --reuid=997')
+        enter = command.index(' -- /usr/bin/env --chdir=/tmp/deepgym ')
+        assert command.index('--mount=/opt/deepgym-staging/agent-processes/mnt') < drop < enter
 
 
 def test_session_verifier_runs_as_its_own_user_from_a_private_file() -> None:
@@ -1508,6 +1551,89 @@ def _daytona_client(
     client = FakeDaytona([_STAGE, _DAYTONA_USERS, *answers])
     monkeypatch.setattr(DeepGym, '_init_daytona', staticmethod(lambda *args: client))
     return DeepGym(mode='daytona'), client
+
+
+def test_daytona_replaces_a_sandbox_that_booted_without_coreutils(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Daytona sometimes boots its default snapshot as a busybox rootfs with no coreutils
+    (about 1 in 16 on 2026-11-06): the first command can't start, nothing of the policy has
+    run, so that sandbox is deleted and one other is created before giving up."""
+    dg, client = _daytona_client(monkeypatch)
+    real_create = client.create
+
+    def create(params: object, timeout: float = 60) -> types.SimpleNamespace:
+        box = real_create(params, timeout)
+        if len(client.boxes) == 1:
+            box.process.exec = lambda command, **kwargs: types.SimpleNamespace(
+                exit_code=127, result='/bin/sh: /usr/bin/timeout: not found'
+            )
+        return box
+
+    monkeypatch.setattr(client, 'create', create)
+    with dg.session(MultiTurnEnvironment(task='t')) as session:
+        session.start()
+    assert len(client.boxes) == 2
+    assert 'deleted' in client.boxes[0].events
+
+
+async def test_async_daytona_finds_and_deletes_a_sandbox_a_failed_create_left(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Daytona can allocate a sandbox and still fail the create (a 502): the async client
+    labels every sandbox, as the sync one does, so that one is found and deleted."""
+    pytest.importorskip('daytona')
+    allocated: list[types.SimpleNamespace] = []
+    deleted: list[str] = []
+
+    class Client:
+        async def create(self, params: object, **kwargs: object) -> None:
+            allocated.append(types.SimpleNamespace(id='left', labels=params.labels))
+            raise RuntimeError('502 Bad Gateway')
+
+        async def list(self, query: object) -> AsyncIterator[types.SimpleNamespace]:
+            for box in allocated:
+                if query.labels.items() <= box.labels.items():
+                    yield box
+
+        async def delete(self, sandbox: types.SimpleNamespace, **kwargs: object) -> None:
+            deleted.append(sandbox.id)
+
+    monkeypatch.setattr(AsyncDeepGym, '_init_daytona', staticmethod(lambda *args: Client()))
+    env = Environment(task='t', verifier_code='return 1.0')
+
+    with pytest.raises(SandboxError, match='502'):
+        await AsyncDeepGym(mode='daytona').run(env, 'x = 1\n')
+
+    assert 'deepgym_sandbox' in allocated[0].labels
+    assert deleted == ['left']
+
+
+async def test_async_daytona_sweep_deletes_a_sandbox_daytona_finishes_later(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The async twin of the sync sweep: retried until Daytona accepts the delete."""
+    pytest.importorskip('daytona')
+    box = types.SimpleNamespace(id='late')
+    listings = iter([[], [box], [box]])
+    deletes = iter([RuntimeError('409: sandbox is being created'), None])
+    deleted: list[str] = []
+
+    class Client:
+        async def list(self, query: object) -> AsyncIterator[types.SimpleNamespace]:
+            for found in next(listings):
+                yield found
+
+        async def delete(self, sandbox: types.SimpleNamespace, **kwargs: object) -> None:
+            if (outcome := next(deletes)) is not None:
+                raise outcome
+            deleted.append(sandbox.id)
+
+    monkeypatch.setattr(AsyncDeepGym, '_init_daytona', staticmethod(lambda *args: Client()))
+    dg = AsyncDeepGym(mode='daytona')
+
+    assert await dg._sweep_labelled({'deepgym_sandbox': 'x'}, seconds=5, every=0) is True
+    assert deleted == ['late']
 
 
 def test_daytona_session_runs_agent_and_verifier_as_separate_users(

@@ -115,7 +115,7 @@ def execute_cli(
             '--mount-proc',
             '--kill-child=KILL',
             '--',
-            *shlex.split(backend._agent_drop),
+            *shlex.split(f'{backend._agent_drop} {backend._chdir}'),
         ],
         'uid': backend._agent_uid,
         'cwd': backend.workdir,

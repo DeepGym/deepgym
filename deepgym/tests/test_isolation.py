@@ -1229,6 +1229,30 @@ def test_a_solution_that_cannot_start_ends_the_run_without_a_verdict(
     assert json.loads(run.stdout.splitlines()[-1])['error_type'] == 'sandbox_error'
 
 
+def test_reporting_a_crash_is_not_reading_the_policys_output(tmp_path: Path) -> None:
+    """A session verifier runs from a file in the agent's work directory. Formatting its
+    crash reads files there (Python 3.13+ opens '<unknown>', relative to the working folder,
+    while finding a statement's carets), which must not count as the verifier reading the
+    agent's output: it crashed before it did, so no verdict."""
+    policy = tmp_path / 'workdir'
+    policy.mkdir()
+    script = tmp_path / 'verifier.py'
+    script.write_text(guard_crashes('print("partial")\nraise RuntimeError("verifier bug")\n'))
+
+    run = subprocess.run(
+        [sys.executable, '-I', str(script)],
+        cwd=policy,
+        env={**os.environ, 'DEEPGYM_POLICY_DIR': str(policy), 'DEEPGYM_CONSULTED': 'MARK'},
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+
+    assert run.returncode == 2, run.stdout + run.stderr
+    assert 'MARK' not in run.stdout
+    assert json.loads(run.stdout.splitlines()[-1])['error_type'] == 'runtime_error'
+
+
 @pytest.mark.parametrize('solution_ran', [False, True], ids=['before', 'after_the_solution_ran'])
 def test_a_full_disk_while_preparing_a_run(tmp_path: Path, solution_ran: bool) -> None:
     """Before any solution code runs, a full disk is the sandbox's (a LaunchError: no

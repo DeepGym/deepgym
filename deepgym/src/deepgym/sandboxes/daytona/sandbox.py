@@ -13,6 +13,7 @@ import math
 import posixpath
 import re
 import shlex
+import threading
 import time
 from collections.abc import Mapping
 from types import ModuleType
@@ -42,6 +43,11 @@ logger = logging.getLogger(__name__)
 
 # How much longer than the command's own deadline Daytona waits for it to end.
 _WAIT_GRACE_S = 15
+# A create the client gave up on can still finish on Daytona about a minute later (seen at
+# 70 s), and Daytona refuses to delete a sandbox while it is being created, so a failed
+# create keeps looking for its labelled sandbox this long, every LEAK_SWEEP_EVERY_S.
+LEAK_SWEEP_S = 300.0
+LEAK_SWEEP_EVERY_S = 10.0
 
 
 def _sdk() -> ModuleType:
@@ -128,13 +134,49 @@ def cleanup_sandbox(sandbox: Sandbox, daytona: Daytona, *, wait: bool = False) -
     return True
 
 
-def _delete_labelled(daytona: Daytona, label: dict[str, str]) -> None:
-    """Delete any sandbox carrying *label*, so a failed create doesn't leak one."""
+def _delete_labelled(daytona: Daytona, label: dict[str, str]) -> bool | None:
+    """Delete every sandbox carrying *label*.
+
+    Returns:
+        None if no sandbox carries it, True once every one that does is deleted, False if
+        the listing or a delete failed.
+    """
     try:
-        for sandbox in daytona.list(_sdk().ListSandboxesQuery(labels=label)):
-            cleanup_sandbox(sandbox, daytona)
+        found = list(daytona.list(_sdk().ListSandboxesQuery(labels=label)))
     except Exception:
-        logger.warning('Could not check for leaked sandboxes labelled %s', label)
+        return False
+    if not found:
+        return None
+    return all([cleanup_sandbox(sandbox, daytona) for sandbox in found])
+
+
+def sweep_labelled(
+    daytona: Daytona,
+    label: dict[str, str],
+    seconds: float = LEAK_SWEEP_S,
+    every: float = LEAK_SWEEP_EVERY_S,
+) -> bool | None:
+    """Keep deleting sandboxes carrying *label* until one is deleted or *seconds* pass.
+
+    Returns:
+        The last :func:`_delete_labelled` outcome; False (logged) means a labelled sandbox
+        may still be running until Daytona auto-stops it.
+    """
+    end = time.monotonic() + seconds
+    outcome = _delete_labelled(daytona, label)
+    while outcome is not True and time.monotonic() < end:
+        time.sleep(every)
+        outcome = _delete_labelled(daytona, label)
+    if outcome is False:
+        logger.warning('Could not delete a sandbox labelled %s; Daytona auto-stops it', label)
+    return outcome
+
+
+def _clean_up_failed_create(daytona: Daytona, label: dict[str, str]) -> None:
+    """Delete the sandbox a failed create left, now or, if Daytona is still making it, later."""
+    if _delete_labelled(daytona, label) is not True:
+        # ponytail: a daemon thread dies with the process; Daytona's auto-stop covers that.
+        threading.Thread(target=sweep_labelled, args=(daytona, label), daemon=True).start()
 
 
 def snapshot_digest(ref: str | None) -> str | None:
@@ -190,28 +232,35 @@ class DaytonaSandbox:
         self._image = env.image
         self._session = isinstance(env, MultiTurnEnvironment)
         params = _session_params(env) if self._session else create_params(env)
-        # A label lets us find and delete the sandbox if create() fails after allocating it.
-        label = {'deepgym_sandbox': uuid4().hex}
-        try:
-            self._sandbox = daytona.create(
-                params.model_copy(update={'labels': label}),
-                timeout=env.setup_timeout if self._session else 60,
-            )
-        except Exception as exc:
-            _delete_labelled(daytona, label)
-            raise SandboxError(f'Failed to create sandbox: {exc}') from exc
-        self.id = str(getattr(self._sandbox, 'id', 'unknown'))
-        self._sudo = ''
-        self._stage = ''
-        try:
-            probe = self.exec('[ "$(id -u)" = 0 ] && echo root || mktemp -d', timeout=30)
-        except Exception as exc:
+        # Daytona sometimes boots its default snapshot as a busybox rootfs with no coreutils,
+        # where the first command can't start. Nothing of the policy has run yet, so that
+        # sandbox is replaced once before the run ends without a verdict.
+        for attempt in (1, 2):
+            # A label lets us find and delete the sandbox if create() fails after allocating it.
+            label = {'deepgym_sandbox': uuid4().hex}
+            try:
+                self._sandbox = daytona.create(
+                    params.model_copy(update={'labels': label}),
+                    timeout=env.setup_timeout if self._session else 60,
+                )
+            except Exception as exc:
+                _clean_up_failed_create(daytona, label)
+                raise SandboxError(f'Failed to create sandbox: {exc}') from exc
+            self.id = str(getattr(self._sandbox, 'id', 'unknown'))
+            self._sudo = ''
+            self._stage = ''
+            try:
+                probe = self.exec('[ "$(id -u)" = 0 ] && echo root || mktemp -d', timeout=30)
+            except Exception as exc:
+                self.delete()
+                raise SandboxError(f'Sandbox {self.id} is not reachable: {exc}') from exc
+            stage = probe.output.strip()
+            if probe.exit_code == 0 and stage:
+                break
             self.delete()
-            raise SandboxError(f'Sandbox {self.id} is not reachable: {exc}') from exc
-        stage = probe.output.strip()
-        if probe.exit_code != 0 or not stage:
-            self.delete()
-            raise SandboxError(f'Could not prepare sandbox {self.id}: {probe.output}')
+            if attempt == 2:
+                raise SandboxError(f'Could not prepare sandbox {self.id}: {probe.output}')
+            logger.warning('Replacing sandbox %s, which could not run: %s', self.id, stage)
         if stage != 'root':
             self._sudo, self._stage = '/usr/bin/sudo -n -E ', stage
 

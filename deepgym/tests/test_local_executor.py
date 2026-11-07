@@ -406,3 +406,22 @@ def test_a_judge_killed_after_an_earlier_report_is_still_the_solutions_zero() ->
     assert judge_verdict(stdout, '', 0, 'mark').verifier_result.score == 1.0
     with pytest.raises(VerifierError):
         judge_verdict('', '', -9, 'mark')  # nothing announced: the solution never ran
+
+
+@pytest.mark.parametrize('confined', [False, True], ids=['unconfined', 'confined'])
+def test_a_local_verifier_gets_the_runs_variables_but_not_the_hosts(
+    monkeypatch: pytest.MonkeyPatch, confined: bool
+) -> None:
+    """The local judge passes its verifier PATH, HOME, locale and the run's own variables,
+    never the rest of the host's environment, such as provider keys: on macOS a solution
+    can read the environment of the verifier that started it (KERN_PROCARGS2)."""
+    monkeypatch.setenv('ANTHROPIC_API_KEY', 'host-secret')
+    verifier = _standalone_verifier(
+        'import os; return 1.0 if "ANTHROPIC_API_KEY" not in os.environ'
+        ' and os.environ.get("TASK_VAR") == "1" and "PATH" in os.environ else 0.0'
+    )
+    job = JudgeJob(verifier=verifier, solution='# x\n', timeout=30, env_vars={'TASK_VAR': '1'})
+
+    result = LocalExecutor(confined=confined).run(job)
+
+    assert result.exit_code == 0, result.stderr

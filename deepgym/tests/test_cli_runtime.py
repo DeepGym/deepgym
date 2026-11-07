@@ -127,6 +127,10 @@ def test_cli_supervisor_retains_namespace_and_collects_events_once(monkeypatch) 
         + 4
     ]
     assert '--pid=/opt/deepgym-staging/agent-processes/pid' in config['prefix']
+    # Back in the work directory once inside the mount namespace, which moved it to the root,
+    # as the agent.
+    assert config['prefix'][-2:] == ['/usr/bin/env', '--chdir=/tmp/deepgym']
+    assert config['prefix'].index('--reuid=997') < config['prefix'].index('--chdir=/tmp/deepgym')
     assert config['env']['ANTHROPIC_API_KEY'] == 'test-key'
     assert observed == [{'type': 'assistant'}]
     assert result.events == ({'type': 'assistant'},)

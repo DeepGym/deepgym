@@ -49,8 +49,6 @@ if TYPE_CHECKING:
     from deepgym.core import DeepGym
 
 logger = logging.getLogger(__name__)
-# Sweeps for sandboxes a failed create may still leave, held so they run to the end.
-_SWEEPS: set[asyncio.Task[bool | None]] = set()
 
 
 class AsyncDeepGym:
@@ -77,6 +75,8 @@ class AsyncDeepGym:
         self._api_url = api_url
         self._default_timeout = default_timeout
         self._daytona: AsyncDaytona | None = None
+        # Sweeps for sandboxes a failed create may still leave; aclose() waits for them.
+        self._sweeps: set[asyncio.Task[bool | None]] = set()
         self._local_executor: AsyncLocalExecutor | None = None
         self._sync: DeepGym | None = None
 
@@ -111,6 +111,21 @@ class AsyncDeepGym:
     # ------------------------------------------------------------------
     # Public API
     # ------------------------------------------------------------------
+
+    async def __aenter__(self) -> AsyncDeepGym:
+        return self
+
+    async def __aexit__(self, *exc: object) -> None:
+        await self.aclose()
+
+    async def aclose(self) -> None:
+        """Wait for any sweep still deleting a sandbox a failed create left (up to
+        LEAK_SWEEP_S), then close the Daytona client's connections."""
+        if self._sweeps:
+            await asyncio.gather(*self._sweeps, return_exceptions=True)
+        if self._daytona is not None:
+            await self._daytona.close()
+            self._daytona = None
 
     async def run(self, env: Environment, model_output: str, **kwargs: Any) -> RunResult:
         """Execute a model's output against an environment asynchronously.
@@ -393,8 +408,8 @@ class AsyncDeepGym:
             if await self._delete_labelled(label) is not True:
                 # Daytona may still be making it: keep looking (see LEAK_SWEEP_S).
                 sweep = asyncio.create_task(self._sweep_labelled(label))
-                _SWEEPS.add(sweep)
-                sweep.add_done_callback(_SWEEPS.discard)
+                self._sweeps.add(sweep)
+                sweep.add_done_callback(self._sweeps.discard)
             raise SandboxError(f'Failed to create async sandbox: {exc}') from exc
 
     async def _delete_labelled(self, label: dict[str, str]) -> bool | None:
@@ -480,10 +495,7 @@ class AsyncDeepGym:
         except Exception as exc:
             if getattr(exc, 'status_code', None) == 404:
                 return True
-            logger.debug(
-                'Failed to clean up async sandbox %s (ignored)',
-                getattr(sandbox, 'id', '?'),
-            )
+            logger.warning('Failed to clean up async sandbox %s', getattr(sandbox, 'id', '?'))
             return False
         return True
 

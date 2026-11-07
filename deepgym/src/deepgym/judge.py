@@ -21,6 +21,7 @@ import functools
 import json
 import logging
 import os
+import re
 import shlex
 import shutil
 import subprocess
@@ -322,6 +323,24 @@ def _warn_unsandboxed() -> None:
     )
 
 
+_SECRET_NAME = re.compile(r'KEY|TOKEN|SECRET|PASSWORD|CREDENTIAL', re.IGNORECASE)
+
+
+@functools.cache
+def _warn_secrets_readable_on_macos() -> None:
+    """Say once per process when this process holds secret-looking variables: sandbox-exec
+    can't stop a local solution reading the environment another of this user's processes
+    started with (sysctl KERN_PROCARGS2), this one's included."""
+    names = sorted(name for name in os.environ if _SECRET_NAME.search(name))
+    if names:
+        logger.warning(
+            'On macOS a local solution can read the environment this process started with, '
+            'which holds %s. For untrusted code, unset them here or use a sandbox provider '
+            '(mode="daytona", "docker", ...) or Linux bwrap.',
+            ', '.join(names),
+        )
+
+
 def local_isolation(expose: list[str]) -> dict:
     """Isolation spec for a local run: what its solution may read.
 
@@ -344,6 +363,8 @@ def local_isolation(expose: list[str]) -> dict:
             f'use a sandbox provider (mode="docker", "daytona", ...), or set '
             f'{ALLOW_UNSANDBOXED_ENV}=1 to run it unsandboxed anyway.'
         )
+    if kind == 'macos':
+        _warn_secrets_readable_on_macos()
     system = _SYSTEM_READ['darwin' if kind == 'macos' else 'linux']
     pythons = {os.path.realpath(p) for p in (sys.prefix, sys.base_prefix, sys.exec_prefix)}
     hidden = [path for path in _SYSTEM_HIDE if os.path.exists(path)]

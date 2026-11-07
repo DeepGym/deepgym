@@ -1253,6 +1253,39 @@ def test_reporting_a_crash_is_not_reading_the_policys_output(tmp_path: Path) -> 
     assert json.loads(run.stdout.splitlines()[-1])['error_type'] == 'runtime_error'
 
 
+def test_a_verifier_formatting_its_own_traceback_is_not_reading_the_policys_output(
+    tmp_path: Path,
+) -> None:
+    """A verifier that logs a caught error with its traceback before touching the agent's
+    output, then crashes, gets no verdict: the trace's source reads aren't the policy's. A
+    session verifier runs from a file in the agent's work directory, so those reads land there."""
+    policy = tmp_path / 'workdir'
+    policy.mkdir()
+    script = policy / 'verifier.py'
+    body = (
+        'import traceback\n'
+        'try:\n'
+        '    {}["missing"]\n'
+        'except KeyError:\n'
+        '    traceback.print_exc()\n'
+        'raise RuntimeError("verifier bug")\n'
+    )
+    script.write_text(guard_crashes(body))
+
+    run = subprocess.run(
+        [sys.executable, '-I', str(script)],
+        cwd=policy,
+        env={**os.environ, 'DEEPGYM_POLICY_DIR': str(policy), 'DEEPGYM_CONSULTED': 'MARK'},
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+
+    assert run.returncode == 2, run.stdout + run.stderr
+    assert 'MARK' not in run.stdout
+    assert json.loads(run.stdout.splitlines()[-1])['error_type'] == 'runtime_error'
+
+
 @pytest.mark.parametrize('solution_ran', [False, True], ids=['before', 'after_the_solution_ran'])
 def test_a_full_disk_while_preparing_a_run(tmp_path: Path, solution_ran: bool) -> None:
     """Before any solution code runs, a full disk is the sandbox's (a LaunchError: no
@@ -1456,3 +1489,26 @@ def test_a_local_result_records_how_its_solution_was_isolated(
 
     assert [result.isolation for result in results] == ['none', 'none']
     assert sum('run unsandboxed' in record.message for record in caplog.records) == 1
+
+
+def test_macos_local_runs_warn_once_when_this_process_holds_secrets(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """sandbox-exec can't hide this process's start-up environment from a local solution,
+    so holding a key-like variable warns once, naming it but never its value."""
+    import logging
+
+    import deepgym.judge
+
+    monkeypatch.setattr('deepgym.judge.local_isolation_kind', lambda: 'macos')
+    monkeypatch.setenv('EXAMPLE_API_KEY', 'value-not-logged')
+    deepgym.judge._warn_secrets_readable_on_macos.cache_clear()
+    with caplog.at_level(logging.WARNING, logger='deepgym.judge'):
+        for _ in range(2):
+            deepgym.judge.local_isolation([])
+
+    warnings = [
+        r.getMessage() for r in caplog.records if 'environment this process' in r.getMessage()
+    ]
+    assert len(warnings) == 1
+    assert 'EXAMPLE_API_KEY' in warnings[0] and 'value-not-logged' not in warnings[0]

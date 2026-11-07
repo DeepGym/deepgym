@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.6.3 (2026-11-07)
 
 - **Daytona sessions run in the work directory:** since 0.6.0, agent commands and CLI agents in a Daytona session ran from `/` after entering the session's mount namespace, so shell steps couldn't find their files. They now change to the work directory after dropping to the agent user.
 - **Verifier crashes on Python 3.14:** a session verifier that crashed was scored as the agent's 0 (`solution_error`) when formatting its own traceback read a file in the agent's work directory, which Python 3.14 does. The crash guard now decides before formatting, so such a crash before the agent acts has no verdict.

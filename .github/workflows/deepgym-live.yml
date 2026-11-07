@@ -44,6 +44,7 @@ jobs:
       # tests still fail; failures are run once more and both runs stay in the log.
       - name: Live suite
         run: |
+          if [ -z "$DAYTONA_API_KEY" ]; then echo "::error::Set the DAYTONA_API_KEY repository secret"; exit 1; fi
           pytest --tb=short -q -n 4 --dist loadgroup \
             tests/test_sandboxes_live.py tests/test_isolation_live.py \
           || pytest --tb=short -q -n 4 --dist loadgroup --last-failed --last-failed-no-failures none \

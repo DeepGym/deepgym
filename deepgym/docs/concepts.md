@@ -32,7 +32,8 @@ print(result.score, result.passed, result.has_verdict, result.cases)
 `dg.run_batch(env, outputs, max_parallel=8)` scores many answers to one environment in
 parallel, as GRPO needs. `AsyncDeepGym` has the same `run`, `run_batch` and `eval`
 methods as coroutines, and with `api_url=` it sends them to a remote `deepgym serve` (see
-the [API server](api-server.md)).
+the [API server](api-server.md)). Use it as `async with AsyncDeepGym() as dg:`, or call
+`await dg.aclose()`, so its Daytona connections are closed.
 
 ## Environments
 

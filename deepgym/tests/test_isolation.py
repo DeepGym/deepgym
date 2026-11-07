@@ -1489,3 +1489,26 @@ def test_a_local_result_records_how_its_solution_was_isolated(
 
     assert [result.isolation for result in results] == ['none', 'none']
     assert sum('run unsandboxed' in record.message for record in caplog.records) == 1
+
+
+def test_macos_local_runs_warn_once_when_this_process_holds_secrets(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """sandbox-exec can't hide this process's start-up environment from a local solution,
+    so holding a key-like variable warns once, naming it but never its value."""
+    import logging
+
+    import deepgym.judge
+
+    monkeypatch.setattr('deepgym.judge.local_isolation_kind', lambda: 'macos')
+    monkeypatch.setenv('EXAMPLE_API_KEY', 'value-not-logged')
+    deepgym.judge._warn_secrets_readable_on_macos.cache_clear()
+    with caplog.at_level(logging.WARNING, logger='deepgym.judge'):
+        for _ in range(2):
+            deepgym.judge.local_isolation([])
+
+    warnings = [
+        r.getMessage() for r in caplog.records if 'environment this process' in r.getMessage()
+    ]
+    assert len(warnings) == 1
+    assert 'EXAMPLE_API_KEY' in warnings[0] and 'value-not-logged' not in warnings[0]

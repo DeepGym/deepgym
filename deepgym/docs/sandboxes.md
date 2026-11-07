@@ -85,7 +85,11 @@ one for anything shared or untrusted.
   signal anything outside its sandbox, its judge included. macOS has no way to contain a
   child that detaches, so there the answer never starts subprocesses and
   `run_solution(..., allow_subprocess=True)` ends the run with no verdict: run such
-  environments on Linux or a sandbox provider. Where neither sandbox works, local runs
+  environments on Linux or a sandbox provider. macOS also lets any process read the
+  environment another of your processes started with, so a local answer can read API keys
+  exported in the shell that started DeepGym; DeepGym warns once when it holds any. Keep
+  keys out of that shell, or use Linux or a sandbox provider, for untrusted code. Where
+  neither sandbox works, local runs
   refuse unless you set `DEEPGYM_ALLOW_UNSANDBOXED=1`.
   `DeepGym(mode='local', confine_local_judge=True)` also runs each whole judge inside the
   local sandbox, for verifiers that might run code in-process; `deepgym qa --mutants`

@@ -1,5 +1,11 @@
 # Changelog
 
+## Unreleased
+
+- **Verifier tracebacks never count as reading the agent's output:** a verifier that printed a caught exception's traceback before it read the agent's output, then crashed, was scored as the agent's 0, because formatting the traceback reads the verifier's own file, which a session keeps in the agent's work directory. Reads made while formatting a traceback no longer count, so that crash has no verdict.
+- **`AsyncDeepGym` closes its Daytona client:** use `async with AsyncDeepGym() as dg:` or `await dg.aclose()`. Closing first waits for any sweep still deleting a sandbox a failed create left. A failed async delete is now logged as a warning, not at debug level.
+- **macOS local runs warn about readable keys:** macOS lets a local solution read the environment another of your processes started with, which `sandbox-exec` can't prevent. DeepGym now warns once, naming the variables, when the process holds key-like ones (`*KEY*`, `*TOKEN*`, `*SECRET*`, ...). For untrusted code, keep keys out of that shell or use Linux or a sandbox provider.
+
 ## 0.6.3 (2026-11-07)
 
 - **Daytona sessions run in the work directory:** since 0.6.0, agent commands and CLI agents in a Daytona session ran from `/` after entering the session's mount namespace, so shell steps couldn't find their files. They now change to the work directory after dropping to the agent user.

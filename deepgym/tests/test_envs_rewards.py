@@ -16,10 +16,11 @@ import pytest
 from deepgym import solution_runtime
 from deepgym.core import DeepGym
 from deepgym.models import Environment
-from deepgym.registry import load_environment
+from deepgym.registry import load_environment, load_environment_dir
 from deepgym.sandbox import build_run_result, parse_verifier_output
 
 ENVS_DIR = Path(__file__).resolve().parent.parent / 'src' / 'deepgym' / 'envs'
+EXAMPLES_DIR = ENVS_DIR.parents[2] / 'examples'
 
 
 @pytest.fixture(scope='module')
@@ -119,6 +120,16 @@ for name, readme in [
     (root / name / 'README.md').write_text(readme + '\\n')
 print('done')
 """
+
+
+def test_the_string_manipulation_example_scores_split_and_slice(dg: DeepGym) -> None:
+    """The examples/ copy, not the built-in: its task allows any correct implementation."""
+    env = load_environment_dir(EXAMPLES_DIR / 'string_manipulation')
+    split_and_slice = "def transform(s):\n    return ' '.join(w[::-1] for w in s.split(' '))\n"
+
+    result = dg.run(env, split_and_slice)
+
+    assert (result.score, result.passed) == (1.0, True), result.output
 
 
 def test_file_organizer_prompt_names_the_checked_directory(dg: DeepGym) -> None:

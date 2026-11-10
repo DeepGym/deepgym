@@ -62,7 +62,8 @@ def _load_humaneval_envs(limit: int = 5) -> list[tuple[str, Environment]]:
 
 
 def _load_hardened_envs() -> list[tuple[str, Environment]]:
-    """Load hardened example verifiers (strong -- check implementation quality).
+    """Load the example verifiers (all or nothing; two also check the implementation
+    their task asks for).
 
     Returns:
         List of (verifier_id, Environment) tuples.
@@ -254,7 +255,7 @@ def main() -> None:
 
     # --- Hardened verifiers (examples) ---
     print('\n' + '=' * 70)
-    print('PHASE 2: HARDENED VERIFIERS (examples -- implementation checks)')
+    print('PHASE 2: HARDENED VERIFIERS (examples)')
     print('=' * 70)
 
     hardened_envs = _load_hardened_envs()

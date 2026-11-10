@@ -1389,19 +1389,19 @@ class PatchVerifier:
                             }
                         )
 
-                    # An uncertain edit gains nothing: failing tests score the normal 0 below, and a
-                    # pass that edit may have caused can't be trusted, so it gets no verdict (masked).
-                    if uncertain and passed_count:
+                    # All or nothing, like SWE-bench's "resolved": a pass-to-pass command passes
+                    # before any fix, so a share of commands would pay a patch that fixes nothing.
+                    pass_fraction = passed_count / len(test_commands)
+                    resolved = passed_count == len(test_commands)
+                    # An uncertain edit gains nothing: an unresolved patch scores the normal 0 below,
+                    # and a pass that edit may have caused can't be trusted, so it gets no verdict.
+                    if uncertain and resolved:
                         return _path_verdict(
                             'validation_uncertain',
                             'Tests passed, but the patch edits paths the guard cannot classify, so the pass was not scored: ',
                             dict(sorted(uncertain.items())),
                         )
 
-                    pass_fraction = passed_count / len(test_commands)
-                    resolved = passed_count == len(test_commands)
-                    # All or nothing, like SWE-bench's "resolved": a pass-to-pass command passes
-                    # before any fix, so a share of commands would pay a patch that fixes nothing.
                     tests_credit = 1 - apply_credit if resolved else 0.0
                     score = apply_credit + tests_credit
                     return _emit(

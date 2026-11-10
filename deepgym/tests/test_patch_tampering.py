@@ -1210,6 +1210,28 @@ def test_tests_score_all_or_nothing(
     assert (result.score, result.metrics['pass_fraction']) == (score, fraction)
 
 
+def test_a_failed_patch_with_an_uncertain_edit_is_a_judged_0(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture
+) -> None:
+    # One command passes (it reads ci.ini, which the patch edits: uncertain) and one fails.
+    # The patch failed whatever the edit did, so it is the trained 0; only a full pass the
+    # edit may have caused is masked.
+    env = _env(tmp_path, {'ci.ini': '[pytest]\n'})
+    patch_file = tmp_path / 'candidate.diff'
+    patch_file.write_text(_diff(Path(env.repo_dir), {**_FIX, 'ci.ini': _EDITED_INI}))
+    task_file = tmp_path / 'task.json'
+    commands = ['cat ci.ini', 'false']
+    task = {'repo_dir': env.repo_dir, 'test_patch': env.test_patch, 'test_commands': commands}
+    task_file.write_text(json.dumps(task))
+    monkeypatch.setattr(sys, 'argv', ['runner', str(task_file), str(patch_file)])
+
+    exit_code = _runner()['main']()
+
+    result = VerifierResult.model_validate_json(capsys.readouterr().out.splitlines()[-1])
+    assert (result.error_type, result.score, result.metrics['pass_fraction']) == (None, 0.0, 0.5)
+    assert is_verdict(exit_code, result.error_type)
+
+
 def test_no_time_left_for_the_tests_has_no_verdict(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture
 ) -> None:

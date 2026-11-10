@@ -97,9 +97,9 @@ that creates a symlink or an unusual file mode, scores 0 with
 - To keep false zeros on correct fixes rare, the guard allows data fixtures under a test
   directory, dependency and version edits, lockfiles, and ordinary files that only share
   a word with a test name. A correct fix that edits a file it refuses still scores 0.
-- An edit the guard can't classify still runs the tests. If any test command passes, the
-  run gets `error_type='validation_uncertain'` with no verdict, so trainers mask it; if
-  all fail, it is scored as usual: 0.
+- An edit the guard can't classify still runs the tests. If every test command passes,
+  the run gets `error_type='validation_uncertain'` with no verdict, so trainers mask it;
+  otherwise it is scored as usual: 0.
   `validation_timeout` and `validation_error` (git couldn't list the paths in time, or
   couldn't find the repository) have no verdict either.
 - The guard is a stopgap denylist, so it can't be exhaustive, and a diff to the code

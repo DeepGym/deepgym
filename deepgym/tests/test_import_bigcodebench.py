@@ -533,3 +533,15 @@ def test_plots_use_a_headless_backend(dg: DeepGym) -> None:
     result = dg.run(env, solution)
 
     assert (result.score, result.output) == (1.0, '1/1 tests passed')
+
+
+def test_a_skip_raised_inside_a_declared_skip_test_scores_zero(dg: DeepGym) -> None:
+    """A skipIf whose condition is false runs the test; a skip from the solution there fails."""
+    tests = _TESTS.replace(
+        'class TestCases', '@unittest.skipIf(False, "never skipped")\nclass TestCases'
+    )
+    env = Environment(task='t', verifier_code=generate_verifier('t', 'task_func', tests, []))
+
+    result = dg.run(env, _SKIP + '    raise unittest.SkipTest("no")\n')
+
+    assert (result.score, result.passed, result.has_verdict) == (0.0, False, True), result.output

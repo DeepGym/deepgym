@@ -138,7 +138,7 @@ def main():
             found.append("sys.monitoring")
         return found
 
-    started, succeeded, changes = [], [], []
+    started, succeeded, changes, called = [], [], [], set()
 
     class Result(TextTestResult):
         def startTest(self, test):
@@ -256,6 +256,8 @@ def main():
         return verdicts[id(cls)][1]
 
     def guarded(*args, **kwargs):
+        if current:  # a skip after this, in the same test, is not the decorator's
+            called.add(name(current[0]))
         # A change the call makes counts even if undone before its test ends (a patch
         # that restores itself on first use); a test's own mocks are there before and after.
         before = set(tampered())
@@ -302,8 +304,9 @@ def main():
     if changed := next((c for c in [*changes, tampered()] if c), None):
         return report("fail", f"Tampering by the solution: {', '.join(changed)}")
 
-    # Only an explicit success passes: an expected failure or an unexpected success is a
-    # failure, and the judge decides whether the test source declared a skip.
+    # Only an explicit success passes: an expected failure, an unexpected success or a
+    # skip in a test that called the solution is a failure. A skip before any call may be
+    # a decorator's; the judge checks the test source declared one.
     failed = {name(test) for test, _ in result.failures + result.errors + result.expectedFailures}
     failed |= {name(test) for test in result.unexpectedSuccesses}
     skipped = {name(test) for test, _ in result.skipped}
@@ -313,7 +316,7 @@ def main():
         if test in failed:
             return "fail"
         if test in skipped:
-            return "skip"
+            return "fail" if test in called else "skip"
         return "pass" if test in passed else "fail"
 
     report("ran", " ".join(f"{test}={outcome(test)}" for test in dict.fromkeys(map(name, started))))

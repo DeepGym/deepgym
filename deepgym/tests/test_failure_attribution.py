@@ -287,8 +287,7 @@ def _daytona(
     """Make every client use a stand-in for Daytona, sync or async, whose image runs
     commands as root, or else as a passwordless sudoer (*root* False). *verify* answers the
     verifier's command, given its env and how long Daytona waits for it. Returns the paths
-    uploads were written to."""
-    pytest.importorskip('daytona')
+    uploads were written to. Needs no daytona package."""
     uploads: list[str] = []
 
     def exec_(command: str, *, env: dict | None = None, timeout: int, **_: object) -> object:
@@ -328,20 +327,22 @@ def _daytona(
     async_client = types.SimpleNamespace(create=create_async, delete=delete_async)
     monkeypatch.setattr(DeepGym, '_init_daytona', staticmethod(lambda *args: sync_client))
     monkeypatch.setattr(AsyncDeepGym, '_init_daytona', staticmethod(lambda *args: async_client))
+    params = types.SimpleNamespace(model_copy=lambda update: params)  # what create() is given
+    for module in ('deepgym.sandboxes.daytona.sandbox', 'deepgym.async_core'):
+        monkeypatch.setattr(f'{module}.create_params', lambda env: params)
     return uploads
 
 
 def _hang(announced: bool, clock: list[float]) -> Callable[[str, dict, int], object]:
     """A verifier that prints the consulted mark if *announced*, then hangs. As on Daytona,
     a command under coreutils ``timeout`` returns what it printed with exit 124; one that
-    isn't hits Daytona's own timeout, which returns nothing. Either way *clock* moves on by
-    how long Daytona waited."""
-    from daytona import DaytonaProcessExecutionTimeoutError
+    isn't hits Daytona's own timeout, which returns nothing (an error here, which has no
+    verdict either way). Either way *clock* moves on by how long Daytona waited."""
 
     def verify(command: str, env: dict, timeout: int) -> object:
         clock[0] += timeout
         if '/usr/bin/timeout' not in command:
-            raise DaytonaProcessExecutionTimeoutError('Daytona stopped waiting')
+            raise RuntimeError('Daytona stopped waiting; nothing it printed came back')
         printed = f'{env["DEEPGYM_CONSULTED"]}\n' if announced else 'loading fixtures\n'
         return types.SimpleNamespace(exit_code=124, result=printed)
 

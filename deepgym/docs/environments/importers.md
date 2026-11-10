@@ -31,12 +31,18 @@ env = load_environment('humaneval_plus/HumanEval_0')
 - HumanEval and MBPP tests run against the dataset's own helpers and only the names the
   tests call, so a solution that redefines `range`, `set` or a helper can't rig the
   asserts.
-- EvalPlus and BigCodeBench pass only when every scored test passes, and keep partial
-  credit as the score.
-- BigCodeBench counts a skipped test as a failure. A fully skipped suite has no verdict,
-  and an empty one scores 0.
+- EvalPlus passes only when every scored test passes, and keeps partial credit as the
+  score. BigCodeBench scores 1.0 only when every test passes (its pass@1), and 0
+  otherwise, with the fraction passed in the details.
+- BigCodeBench counts a skip the solution causes as a failure. A test the task's own
+  decorators skip gives no verdict, and an empty suite scores 0.
 - BigCodeBench tests need the solution's real objects, so they run inside the solution's
-  isolated process, and a determined model can forge that result.
+  isolated process. The runner signs its result; a run where the solution changed
+  unittest, builtins, `numpy.testing`, `pandas.testing` or a test class, or left a
+  thread or trace hook running, scores 0, and a call that returns a value whose
+  comparisons the solution wrote fails. A determined model can still forge the result
+  by reading the runner's memory (its frames or signing key), or by hiding a lying
+  object inside a DataFrame.
 - Re-run the import scripts after upgrading DeepGym to pick up verifier fixes.
 
 ## Repo, terminal and CyberGym tasks need a sandbox

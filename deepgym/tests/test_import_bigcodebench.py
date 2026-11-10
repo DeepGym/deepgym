@@ -1,5 +1,5 @@
-"""BigCodeBench importer: skipped tests are not passes, passing means every test passed, and a
-solution that rigs the result line or unittest scores 0."""
+"""BigCodeBench importer: a run scores 1.0 only when every test passes, a skip the solution
+causes is a failure, and a solution that rigs the result line or unittest scores 0."""
 
 import sys
 from collections.abc import Iterator
@@ -15,7 +15,7 @@ scripts_dir = Path(__file__).resolve().parent.parent / 'scripts'
 if str(scripts_dir) not in sys.path:
     sys.path.insert(0, str(scripts_dir))
 
-from import_bigcodebench import generate_verifier  # noqa: E402
+from import_bigcodebench import declared_tests, generate_verifier  # noqa: E402
 
 _TESTS = """
 import unittest
@@ -64,20 +64,23 @@ def dg() -> Iterator[DeepGym]:
 
 
 @pytest.mark.parametrize(
-    ('solution', 'score', 'passed'),
+    ('solution', 'details'),
     [
-        ('def task_func(x):\n    return x ** 2\n', 1.0, True),
-        ('def task_func(x):\n    return abs(x) * x\n', 0.8, False),  # 4 of 5 is no longer a pass
-        (_SKIP_NEGATIVE, 0.8, False),  # skipping the hard case used to count it as a pass
+        ('def task_func(x):\n    return x ** 2\n', '5/5 tests passed'),
+        ('def task_func(x):\n    return abs(x) * x\n', '4/5 tests passed'),
+        (_SKIP_NEGATIVE, '4/5 tests passed'),  # skipping the hard case used to count as a pass
     ],
 )
-def test_score_counts_only_tests_that_passed(
-    env: Environment, dg: DeepGym, solution: str, score: float, passed: bool
+def test_only_a_full_pass_scores(
+    env: Environment, dg: DeepGym, solution: str, details: str
 ) -> None:
+    """All or nothing, like BigCodeBench's pass@1; the fraction stays in the details."""
     result = dg.run(env, solution)
 
-    assert result.score == pytest.approx(score), result.output
-    assert result.passed is passed
+    assert result.output == details
+    assert (result.score, result.passed) == (
+        (1.0, True) if details == '5/5 tests passed' else (0.0, False)
+    )
 
 
 _SUBTESTS = """
@@ -105,16 +108,24 @@ def test_skipped_subtests_count_once_per_test(dg: DeepGym) -> None:
 
     result = dg.run(env, solution)
 
-    assert result.score == pytest.approx(2 / 3)
-    assert result.passed is False
+    assert (result.score, result.output) == (0.0, '2/3 tests passed')
 
 
-def test_suite_that_ran_nothing_has_no_verdict(env: Environment, dg: DeepGym) -> None:
-    """Every test skipped used to score 1.0; nothing was checked, so there is no verdict."""
+def test_skips_the_solution_raises_score_zero(env: Environment, dg: DeepGym) -> None:
+    """Raising SkipTest from its own call used to mask a failure as no verdict."""
     result = dg.run(env, _SKIP + '    raise unittest.SkipTest("no")\n')
 
-    assert result.exit_code == 2
-    assert result.has_verdict is False
+    assert (result.score, result.passed, result.has_verdict) == (0.0, False, True), result.output
+
+
+def test_skips_the_tests_declare_have_no_verdict(dg: DeepGym) -> None:
+    """A test its own decorator skips checked nothing, whatever the solution does."""
+    tests = _TESTS.replace('class TestCases', '@unittest.skip("needs a display")\nclass TestCases')
+    env = Environment(task='t', verifier_code=generate_verifier('t', 'task_func', tests, []))
+
+    result = dg.run(env, 'def task_func(x):\n    return x ** 2\n')
+
+    assert (result.exit_code, result.has_verdict) == (2, False)
 
 
 _HIDE_TESTS = (
@@ -257,6 +268,43 @@ _FORGERIES = {
         'for i in range(95):\n'
         "    setattr(Extra, f'test_{i}', lambda self: None)\n" + _WRONG
     ),
+    # The same function object, running other code.
+    'assertion code swapped': (
+        'import unittest\n'
+        'noop = lambda self, first, second, msg=None: None\n'
+        'unittest.TestCase.assertEqual.__code__ = noop.__code__\n' + _WRONG
+    ),
+    # Failed assertions become expected failures, which scoring used to ignore.
+    'every test marked an expected failure': (
+        'import unittest\nunittest.TestCase.__unittest_expecting_failure__ = True\n' + _WRONG
+    ),
+    'equals everything under a stdlib module name': (
+        'class Anything:\n'
+        "    __module__ = 'builtins'\n"
+        '    def __eq__(self, other):\n'
+        '        return True\n'
+        'def task_func(x):\n'
+        '    return Anything()\n'
+    ),
+    'equals everything through a C callable': (
+        'import functools, operator\n'
+        'class Anything:\n'
+        "    __module__ = 'builtins'\n"
+        '    __eq__ = functools.partial(operator.is_not, object())\n'
+        'def task_func(x):\n'
+        '    return Anything()\n'
+    ),
+    # A trace function rewrites each assertion's expected value to the answer.
+    'trace function': (
+        'import sys, unittest\n'
+        'target = unittest.TestCase.assertEqual.__code__\n'
+        'def tracer(frame, event, arg):\n'
+        "    if event == 'call' and frame.f_code is target:\n"
+        "        frame.f_locals['second'] = frame.f_locals['first']\n"
+        'def task_func(x):\n'
+        '    sys.settrace(tracer)\n'
+        '    return -1\n'
+    ),
 }
 
 
@@ -303,6 +351,16 @@ _LATE_FORGERIES = {
         'def task_func(x):\n'
         '    return collections.defaultdict(int, square=Anything())\n'
     ),
+    # The test's own instance, reached through the stack.
+    'assertion hidden on the test instance': (
+        'import sys, unittest\n'
+        'def task_func(x):\n'
+        '    frame = sys._getframe(1)\n'
+        "    while not isinstance(frame.f_locals.get('self'), unittest.TestCase):\n"
+        '        frame = frame.f_back\n'
+        "    frame.f_locals['self'].assertEqual = lambda *args, **kwargs: None\n"
+        '    return {}\n'
+    ),
 }
 
 
@@ -316,3 +374,108 @@ def test_a_forgery_after_the_call_scores_zero(dg: DeepGym, solution: str) -> Non
     result = dg.run(env, solution)
 
     assert (result.score, result.passed) == (0.0, False), result.output
+
+
+def test_a_thread_left_running_scores_zero(env: Environment, dg: DeepGym) -> None:
+    """A thread that outlives its call could change unittest between the runner's checks."""
+    solution = (
+        'import threading, time\n'
+        'threading.Thread(target=time.sleep, args=(60,), daemon=True).start()\n'
+        'def task_func(x):\n'
+        '    return x * x\n'
+    )
+
+    result = dg.run(env, solution)
+
+    assert (result.score, result.passed) == (0.0, False), result.output
+
+
+def test_a_patched_testing_helper_scores_zero(dg: DeepGym) -> None:
+    """numpy.testing and pandas.testing are watched like unittest."""
+    pytest.importorskip('numpy')
+    tests = (
+        'import unittest\nimport numpy as np\n\n\n'
+        'class TestCases(unittest.TestCase):\n'
+        '    def test_square(self):\n'
+        '        np.testing.assert_array_equal(task_func([1, 2]), [1, 4])\n'
+    )
+    env = Environment(task='t', verifier_code=generate_verifier('t', 'task_func', tests, []))
+    solution = (
+        'import numpy.testing\n'
+        'numpy.testing.assert_array_equal = lambda *args, **kwargs: None\n'
+        'def task_func(xs):\n'
+        '    return xs\n'
+    )
+
+    result = dg.run(env, solution)
+
+    assert (result.score, result.passed) == (0.0, False), result.output
+
+
+# BigCodeBench/96's tests, verbatim: a list of (word, count) tuples.
+_TASK_96_TESTS = """
+import unittest
+from unittest.mock import patch, mock_open
+class TestCases(unittest.TestCase):
+    def test_return_type(self):
+        with patch('builtins.open', mock_open(read_data="word1,word2,word1")):
+            result = task_func('dummy_path.csv', ',')
+        self.assertIsInstance(result, list)
+    def test_tuple_structure(self):
+        with patch('builtins.open', mock_open(read_data="word1,word2,word1")):
+            result = task_func('dummy_path.csv', ',')
+        for item in result:
+            self.assertIsInstance(item, tuple)
+            self.assertEqual(len(item), 2)
+    def test_word_count(self):
+        with patch('builtins.open', mock_open(read_data="word1\\nword2\\nword1")):
+            result = task_func('dummy_path.csv', ',')
+        self.assertIn(('word1', 2), result)
+        self.assertIn(('word2', 1), result)
+    def test_empty_file(self):
+        with patch('builtins.open', mock_open(read_data="")):
+            result = task_func('dummy_path.csv', ',')
+        self.assertEqual(len(result), 0)
+    def test_no_repeated_words(self):
+        with patch('builtins.open', mock_open(read_data="word1,word2,word3")):
+            result = task_func('dummy_path.csv', ',')
+        expected_counts = {('word1', 1), ('word2', 1), ('word3', 1)}
+        self.assertTrue(all(pair in expected_counts for pair in result))
+    def test_custom_delimiter(self):
+        with patch('builtins.open', mock_open(read_data="word1;word2;word1")):
+            result = task_func('dummy_path.csv', ';')
+        self.assertIn(('word1', 2), result)
+        self.assertIn(('word2', 1), result)
+"""
+
+
+def test_a_namedtuple_answer_still_passes(dg: DeepGym) -> None:
+    """A tuple subclass that keeps tuple's comparisons is a fair answer (BigCodeBench/96)."""
+    env = Environment(
+        task='t', verifier_code=generate_verifier('t', 'task_func', _TASK_96_TESTS, [])
+    )
+    solution = (
+        'import csv\n'
+        'from collections import Counter, namedtuple\n'
+        "Pair = namedtuple('Pair', 'word count')\n"
+        'def task_func(csv_file, csv_delimiter):\n'
+        '    with open(csv_file) as f:\n'
+        '        words = [word for row in csv.reader(f, delimiter=csv_delimiter) for word in row]\n'
+        '    return [Pair(*pair) for pair in Counter(words).most_common()]\n'
+    )
+
+    result = dg.run(env, solution)
+
+    assert (result.score, result.output) == (1.0, '6/6 tests passed')
+
+
+def test_a_redefined_test_method_counts_once() -> None:
+    """Python keeps only the last definition of a name (BigCodeBench/804 has 8 for 5 tests)."""
+    tests = (
+        'class TestCases(unittest.TestCase):\n'
+        '    def test_a(self): pass\n'
+        '    def test_b(self): pass\n'
+        '    def test_a(self): pass\n'
+    )
+
+    assert declared_tests(tests) == ['TestCases.test_a', 'TestCases.test_b']

@@ -54,7 +54,8 @@ result = dg.run(env, model_output=solution)
 print(f'Score: {result.score}, Passed: {result.passed}')   # Score: 1.0, Passed: True
 
 wrong = dg.run(env, model_output='def coin_change(coins, amount):\n    return -1\n')
-print(wrong.score, wrong.passed)   # 0.12 False: 3 of 25 cases pass, each in wrong.cases
+print(wrong.score, wrong.passed)   # 0.0 False: built-ins pay only when every case passes
+print(wrong.metrics)   # {'pass_fraction': 0.12}: 3 of 25 cases pass, each in wrong.cases
 ```
 
 `mode='local'` is for trying things out. For model-generated code, switch to a sandbox
@@ -144,8 +145,8 @@ statistics (continues the quickstart):
 completions = [solution, 'def coin_change(coins, amount):\n    return -1\n']
 batch = dg.run_batch(env, completions, max_parallel=8)
 
-rewards = [r.score if r.has_verdict else None for r in batch.results]   # [1.0, 0.12]
-print(batch.avg_score, batch.judged_count, batch.no_verdict_count)      # 0.56 2 0
+rewards = [r.score if r.has_verdict else None for r in batch.results]   # [1.0, 0.0]
+print(batch.avg_score, batch.judged_count, batch.no_verdict_count)      # 0.5 2 0
 ```
 
 `batch.avg_score` and `batch.passed` count a run without a verdict as a failed 0;

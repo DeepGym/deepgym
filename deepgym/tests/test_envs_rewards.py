@@ -73,6 +73,17 @@ def test_level_order_scores_a_parent_following_bfs(dg: DeepGym) -> None:
     assert wrong.score < 1.0
 
 
+def test_a_partly_right_answer_earns_nothing_but_keeps_its_pass_fraction(dg: DeepGym) -> None:
+    """All or nothing: 3 of 25 coin_change cases right still scores 0; the share stays visible."""
+    wrong = 'def coin_change(coins, amount):\n    return -1\n'
+
+    result = dg.run(load_environment('coin_change'), wrong)
+
+    assert (result.score, result.passed) == (0.0, False)
+    assert result.metrics == {'pass_fraction': 0.12}
+    assert sum(case.passed for case in result.cases) == 3
+
+
 def test_string_manipulation_scores_split_and_slice(dg: DeepGym, string_env: Environment) -> None:
     split_and_slice = "def transform(s):\n    return ' '.join(w[::-1] for w in s.split(' '))\n"
     collapses_spaces = "def transform(s):\n    return ' '.join(w[::-1] for w in s.split())\n"

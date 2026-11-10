@@ -114,11 +114,13 @@ def verify(solution_path, test_cases_path=None):
 
         cases.append(case)
 
-    score = passed / total
+    # All or nothing: partial credit would pay a shortcut that gets a few cases right.
+    score = 1.0 if passed == total else 0.0
     return {
         'schema_version': '1.0',
         'score': score,
         'passed': score == 1.0,
+        'metrics': {'pass_fraction': passed / total},
         'details': f'{passed}/{total} passed. ' + '; '.join(details)
         if details
         else f'{passed}/{total} passed',

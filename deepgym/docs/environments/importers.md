@@ -304,8 +304,8 @@ deepgym qa --mode daytona ~/.deepgym/environments/osworld/<task id>
 
 - A rule the starting file already holds, or holds once an empty sheet is added, is a
   guard rather than progress, so saving the untouched file or adding a blank sheet
-  earns nothing. OSWorld's evaluator is all-or-nothing; here a task with several rules
-  pays the share it got right.
+  earns nothing. As in OSWorld's evaluator, a task scores 1.0 only when every rule
+  passes; the share of rules met is in `metrics['pass_fraction']`.
 - Whatever is at the result path, the verifier gives a verdict: a file it can't read
   (missing, corrupt, not a regular file, or past the size limits) scores 0, and a rule
   it can't evaluate fails every rule. Reading and scoring run in a child process with

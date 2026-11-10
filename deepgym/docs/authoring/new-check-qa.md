@@ -32,7 +32,9 @@ in [verifiers](verifiers.md).
 
 ## Kinds
 
-- `function`: the verifier calls a function through `load_solution`.
+- `function`: the verifier calls a function through `load_solution`. It scores 1.0
+  only when every case passes and 0.0 otherwise, with the share passed in
+  `metrics['pass_fraction']`.
 - `script`: the verifier runs a stdin/stdout script through `run_solution`.
 - `repo-patch`: the model answers with a unified diff. The verifier applies it to the
   files in `repo/` with `apply_patch` (in memory, only to files you list; a diff that

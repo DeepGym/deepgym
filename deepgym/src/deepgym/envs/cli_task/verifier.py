@@ -198,7 +198,8 @@ def verify(solution_path, test_cases_path=None):
 
     passed_count = sum(checks.values())
     total = len(checks)
-    score = passed_count / total
+    # All or nothing: partial credit would pay a shortcut that gets a few cases right.
+    score = 1.0 if passed_count == total else 0.0
 
     details_parts = [f'{k}={v}' for k, v in checks.items()]
 
@@ -220,10 +221,8 @@ def verify(solution_path, test_cases_path=None):
     return {
         'schema_version': '1.0',
         'score': score,
-        # Threshold < 1.0: CLI tasks use discrete filesystem/git checks where
-        # minor output differences (e.g. missing "done" print) should not fail
-        # an otherwise correct solution.
-        'passed': score >= 0.8,
+        'passed': score == 1.0,
+        'metrics': {'pass_fraction': passed_count / total},
         'details': f'{passed_count}/{total} checks passed. ' + ', '.join(details_parts),
         'cases': cases,
     }

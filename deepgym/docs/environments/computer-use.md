@@ -56,9 +56,10 @@ The count is in `list_environments()` under `variants`.
 ## Scoring
 
 Verifiers split checks into *progress* (the changes the task asked for) and *guards*
-(work was saved, nothing else broke, no duplicate rows). The score is the share of
-progress checks passed, and any failed guard scores 0, so neither doing nothing nor
-clicking Save on untouched state earns reward.
+(work was saved, nothing else broke, no duplicate rows). The score is 1.0 only when every
+progress check passes and every guard holds, and 0 otherwise, so neither doing nothing,
+clicking Save on untouched state, nor doing part of the task earns reward. The share of
+progress checks passed is in `metrics['pass_fraction']`.
 
 Each task ships a `reference_actions.json` with one scripted episode per variant. On
 `--mode daytona`, `deepgym qa` replays it and runs agents that quit at once, use every

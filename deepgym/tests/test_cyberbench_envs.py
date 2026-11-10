@@ -85,16 +85,16 @@ def test_log_triage_scores_the_answer_fields_not_keywords_elsewhere(dg: DeepGym)
 
     result = dg.run(env, json.dumps(padded))
 
-    assert result.passed is False
-    assert result.score == pytest.approx(0.4)  # the IPs, nothing else
+    assert (result.score, result.passed) == (0.0, False)
+    assert sum(result.reward_components.values()) == pytest.approx(0.4)  # the IPs, nothing else
 
 
 @pytest.mark.parametrize(
     ('action', 'score'),
     [
-        ('Do not patch, block or search the logs.', 0.85),
-        ("Don't patch Log4j; there is no need to block or search logs.", 0.85),
-        ('Patching Log4j, blocking the sources and searching logs are not needed.', 0.85),
+        ('Do not patch, block or search the logs.', 0.0),
+        ("Don't patch Log4j; there is no need to block or search logs.", 0.0),
+        ('Patching Log4j, blocking the sources and searching logs are not needed.', 0.0),
         ('Patch Log4j, block both sources and search the logs. Do not expose JNDI.', 1.0),
         ('Do not delay: patch Log4j, block both sources and search the logs.', 1.0),
     ],

@@ -339,9 +339,9 @@ sleep 3
 def build_verifier(task: Task) -> str:
     """The verifier: OSWorld's evaluator ported to a state check on the saved file.
 
-    Every compare_table rule is one progress check (the original evaluator was
-    all-or-nothing, so a partial solution earns partial reward), and a workbook
-    that cannot be read fails the guard: an unsaved or missing file scores 0.
+    Every compare_table rule is one progress check, scored all or nothing like the
+    original evaluator (the share met is in metrics), and a workbook that cannot be
+    read fails the guard: an unsaved or missing file scores 0.
     """
     if task.func == 'compare_docx_files':
         return (

@@ -883,6 +883,31 @@ def test_async_daytona_judge_fails_closed_when_it_cannot_go_offline() -> None:
         asyncio.run(client._run_judge(sandbox, _JOB))
 
 
+@pytest.mark.parametrize('use_async', [False, True], ids=['sync', 'async'])
+def test_judge_refuses_to_run_as_the_solver(use_async: bool) -> None:
+    """An image whose default user is already the solver account would hand the judge's
+    private tree to the solution: no verdict, before the solution runs."""
+    as_solver = '999 999 987 /usr/bin/python3 1'  # judge uid, solver uid and gid, python, netns
+    if use_async:
+        from deepgym.async_core import AsyncDeepGym
+
+        class Process:
+            async def exec(self, command: str, **kwargs: object) -> object:
+                assert 'DEEPGYM_DEADLINE' not in command, 'the verifier must not run'
+                return types.SimpleNamespace(exit_code=0, result=as_solver)
+
+        client = AsyncDeepGym(mode='local')
+        run = lambda: asyncio.run(client._run_judge(_async_daytona_box(Process()), _JOB))  # noqa: E731
+    else:
+        box = FakeSandbox(network_blocked=True, answers=[('useradd', as_solver)])
+        run = lambda: run_judge_in_sandbox(box, _JOB)  # noqa: E731
+
+    with pytest.raises(SandboxError, match='same user'):
+        run()
+    if not use_async:
+        assert not any('DEEPGYM_DEADLINE' in command for command in box.commands)
+
+
 def test_judge_killed_after_printing_a_pass_is_an_error() -> None:
     box = FakeSandbox(network_blocked=True, answers=[('useradd', '0 999 987 /usr/bin/python3 0')])
     answer = box.exec

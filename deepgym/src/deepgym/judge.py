@@ -471,7 +471,8 @@ def sandbox_isolation(setup_output: str, *, require_offline: bool = False) -> tu
     no host). ``own_network`` in the spec says it got one.
 
     Raises:
-        SandboxError: If the solver's uid or gid is root or unreadable, or if
+        SandboxError: If the solver's uid or gid is root or unreadable, or the judge's
+            own uid (the solution could then read the judge's private files), or if
             *require_offline* is set but the sandbox can't make that namespace.
     """
     judge_uid, uid, gid, python, netns = setup_output.split()[-5:]
@@ -479,6 +480,8 @@ def sandbox_isolation(setup_output: str, *, require_offline: bool = False) -> tu
     # Only sandbox_judge_by_name passes the solver's name instead.
     if not all(v == SOLVER_USER or (v.isdecimal() and int(v) > 0) for v in (uid, gid)):
         raise SandboxError(f'Refusing to run the solution as root or an unknown id: {uid}:{gid}')
+    if uid == judge_uid:
+        raise SandboxError(f'Refusing to run the solution as the same user as the judge: {uid}')
     if require_offline and netns != '1':
         raise SandboxError(
             'Cannot cut the solution off the network here; the image needs util-linux '

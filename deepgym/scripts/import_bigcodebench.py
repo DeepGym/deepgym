@@ -35,6 +35,10 @@ import sys
 import types
 import unittest
 
+# Headless plots, before the tests or the solution import matplotlib: a GUI backend's
+# show() can block an honest answer until the timeout.
+os.environ.setdefault("MPLBACKEND", "Agg")
+
 
 def main():
     # Read the judge's key before any solution code runs (stdin is then empty) and bind

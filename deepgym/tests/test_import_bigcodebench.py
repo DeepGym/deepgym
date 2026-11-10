@@ -479,3 +479,19 @@ def test_a_redefined_test_method_counts_once() -> None:
     )
 
     assert declared_tests(tests) == ['TestCases.test_a', 'TestCases.test_b']
+
+
+def test_plots_use_a_headless_backend(dg: DeepGym) -> None:
+    """A GUI backend's show() can block an honest plot until the timeout (macOS)."""
+    tests = (
+        'import unittest\n\n\n'
+        'class TestCases(unittest.TestCase):\n'
+        '    def test_backend(self):\n'
+        "        self.assertEqual(task_func(), 'Agg')\n"
+    )
+    env = Environment(task='t', verifier_code=generate_verifier('t', 'task_func', tests, []))
+    solution = "import os\ndef task_func():\n    return os.environ.get('MPLBACKEND')\n"
+
+    result = dg.run(env, solution)
+
+    assert (result.score, result.output) == (1.0, '1/1 tests passed')

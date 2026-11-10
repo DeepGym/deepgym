@@ -7,12 +7,15 @@ its preflight or launch before any solution code runs, or the verifier failing f
 no verdict; and a crash never keeps a score printed before it. That must hold for every
 verifier shape and auto detection, sync and async runs, and session step and final
 verifiers. These run locally; test_sandboxes_live.py reruns them on every sandbox provider
-it can reach, through its own ``mode`` fixture.
+it can reach, through its own ``mode`` fixture. A stand-in for Daytona checks the sync and
+async Daytona clients date a hang alike without one.
 """
 
 import asyncio
 import contextlib
 import textwrap
+import time
+import types
 
 import pytest
 
@@ -248,6 +251,70 @@ def test_an_uncaught_solution_timeout_is_a_judged_zero(
     result = _grade(mode, use_async, env, 'def solve():\n    while True:\n        pass\n')
 
     assert (result.score, result.has_verdict, result.error_type) == (0.0, True, 'solution_timeout')
+
+
+def _hanging_daytona(announced: bool, use_async: bool, clock: list[float]) -> object:
+    """A Daytona client, sync or async, whose verifier prints the consulted mark if
+    *announced*, then hangs. As on Daytona, a command under coreutils ``timeout`` returns
+    what it printed with exit 124; one that isn't hits Daytona's own timeout, which returns
+    nothing. Either way *clock* moves on by how long Daytona waited."""
+    from daytona import DaytonaProcessExecutionTimeoutError
+
+    def exec_(command: str, *, env: dict | None = None, timeout: int, **_: object) -> object:
+        if 'DEEPGYM_DEADLINE' not in command:  # the root probe, then the judge's setup
+            output = '0 999 987 /usr/bin/python3 1' if 'useradd' in command else 'root'
+            return types.SimpleNamespace(exit_code=0, result=output)
+        clock[0] += timeout
+        if '/usr/bin/timeout' not in command:
+            raise DaytonaProcessExecutionTimeoutError('Daytona stopped waiting')
+        printed = f'{env["DEEPGYM_CONSULTED"]}\n' if announced else 'loading fixtures\n'
+        return types.SimpleNamespace(exit_code=124, result=printed)
+
+    async def exec_async(command: str, **kwargs: object) -> object:
+        return exec_(command, **kwargs)
+
+    async def upload_async(content: bytes, path: str) -> None:
+        pass
+
+    async def delete_async(sandbox: object) -> None:
+        pass
+
+    async def create_async(params: object) -> object:
+        return types.SimpleNamespace(
+            id='daytona-async',
+            process=types.SimpleNamespace(exec=exec_async),
+            fs=types.SimpleNamespace(upload_file=upload_async),
+        )
+
+    if use_async:
+        return types.SimpleNamespace(create=create_async, delete=delete_async)
+    box = types.SimpleNamespace(
+        id='daytona',
+        process=types.SimpleNamespace(exec=exec_),
+        fs=types.SimpleNamespace(upload_file=lambda content, path: None),
+    )
+    return types.SimpleNamespace(create=lambda params, timeout: box, delete=lambda box, wait: None)
+
+
+@pytest.mark.parametrize('use_async', [False, True], ids=['sync', 'async'])
+@pytest.mark.parametrize(
+    ('announced', 'expected'),
+    [(False, 'no_verdict'), (True, 'judged_zero:solution_timeout')],
+    ids=['before_the_solution_runs', 'after_the_solution_runs'],
+)
+def test_daytona_dates_a_hang_alike(
+    monkeypatch: pytest.MonkeyPatch, announced: bool, expected: str, use_async: bool
+) -> None:
+    pytest.importorskip('daytona')
+    clock = [0.0]
+    real_monotonic = time.monotonic
+    monkeypatch.setattr(time, 'monotonic', lambda: real_monotonic() + clock[0])
+    client = _hanging_daytona(announced, use_async, clock)
+    for cls in (DeepGym, AsyncDeepGym):
+        monkeypatch.setattr(cls, '_init_daytona', staticmethod(lambda *args: client))
+    env = Environment(task='t', verifier_code=_single_turn(_CALL, 'body'))
+
+    assert _outcome(_grade('daytona', use_async, env, HANGS)) == expected
 
 
 def _write_agent(code: str) -> Action:

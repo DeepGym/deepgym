@@ -32,9 +32,11 @@ from deepgym.sandboxes.protocol import (
 
 if TYPE_CHECKING:
     from daytona import (
+        AsyncSandbox,
         CreateSandboxFromImageParams,
         CreateSandboxFromSnapshotParams,
         Daytona,
+        ExecuteResponse,
         Sandbox,
     )
     from daytona._sync.computer_use import ComputerUse
@@ -201,6 +203,55 @@ def is_timeout(exc: Exception) -> bool:
     return isinstance(exc, DaytonaProcessExecutionTimeoutError)
 
 
+def _timed(command: str, timeout: float | None, sudo: str = '') -> tuple[str, int | None]:
+    """Return *command* as Daytona should run it with sh, and how long Daytona should wait.
+
+    The deadline is enforced in the sandbox by coreutils ``timeout``, as on E2B, so a
+    command that outruns it still returns what it printed (Daytona's own timeout returns
+    nothing); Daytona waits a little longer.
+    """
+    if timeout:
+        command = f'/usr/bin/timeout --kill-after=2 {timeout} /bin/sh -c {shlex.quote(command)}'
+    wait = math.ceil(timeout + _WAIT_GRACE_S) if timeout else None
+    return f'{sudo}/bin/sh -c {shlex.quote(command)}', wait
+
+
+def _result(response: ExecuteResponse, timeout: float | None, start: float) -> ExecResult:
+    """Return Daytona's *response* to a command :func:`_timed` wrapped, started at *start*.
+
+    Raises:
+        SandboxTimeoutError: With what the command printed, if it outran *timeout* seconds.
+    """
+    if timeout and response.exit_code in TIMEOUT_EXIT_CODES:
+        if time.monotonic() - start >= timeout:
+            raise SandboxTimeoutError(f'command exceeded {timeout}s', response.result)
+    return ExecResult(response.exit_code, response.result)
+
+
+async def exec_async(
+    sandbox: AsyncSandbox,
+    command: str,
+    *,
+    env: Mapping[str, str] | None = None,
+    timeout: float | None = None,
+) -> ExecResult:
+    """Run *command* with sh in a sandbox of Daytona's async client, under the same deadline
+    as :meth:`DaytonaSandbox.exec`, as the image's default user.
+
+    Raises:
+        SandboxTimeoutError: If the command outruns *timeout* seconds.
+    """
+    command, wait = _timed(command, timeout)
+    start = time.monotonic()
+    try:
+        response = await sandbox.process.exec(command, env=dict(env) if env else None, timeout=wait)
+    except Exception as exc:
+        if is_timeout(exc):
+            raise SandboxTimeoutError(f'command exceeded {timeout}s') from exc
+        raise
+    return _result(response, timeout, start)
+
+
 class DaytonaSandbox:
     """A Daytona sandbox, deleted by :meth:`delete`.
 
@@ -299,35 +350,25 @@ class DaytonaSandbox:
         env: Mapping[str, str] | None = None,
         timeout: float | None = None,
     ) -> ExecResult:
-        """Run *command* with sh as root.
-
-        The deadline is enforced in the sandbox by coreutils ``timeout``, as on E2B, so a
-        command that outruns it still returns what it printed (Daytona's own timeout
-        returns nothing); Daytona waits a little longer.
+        """Run *command* with sh as root, its deadline enforced in the sandbox (see
+        :func:`_timed`).
 
         Raises:
             SandboxTimeoutError: If the command outruns *timeout* seconds.
             SandboxDiedError: If the sandbox stopped during the command.
         """
-        if timeout:
-            command = f'/usr/bin/timeout --kill-after=2 {timeout} /bin/sh -c {shlex.quote(command)}'
+        command, wait = _timed(command, timeout, self._sudo)
         start = time.monotonic()
         try:
             response = self._sandbox.process.exec(
-                f'{self._sudo}/bin/sh -c {shlex.quote(command)}',
-                cwd=cwd,
-                env=dict(env) if env else None,
-                timeout=math.ceil(timeout + _WAIT_GRACE_S) if timeout else None,
+                command, cwd=cwd, env=dict(env) if env else None, timeout=wait
             )
         except Exception as exc:
             if is_timeout(exc):
                 raise SandboxTimeoutError(f'command exceeded {timeout}s') from exc
             self._raise_if_stopped(exc)
             raise
-        if timeout and response.exit_code in TIMEOUT_EXIT_CODES:
-            if time.monotonic() - start >= timeout:
-                raise SandboxTimeoutError(f'command exceeded {timeout}s', response.result)
-        return ExecResult(response.exit_code, response.result)
+        return _result(response, timeout, start)
 
     def _raise_if_stopped(self, exc: Exception) -> None:
         """Raise what a call that failed with *exc* means if the sandbox stopped: Daytona's

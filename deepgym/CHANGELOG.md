@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.6.5 (2026-11-10)
+
+- **Built-ins score all or nothing:** every built-in, the example envs and the `function`, `script` and `repo-patch` templates score 1.0 only when every case passes, and 0.0 otherwise. Per-case credit gave a constant or echoed answer 0.04-0.25 on 15 built-ins. The share of cases passed is in `metrics['pass_fraction']`, and weighted parts stay in `reward_components`. `two_sum` and `python_sorting` check their stated implementation rules across the whole solution file, so a correct answer built on helpers scores 1.0.
+- **The QA gate fails on any shortcut reward:** `hack_resistant` fails when a heuristic attack earns more than 1e-6, not only at 0.5. `AdversarialTester`, `RewardAuditor` and the black-box tester share this default, and `pass_threshold` still sets another line. Stored scan and audit results include the threshold, so results saved under 0.5 are tested again.
+- **SWE-bench Pro and repo-patch tasks:** `apply_credit` defaults to 0.0 (was 0.3), and the test credit is paid only when every test command passes, like SWE-bench's resolved. A patch that fixed nothing earned the share of tests that already passed. A patch with an edit the guard can't classify loses its verdict only when every test passes; otherwise it scores 0.
+- **Async Daytona judges like sync:** async runs enforce the deadline with coreutils `timeout`, so a verifier that hangs after the solution's output is in play is `solution_timeout` instead of no verdict. On a snapshot whose default user is a sudoer, the async judge runs as root and stages uploads, as sync does. A judge that would run as the solver's own user refuses to run (no verdict).
+- **Strict sudo umask:** on an image whose sudo umask is `0077`, the solver can now read its solution and the runtime, so an honest answer is no longer judged 0. The judge's own files stay private.
+- **Masked-rate warning everywhere:** `RewardFunction`, `AsyncRewardFunction` and the TRL, Axolotl and DAPO reward functions log a warning when more than 5 in 100 samples get no verdict. Rewards are unchanged.
+- **BigCodeBench verifiers:** results are signed and scored against the task's own deduplicated test list, 1.0 only when every test passes. A run scores 0 when the solution changes unittest, builtins, `numpy.testing`/`pandas.testing` or a test class, leaves a thread or trace hook running, or raises a skip the test source didn't declare. Plots use the Agg backend. The tests still share the solution's process, so a solution written to forge results can (#26).
+
 ## 0.6.4 (2026-11-07)
 
 - **Verifier tracebacks never count as reading the agent's output:** a verifier that printed a caught exception's traceback before it read the agent's output, then crashed, was scored as the agent's 0, because formatting the traceback reads the verifier's own file, which a session keeps in the agent's work directory. Reads made while formatting a traceback no longer count, so that crash has no verdict.

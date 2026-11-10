@@ -11,13 +11,16 @@ import os
 import re
 import shlex
 import subprocess
+import time
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 import pytest
 
 from deepgym import AsyncDeepGym, ComputerUseEnvironment, DeepGym, load_environment
-from deepgym.exceptions import ActionError, DeepGymError
+from deepgym.exceptions import ActionError, DeepGymError, SandboxUnreachableError
 from deepgym.models import Action, MultiTurnEnvironment
+from deepgym.sandboxes import SandboxTimeoutError, open_sandbox
 from deepgym.sandboxes.apple import AppleContainer
 from deepgym.sandboxes.docker import DockerContainer
 from deepgym.traces import AgentMeta
@@ -314,3 +317,36 @@ def test_async_client(dg: DeepGym) -> None:
             return (await client.run(env, reference)).score
 
     assert asyncio.run(run()) == 1.0
+
+
+# Stops every coreutils timeout in the container, so the command it guards runs on.
+_STOP_TIMEOUTS = (
+    'for d in /proc/[0-9]*; do '
+    '[ "$(cat "$d/comm" 2>/dev/null)" = timeout ] && kill -STOP "${d#/proc/}"; done; true'
+)
+
+
+def test_cli_exec_dates_a_lost_answer_by_the_containers_clock(
+    mode: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The host gives up on the CLI early: while the command is within its deadline by the
+    container's clock that is a lost answer (no verdict), and while it runs past it, the
+    command's own timeout, with what it printed."""
+    if mode not in ('apple', 'docker'):
+        pytest.skip('only the container CLIs wrap exec')
+    box = open_sandbox(mode)
+    try:
+        monkeypatch.setattr('deepgym.sandboxes.cli._WAIT_GRACE_S', -27)  # waits 3s of 30
+        with pytest.raises(SandboxUnreachableError):
+            box.exec('sleep 10', timeout=30)
+
+        monkeypatch.setattr('deepgym.sandboxes.cli._WAIT_GRACE_S', 4)  # waits 6s of 2
+        with ThreadPoolExecutor(1) as pool:
+            stalled = pool.submit(box.exec, 'echo started; sleep 30', timeout=2)
+            time.sleep(1)
+            box.exec(_STOP_TIMEOUTS)  # no timeout of its own to stop
+            with pytest.raises(SandboxTimeoutError) as caught:
+                stalled.result()
+        assert 'started' in caught.value.output
+    finally:
+        box.delete()

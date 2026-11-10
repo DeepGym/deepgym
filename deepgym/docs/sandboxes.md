@@ -55,6 +55,12 @@ the VM-based providers (Apple container, E2B, Daytona).
 - The default image is `python:3.12-slim`; override it with `DEEPGYM_CONTAINER_IMAGE` or
   per environment (below).
 - Each sandbox is capped at 2 CPUs and 2 GB, and Docker also at 512 processes.
+- A wrapper around each command reports its exit code, and marks in a root-only folder
+  (`/run/deepgym-exec`) when it started by the container's clock. If the CLI or its daemon
+  hangs or fails before that report arrives, the command raises `SandboxUnreachableError`
+  (no verdict), even while the container still runs, unless the container stopped
+  (`SandboxDiedError`) or its clock shows the command still running past its time limit
+  (the command's timeout).
 - Sessions run offline; servers inside the sandbox still work on localhost.
 - Stop Apple's service with `container system stop`.
 

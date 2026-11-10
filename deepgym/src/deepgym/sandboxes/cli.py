@@ -38,6 +38,26 @@ _LIMITS = ('--cpus', '2', '--memory', '2g')
 _START_TIMEOUT_S = 300
 _BUILD_TIMEOUT_S = 1800
 _NAME_PREFIX = 'deepgym-'
+# How much longer than a command's timeout the host waits for the CLI to answer.
+_WAIT_GRACE_S = 15
+# Root-only folder where each exec marks, by the container's clock, that its command runs.
+_EXEC_DIR = '/run/deepgym-exec'
+# Runs an exec's command ("$3"...): writes the container's uptime to its marker ($1) while
+# the command runs, then ends stdout and stderr with its trailer ($2) and exit code. A
+# marker it can't write (a full disk) never stops the command or changes its output.
+_WRAPPER = (
+    'm=$1 t=$2; shift 2; '
+    f'{{ [ -d {_EXEC_DIR} ] || (PATH={TRUSTED_PATH}; mkdir -p -m 700 {_EXEC_DIR}); '
+    'read -r up _ < /proc/uptime && echo "$up" > "$m"; } 2>/dev/null; '
+    '"$@"; rc=$?; '
+    f'(PATH={TRUSTED_PATH}; rm -f "$m") 2>/dev/null; '
+    'printf "%s%s\\n" "$t" "$rc"; printf "%s%s\\n" "$t" "$rc" >&2; exit "$rc"'
+)
+# Prints the container's uptime, then the one in marker $1 if its command still runs.
+_READ_MARKER = (
+    'read -r now _ < /proc/uptime && echo "$now" && '
+    '{ read -r up < "$1" && echo "$up"; } 2>/dev/null; exit 0'
+)
 
 
 class RunningSandbox(BaseModel):
@@ -131,42 +151,73 @@ class CliContainer:
     ) -> ExecResult:
         """Run *command* with sh in the container; output is stdout followed by stderr.
 
-        A CLI that gives no answer, or a failed exec, is the daemon's failure only if the
-        daemon can't list containers either: anything else, even an exec that couldn't
-        start, may come from what ran in the container before (processes or memory it
-        used up), so it stays the command's outcome.
+        A wrapper (see ``_WRAPPER``) reports how the command ended. Without that report the
+        CLI or its daemon lost the outcome, which is ours, even while the container still
+        lists: unless the container stopped, or its own clock shows the command still
+        running past its deadline (the command's timeout).
 
         Raises:
             SandboxTimeoutError: If the command outruns *timeout* seconds.
             SandboxDiedError: If the container stopped during the command.
-            SandboxUnreachableError: If the CLI gave no answer or the exec failed, and the
-                daemon can't list containers.
+            SandboxUnreachableError: If the CLI lost the command's outcome any other way.
         """
+        tag = uuid4().hex
+        trailer, marker = f'deepgym-exit-{tag}:', f'{_EXEC_DIR}/{tag}'
         argv = ['exec']
         if cwd:
             argv += ['--workdir', cwd]
         for key, value in (env or {}).items():
             argv += ['--env', f'{key}={value}']
-        argv.append(self.id)
+        argv += [self.id, '/bin/sh', '-c', _WRAPPER, 'sh', marker, trailer]
         if timeout:
             argv += ['/usr/bin/timeout', '--kill-after=2', str(timeout)]
         argv += ['/bin/sh', '-c', command]
+        deadline = timeout or 3600
         start = time.monotonic()
+        cause: subprocess.TimeoutExpired | None = None
         try:
-            done = self._cli(*argv, timeout=(timeout or 3600) + 15)
+            done = self._cli(*argv, timeout=deadline + _WAIT_GRACE_S)
+            out, err, ended = done.stdout, done.stderr, f'exit {done.returncode}'
         except subprocess.TimeoutExpired as exc:
-            printed = ((exc.stdout or b'') + (exc.stderr or b'')).decode('utf-8', 'replace')
-            if self._gone():
-                raise SandboxDiedError(f'Container {self.id} stopped', printed) from exc
-            raise SandboxTimeoutError(f'command exceeded {timeout}s', printed) from exc
-        output = done.stdout.decode('utf-8', 'replace') + done.stderr.decode('utf-8', 'replace')
-        if timeout and done.returncode in TIMEOUT_EXIT_CODES:
+            out, err, ended, cause = exc.stdout or b'', exc.stderr or b'', 'no answer', exc
+        stdout, stderr = _before(out, trailer), _before(err, trailer)
+        if stdout is None or stderr is None:
+            why = f'{ended}: {err.decode("utf-8", "replace")}'
+            raise self._lost(marker, deadline, out + err, why) from cause
+        code, output = stdout[1], stdout[0] + stderr[0]
+        if timeout and code in TIMEOUT_EXIT_CODES:
             if time.monotonic() - start >= timeout:
                 raise SandboxTimeoutError(f'command exceeded {timeout}s', output)
-        # A failed exec may mean the container itself is gone; only the listing can tell.
-        if done.returncode != 0 and self._gone():
-            raise SandboxDiedError(f'Container {self.id} stopped: {output}', output)
-        return ExecResult(done.returncode, output)
+        return ExecResult(code, output)
+
+    def _lost(
+        self, marker: str, deadline: int, printed: bytes, why: str
+    ) -> SandboxError | SandboxTimeoutError:
+        """Return the error for an exec whose outcome the CLI didn't give, though it gave
+        *printed* and ended as *why* says.
+
+        Raises:
+            SandboxUnreachableError: If the CLI can't list containers either.
+        """
+        output = printed.decode('utf-8', 'replace')
+        if self._gone():
+            return SandboxDiedError(f'Container {self.id} stopped', output)
+        running_for = self._running_for(marker)
+        if running_for is not None and running_for >= deadline:
+            return SandboxTimeoutError(f'command exceeded {deadline}s', output)
+        return SandboxUnreachableError(f'{self.cli} lost a command in {self.id}, {why}')
+
+    def _running_for(self, marker: str) -> float | None:
+        """Seconds the command *marker* belongs to has run, by the container's clock; None
+        if it never started or has ended, or the container can't say."""
+        try:
+            done = self._cli(
+                'exec', self.id, '/bin/sh', '-c', _READ_MARKER, 'sh', marker, timeout=30
+            )
+            now, started = map(float, done.stdout.split())
+        except (subprocess.TimeoutExpired, ValueError):
+            return None
+        return now - started
 
     def _gone(self) -> bool:
         """Whether the container no longer runs.
@@ -294,3 +345,14 @@ class CliContainer:
             )
         except FileNotFoundError as exc:
             raise SandboxError(f'{cls.cli} CLI not found') from exc
+
+
+def _before(stream: bytes, trailer: str) -> tuple[str, int] | None:
+    """Return what *stream* held before the wrapper's *trailer*, and the exit code the
+    trailer gives; None if the trailer never came. What follows it came from a child the
+    command left running, not from the command."""
+    head, found, tail = stream.rpartition(trailer.encode())
+    code = tail.partition(b'\n')[0]
+    if not found or not code.isdigit():
+        return None
+    return head.decode('utf-8', 'replace'), int(code)

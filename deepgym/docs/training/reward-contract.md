@@ -52,6 +52,10 @@ agent's work directory.
 - A provider or network failure has no verdict at any point. In a single run, so does a
   sandbox that dies on Daytona, or in an E2B or Modal call that raises, since those
   return nothing the judge printed.
+- On Docker and Apple container, a CLI or daemon that hangs or fails before it reports how
+  the command ended is a provider failure, even while the container still runs. Only the
+  container's own clock showing the command still running past its deadline makes it the
+  command's timeout.
 
 In agent episodes, `deepgym.session.failure_result(exc, sandbox_id)` draws the line once the
 agent has acted. Only a failure that is ours for certain has no verdict: what

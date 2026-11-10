@@ -21,12 +21,17 @@ WATCH_S = 180.0
 EVERY_S = 15.0
 
 
+def state(sandbox) -> str:
+    return str(getattr(sandbox.state, 'value', sandbox.state))
+
+
 def ours(daytona: Daytona, since: datetime) -> list:
-    """DeepGym's sandboxes created at or after *since*."""
+    """DeepGym's sandboxes created at or after *since* that aren't destroyed yet."""
     return [
         sandbox
         for sandbox in daytona.list()
         if LABEL in (sandbox.labels or {})
+        and state(sandbox) != 'destroyed'
         and datetime.fromisoformat(str(sandbox.created_at)) >= since
     ]
 
@@ -38,6 +43,8 @@ def main(since: str) -> int:
     end = time.monotonic() + WATCH_S
     while True:
         for sandbox in ours(daytona, start):
+            if state(sandbox) == 'destroying':  # the run deleted it; the last check counts it
+                continue
             leaked.add(sandbox.id)
             try:
                 daytona.delete(sandbox, timeout=60)
@@ -48,7 +55,7 @@ def main(since: str) -> int:
         time.sleep(EVERY_S)
     left = [sandbox.id for sandbox in ours(daytona, start)]
     print(f'leaked: {len(leaked)} {sorted(leaked)}; still there: {len(left)} {left}')
-    return 1 if leaked else 0
+    return 1 if leaked or left else 0
 
 
 if __name__ == '__main__':

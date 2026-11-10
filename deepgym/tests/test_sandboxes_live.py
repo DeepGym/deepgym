@@ -308,5 +308,9 @@ def test_desktop_env_is_refused(dg: DeepGym) -> None:
 def test_async_client(dg: DeepGym) -> None:
     env = load_environment('coin_change')
     reference = env.verifier_path.with_name('reference_solution.py').read_text()
-    result = asyncio.run(AsyncDeepGym(mode=dg.backend).run(env, reference))
-    assert result.score == 1.0
+
+    async def run() -> float:
+        async with AsyncDeepGym(mode=dg.backend) as client:
+            return (await client.run(env, reference)).score
+
+    assert asyncio.run(run()) == 1.0

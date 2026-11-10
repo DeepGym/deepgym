@@ -34,15 +34,16 @@ env = load_environment('humaneval_plus/HumanEval_0')
 - EvalPlus passes only when every scored test passes, and keeps partial credit as the
   score. BigCodeBench scores 1.0 only when every test passes (its pass@1), and 0
   otherwise, with the fraction passed in the details.
-- BigCodeBench counts a skip the solution causes as a failure. A test the task's own
-  decorators skip gives no verdict, and an empty suite scores 0.
+- BigCodeBench gives no verdict only for a test that a `skip`, `skipIf` or `skipUnless`
+  decorator in the task's test source skips; any other skip is a failure, and an empty
+  suite scores 0.
 - BigCodeBench tests need the solution's real objects, so they run inside the solution's
   isolated process. The runner signs its result; a run where the solution changed
   unittest, builtins, `numpy.testing`, `pandas.testing` or a test class, or left a
   thread or trace hook running, scores 0, and a call that returns a value whose
-  comparisons the solution wrote fails. A determined model can still forge the result
-  by reading the runner's memory (its frames or signing key), or by hiding a lying
-  object inside a DataFrame.
+  comparisons the solution wrote fails. These rewards resist casual tampering, but not a
+  solution deliberately written to forge them, because the tests share the solution's
+  process; issue #26 tracks the real fix.
 - Re-run the import scripts after upgrading DeepGym to pick up verifier fixes.
 
 ## Repo, terminal and CyberGym tasks need a sandbox

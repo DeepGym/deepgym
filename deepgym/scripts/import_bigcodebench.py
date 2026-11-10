@@ -296,20 +296,14 @@ def main():
         loader, suite = TestLoader(), TestSuite()
         for case in cases:
             suite.addTests(loader.loadTestsFromTestCase(case))
-        # Skipped by the tests' own decorators, before any solution call: no verdict.
-        declared = {
-            name(test) for test in suite
-            if getattr(type(test), "__unittest_skip__", False)
-            or getattr(getattr(test, test._testMethodName), "__unittest_skip__", False)
-        }
         result = TextTestRunner(stream=StringIO(), verbosity=0, resultclass=Result).run(suite)
     except Exception as e:
         return report("fail", f"Error: {type(e).__name__}: {e}")
     if changed := next((c for c in [*changes, tampered()] if c), None):
         return report("fail", f"Tampering by the solution: {', '.join(changed)}")
 
-    # Only an explicit success passes: an expected failure, an unexpected success or a
-    # skip the tests didn't declare is a failure.
+    # Only an explicit success passes: an expected failure or an unexpected success is a
+    # failure, and the judge decides whether the test source declared a skip.
     failed = {name(test) for test, _ in result.failures + result.errors + result.expectedFailures}
     failed |= {name(test) for test in result.unexpectedSuccesses}
     skipped = {name(test) for test, _ in result.skipped}
@@ -319,7 +313,7 @@ def main():
         if test in failed:
             return "fail"
         if test in skipped:
-            return "skip" if test in declared else "fail"
+            return "skip"
         return "pass" if test in passed else "fail"
 
     report("ran", " ".join(f"{test}={outcome(test)}" for test in dict.fromkeys(map(name, started))))
@@ -329,22 +323,32 @@ main()
 """
 
 
-def declared_tests(test_code: str) -> list[str]:
-    """``Class.method`` for each test method of the TestCase classes *test_code* defines.
+_SKIP_DECORATORS = {'skip', 'skipIf', 'skipUnless'}
+
+
+def _skips(node: ast.ClassDef | ast.FunctionDef | ast.AsyncFunctionDef) -> bool:
+    """Whether a unittest skip decorator (``skip``, ``skipIf``, ``skipUnless``) is on *node*."""
+    return any(
+        ast.unparse(d.func if isinstance(d, ast.Call) else d).rpartition('.')[2] in _SKIP_DECORATORS
+        for d in node.decorator_list
+    )
+
+
+def declared_tests(test_code: str) -> dict[str, bool]:
+    """``Class.method`` for each test method of the TestCase classes *test_code* defines,
+    and whether a skip decorator on it or its class, in this source, may skip it.
 
     A name defined twice is one test, as Python keeps only the last definition.
     """
-    return list(
-        dict.fromkeys(
-            f'{node.name}.{item.name}'
-            for node in ast.parse(test_code).body
-            if isinstance(node, ast.ClassDef)
-            and any(ast.unparse(base).endswith('TestCase') for base in node.bases)
-            for item in node.body
-            if isinstance(item, (ast.FunctionDef, ast.AsyncFunctionDef))
-            and item.name.startswith('test')
-        )
-    )
+    return {
+        f'{node.name}.{item.name}': _skips(node) or _skips(item)
+        for node in ast.parse(test_code).body
+        if isinstance(node, ast.ClassDef)
+        and any(ast.unparse(base).endswith('TestCase') for base in node.bases)
+        for item in node.body
+        if isinstance(item, (ast.FunctionDef, ast.AsyncFunctionDef))
+        and item.name.startswith('test')
+    }
 
 
 def generate_verifier(task_id: str, entry_point: str, test_code: str, libs: list) -> str:
@@ -358,8 +362,8 @@ def generate_verifier(task_id: str, entry_point: str, test_code: str, libs: list
     class, function code included, or left a thread, trace or profile hook behind,
     and fails a call that returns a value whose comparisons the solution wrote. The
     judge reads the test methods from the test source and scores 1.0 only when every
-    one passed (BigCodeBench's pass@1), with the fraction in the details; a skip the
-    tests' own decorators don't declare is a failure.
+    one passed (BigCodeBench's pass@1), with the fraction in the details. Only a skip
+    decorator in the test source can skip a test without failing it (no verdict).
 
     The ceiling: a solution that reads the runner's memory (its frames, or the key)
     can still forge the result, as can one that hides a lying object where the
@@ -392,7 +396,8 @@ from deepgym_solution import run_solution
 
 _TEST_CODE = {test_code!r}
 _ENTRY_POINT = {entry_point!r}
-# Every test method the task defines: one the result doesn't report as passed fails.
+# Every test method the task defines, and whether a skip decorator in its source may
+# skip it: one the result doesn't report as passed fails.
 _TESTS = {tests!r}
 _RUNNER = {_RUNNER_SOURCE!r}
 
@@ -430,10 +435,12 @@ def verify(solution_path):
         if kind != "ran":
             return {{"score": 0.0, "passed": False, "details": details}}
         outcomes = dict(pair.partition("=")[::2] for pair in details.split())
-        if skipped := sum(outcomes.get(test) == "skip" for test in _TESTS):
-            # The tests' own decorators skipped these: unchecked, whatever the solution did.
+        declared = [test for test, may_skip in _TESTS.items() if may_skip]
+        if skipped := sum(outcomes.get(test) == "skip" for test in declared):
+            # The test source's own skip decorators skipped these: unchecked, so no verdict.
             raise RuntimeError(f"the tests skip {{skipped}} of {{len(_TESTS)}} cases")
-        # All or nothing, as BigCodeBench's pass@1; an unreported test failed.
+        # All or nothing, as BigCodeBench's pass@1; any other skip, or an unreported test,
+        # is a failure.
         ok = sum(outcomes.get(test) == "pass" for test in _TESTS)
         passed = ok == len(_TESTS)
         details = f"{{ok}}/{{len(_TESTS)}} tests passed"

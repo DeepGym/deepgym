@@ -478,7 +478,45 @@ def test_a_redefined_test_method_counts_once() -> None:
         '    def test_a(self): pass\n'
     )
 
-    assert declared_tests(tests) == ['TestCases.test_a', 'TestCases.test_b']
+    assert list(declared_tests(tests)) == ['TestCases.test_a', 'TestCases.test_b']
+
+
+def test_only_skip_decorators_in_the_source_declare_a_skip() -> None:
+    """Whether a test may skip comes from the test source, not from flags set at run time."""
+    tests = (
+        '@unittest.skipIf(sys.platform == "win32", "posix only")\n'
+        'class Posix(unittest.TestCase):\n'
+        '    def test_a(self): pass\n'
+        'class TestCases(unittest.TestCase):\n'
+        '    @unittest.skip("needs a display")\n'
+        '    def test_b(self): pass\n'
+        '    @skipUnless(HAS_NET, "needs a network")\n'
+        '    def test_c(self): pass\n'
+        '    @patch("os.remove")\n'
+        '    def test_d(self, remove): pass\n'
+    )
+
+    assert declared_tests(tests) == {
+        'Posix.test_a': True,
+        'TestCases.test_b': True,
+        'TestCases.test_c': True,
+        'TestCases.test_d': False,
+    }
+
+
+def test_a_skip_flag_the_solution_sets_scores_zero(env: Environment, dg: DeepGym) -> None:
+    """Setting __unittest_skip__ on the test class at run time is a failure, not no verdict."""
+    solution = (
+        'import unittest\n'
+        'def task_func(x):\n'
+        '    for cls in unittest.TestCase.__subclasses__():\n'
+        '        cls.__unittest_skip__ = True\n'
+        '    return -1\n'
+    )
+
+    result = dg.run(env, solution)
+
+    assert (result.score, result.passed, result.has_verdict) == (0.0, False, True), result.output
 
 
 def test_plots_use_a_headless_backend(dg: DeepGym) -> None:

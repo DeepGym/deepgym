@@ -24,6 +24,7 @@ from deepgym.traces import AgentMeta
 
 # Every failure-attribution path, rerun on each provider via this module's `mode`.
 from tests.test_failure_attribution import (  # noqa: F401
+    test_a_verifier_stuck_on_the_solutions_output_is_a_judged_zero,
     test_an_uncaught_solution_timeout_is_a_judged_zero,
     test_final_verifiers_attribute_failures_alike,
     test_single_runs_attribute_failures_alike,

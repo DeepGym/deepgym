@@ -253,6 +253,24 @@ def test_an_uncaught_solution_timeout_is_a_judged_zero(
     assert (result.score, result.has_verdict, result.error_type) == (0.0, True, 'solution_timeout')
 
 
+# Stuck on what the solution gave it (a regex it made backtrack, say) past the run's limit.
+_STUCK_VERIFIER = (
+    'import sys\n\nif __name__ == "__main__":\n    open(sys.argv[1]).read()\n'
+    '    while True:\n        pass\n'
+)
+
+
+@pytest.mark.parametrize('use_async', [False, True], ids=['sync', 'async'])
+def test_a_verifier_stuck_on_the_solutions_output_is_a_judged_zero(
+    mode: str, use_async: bool
+) -> None:
+    env = Environment(task='t', verifier_code=_STUCK_VERIFIER, verifier_mode='script', timeout=1)
+
+    result = _grade(mode, use_async, env, GOOD)
+
+    assert (result.score, result.has_verdict, result.error_type) == (0.0, True, 'solution_timeout')
+
+
 def _hanging_daytona(announced: bool, use_async: bool, clock: list[float]) -> object:
     """A Daytona client, sync or async, whose verifier prints the consulted mark if
     *announced*, then hangs. As on Daytona, a command under coreutils ``timeout`` returns

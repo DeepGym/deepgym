@@ -19,6 +19,8 @@ LABEL = 'deepgym_sandbox'
 # Daytona has finished a create about 70 s after the client's 60 s timeout.
 WATCH_S = 180.0
 EVERY_S = 15.0
+# A sandbox the run already deleted can still be listed for a moment.
+GONE = {'destroyed', 'destroying'}
 
 
 def ours(daytona: Daytona, since: datetime) -> list:
@@ -27,6 +29,7 @@ def ours(daytona: Daytona, since: datetime) -> list:
         sandbox
         for sandbox in daytona.list()
         if LABEL in (sandbox.labels or {})
+        and getattr(sandbox.state, 'value', sandbox.state) not in GONE
         and datetime.fromisoformat(str(sandbox.created_at)) >= since
     ]
 

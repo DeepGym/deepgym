@@ -1399,19 +1399,23 @@ class PatchVerifier:
                         )
 
                     pass_fraction = passed_count / len(test_commands)
-                    score = apply_credit + (1 - apply_credit) * pass_fraction
+                    resolved = passed_count == len(test_commands)
+                    # All or nothing, like SWE-bench's "resolved": a pass-to-pass command passes
+                    # before any fix, so a share of commands would pay a patch that fixes nothing.
+                    tests_credit = 1 - apply_credit if resolved else 0.0
+                    score = apply_credit + tests_credit
                     return _emit(
                         {
                             'schema_version': '1.0',
                             'score': round(max(0.0, min(1.0, score)), 6),
-                            'passed': passed_count == len(test_commands),
+                            'passed': resolved,
                             'details': (
                                 f'Patch applies cleanly; '
                                 f'{passed_count}/{len(test_commands)} test commands passed.'
                             ),
                             'reward_components': {
                                 'apply': apply_credit,
-                                'tests': round((1 - apply_credit) * pass_fraction, 6),
+                                'tests': round(tests_credit, 6),
                             },
                             'metrics': {
                                 'pass_fraction': pass_fraction,
@@ -1421,7 +1425,7 @@ class PatchVerifier:
                             'truncated': False,
                             'cases': cases,
                         },
-                        0 if passed_count == len(test_commands) else 1,
+                        0 if resolved else 1,
                     )
 
 

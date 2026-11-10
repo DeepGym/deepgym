@@ -76,9 +76,10 @@ never become test commands: the tests that run are `test_commands`, or else the 
 - The model's diff goes first. Every path the hidden test patch touches is put back to its
   state before the diff, and the test patch goes last, so a diff can't edit the hidden
   tests.
-- A patch that applies scores the share of the task's test commands that pass, so
-  applying alone earns nothing; `passed` needs all of them. A diff that is missing
-  (`invalid_patch`) or doesn't apply (`patch_apply_failed`) scores 0.
+- A patch scores 1.0 only when every test command passes, and 0 otherwise, like
+  SWE-bench's "resolved": applying alone, or tests that already passed before the fix,
+  earn nothing. The share of commands that pass is in `metrics['pass_fraction']`. A diff
+  that is missing (`invalid_patch`) or doesn't apply (`patch_apply_failed`) scores 0.
 - A task with no test runner (no `test_commands`, and either no
   `selected_test_files_to_run` or a language other than Python or JS/TS) gets
   `error_type='unsupported_runner'`: no verdict, so trainers mask it.

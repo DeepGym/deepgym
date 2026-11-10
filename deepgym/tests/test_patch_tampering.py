@@ -1185,6 +1185,31 @@ def test_time_limit(
     assert time.monotonic() - started < task['timeout'] + 2
 
 
+@pytest.mark.parametrize(
+    ('task', 'score', 'fraction'),
+    [
+        # Half the commands pass without a fix (pass-to-pass): no partial credit for that.
+        pytest.param({'test_commands': ['true', 'false']}, 0.0, 0.5, id='some-pass'),
+        pytest.param({'test_commands': ['true', 'true']}, 1.0, 1.0, id='all-pass'),
+        # A task's explicit apply_credit is still paid to a patch that applies.
+        pytest.param(
+            {'apply_credit': 0.3, 'test_commands': ['true', 'false']}, 0.3, 0.5, id='credit'
+        ),
+    ],
+)
+def test_tests_score_all_or_nothing(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture,
+    task: dict,
+    score: float,
+    fraction: float,
+) -> None:
+    _, result = _run_main(tmp_path, monkeypatch, capsys, _runner(), task)
+
+    assert (result.score, result.metrics['pass_fraction']) == (score, fraction)
+
+
 def test_no_time_left_for_the_tests_has_no_verdict(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture
 ) -> None:

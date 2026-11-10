@@ -53,9 +53,11 @@ agent's work directory.
   sandbox that dies on Daytona, or in an E2B or Modal call that raises, since those
   return nothing the judge printed.
 - On Docker and Apple container, a CLI or daemon that hangs or fails before it reports how
-  the command ended is a provider failure, even while the container still runs. Only the
-  container's own clock showing the command still running past its deadline makes it the
-  command's timeout.
+  the command ended is a provider failure, even while the container still runs. It is the
+  command's outcome only if the container's own clock shows the command still running past
+  its deadline (its timeout), or the container is out of processes, which what ran there
+  used up. A report that is malformed or contradicts itself counts as the command failing
+  (see [sandboxes](../sandboxes.md#docker-and-apple-container)).
 
 In agent episodes, `deepgym.session.failure_result(exc, sandbox_id)` draws the line once the
 agent has acted. Only a failure that is ours for certain has no verdict: what

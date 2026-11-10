@@ -1046,7 +1046,7 @@ class PatchVerifier:
                 deadline = started + timeout
                 setup_commands = task.get('setup_commands', '')
                 test_patch = task.get('test_patch', '')
-                apply_credit = float(task.get('apply_credit', 0.3))
+                apply_credit = float(task.get('apply_credit', 0.0))
 
                 with tempfile.TemporaryDirectory(prefix='deepgym_patch_repo_') as temp_dir_name:
                     temp_dir = Path(temp_dir_name)

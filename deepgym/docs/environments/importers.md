@@ -76,9 +76,9 @@ never become test commands: the tests that run are `test_commands`, or else the 
 - The model's diff goes first. Every path the hidden test patch touches is put back to its
   state before the diff, and the test patch goes last, so a diff can't edit the hidden
   tests.
-- A patch that applies scores 0.3, plus 0.7 times the share of the task's test commands
-  that pass; `passed` needs all of them. A diff that is missing (`invalid_patch`) or
-  doesn't apply (`patch_apply_failed`) scores 0.
+- A patch that applies scores the share of the task's test commands that pass, so
+  applying alone earns nothing; `passed` needs all of them. A diff that is missing
+  (`invalid_patch`) or doesn't apply (`patch_apply_failed`) scores 0.
 - A task with no test runner (no `test_commands`, and either no
   `selected_test_files_to_run` or a language other than Python or JS/TS) gets
   `error_type='unsupported_runner'`: no verdict, so trainers mask it.
@@ -98,8 +98,7 @@ that creates a symlink or an unusual file mode, scores 0 with
   a word with a test name. A correct fix that edits a file it refuses still scores 0.
 - An edit the guard can't classify still runs the tests. If any test command passes, the
   run gets `error_type='validation_uncertain'` with no verdict, so trainers mask it; if
-  all fail, it is scored as usual (0.3 for SWE-bench Pro, whose applied patch earns that,
-  0 for MiMo).
+  all fail, it is scored as usual: 0.
   `validation_timeout` and `validation_error` (git couldn't list the paths in time, or
   couldn't find the repository) have no verdict either.
 - The guard is a stopgap denylist, so it can't be exhaustive, and a diff to the code

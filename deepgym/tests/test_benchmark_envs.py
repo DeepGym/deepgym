@@ -167,7 +167,18 @@ class TestPatchVerifier:
         result = sandbox_dg.run(env, swebench_repo['patch_text'], task=swebench_repo['row'])
         assert result.score == pytest.approx(1.0)
         assert result.passed is True
-        assert result.reward_components == {'apply': 0.3, 'tests': 0.7}
+        assert result.reward_components == {'apply': 0.0, 'tests': 1.0}
+
+    def test_a_patch_that_applies_but_passes_no_test_scores_0(
+        self, sandbox_dg, swebench_repo: dict[str, object]
+    ) -> None:
+        # Applies cleanly, leaves the bug: applying alone must earn nothing.
+        patch = swebench_repo['patch_text'].replace('+    return a + b', '+    return a - b + 0')
+
+        result = sandbox_dg.run(SWEBenchProEnvironment(), patch, task=swebench_repo['row'])
+
+        assert (result.score, result.passed, result.error_type) == (0.0, False, None)
+        assert result.reward_components == {'apply': 0.0, 'tests': 0.0}
 
     def test_unsupported_language_is_not_scored(self, sandbox_dg, tmp_path: Path) -> None:
         # A Go repo whose bug the patch leaves in place. There's no Go runner, so the

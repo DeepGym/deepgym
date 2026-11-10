@@ -54,7 +54,26 @@ the VM-based providers (Apple container, E2B, Daytona).
 
 - The default image is `python:3.12-slim`; override it with `DEEPGYM_CONTAINER_IMAGE` or
   per environment (below).
-- Each sandbox is capped at 2 CPUs and 2 GB, and Docker also at 512 processes.
+- Each sandbox is capped at 2 CPUs and 2 GB, and Docker also at 512 processes
+  (`--pids-limit`; Docker sets no limit by default). DeepGym sets no process limit on
+  Apple container, whose VM kernel allows about 17,000 threads at 2 GB (`threads-max`).
+- A wrapper around each command ends its stdout and stderr with a trailer holding the exit
+  code, and marks in a root-only folder (`/run/deepgym-exec`) when it started by the
+  container's clock. The trailer's token reaches the wrapper in its environment, which
+  only root can read, and the command never inherits it. Only the first trailer counts. One
+  that is malformed, missing from one stream, or disagrees with the other stream or the
+  CLI's exit code means the command failed (exit code -1).
+- If the CLI or its daemon hangs or fails before any trailer arrives, the command raises
+  `SandboxUnreachableError` (no verdict), even while the container still runs, except:
+  - the container stopped: `SandboxDiedError`;
+  - the exec, or the marker read after it, couldn't start a process because the container
+    is out of them (`resource temporarily unavailable`, `EAGAIN`, `Cannot fork`, a pids
+    limit): the command's failure as the CLI reported it, or its timeout if the CLI never
+    answered;
+  - the container's clock shows the command still running past its time limit: the
+    command's timeout. The marker counts only while its folder is root's with mode 700.
+- At the VM's own thread limit, Apple's exec fails with "Connection reset by peer" or
+  hangs, which names no limit, so that run has no verdict.
 - Sessions run offline; servers inside the sandbox still work on localhost.
 - Stop Apple's service with `container system stop`.
 

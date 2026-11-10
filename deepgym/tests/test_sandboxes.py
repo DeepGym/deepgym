@@ -10,6 +10,7 @@ import importlib
 import json
 import os
 import re
+import resource
 import shlex
 import subprocess
 import sys
@@ -44,6 +45,7 @@ from deepgym.sandboxes import (
     SandboxDiedError,
     SandboxImage,
     SandboxTimeoutError,
+    cli,
     open_sandbox,
     protocol,
     sealed_path,
@@ -146,12 +148,31 @@ class FakeDaytona:
 # ---------------------------------------------------------------------------
 
 
+_TOKEN_ENV = 'DEEPGYM_EXEC_TOKEN='
+
+
+def _trailer(argv: list[str]) -> bytes:
+    """The trailer the exec *argv* has its wrapper print, from the environment it passes."""
+    return next(arg[len(_TOKEN_ENV) :] for arg in argv if arg.startswith(_TOKEN_ENV)).encode()
+
+
+def _finished(
+    argv: list[str], code: int = 0, stdout: bytes = b'', stderr: bytes = b''
+) -> subprocess.CompletedProcess:
+    """What the container CLI returns for an exec whose wrapper finished: the command's
+    output, each stream ending in the wrapper's trailer with the exit code."""
+    ending = _trailer(argv) + str(code).encode() + b'\n'
+    return subprocess.CompletedProcess(argv, code, stdout + ending, stderr + ending)
+
+
 @pytest.fixture()
 def cli_calls(monkeypatch: pytest.MonkeyPatch) -> list[list[str]]:
     calls: list[list[str]] = []
 
     def fake_run(argv: list[str], **kwargs: object) -> subprocess.CompletedProcess:
         calls.append(argv)
+        if any(arg.startswith(_TOKEN_ENV) for arg in argv):
+            return _finished(argv, 0, b'out')
         return subprocess.CompletedProcess(argv, 0, b'out', b'')
 
     monkeypatch.setattr(subprocess, 'run', fake_run)
@@ -160,15 +181,17 @@ def cli_calls(monkeypatch: pytest.MonkeyPatch) -> list[list[str]]:
 
 def test_docker_runs_offline_and_removes_with_rm(cli_calls: list[list[str]]) -> None:
     box = DockerContainer(image='img')
-    box.exec('echo hi', cwd='/w', env={'A': '1'}, timeout=5)
+    assert box.exec('echo hi', cwd='/w', env={'A': '1'}, timeout=5) == ExecResult(0, 'out')
     box.upload(b'x', '/p/f')
     box.delete()
     run, exec_, upload, delete = cli_calls
     assert run[:2] == ['docker', 'run'] and {'--network', '--pids-limit', '--memory'} <= set(run)
-    assert exec_ == [
-        'docker', 'exec', '--workdir', '/w', '--env', 'A=1', box.id,
-        '/usr/bin/timeout', '--kill-after=2', '5', '/bin/sh', '-c', 'echo hi',
-    ]  # fmt: skip
+    assert exec_[:6] == ['docker', 'exec', '--workdir', '/w', '--env', 'A=1']
+    assert exec_[6] == '--env' and exec_[7].startswith(_TOKEN_ENV)
+    assert exec_[8:11] == [box.id, '/bin/sh', '-c']
+    assert exec_[-6:] == ['/usr/bin/timeout', '--kill-after=2', '5', '/bin/sh', '-c', 'echo hi']
+    # Only root can read an environment in the container, but any process an argument.
+    assert not any(_trailer(exec_).decode() in arg for arg in exec_[8:])
     assert upload[:3] == ['docker', 'exec', '--interactive']
     assert delete == ['docker', 'rm', '--force', box.id]
     assert box.network_blocked
@@ -191,7 +214,9 @@ def test_cli_boots_the_given_image_or_the_default(cli_calls: list[list[str]]) ->
 
 def test_cli_timeout_exit_becomes_timeout_error(monkeypatch: pytest.MonkeyPatch) -> None:
     def fake_run(argv: list[str], **kwargs: object) -> subprocess.CompletedProcess:
-        return subprocess.CompletedProcess(argv, 124 if argv[1] == 'exec' else 0, b'', b'')
+        if argv[1] == 'exec':
+            return _finished(argv, 124)
+        return subprocess.CompletedProcess(argv, 0, b'', b'')
 
     monkeypatch.setattr(subprocess, 'run', fake_run)
     box = DockerContainer(image='img')
@@ -202,12 +227,20 @@ def test_cli_timeout_exit_becomes_timeout_error(monkeypatch: pytest.MonkeyPatch)
 
 
 def _exec_answering(
-    monkeypatch: pytest.MonkeyPatch, exec_answer, listing: Exception | None = None
+    monkeypatch: pytest.MonkeyPatch,
+    exec_answer,
+    listing: Exception | None = None,
+    marker: subprocess.CompletedProcess | Exception | None = None,
 ) -> DockerContainer:
     """Fake the docker CLI: exec runs *exec_answer*; the listing shows the container running,
-    or raises *listing* (a daemon that can't answer)."""
+    or raises *listing* (a daemon that can't answer); reading the exec's marker afterwards
+    gives *marker* (see :func:`_uptimes`), or raises it."""
 
     def fake_run(argv: list[str], **kwargs: object) -> subprocess.CompletedProcess:
+        if argv[1] == 'exec' and argv[-1].startswith('/run/deepgym-exec/'):
+            if isinstance(marker, Exception):
+                raise marker
+            return marker or _uptimes('100.00')  # no marker: not running
         if argv[1] == 'exec':
             return exec_answer(argv)
         return subprocess.CompletedProcess(argv, 0, b'', b'')
@@ -224,45 +257,253 @@ def _exec_answering(
     return box
 
 
-@pytest.mark.parametrize('daemon_answers', [True, False])
-def test_a_cli_that_gives_no_answer_is_ours_only_if_the_daemon_cannot_answer(
-    monkeypatch: pytest.MonkeyPatch, daemon_answers: bool
+def _hang(argv: list[str]) -> subprocess.CompletedProcess:
+    raise subprocess.TimeoutExpired(argv, 20, output=b'partial')
+
+
+def _uptimes(
+    now: str, started: str | None = None, folder: str = '0 700'
+) -> subprocess.CompletedProcess:
+    """The marker read's answer: the container's uptime, the owner and mode of the marker's
+    *folder*, then the uptime in the marker if its command still runs."""
+    lines = [now, folder] + ([started] if started else [])
+    return subprocess.CompletedProcess([], 0, '\n'.join(lines).encode() + b'\n', b'')
+
+
+@pytest.mark.parametrize(
+    ('listing', 'marker', 'raised'),
+    [
+        (SandboxError('docker could not list containers'), None, SandboxUnreachableError),
+        (None, None, SandboxUnreachableError),
+        (None, _uptimes('100.00', '98.00'), SandboxUnreachableError),
+        (None, subprocess.TimeoutExpired([], 30), SandboxUnreachableError),
+        (None, _uptimes('100.00', '94.50'), SandboxTimeoutError),
+        (None, _uptimes('100.00', '94.50', folder='1000 700'), SandboxUnreachableError),
+        (None, _uptimes('100.00', '94.50', folder='0 777'), SandboxUnreachableError),
+    ],
+    ids=[
+        'daemon_cannot_list',
+        'command_not_running',
+        'command_started_late',
+        'marker_unreadable',
+        'command_past_its_deadline',
+        'marker_folder_not_roots',
+        'marker_folder_open_to_others',
+    ],
+)
+def test_a_cli_that_gives_no_answer_is_ours_unless_the_command_outran_its_deadline(
+    monkeypatch: pytest.MonkeyPatch,
+    listing: Exception | None,
+    marker: object,
+    raised: type[Exception],
 ) -> None:
-    """A daemon that still lists the running container was held by what ran in it (a child
-    left with the output open, processes or memory used up): the command's own timeout.
-    One that can't list containers failed itself: infrastructure, no verdict."""
+    """A container that still lists is no proof the command ran to its deadline: the CLI or
+    its daemon can hang while it runs. Only the container's own clock showing the command
+    still running past its deadline makes it the command's timeout, with what it printed;
+    anything else (never started, ended, started late, can't tell, or a marker in a folder
+    someone besides root could write) is ours, no verdict."""
+    box = _exec_answering(monkeypatch, _hang, listing, marker)
 
-    def hang(argv: list[str]) -> subprocess.CompletedProcess:
-        raise subprocess.TimeoutExpired(argv, 20, output=b'partial')
-
-    listing = None if daemon_answers else SandboxError('docker could not list containers')
-    box = _exec_answering(monkeypatch, hang, listing)
-
-    with pytest.raises(
-        SandboxTimeoutError if daemon_answers else SandboxUnreachableError
-    ) as caught:
+    with pytest.raises(raised) as caught:
         box.exec('work', timeout=5)
-    assert is_infrastructure_failure(caught.value) is not daemon_answers
+    assert is_infrastructure_failure(caught.value) is (raised is SandboxUnreachableError)
+    if raised is SandboxTimeoutError:
+        assert caught.value.output == 'partial'
 
 
-@pytest.mark.parametrize('daemon_answers', [True, False])
-def test_a_failed_exec_is_the_commands_unless_the_daemon_cannot_answer(
-    monkeypatch: pytest.MonkeyPatch, daemon_answers: bool
+@pytest.mark.parametrize(
+    ('listing', 'marker'),
+    [
+        (SandboxError('Cannot connect to the Docker daemon'), None),
+        (None, None),
+        (None, _uptimes('100.00', '99.90')),
+    ],
+    ids=['daemon_cannot_list', 'command_never_started', 'cli_failed_while_it_runs'],
+)
+def test_an_exec_that_fails_before_the_command_ends_is_ours(
+    monkeypatch: pytest.MonkeyPatch, listing: Exception | None, marker: object
 ) -> None:
-    """Even an exec that couldn't start (the container's process limit, used up by what ran
-    before) stays the command's outcome while the daemon answers."""
+    """An exec the CLI couldn't start (with room for processes), or that failed while the
+    command still ran, never gave the command's outcome, even while the daemon lists the
+    container."""
 
     def fails(argv: list[str]) -> subprocess.CompletedProcess:
-        return subprocess.CompletedProcess(argv, 126, b'', b'cannot start: resource limit')
+        return subprocess.CompletedProcess(argv, 126, b'', b'OCI runtime exec failed')
 
-    listing = None if daemon_answers else SandboxError('Cannot connect to the Docker daemon')
-    box = _exec_answering(monkeypatch, fails, listing)
+    box = _exec_answering(monkeypatch, fails, listing, marker)
 
-    if daemon_answers:
-        assert box.exec('work', timeout=5) == ExecResult(126, 'cannot start: resource limit')
-        return
-    with pytest.raises(SandboxUnreachableError):
+    with pytest.raises(SandboxUnreachableError, match='OCI runtime exec failed|list'):
         box.exec('work', timeout=5)
+
+
+def test_a_command_that_ran_keeps_its_own_failure(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Once the wrapper reports the command's exit, any code is the command's own, even one
+    a CLI also uses for its failures (126: couldn't run, say after it used up processes)."""
+
+    def ran(argv: list[str]) -> subprocess.CompletedProcess:
+        return _finished(argv, 126, b'half', b'fork: resource temporarily unavailable')
+
+    box = _exec_answering(monkeypatch, ran)
+
+    assert box.exec('work', timeout=5) == ExecResult(
+        126, 'halffork: resource temporarily unavailable'
+    )
+
+
+def test_a_cli_held_open_after_the_command_ended_keeps_its_outcome(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A child the command left holding the output can keep the CLI from returning; the
+    wrapper's trailer already says how the command ended, and what the child printed after
+    it isn't the command's output."""
+
+    def held(argv: list[str]) -> subprocess.CompletedProcess:
+        ended = _finished(argv, 0, b'served\n', b'warn\n')
+        raise subprocess.TimeoutExpired(
+            argv, 20, output=ended.stdout + b'GET / 200\n', stderr=ended.stderr
+        )
+
+    box = _exec_answering(monkeypatch, held)
+
+    assert box.exec('server &', timeout=5) == ExecResult(0, 'served\nwarn\n')
+
+
+@pytest.mark.parametrize('cli_code', [0, -9], ids=['cli_exited', 'cli_killed_by_a_signal'])
+def test_the_first_trailer_is_how_the_command_ended(
+    monkeypatch: pytest.MonkeyPatch, cli_code: int
+) -> None:
+    """What follows the wrapper's trailer came from a child the command left running, so a
+    copy of the trailer there changes nothing. A CLI killed by a signal has no exit code of
+    its own to check the trailer against."""
+
+    def answer(argv: list[str]) -> subprocess.CompletedProcess:
+        ended = _finished(argv, 0, b'out')
+        later = _trailer(argv) + b'3\n'
+        return subprocess.CompletedProcess(argv, cli_code, ended.stdout + later, ended.stderr)
+
+    box = _exec_answering(monkeypatch, answer)
+
+    assert box.exec('work', timeout=5) == ExecResult(0, 'out')
+
+
+# Trailers that don't hold up, given the real one *t*: (stdout, stderr, the CLI's exit code,
+# or None if it gave no answer).
+_BROKEN_TRAILERS = {
+    'streams_disagree': lambda t: (b'out' + t + b'0\n', t + b'1\n', 0),
+    'cli_exit_disagrees': lambda t: (b'out' + t + b'0\n', t + b'0\n', 1),
+    'malformed': lambda t: (b'out' + t + b'zero\n', t + b'0\n', 0),
+    'missing_from_stderr': lambda t: (b'out' + t + b'0\n', b'', 0),
+    'malformed_with_no_answer': lambda t: (b'out' + t + b'0\n', t + b'x\n', None),
+}
+
+
+@pytest.mark.parametrize('case', _BROKEN_TRAILERS)
+def test_a_trailer_that_does_not_hold_up_is_the_commands_failure(
+    monkeypatch: pytest.MonkeyPatch, case: str
+) -> None:
+    """Only the wrapper can print its trailer, so one that is malformed, missing from one
+    stream, or at odds with the other stream or the CLI's exit came from what ran in the
+    container: the command ended abnormally (exit -1). The CLI didn't lose the outcome."""
+
+    def answer(argv: list[str]) -> subprocess.CompletedProcess:
+        stdout, stderr, code = _BROKEN_TRAILERS[case](_trailer(argv))
+        if code is None:
+            raise subprocess.TimeoutExpired(argv, 20, output=stdout, stderr=stderr)
+        return subprocess.CompletedProcess(argv, code, stdout, stderr)
+
+    box = _exec_answering(monkeypatch, answer)
+
+    assert box.exec('work', timeout=5) == ExecResult(-1, 'out')
+
+
+def _wrap(tmp_path: Path, *command: str, **kwargs: object) -> subprocess.CompletedProcess:
+    """Run the exec wrapper here with dash (the default image's /bin/sh), its marker folder
+    in *tmp_path* and the container's uptime 123.45s."""
+    uptime = tmp_path / 'uptime'
+    uptime.write_text('123.45 200.00\n')
+    wrapper = cli._WRAPPER.replace(cli._EXEC_DIR, str(tmp_path))
+    wrapper = wrapper.replace('/proc/uptime', str(uptime))
+    return subprocess.run(
+        ['/bin/dash', '-c', wrapper, 'sh', str(tmp_path / 'marker'), *command],
+        capture_output=True,
+        env={'PATH': os.environ['PATH'], 'DEEPGYM_EXEC_TOKEN': 'tok:'},
+        check=False,
+        **kwargs,
+    )
+
+
+_needs_dash = pytest.mark.skipif(not Path('/bin/dash').exists(), reason='needs /bin/dash')
+
+
+@_needs_dash
+def test_the_wrapper_keeps_its_token_from_the_command(tmp_path: Path) -> None:
+    done = _wrap(tmp_path, 'env')
+    assert done.stdout.endswith(b'\ntok:0\n') and done.stderr == b'tok:0\n'
+    assert b'DEEPGYM_EXEC_TOKEN' not in done.stdout
+
+
+@_needs_dash
+def test_the_wrapper_reports_the_exit_with_no_process_to_spare(tmp_path: Path) -> None:
+    """dash ends the whole script on a fork it can't make, so out of processes the wrapper
+    reports how the command (here a builtin) ended without forking anything."""
+
+    def no_processes() -> None:
+        resource.setrlimit(resource.RLIMIT_NPROC, (0, 0))
+
+    done = _wrap(tmp_path, 'false', preexec_fn=no_processes)
+    assert (done.returncode, done.stdout, done.stderr) == (1, b'tok:1\n', b'tok:1\n')
+
+
+@_needs_dash
+def test_the_wrapper_marks_its_command_running_then_ended(tmp_path: Path) -> None:
+    """The marker holds the start time while the command runs, and a second line once it
+    ended, written through the file the wrapper opened, never through its path again."""
+    marker = tmp_path / 'marker'
+    done = _wrap(tmp_path, 'cat', str(marker))
+    assert done.stdout == b'123.45\ntok:0\n'
+    assert marker.read_bytes() == b'123.45\n\n'
+
+
+# How a CLI, its runtime or the shell says a process couldn't start for want of processes.
+_PROCESS_LIMIT_ERRORS = [
+    b'OCI runtime exec failed: exec failed: unable to start container process: '
+    b'nsexec: unable to spawn stage-1 child: Resource temporarily unavailable: unknown',
+    b'runtime/cgo: pthread_create failed: Resource temporarily unavailable',
+    b'fork/exec /proc/self/exe: EAGAIN',
+    b'sh: 1: Cannot fork',
+    b'Error: container exceeded its pids limit',
+]
+
+
+@pytest.mark.parametrize('error', _PROCESS_LIMIT_ERRORS)
+def test_an_exec_the_process_limit_kept_from_starting_is_the_commands(
+    monkeypatch: pytest.MonkeyPatch, error: bytes
+) -> None:
+    """A container out of processes can't start an exec, and what ran in it used them up:
+    the command's own failure, as the CLI reported it."""
+    box = _exec_answering(
+        monkeypatch, lambda argv: subprocess.CompletedProcess(argv, 126, b'', error)
+    )
+
+    assert box.exec('work', timeout=5) == ExecResult(126, error.decode())
+
+
+def test_a_marker_read_the_process_limit_kept_from_starting_is_the_commands(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """With no report from the wrapper, a container too full of processes to read the marker
+    shows what ran in it: the command's timeout if the CLI never answered, else its exit."""
+    limited = subprocess.CompletedProcess([], 126, b'', _PROCESS_LIMIT_ERRORS[0])
+    box = _exec_answering(monkeypatch, _hang, marker=limited)
+    with pytest.raises(SandboxTimeoutError) as caught:
+        box.exec('work', timeout=5)
+    assert caught.value.output == 'partial'
+
+    def fails(argv: list[str]) -> subprocess.CompletedProcess:
+        return subprocess.CompletedProcess(argv, 126, b'', b'OCI runtime exec failed')
+
+    box = _exec_answering(monkeypatch, fails, marker=limited)
+    assert box.exec('work', timeout=5) == ExecResult(126, 'OCI runtime exec failed')
 
 
 def test_cli_start_timeout_removes_the_container(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -1103,6 +1344,8 @@ def test_a_verifier_run_cut_short_is_the_solutions_only_after_it_started(
 
 def test_a_cli_timeout_keeps_what_the_command_printed(monkeypatch: pytest.MonkeyPatch) -> None:
     def fake_run(argv: list[str], **kwargs: object) -> subprocess.CompletedProcess:
+        if argv[1] == 'exec' and argv[-1].startswith('/run/deepgym-exec/'):
+            return _uptimes('50.00', '30.00')  # still running, 20s in, by the container's clock
         if argv[1] == 'exec':
             raise subprocess.TimeoutExpired(argv, 16, output=b'printed', stderr=b' first')
         return subprocess.CompletedProcess(argv, 0, b'', b'')
@@ -1129,8 +1372,10 @@ def test_cli_container_that_dies(
             died.append(True)
             return subprocess.CompletedProcess(argv, 137, _printed(announced).encode(), b'')
         if argv[1] == 'exec' and 'false' in command:  # fails, but the container still runs
-            return subprocess.CompletedProcess(argv, 1, b'', b'')
+            return _finished(argv, 1)
         output = _SETUP_OUTPUT.encode() if 'useradd' in command else b''
+        if 'deepgym-exit-' in command:
+            return _finished(argv, 0, output)
         return subprocess.CompletedProcess(argv, 0, output, b'')
 
     monkeypatch.setattr(subprocess, 'run', fake_run)

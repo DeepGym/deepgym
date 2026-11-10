@@ -117,6 +117,10 @@ env = Environment(task=..., verifier_code=..., image='python:3.11-slim')
 - The image must run as root and have python3, bash, useradd and util-linux (setpriv,
   unshare, nsenter, mount). The official `python` images do; plain `debian` and `ubuntu`
   images lack python3, and Alpine lacks more.
+- On Daytona the image's default user may instead be a passwordless sudoer, as on
+  Daytona's own snapshots: `DeepGym` and `AsyncDeepGym` both run the judge as root
+  through sudo. A judge that would run as the solution's own user ends the run without a
+  verdict before the solution starts.
 - Root in the sandbox runs the image's binaries, so only use images you trust. What the
   HTTP API accepts is in [the API server](api-server.md) docs.
 - Docker and Apple container can also build a Dockerfile, as Harbor tasks with an

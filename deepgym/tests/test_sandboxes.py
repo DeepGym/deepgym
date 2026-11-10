@@ -1022,6 +1022,8 @@ def test_async_daytona_judge_parses_stdout_only(tmp_path: Path) -> None:
         async def exec(self, command: str, **kwargs: object) -> object:
             if 'useradd' in command:
                 return types.SimpleNamespace(exit_code=0, result='0 999 987 /usr/bin/python3 1')
+            if 'id -u' in command:  # an image whose default user is root
+                return types.SimpleNamespace(exit_code=0, result='root')
             # Daytona runs no shell of its own and returns one stream.
             code, output = _run_as_provider(shlex.split(command), tmp_path, _PASS, _FAIL)
             return types.SimpleNamespace(exit_code=code, result=output)

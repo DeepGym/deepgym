@@ -84,6 +84,15 @@ def test_a_partly_right_answer_earns_nothing_but_keeps_its_pass_fraction(dg: Dee
     assert sum(case.passed for case in result.cases) == 3
 
 
+def test_a_correct_but_built_in_sort_earns_nothing(dg: DeepGym, sorting_env: Environment) -> None:
+    """The example envs are all or nothing too: every case right, but via sorted(), is 0."""
+    result = dg.run(sorting_env, 'def sort_list(lst):\n    return sorted(lst)\n')
+
+    assert (result.score, result.passed) == (0.0, False)
+    assert result.metrics == {'pass_fraction': 1.0}
+    assert result.reward_components == {'correctness': 1.0, 'implementation_quality': 0.0}
+
+
 def test_string_manipulation_scores_split_and_slice(dg: DeepGym, string_env: Environment) -> None:
     split_and_slice = "def transform(s):\n    return ' '.join(w[::-1] for w in s.split(' '))\n"
     collapses_spaces = "def transform(s):\n    return ' '.join(w[::-1] for w in s.split())\n"

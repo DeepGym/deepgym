@@ -143,22 +143,21 @@ def verify(solution_path, test_cases_path=None):
 
     correctness_score = passed / total
 
-    # Combine correctness (70%) and implementation quality (30%).
-    # Trivial solutions that use built-ins are capped at 0.3.
     if is_genuine:
         impl_score = 1.0
     else:
         impl_score = 0.0
         details.append(f'Implementation check failed: {impl_reason}')
 
-    score = round(correctness_score * 0.7 + impl_score * 0.3, 4)
-    if not is_genuine:
-        score = min(score, 0.3)
+    # All or nothing: every case right with a genuine implementation, else 0. Partial
+    # credit would pay a shortcut; the parts stay in reward_components for shaping.
+    score = 1.0 if passed == total and is_genuine else 0.0
 
     return {
         'schema_version': '1.0',
         'score': score,
         'passed': score == 1.0,
+        'metrics': {'pass_fraction': correctness_score},
         'details': (
             f'{passed}/{total} correctness tests passed. '
             f'Implementation: {impl_reason}. ' + ('; '.join(details) if details else '')

@@ -70,11 +70,17 @@ def run_case(index, values, function):
 
 
 def result(cases, problem=None):
-    """Full marks only when every case passes; partial credit otherwise."""
+    """All or nothing: 1.0 only when every case passes, else 0.0.
+
+    Partial credit would pay a shortcut that gets a few cases right. The share of cases
+    passed is in metrics['pass_fraction'] for trainers that shape rewards.
+    """
     passed = sum(case['passed'] for case in cases)
+    solved = bool(cases) and passed == len(cases)
     return {
-        'score': passed / len(cases) if cases else 0.0,
-        'passed': bool(cases) and passed == len(cases),
+        'score': 1.0 if solved else 0.0,
+        'passed': solved,
+        'metrics': {'pass_fraction': passed / len(cases) if cases else 0.0},
         'details': problem or f'{passed}/{len(cases)} cases passed',
         'cases': cases,
         'seed': SEED,

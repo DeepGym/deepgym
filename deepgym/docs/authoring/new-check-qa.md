@@ -32,9 +32,7 @@ in [verifiers](verifiers.md).
 
 ## Kinds
 
-- `function`: the verifier calls a function through `load_solution`. It scores 1.0
-  only when every case passes and 0.0 otherwise, with the share passed in
-  `metrics['pass_fraction']`.
+- `function`: the verifier calls a function through `load_solution`.
 - `script`: the verifier runs a stdin/stdout script through `run_solution`.
 - `repo-patch`: the model answers with a unified diff. The verifier applies it to the
   files in `repo/` with `apply_patch` (in memory, only to files you list; a diff that
@@ -51,6 +49,10 @@ in [verifiers](verifiers.md).
   than copied in. Local sessions aren't isolated; use a sandbox mode for untrusted
   agents. The final verifier loads the agent's code with `load_solution`, which a sandbox
   session provides only on an image with `sudo` (a separate user runs that code).
+
+The `function`, `script` and `repo-patch` verifiers score 1.0 only when every case
+passes and 0.0 otherwise, since partial credit would pay a shortcut that gets a few cases
+right; the share passed is in `metrics['pass_fraction']`.
 
 ## deepgym check
 

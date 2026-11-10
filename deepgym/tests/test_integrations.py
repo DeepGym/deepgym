@@ -15,10 +15,10 @@ from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
 from deepgym.async_core import AsyncDeepGym
-from deepgym.core import DeepGym
+from deepgym.core import DeepGym, build_batch_result
 from deepgym.exceptions import InvalidScoreError, NoVerdictError, SandboxError, VerifierError
 from deepgym.exceptions import TimeoutError as DeepGymTimeout
-from deepgym.integrations import openrlhf
+from deepgym.integrations import axolotl, openrlhf
 from deepgym.integrations import verl as verl_module
 from deepgym.integrations.dapo import (
     generate_dapo_reward_module,
@@ -46,7 +46,8 @@ from deepgym.integrations.verl import (
     make_verl_reward_fn,
     verl_rows,
 )
-from deepgym.models import Environment, RunResult
+from deepgym.models import BatchResult, Environment, RunResult
+from deepgym.sandbox import error_result
 
 ENVS_DIR = Path(__file__).resolve().parent.parent / 'src' / 'deepgym' / 'envs'
 REVERSE_DIR = ENVS_DIR / 'reverse_string'
@@ -419,6 +420,73 @@ def test_masked_rate_warns_when_a_batch_passes_five_percent(
 
     assert f'test trainer: 6 of the last {MASKED_BATCH} samples got no verdict' in caplog.text
     assert f'(11 of {2 * MASKED_BATCH} this run)' in caplog.text
+
+
+class _OutageClient:
+    """Runs nothing: an output of 'down' gets no verdict (its provider failed), any other
+    passes."""
+
+    def run_batch(self, env: Environment, outputs: list[str], **kwargs: object) -> BatchResult:
+        results = [
+            error_result(SandboxError('provider down')) if output == 'down' else _PASSED
+            for output in outputs
+        ]
+        return build_batch_result(results, 0.0)
+
+
+class _AsyncOutageClient(_OutageClient):
+    async def run_batch(
+        self, env: Environment, outputs: list[str], **kwargs: object
+    ) -> BatchResult:
+        return super().run_batch(env, outputs, **kwargs)
+
+
+_PASSED = RunResult(
+    score=1.0,
+    passed=True,
+    output='',
+    stderr='',
+    exit_code=0,
+    execution_time_ms=0.0,
+    sandbox_id='fake',
+)
+_TRL = 'TRL reward function'
+# Each reward function that hands trainers None for no verdict, and the source it warns as.
+_MASKING_REWARD_FNS = {
+    'RewardFunction': ('RewardFunction', lambda outs: RewardFunction(MIXED, _OutageClient())(outs)),
+    'AsyncRewardFunction': (
+        'AsyncRewardFunction',
+        lambda outs: asyncio.run(AsyncRewardFunction(MIXED, _AsyncOutageClient())(outs)),
+    ),
+    'trl': (_TRL, lambda outs: make_trl_reward_fn(MIXED, _OutageClient())(completions=outs)),
+    'trl_async': (
+        _TRL,
+        lambda outs: asyncio.run(
+            make_trl_async_reward_fn(MIXED, _OutageClient())(completions=outs)
+        ),
+    ),
+    'axolotl_rows': (
+        _TRL,
+        lambda outs: axolotl.row_reward_fn(outs, data_source=['coin_change'] * len(outs)),
+    ),
+}
+
+
+@pytest.mark.parametrize('name', sorted(_MASKING_REWARD_FNS))
+def test_reward_fns_warn_when_too_many_samples_get_no_verdict(
+    name: str, caplog: pytest.LogCaptureFixture, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Trainers still get None for no verdict; the warning comes on top."""
+    monkeypatch.setattr(axolotl, '_client', _OutageClient)
+    source, score = _MASKING_REWARD_FNS[name]
+    # 10% masked: every block of 100 entirely in these 200 is over 5%, whatever came before.
+    outputs = ['down' if i % 10 == 0 else 'right' for i in range(2 * MASKED_BATCH)]
+
+    with caplog.at_level(logging.WARNING, logger='deepgym.integrations.reward'):
+        rewards = score(outputs)
+
+    assert rewards == [None if output == 'down' else 1.0 for output in outputs]
+    assert f'{source}: 10 of the last {MASKED_BATCH} samples got no verdict' in caplog.text
 
 
 OPENRLHF_CONTEXT = '<|im_start|>user\n' + 'Strings are sequences of characters. ' * 12

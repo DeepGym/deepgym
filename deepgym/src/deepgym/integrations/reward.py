@@ -13,7 +13,7 @@ The reward functions here and in the TRL, Axolotl and DAPO adapters share two ru
 - A completion that got no verdict (the sandbox or verifier failed, see
   ``RunResult.has_verdict``) is rewarded None, not 0.0. Leave it out of the loss and out
   of its group's baseline; TRL 1.6+ does both when every reward function returns None
-  for a completion.
+  for a completion. Too many of those in a row log a warning (:class:`MaskedRate`).
 """
 
 from __future__ import annotations
@@ -76,6 +76,11 @@ class MaskedRate:
                 run_total,
             )
 
+    def record_batch(self, batch: BatchResult) -> None:
+        """Count every run in *batch*, masked if it got no verdict."""
+        for result in batch.results:
+            self.record(masked=not result.has_verdict)
+
 
 def _answer_text(completion: Completion) -> str:
     """Return the last assistant turn's text; content given as parts has its text parts joined."""
@@ -135,6 +140,7 @@ class RewardFunction:
         self._env = env
         self._dg = dg or DeepGym(mode='auto')
         self._max_parallel = max_parallel
+        self._masked = MaskedRate('RewardFunction')
 
     def __call__(self, outputs: Sequence[Completion], **kwargs: object) -> list[float | None]:
         """Score a batch of model outputs: a score in [0, 1] each, None without a verdict."""
@@ -142,12 +148,14 @@ class RewardFunction:
 
     def call_with_details(self, outputs: Sequence[Completion], **kwargs: object) -> BatchResult:
         """Score with full details (reward_components, metrics, has_verdict, etc.)."""
-        return self._dg.run_batch(
+        batch = self._dg.run_batch(
             self._env,
             solutions(outputs),
             max_parallel=self._max_parallel,
             **kwargs,
         )
+        self._masked.record_batch(batch)
+        return batch
 
     def shaped_rewards(
         self, outputs: Sequence[Completion], **kwargs: object
@@ -193,6 +201,7 @@ class AsyncRewardFunction:
         self._env = env
         self._dg = dg or AsyncDeepGym(mode='auto')
         self._max_parallel = max_parallel
+        self._masked = MaskedRate('AsyncRewardFunction')
 
     async def __call__(self, outputs: Sequence[Completion]) -> list[float | None]:
         """Score a batch of model outputs: a score in [0, 1] each, None without a verdict."""
@@ -200,9 +209,11 @@ class AsyncRewardFunction:
 
     async def call_with_details(self, outputs: Sequence[Completion]) -> BatchResult:
         """Score with full details (reward_components, metrics, has_verdict, etc.)."""
-        return await self._dg.run_batch(
+        batch = await self._dg.run_batch(
             self._env, solutions(outputs), max_parallel=self._max_parallel
         )
+        self._masked.record_batch(batch)
+        return batch
 
     async def shaped_rewards(self, outputs: Sequence[Completion]) -> list[dict[str, float] | None]:
         """Return shaped reward components for each output; None without a verdict."""

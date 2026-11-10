@@ -12,7 +12,8 @@ A completion that got no verdict (the sandbox or verifier failed) is rewarded No
 instead of 0.0. TRL 1.6+ leaves a completion that every reward function scored None
 out of its group's baseline and gives it zero advantage, so a failed sandbox neither
 penalizes the completion nor shifts its siblings' advantages. (Older TRL treats the
-None as 0.0.)
+None as 0.0.) Too many completions without a verdict log a warning
+(:class:`~deepgym.integrations.reward.MaskedRate`).
 
 Supported signatures (from TRL docs):
     def reward_func(completions, **kwargs) -> list[float]
@@ -43,8 +44,11 @@ import asyncio
 from collections.abc import Awaitable, Callable, Sequence
 
 from deepgym.core import DeepGym
-from deepgym.integrations.reward import Completion, reward, solutions
+from deepgym.integrations.reward import Completion, MaskedRate, reward, solutions
 from deepgym.models import Environment
+
+# Shared by every TRL reward function: Axolotl's row_reward_fn makes new ones on each call.
+_MASKED = MaskedRate('TRL reward function')
 
 
 def make_trl_reward_fn(
@@ -89,6 +93,7 @@ def make_trl_reward_fn(
             max_parallel=min(len(completions), max_parallel),
             **kwargs,
         )
+        _MASKED.record_batch(batch)
         return [reward(result, component) for result in batch.results]
 
     return reward_fn

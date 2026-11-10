@@ -32,6 +32,9 @@ trainer.train()
   baseline and gives it no advantage, so an outage neither penalizes it nor shifts its
   siblings' advantages. Older TRL treats the `None` as 0.0. See
   [the reward contract](reward-contract.md).
+- When more than 5 completions in a block of 100 get `None`, it logs a warning: a
+  provider outage, or a policy that found a failure that gets masked. The count is shared
+  by every TRL, Axolotl and DAPO reward function in the process.
 - `max_parallel` (default 32) caps the sandbox runs at once.
 - `component='correctness'` returns one reward component instead of the score (a result
   without it falls back to its score), for one reward function per component.

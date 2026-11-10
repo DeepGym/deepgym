@@ -82,10 +82,12 @@ Details are on each trainer's page: [verl](verl.md), [TRL](trl.md),
 [OpenRLHF](openrlhf.md), [lm-eval](lm-eval.md) and [Axolotl](axolotl.md).
 
 A policy that learns to trigger failures that get masked escapes their penalty. The verl
-agent loops and the OpenRLHF endpoint log a warning when more than 5 samples in a block of
-100 got no verdict (`deepgym.integrations.reward.MaskedRate`); the OpenRLHF endpoint counts
-only the samples it gave `infra_failure_score`. A rate that climbs means a provider
-outage, or a policy that found such a failure.
+agent loops, the OpenRLHF endpoint, `RewardFunction`, `AsyncRewardFunction` and the TRL,
+Axolotl and DAPO reward functions log a warning when more than 5 samples in a block of 100
+got no verdict (`deepgym.integrations.reward.MaskedRate`); the OpenRLHF endpoint counts
+only the samples it gave `infra_failure_score`, and the TRL, Axolotl and DAPO reward
+functions share one count. The warning changes no reward. A rate that climbs means a
+provider outage, or a policy that found such a failure.
 
 ## Totals
 

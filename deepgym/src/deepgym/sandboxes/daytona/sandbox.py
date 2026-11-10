@@ -32,9 +32,11 @@ from deepgym.sandboxes.protocol import (
 
 if TYPE_CHECKING:
     from daytona import (
+        AsyncSandbox,
         CreateSandboxFromImageParams,
         CreateSandboxFromSnapshotParams,
         Daytona,
+        ExecuteResponse,
         Sandbox,
     )
     from daytona._sync.computer_use import ComputerUse
@@ -43,6 +45,10 @@ logger = logging.getLogger(__name__)
 
 # How much longer than the command's own deadline Daytona waits for it to end.
 _WAIT_GRACE_S = 15
+# Prints root if the image's default user is root, else makes that user's upload staging dir.
+_ROOT_PROBE = '[ "$(id -u)" = 0 ] && echo root || mktemp -d'
+# How a default user that isn't root runs commands as root (a passwordless sudoer).
+_SUDO = '/usr/bin/sudo -n -E '
 # A create the client gave up on can still finish on Daytona about a minute later (seen at
 # 70 s), and Daytona refuses to delete a sandbox while it is being created, so a failed
 # create keeps looking for its labelled sandbox this long, every LEAK_SWEEP_EVERY_S.
@@ -201,6 +207,97 @@ def is_timeout(exc: Exception) -> bool:
     return isinstance(exc, DaytonaProcessExecutionTimeoutError)
 
 
+def _timed(command: str, timeout: float | None, sudo: str = '') -> tuple[str, int | None]:
+    """Return *command* as Daytona should run it with sh, and how long Daytona should wait.
+
+    The deadline is enforced in the sandbox by coreutils ``timeout``, as on E2B, so a
+    command that outruns it still returns what it printed (Daytona's own timeout returns
+    nothing); Daytona waits a little longer.
+    """
+    if timeout:
+        command = f'/usr/bin/timeout --kill-after=2 {timeout} /bin/sh -c {shlex.quote(command)}'
+    wait = math.ceil(timeout + _WAIT_GRACE_S) if timeout else None
+    return f'{sudo}/bin/sh -c {shlex.quote(command)}', wait
+
+
+def _result(response: ExecuteResponse, timeout: float | None, start: float) -> ExecResult:
+    """Return Daytona's *response* to a command :func:`_timed` wrapped, started at *start*.
+
+    Raises:
+        SandboxTimeoutError: With what the command printed, if it outran *timeout* seconds.
+    """
+    if timeout and response.exit_code in TIMEOUT_EXIT_CODES:
+        if time.monotonic() - start >= timeout:
+            raise SandboxTimeoutError(f'command exceeded {timeout}s', response.result)
+    return ExecResult(response.exit_code, response.result)
+
+
+def _move_staged(staged: str, path: str) -> str:
+    """Return the root command that moves an upload from *staged* to *path*."""
+    src, dst = shlex.quote(staged), shlex.quote(path)
+    return (
+        f'PATH={TRUSTED_PATH}; mkdir -p {shlex.quote(posixpath.dirname(path))} && '
+        f'cat {src} > {dst}; '
+        f'status=$?; rm -f {src}; exit $status'
+    )
+
+
+class AsyncDaytonaSandbox:
+    """A sandbox of Daytona's async client, run as root as :class:`DaytonaSandbox` runs one:
+    commands go through sudo, and uploads through a staging directory, where the image's
+    default user isn't root. Make one with :meth:`as_root`."""
+
+    def __init__(self, sandbox: AsyncSandbox, sudo: str = '', stage: str = '') -> None:
+        self._sandbox, self._sudo, self._stage = sandbox, sudo, stage
+
+    @classmethod
+    async def as_root(cls, sandbox: AsyncSandbox) -> AsyncDaytonaSandbox:
+        """Wrap *sandbox*, finding out how its default user acts as root.
+
+        Raises:
+            SandboxError: If the sandbox can't say.
+        """
+        probe = await cls(sandbox).exec(_ROOT_PROBE, timeout=30)
+        stage = probe.output.strip()
+        if probe.exit_code != 0 or not stage:
+            raise SandboxError(f'Could not prepare the sandbox: {probe.output}')
+        return cls(sandbox) if stage == 'root' else cls(sandbox, _SUDO, stage)
+
+    async def exec(
+        self, command: str, *, env: Mapping[str, str] | None = None, timeout: float | None = None
+    ) -> ExecResult:
+        """Run *command* with sh as root, as :meth:`DaytonaSandbox.exec` does.
+
+        Raises:
+            SandboxTimeoutError: If the command outruns *timeout* seconds.
+        """
+        command, wait = _timed(command, timeout, self._sudo)
+        start = time.monotonic()
+        try:
+            response = await self._sandbox.process.exec(
+                command, env=dict(env) if env else None, timeout=wait
+            )
+        except Exception as exc:
+            if is_timeout(exc):
+                raise SandboxTimeoutError(f'command exceeded {timeout}s') from exc
+            raise
+        return _result(response, timeout, start)
+
+    async def upload(self, content: bytes, path: str) -> None:
+        """Write *content* to *path* as root, creating parent directories.
+
+        Raises:
+            SandboxError: If root can't move the staged file into place.
+        """
+        staged = f'{self._stage}/{uuid4().hex}' if self._stage else path
+        await self._sandbox.fs.upload_file(content, staged)
+        if not self._stage:
+            return
+        moved = await self.exec(_move_staged(staged, path), timeout=60)
+        if moved.exit_code != 0:
+            raise SandboxError(f'Failed to upload {path}: {moved.output}')
+
+
 class DaytonaSandbox:
     """A Daytona sandbox, deleted by :meth:`delete`.
 
@@ -250,7 +347,7 @@ class DaytonaSandbox:
             self._sudo = ''
             self._stage = ''
             try:
-                probe = self.exec('[ "$(id -u)" = 0 ] && echo root || mktemp -d', timeout=30)
+                probe = self.exec(_ROOT_PROBE, timeout=30)
             except Exception as exc:
                 self.delete()
                 raise SandboxError(f'Sandbox {self.id} is not reachable: {exc}') from exc
@@ -262,7 +359,7 @@ class DaytonaSandbox:
                 raise SandboxError(f'Could not prepare sandbox {self.id}: {probe.output}')
             logger.warning('Replacing sandbox %s, which could not run: %s', self.id, stage)
         if stage != 'root':
-            self._sudo, self._stage = '/usr/bin/sudo -n -E ', stage
+            self._sudo, self._stage = _SUDO, stage
 
     @property
     def computer_use(self) -> ComputerUse:
@@ -299,35 +396,25 @@ class DaytonaSandbox:
         env: Mapping[str, str] | None = None,
         timeout: float | None = None,
     ) -> ExecResult:
-        """Run *command* with sh as root.
-
-        The deadline is enforced in the sandbox by coreutils ``timeout``, as on E2B, so a
-        command that outruns it still returns what it printed (Daytona's own timeout
-        returns nothing); Daytona waits a little longer.
+        """Run *command* with sh as root, its deadline enforced in the sandbox (see
+        :func:`_timed`).
 
         Raises:
             SandboxTimeoutError: If the command outruns *timeout* seconds.
             SandboxDiedError: If the sandbox stopped during the command.
         """
-        if timeout:
-            command = f'/usr/bin/timeout --kill-after=2 {timeout} /bin/sh -c {shlex.quote(command)}'
+        command, wait = _timed(command, timeout, self._sudo)
         start = time.monotonic()
         try:
             response = self._sandbox.process.exec(
-                f'{self._sudo}/bin/sh -c {shlex.quote(command)}',
-                cwd=cwd,
-                env=dict(env) if env else None,
-                timeout=math.ceil(timeout + _WAIT_GRACE_S) if timeout else None,
+                command, cwd=cwd, env=dict(env) if env else None, timeout=wait
             )
         except Exception as exc:
             if is_timeout(exc):
                 raise SandboxTimeoutError(f'command exceeded {timeout}s') from exc
             self._raise_if_stopped(exc)
             raise
-        if timeout and response.exit_code in TIMEOUT_EXIT_CODES:
-            if time.monotonic() - start >= timeout:
-                raise SandboxTimeoutError(f'command exceeded {timeout}s', response.result)
-        return ExecResult(response.exit_code, response.result)
+        return _result(response, timeout, start)
 
     def _raise_if_stopped(self, exc: Exception) -> None:
         """Raise what a call that failed with *exc* means if the sandbox stopped: Daytona's
@@ -364,13 +451,7 @@ class DaytonaSandbox:
             raise
         if not self._stage:
             return
-        src, dst = shlex.quote(staged), shlex.quote(path)
-        moved = self.exec(
-            f'PATH={TRUSTED_PATH}; mkdir -p {shlex.quote(posixpath.dirname(path))} && '
-            f'cat {src} > {dst}; '
-            f'status=$?; rm -f {src}; exit $status',
-            timeout=60,
-        )
+        moved = self.exec(_move_staged(staged, path), timeout=60)
         if moved.exit_code != 0:
             raise SandboxError(f'Failed to upload {path}: {moved.output}')
 

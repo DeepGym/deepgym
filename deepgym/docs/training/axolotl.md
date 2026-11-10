@@ -5,7 +5,8 @@ a generated config with no code, plus the process reward model config.
 
 Axolotl trains GRPO with TRL, so `make_axolotl_reward_fn(env)` is the
 [TRL reward function](trl.md): it runs the last fenced code block of each completion,
-plain or conversational, and returns `None` for a completion that got no verdict.
+plain or conversational, returns `None` for a completion that got no verdict, and logs a
+warning when more than 5 completions in a block of 100 get `None`.
 
 ## A config with no code
 

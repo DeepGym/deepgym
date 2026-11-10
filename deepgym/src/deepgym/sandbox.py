@@ -293,6 +293,18 @@ def solution_timeout(timeout: int) -> ExecutionResult:
     return _judged_zero(f'The run exceeded {timeout}s after the solution ran', 'solution_timeout')
 
 
+def judge_timeout(job: JudgeJob, exc: SandboxTimeoutError) -> ExecutionResult:
+    """Return the judged 0 of a sandbox run of *job* that timed out after the judge
+    announced the solution's start (``job.consulted_mark`` in what *exc* says it printed).
+
+    Raises:
+        TimeoutError: If it timed out before then, or its provider returned nothing it printed.
+    """
+    if job.consulted_mark in exc.output:
+        return solution_timeout(job.timeout)
+    raise TimeoutError(f'Verifier exceeded {job.timeout}s') from exc
+
+
 def _printed(output: bytes | str | None) -> str:
     """What a stopped command printed, as text."""
     if isinstance(output, bytes):
@@ -332,9 +344,7 @@ def run_judge_in_sandbox(sandbox: Sandbox, job: JudgeJob) -> ExecutionResult:
     try:
         response = sandbox.exec(command, env=env, timeout=job.timeout + DEADLINE_GRACE_S)
     except SandboxTimeoutError as exc:
-        if job.consulted_mark in exc.output:
-            return solution_timeout(job.timeout)
-        raise TimeoutError(f'Verifier exceeded {job.timeout}s') from exc
+        return judge_timeout(job, exc)
     except SandboxDiedError as exc:
         if job.consulted_mark in exc.output:
             return policy_sandbox_failure(exc)

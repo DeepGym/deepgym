@@ -20,7 +20,7 @@ from deepgym.benchmark_envs import (
     route_single_run,
 )
 from deepgym.core import build_batch_result, build_eval_result
-from deepgym.exceptions import DeepGymError, SandboxError, TimeoutError
+from deepgym.exceptions import DeepGymError, SandboxError
 from deepgym.judge import DEADLINE_GRACE_S, SANDBOX_SETUP, JudgeJob, sandbox_judge, sandbox_uploads
 from deepgym.models import (
     BatchResult,
@@ -35,13 +35,18 @@ from deepgym.sandbox import (
     _validate_env_vars,
     build_run_result,
     error_result,
+    judge_timeout,
     local_run_result,
     parse_wrapped_output,
     wrap_stderr,
 )
-from deepgym.sandboxes import PROVIDERS, Provider
-from deepgym.sandboxes.daytona import create_params, is_timeout
-from deepgym.sandboxes.daytona.sandbox import LEAK_SWEEP_EVERY_S, LEAK_SWEEP_S
+from deepgym.sandboxes import PROVIDERS, Provider, SandboxTimeoutError
+from deepgym.sandboxes.daytona import create_params
+from deepgym.sandboxes.daytona.sandbox import (
+    LEAK_SWEEP_EVERY_S,
+    LEAK_SWEEP_S,
+    AsyncDaytonaSandbox,
+)
 
 if TYPE_CHECKING:
     from daytona import AsyncDaytona, Sandbox
@@ -448,39 +453,41 @@ class AsyncDeepGym:
         return outcome
 
     async def _run_judge(self, sandbox: Sandbox, job: JudgeJob) -> ExecutionResult:
-        """Async twin of :func:`deepgym.sandbox.run_judge_in_sandbox`.
+        """Async twin of :func:`deepgym.sandbox.run_judge_in_sandbox`, with the judge as root
+        as there (see :class:`~deepgym.sandboxes.daytona.sandbox.AsyncDaytonaSandbox`): a run
+        that times out after the judge announced the solution's start is a judged 0 (see
+        :func:`~deepgym.sandbox.judge_timeout`).
 
         Raises:
             SandboxError: If setting up users or uploading files fails, or if Daytona
                 fails to run the verifier.
-            TimeoutError: If the verifier outruns its time budget.
+            TimeoutError: If the verifier outruns its time budget before the solution starts.
             VerifierError: If the verifier prints no protocol JSON.
         """
         _validate_env_vars(job.env_vars)
         try:
-            setup = await sandbox.process.exec(f'bash -c {shlex.quote(SANDBOX_SETUP)}', timeout=60)
+            box = await AsyncDaytonaSandbox.as_root(sandbox)
+            setup = await box.exec(f'bash -c {shlex.quote(SANDBOX_SETUP)}', timeout=60)
             if setup.exit_code != 0:
-                raise SandboxError(f'Judge setup failed: {setup.result}')
+                raise SandboxError(f'Judge setup failed: {setup.output}')
             for content, path in sandbox_uploads(job):
-                await sandbox.fs.upload_file(content, path)
+                await box.upload(content, path)
         except SandboxError:
             raise
         except Exception as exc:
             raise SandboxError(f'Failed to set up the judge: {exc}') from exc
         # Daytona doesn't block the network itself, so refuse to judge online.
-        command, env = sandbox_judge(job, setup.result, require_offline=True)
+        command, env = sandbox_judge(job, setup.output, require_offline=True)
         command, marker = wrap_stderr(command)
         try:
-            response = await sandbox.process.exec(
-                f'sh -c {shlex.quote(command)}', env=env, timeout=job.timeout + DEADLINE_GRACE_S
-            )
+            response = await box.exec(command, env=env, timeout=job.timeout + DEADLINE_GRACE_S)
+        except SandboxTimeoutError as exc:
+            return judge_timeout(job, exc)
         except Exception as exc:
-            if is_timeout(exc):
-                raise TimeoutError(f'Verifier exceeded {job.timeout}s') from exc
-            # Daytona returns nothing the verifier printed, so even a sandbox that died
+            # A failed call returns nothing the verifier printed, so even a sandbox that died
             # can't be shown to have died after the solution started: no verdict.
             raise SandboxError(f'Verifier execution failed: {exc}') from exc
-        return parse_wrapped_output(response.result, marker, response.exit_code, job.consulted_mark)
+        return parse_wrapped_output(response.output, marker, response.exit_code, job.consulted_mark)
 
     async def _cleanup_sandbox(self, sandbox: Sandbox) -> bool:
         """Safely destroy a sandbox, swallowing errors.

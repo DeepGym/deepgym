@@ -30,7 +30,7 @@ from deepgym.exceptions import (
     VerifierError,
     is_infrastructure_failure,
 )
-from deepgym.judge import JudgeJob
+from deepgym.judge import RUNTIME_FILE, SANDBOX_ROOT, JudgeJob, sandbox_judge, sandbox_uploads
 from deepgym.models import Action, Environment, MultiTurnEnvironment
 from deepgym.sandbox import (
     build_run_result,
@@ -883,6 +883,55 @@ def test_async_daytona_judge_fails_closed_when_it_cannot_go_offline() -> None:
         asyncio.run(client._run_judge(sandbox, _JOB))
 
 
+@pytest.mark.parametrize('use_async', [False, True], ids=['sync', 'async'])
+def test_judge_refuses_to_run_as_the_solver(use_async: bool) -> None:
+    """An image whose default user is already the solver account would hand the judge's
+    private tree to the solution: no verdict, before the solution runs."""
+    as_solver = '999 999 987 /usr/bin/python3 1'  # judge uid, solver uid and gid, python, netns
+    if use_async:
+        from deepgym.async_core import AsyncDeepGym
+
+        class Process:
+            async def exec(self, command: str, **kwargs: object) -> object:
+                assert 'DEEPGYM_DEADLINE' not in command, 'the verifier must not run'
+                return types.SimpleNamespace(exit_code=0, result=as_solver)
+
+        client = AsyncDeepGym(mode='local')
+        run = lambda: asyncio.run(client._run_judge(_async_daytona_box(Process()), _JOB))  # noqa: E731
+    else:
+        box = FakeSandbox(network_blocked=True, answers=[('useradd', as_solver)])
+        run = lambda: run_judge_in_sandbox(box, _JOB)  # noqa: E731
+
+    with pytest.raises(SandboxError, match='same user'):
+        run()
+    if not use_async:
+        assert not any('DEEPGYM_DEADLINE' in command for command in box.commands)
+
+
+def test_solver_can_read_its_solution_and_runtime_under_a_strict_umask(tmp_path: Path) -> None:
+    """A sudoer image with ``Defaults umask=0077`` leaves every file root moves into place
+    0600, root's alone: the solver couldn't start its solution or the runtime, and an honest
+    answer judged on its output would score 0. The judge's own files stay private."""
+    root = tmp_path / 'deepgym'
+    for name, mode in {'judge': 0o700, 'runtime': 0o755, 'solution': 0o755, 'tmp': 0o711}.items():
+        (root / name).mkdir(parents=True)
+        (root / name).chmod(mode)
+    for content, path in sandbox_uploads(_JOB):  # as root moved them in under umask 0077
+        target = Path(path.replace(SANDBOX_ROOT, str(root)))
+        target.write_bytes(content)
+        target.chmod(0o600)
+    # The judge command as root runs it (true stands in for the verifier's Python).
+    command, _ = sandbox_judge(_JOB, '0 999 987 /usr/bin/true 1')
+    script = f'umask 077; {command.replace(SANDBOX_ROOT, str(root))}'
+    subprocess.run(['/bin/sh', '-c', script], check=True)
+
+    def mode(path: Path) -> int:
+        return path.stat().st_mode & 0o777
+
+    assert mode(root / 'runtime' / RUNTIME_FILE) == mode(root / 'solution' / 'solution.py') == 0o644
+    assert (mode(root / 'judge'), mode(root / 'judge' / 'verifier.py')) == (0o700, 0o600)
+
+
 def test_judge_killed_after_printing_a_pass_is_an_error() -> None:
     box = FakeSandbox(network_blocked=True, answers=[('useradd', '0 999 987 /usr/bin/python3 0')])
     answer = box.exec
@@ -997,6 +1046,8 @@ def test_async_daytona_judge_parses_stdout_only(tmp_path: Path) -> None:
         async def exec(self, command: str, **kwargs: object) -> object:
             if 'useradd' in command:
                 return types.SimpleNamespace(exit_code=0, result='0 999 987 /usr/bin/python3 1')
+            if 'id -u' in command:  # an image whose default user is root
+                return types.SimpleNamespace(exit_code=0, result='root')
             # Daytona runs no shell of its own and returns one stream.
             code, output = _run_as_provider(shlex.split(command), tmp_path, _PASS, _FAIL)
             return types.SimpleNamespace(exit_code=code, result=output)

@@ -7,12 +7,17 @@ its preflight or launch before any solution code runs, or the verifier failing f
 no verdict; and a crash never keeps a score printed before it. That must hold for every
 verifier shape and auto detection, sync and async runs, and session step and final
 verifiers. These run locally; test_sandboxes_live.py reruns them on every sandbox provider
-it can reach, through its own ``mode`` fixture.
+it can reach, through its own ``mode`` fixture. A stand-in for Daytona checks the sync and
+async Daytona clients date a hang alike without one.
 """
 
 import asyncio
 import contextlib
+import json
 import textwrap
+import time
+import types
+from collections.abc import Callable
 
 import pytest
 
@@ -248,6 +253,141 @@ def test_an_uncaught_solution_timeout_is_a_judged_zero(
     result = _grade(mode, use_async, env, 'def solve():\n    while True:\n        pass\n')
 
     assert (result.score, result.has_verdict, result.error_type) == (0.0, True, 'solution_timeout')
+
+
+# Stuck on what the solution gave it (a regex it made backtrack, say) past the run's limit.
+_STUCK_VERIFIER = (
+    'import sys\n\nif __name__ == "__main__":\n    open(sys.argv[1]).read()\n'
+    '    while True:\n        pass\n'
+)
+
+
+@pytest.mark.parametrize('use_async', [False, True], ids=['sync', 'async'])
+def test_a_verifier_stuck_on_the_solutions_output_is_a_judged_zero(
+    mode: str, use_async: bool
+) -> None:
+    env = Environment(task='t', verifier_code=_STUCK_VERIFIER, verifier_mode='script', timeout=1)
+
+    result = _grade(mode, use_async, env, GOOD)
+
+    assert (result.score, result.has_verdict, result.error_type) == (0.0, True, 'solution_timeout')
+
+
+_STAGE = '/tmp/tmp.stage'
+"""Where a non-root Daytona user's uploads wait for root to move them into place."""
+
+
+def _daytona(
+    monkeypatch: pytest.MonkeyPatch,
+    use_async: bool,
+    verify: Callable[[str, dict, int], object],
+    *,
+    root: bool = True,
+) -> list[str]:
+    """Make every client use a stand-in for Daytona, sync or async, whose image runs
+    commands as root, or else as a passwordless sudoer (*root* False). *verify* answers the
+    verifier's command, given its env and how long Daytona waits for it. Returns the paths
+    uploads were written to. Needs no daytona package."""
+    uploads: list[str] = []
+
+    def exec_(command: str, *, env: dict | None = None, timeout: int, **_: object) -> object:
+        if 'DEEPGYM_DEADLINE' in command:
+            return verify(command, env or {}, timeout)
+        as_root = root or command.startswith('/usr/bin/sudo -n -E ')
+        if 'useradd' in command:  # the judge's setup: its uid, the solver's ids, python, netns
+            output = f'{0 if as_root else 1000} 999 987 /usr/bin/python3 1'
+        else:  # the root probe; '' for root moving a staged upload into place
+            output = ('root' if as_root else _STAGE) if 'id -u' in command else ''
+        return types.SimpleNamespace(exit_code=0, result=output)
+
+    async def exec_async(command: str, **kwargs: object) -> object:
+        return exec_(command, **kwargs)
+
+    async def upload_async(content: bytes, path: str) -> None:
+        uploads.append(path)
+
+    async def delete_async(sandbox: object) -> None:
+        pass
+
+    async def create_async(params: object) -> object:
+        return types.SimpleNamespace(
+            id='daytona-async',
+            process=types.SimpleNamespace(exec=exec_async),
+            fs=types.SimpleNamespace(upload_file=upload_async),
+        )
+
+    box = types.SimpleNamespace(
+        id='daytona',
+        process=types.SimpleNamespace(exec=exec_),
+        fs=types.SimpleNamespace(upload_file=lambda content, path: uploads.append(path)),
+    )
+    sync_client = types.SimpleNamespace(
+        create=lambda params, timeout: box, delete=lambda box, wait: None
+    )
+    async_client = types.SimpleNamespace(create=create_async, delete=delete_async)
+    monkeypatch.setattr(DeepGym, '_init_daytona', staticmethod(lambda *args: sync_client))
+    monkeypatch.setattr(AsyncDeepGym, '_init_daytona', staticmethod(lambda *args: async_client))
+    params = types.SimpleNamespace(model_copy=lambda update: params)  # what create() is given
+    for module in ('deepgym.sandboxes.daytona.sandbox', 'deepgym.async_core'):
+        monkeypatch.setattr(f'{module}.create_params', lambda env: params)
+    return uploads
+
+
+def _hang(announced: bool, clock: list[float]) -> Callable[[str, dict, int], object]:
+    """A verifier that prints the consulted mark if *announced*, then hangs. As on Daytona,
+    a command under coreutils ``timeout`` returns what it printed with exit 124; one that
+    isn't hits Daytona's own timeout, which returns nothing (an error here, which has no
+    verdict either way). Either way *clock* moves on by how long Daytona waited."""
+
+    def verify(command: str, env: dict, timeout: int) -> object:
+        clock[0] += timeout
+        if '/usr/bin/timeout' not in command:
+            raise RuntimeError('Daytona stopped waiting; nothing it printed came back')
+        printed = f'{env["DEEPGYM_CONSULTED"]}\n' if announced else 'loading fixtures\n'
+        return types.SimpleNamespace(exit_code=124, result=printed)
+
+    return verify
+
+
+@pytest.mark.parametrize('use_async', [False, True], ids=['sync', 'async'])
+@pytest.mark.parametrize(
+    ('announced', 'expected'),
+    [(False, 'no_verdict'), (True, 'judged_zero:solution_timeout')],
+    ids=['before_the_solution_runs', 'after_the_solution_runs'],
+)
+def test_daytona_dates_a_hang_alike(
+    monkeypatch: pytest.MonkeyPatch, announced: bool, expected: str, use_async: bool
+) -> None:
+    clock = [0.0]
+    real_monotonic = time.monotonic
+    monkeypatch.setattr(time, 'monotonic', lambda: real_monotonic() + clock[0])
+    _daytona(monkeypatch, use_async, _hang(announced, clock))
+    env = Environment(task='t', verifier_code=_single_turn(_CALL, 'body'))
+
+    assert _outcome(_grade('daytona', use_async, env, HANGS)) == expected
+
+
+@pytest.mark.parametrize('use_async', [False, True], ids=['sync', 'async'])
+def test_daytona_judges_as_root_when_the_image_user_is_not(
+    monkeypatch: pytest.MonkeyPatch, use_async: bool
+) -> None:
+    """The judge must be root to launch the solution through setpriv, which keeps the start
+    handshake. Through sudo the handshake is lost, so a launcher that hangs before the
+    solution's Python starts would pass for a solution that timed out (a judged 0) instead
+    of a launch failure (no verdict)."""
+    launches: list[list[str]] = []
+
+    def verify(command: str, env: dict, timeout: int) -> object:
+        launches.append(json.loads(env['DEEPGYM_ISOLATION'])['prefix'])
+        return types.SimpleNamespace(exit_code=0, result='{"score": 1.0, "passed": true}\n')
+
+    uploads = _daytona(monkeypatch, use_async, verify, root=False)
+    env = Environment(task='t', verifier_code='return 1.0')
+
+    assert _outcome(_grade('daytona', use_async, env, GOOD)) == 'pass'
+    assert launches and 'sudo' not in launches[0]
+    # The judge's tree is root's, so uploads wait in the user's staging directory.
+    assert uploads and all(path.startswith(f'{_STAGE}/') for path in uploads)
 
 
 def _write_agent(code: str) -> Action:

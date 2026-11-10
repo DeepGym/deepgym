@@ -471,7 +471,8 @@ def sandbox_isolation(setup_output: str, *, require_offline: bool = False) -> tu
     no host). ``own_network`` in the spec says it got one.
 
     Raises:
-        SandboxError: If the solver's uid or gid is root or unreadable, or if
+        SandboxError: If the solver's uid or gid is root or unreadable, or the judge's
+            own uid (the solution could then read the judge's private files), or if
             *require_offline* is set but the sandbox can't make that namespace.
     """
     judge_uid, uid, gid, python, netns = setup_output.split()[-5:]
@@ -479,6 +480,8 @@ def sandbox_isolation(setup_output: str, *, require_offline: bool = False) -> tu
     # Only sandbox_judge_by_name passes the solver's name instead.
     if not all(v == SOLVER_USER or (v.isdecimal() and int(v) > 0) for v in (uid, gid)):
         raise SandboxError(f'Refusing to run the solution as root or an unknown id: {uid}:{gid}')
+    if uid == judge_uid:
+        raise SandboxError(f'Refusing to run the solution as the same user as the judge: {uid}')
     if require_offline and netns != '1':
         raise SandboxError(
             'Cannot cut the solution off the network here; the image needs util-linux '
@@ -519,12 +522,17 @@ def sandbox_judge(
     """
     isolation, python = sandbox_isolation(setup_output, require_offline=require_offline)
     judge_dir = f'{SANDBOX_ROOT}/judge'
-    args = job.verifier_args(judge_dir, f'{SANDBOX_ROOT}/solution/solution.py')
+    solution_path = f'{SANDBOX_ROOT}/solution/solution.py'
+    runtime_path = f'{SANDBOX_ROOT}/runtime/{RUNTIME_FILE}'
+    args = job.verifier_args(judge_dir, solution_path)
+    # The solver must read its solution and the runtime, whatever umask root moved them in
+    # under (a sudoer image's `Defaults umask=0077` leaves them root's alone), even with no
+    # solution file (an exported Harbor task whose agent wrote none).
     command = (
+        f'chmod -R a+rX {SANDBOX_ROOT}/runtime {SANDBOX_ROOT}/solution && '
         f'umask 077 && cd {judge_dir} && DEEPGYM_DEADLINE=$(( $(date +%s) + {job.timeout} )) '
         f'exec {shlex.quote(python)} {shlex.join(args)}'
     )
-    runtime_path = f'{SANDBOX_ROOT}/runtime/{RUNTIME_FILE}'
     env = job.runtime_env(isolation, runtime_path, python, f'{SANDBOX_ROOT}/solution')
     # Private temp dir + umask 077: the judge's own temp files stay unreadable to the
     # solution; run_solution shares only the directories it hands over.

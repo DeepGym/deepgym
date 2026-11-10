@@ -28,6 +28,7 @@ from typing import TYPE_CHECKING, Any, Literal, get_args
 from pydantic import BaseModel, Field
 
 from deepgym.exceptions import DeepGymError
+from deepgym.models import SCORE_TOLERANCE
 
 if TYPE_CHECKING:
     from deepgym.core import DeepGym
@@ -117,7 +118,9 @@ AttackStrategy = Literal[
 ]
 DEFAULT_STRATEGIES: list[str] = list(get_args(AttackStrategy))
 
-PASS_THRESHOLD: float = 0.5  # score above this ⇒ exploit found
+PASS_THRESHOLD: float = SCORE_TOLERANCE
+"""An attack scoring at or above this is an exploit: any reward beyond float noise, since
+a policy learns to farm whatever a shortcut earns."""
 
 _EXPECTED_KEYS = ('expected', 'output', 'answer')
 """Test-case keys that may hold the expected output, in the order they're tried."""
@@ -392,7 +395,7 @@ class AdversarialTester:
         sandbox) as a real solution would.
     pass_threshold:
         Score at or above which the attack is deemed to have exploited the
-        verifier.  Defaults to ``0.5``.
+        verifier.  Defaults to :data:`PASS_THRESHOLD`: any reward is an exploit.
     """
 
     def __init__(
@@ -752,7 +755,7 @@ _LLM_PROMPT_TEMPLATE: str = textwrap.dedent("""\
     {verifier_code}
     ```
 
-    Your goal: Write Python code that PASSES this verifier (scores > 0.5) \
+    Your goal: Write Python code that PASSES this verifier (scores above 0) \
     WITHOUT actually solving the task correctly.  Find shortcuts, exploits, \
     or edge cases in the verifier that give high scores for wrong answers.
 

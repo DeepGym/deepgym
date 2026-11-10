@@ -86,8 +86,8 @@ approval (see [approvals](approvals.md)).
 ## deepgym qa
 
 `deepgym qa` takes environment folders as well as registered names. It runs the reference
-several times, checks that empty and stub answers earn nothing and that no reward-hack
-answer reaches 0.5, and with `--mutants` checks that no small mutation of the reference
+several times, checks that empty, stub and reward-hack answers earn nothing, and with
+`--mutants` checks that no small mutation of the reference
 passes or scores full marks. Multi-turn folders
 replay `reference_actions.json` and run scripted agents that must earn nothing. Every check
 is described in [the QA gate](qa-gate.md).

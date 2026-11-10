@@ -25,14 +25,14 @@ Each single-turn environment must pass:
   skipped when the reference is a script with no top-level function. A verifier that
   crashes on them instead of scoring them is inconclusive, not a pass.
 - `hack_resistant`: none of the heuristic reward-hack attacks behind `deepgym audit`
-  reaches the exploit threshold (0.50). The attacks define the env's own entry point
-  (from the reference, the functions the verifier calls, or the task) returning a
-  constant, nothing, NaN or its input. If none got through but some crashed or couldn't
-  run, the check is inconclusive, not passed. The attacks are Python solutions, so the
-  check is skipped where they can't apply: a Harbor task runs bash, and a verifier that
-  rejects every attack as a malformed answer (a repo-patch env takes diffs) was never
-  attacked. Self-contained patch tasks such as `mimo_code` get `patch_tampering`
-  attacks instead.
+  earns reward above float noise, since a policy learns to farm whatever a shortcut
+  earns. The attacks define the env's own entry point (from the reference, the functions
+  the verifier calls, or the task) returning a constant, nothing, NaN or its input. If
+  none got through but some crashed or couldn't run, the check is inconclusive, not
+  passed. The attacks are Python solutions, so the check is skipped where they can't
+  apply: a Harbor task runs bash, and a verifier that rejects every attack as a malformed
+  answer (a repo-patch env takes diffs) was never attacked. Self-contained patch tasks
+  such as `mimo_code` get `patch_tampering` attacks instead.
 - `mutants_killed` (with `--mutants`): no mutant of the reference passes or scores full
   marks (see below).
 - `difficulty` (with `--model`): see below.

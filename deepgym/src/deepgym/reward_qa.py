@@ -10,6 +10,7 @@ from typing import Literal
 from pydantic import BaseModel, Field
 
 from deepgym.adversarial import (
+    PASS_THRESHOLD,
     AdversarialReport,
     AdversarialTester,
     environment_id,
@@ -192,7 +193,7 @@ class RewardAuditor:
         self,
         dg,
         *,
-        pass_threshold: float = 0.5,
+        pass_threshold: float = PASS_THRESHOLD,
         db: ExploitDB | None = None,
     ) -> None:
         self._tester = AdversarialTester(dg, pass_threshold=pass_threshold)

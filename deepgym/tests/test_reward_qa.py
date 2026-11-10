@@ -49,6 +49,16 @@ class TestRewardAuditor:
         assert report.recommendations
         assert report.stored is False
 
+    def test_partial_credit_is_an_exploit_unless_the_caller_sets_a_higher_line(
+        self, dg: DeepGym
+    ) -> None:
+        env = Environment(task='Do anything', verifier_code='return 0.3\n')
+
+        default = RewardAuditor(dg).audit(env, strategies=['empty'])
+        lenient = RewardAuditor(dg, pass_threshold=0.5).audit(env, strategies=['empty'])
+
+        assert (default.status, lenient.status) == ('exploitable', 'robust')
+
     def test_attacks_that_cannot_run_are_not_exploits(self, dg: DeepGym) -> None:
         env = Environment(task='Do anything', verifier_code=CRASHING_VERIFIER)
 

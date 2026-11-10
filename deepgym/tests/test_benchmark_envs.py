@@ -167,7 +167,34 @@ class TestPatchVerifier:
         result = sandbox_dg.run(env, swebench_repo['patch_text'], task=swebench_repo['row'])
         assert result.score == pytest.approx(1.0)
         assert result.passed is True
-        assert result.reward_components == {'apply': 0.3, 'tests': 0.7}
+        assert result.reward_components == {'apply': 0.0, 'tests': 1.0}
+
+    def test_a_patch_that_applies_but_passes_no_test_scores_0(
+        self, sandbox_dg, swebench_repo: dict[str, object]
+    ) -> None:
+        # Applies cleanly, leaves the bug: applying alone must earn nothing.
+        patch = swebench_repo['patch_text'].replace('+    return a + b', '+    return a - b + 0')
+
+        result = sandbox_dg.run(SWEBenchProEnvironment(), patch, task=swebench_repo['row'])
+
+        assert (result.score, result.passed, result.error_type) == (0.0, False, None)
+        assert result.reward_components == {'apply': 0.0, 'tests': 0.0}
+
+    def test_a_no_op_patch_earns_nothing_from_tests_that_already_pass(
+        self, sandbox_dg, swebench_repo: dict[str, object]
+    ) -> None:
+        # The second command passes before any fix (pass-to-pass), and the patch fixes nothing.
+        row = swebench_repo['row']
+        pass_to_pass = 'PYTHONPATH=. pytest -q --collect-only tests/test_calc.py'
+        row = {**row, 'test_commands': [*row['test_commands'], pass_to_pass]}
+        no_op = swebench_repo['patch_text'].replace(
+            '+    return a + b', '+    return a - b  # same'
+        )
+
+        result = sandbox_dg.run(SWEBenchProEnvironment(), no_op, task=row)
+
+        assert (result.score, result.passed, result.error_type) == (0.0, False, None)
+        assert result.metrics['pass_fraction'] == 0.5
 
     def test_unsupported_language_is_not_scored(self, sandbox_dg, tmp_path: Path) -> None:
         # A Go repo whose bug the patch leaves in place. There's no Go runner, so the

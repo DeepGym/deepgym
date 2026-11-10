@@ -41,7 +41,7 @@ STATE_CASES = [
             'plan': 'pro',
             'agreed': True,
         },
-        0.75,
+        0.0,  # three of four fields right: all or nothing
     ),
     (
         'signup_form',
@@ -144,7 +144,7 @@ FILE_CASES = [
     (
         'copied, not moved',
         {**_FILES, 'Archive/report.pdf': _FILES['report.pdf']},
-        1 / 3,
+        0.0,  # one of three changes made: all or nothing
     ),
     (
         'done',

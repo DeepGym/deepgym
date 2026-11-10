@@ -50,6 +50,10 @@ in [verifiers](verifiers.md).
   agents. The final verifier loads the agent's code with `load_solution`, which a sandbox
   session provides only on an image with `sudo` (a separate user runs that code).
 
+The `function`, `script` and `repo-patch` verifiers score 1.0 only when every case
+passes and 0.0 otherwise, since partial credit would pay a shortcut that gets a few cases
+right; the share passed is in `metrics['pass_fraction']`.
+
 ## deepgym check
 
 `deepgym check PATH` validates the files, the metadata schema and that the verifier
@@ -86,8 +90,8 @@ approval (see [approvals](approvals.md)).
 ## deepgym qa
 
 `deepgym qa` takes environment folders as well as registered names. It runs the reference
-several times, checks that empty and stub answers earn nothing and that no reward-hack
-answer reaches 0.5, and with `--mutants` checks that no small mutation of the reference
+several times, checks that empty, stub and reward-hack answers earn nothing, and with
+`--mutants` checks that no small mutation of the reference
 passes or scores full marks. Multi-turn folders
 replay `reference_actions.json` and run scripted agents that must earn nothing. Every check
 is described in [the QA gate](qa-gate.md).

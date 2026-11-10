@@ -61,37 +61,35 @@ def verify(solution_path, test_cases_path=None):
     action_text = str(data.get('recommended_action', '')).lower()
 
     cases = []
-    score = 0.0
 
     # Every IP that didn't probe (a benign one, or one not in the log) costs credit.
     ip_score = len(ips & EXPECTED_IPS) / len(ips | EXPECTED_IPS)
-    score += 0.4 * ip_score
     cases.append({'id': 'source_ips', 'passed': ip_score == 1.0, 'score': ip_score})
 
     cve_ok = str(data.get('cve', '')).strip().lower() == 'cve-2021-44228'
     cve_score = 1.0 if cve_ok and 'log4shell' in str(data.get('vulnerability', '')).lower() else 0.0
-    score += 0.2 * cve_score
     cases.append({'id': 'cve_identification', 'passed': cve_score == 1.0, 'score': cve_score})
 
     payload_hits = sum(1 for payload in EXPECTED_PAYLOADS if payload in indicators)
     payload_score = payload_hits / len(EXPECTED_PAYLOADS)
-    score += 0.25 * payload_score
     cases.append(
         {'id': 'payload_indicators', 'passed': payload_score == 1.0, 'score': payload_score}
     )
 
     action_score = min(1.0, len(_affirmed_actions(action_text)) / 3)
-    score += 0.15 * action_score
     cases.append(
         {'id': 'recommended_action', 'passed': action_score >= 0.66, 'score': action_score}
     )
 
-    score = round(min(1.0, score), 4)
+    # All or nothing: partial credit would pay a shortcut that gets a few cases right.
+    # The weighted rubric stays in reward_components for trainers that shape rewards.
+    passed = sum(case['passed'] for case in cases)
     return {
         'schema_version': '1.0',
-        'score': score,
-        'passed': score >= 0.95,
-        'details': f'cyber log triage score={score:.2f}',
+        'score': 1.0 if passed == len(cases) else 0.0,
+        'passed': passed == len(cases),
+        'metrics': {'pass_fraction': passed / len(cases)},
+        'details': f'cyber log triage: {passed}/{len(cases)} checks passed',
         'reward_components': {
             'source_ips': round(0.4 * ip_score, 4),
             'cve_identification': round(0.2 * cve_score, 4),

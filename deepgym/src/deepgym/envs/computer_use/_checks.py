@@ -37,20 +37,21 @@ def load_state(path: str = 'state.json') -> dict:
 def report(progress: dict[str, bool], guards: dict[str, bool]) -> None:
     """Print verifier protocol JSON.
 
-    Score is the fraction of progress checks passed, but only if every guard
-    holds (work was saved, nothing else was broken). Otherwise it is 0, so
-    neither doing nothing nor saving untouched state earns reward.
+    All or nothing: 1.0 only when every progress check passes and every guard holds
+    (work was saved, nothing else was broken), else 0, so neither doing nothing, saving
+    untouched state, nor doing part of the task earns reward. The share of progress
+    checks passed is in metrics['pass_fraction'].
     """
-    guards_ok = all(guards.values())
+    passed = all(guards.values()) and all(progress.values())
     done = sum(progress.values())
-    score = done / len(progress) if guards_ok else 0.0
     failed = [name for name, ok in guards.items() if not ok]
     print(
         json.dumps(
             {
                 'schema_version': '1.0',
-                'score': score,
-                'passed': guards_ok and done == len(progress),
+                'score': 1.0 if passed else 0.0,
+                'passed': passed,
+                'metrics': {'pass_fraction': done / len(progress)},
                 'details': f'{done}/{len(progress)} changes made'
                 + (f'; guards failed: {", ".join(failed)}' if failed else ''),
                 'cases': [

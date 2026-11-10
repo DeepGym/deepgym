@@ -9,7 +9,7 @@ if str(scripts_dir) not in sys.path:
 
 import run_blackbox_scan  # noqa: E402
 
-from deepgym.adversarial import BlackBoxReport, BlackBoxRound  # noqa: E402
+from deepgym.adversarial import PASS_THRESHOLD, BlackBoxReport, BlackBoxRound  # noqa: E402
 from deepgym.exploit_db import ExploitDB  # noqa: E402
 from deepgym.models import Environment  # noqa: E402
 
@@ -18,6 +18,7 @@ class _Tester:
     """A stand-in BlackBoxAdversarialTester that returns a fixed report."""
 
     _model, _max_rounds, _attempts_per_round = 'm', 2, 3
+    _pass_threshold = PASS_THRESHOLD
 
     def __init__(self, report: BlackBoxReport) -> None:
         self.report = report
@@ -62,5 +63,20 @@ def test_a_saved_scan_is_reused_until_the_verifier_changes(tmp_path: Path) -> No
         assert 'skipping' in run_blackbox_scan._scan_one(db, tester, 'v', 'b', env)
         assert run_blackbox_scan._scan_one(db, tester, 'v', 'b', changed).startswith('ROBUST')
         assert tester.calls == 2  # the changed verifier was tested again
+    finally:
+        db.close()
+
+
+def test_a_scan_saved_under_another_threshold_is_scanned_again(tmp_path: Path) -> None:
+    # A verifier found robust when only 0.5 counted as an exploit says nothing at a stricter line.
+    db = ExploitDB(db_path=tmp_path / 'e.db')
+    old, new = _Tester(_report('robust')), _Tester(_report('robust'))
+    old._pass_threshold = 0.5
+    env = Environment(task='t', verifier_code='return 0.0\n')
+    try:
+        run_blackbox_scan._scan_one(db, old, 'v', 'b', env)
+
+        assert run_blackbox_scan._scan_one(db, new, 'v', 'b', env).startswith('ROBUST')
+        assert new.calls == 1
     finally:
         db.close()

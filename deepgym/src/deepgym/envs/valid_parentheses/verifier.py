@@ -120,29 +120,17 @@ def verify(solution_path, test_cases_path=None):
 
         cases.append(case)
 
-    score = _balanced(cases, [case[-1] for case in test_cases])
+    # All or nothing: partial credit would pay a shortcut that gets a few cases right.
+    score = 1.0 if passed == total else 0.0
     return {
         'schema_version': '1.0',
         'score': score,
         'passed': score == 1.0,
-        'details': f'{passed}/{total} passed, balanced score {score:.2f}'
-        + ('. ' + '; '.join(details) if details else ''),
+        'metrics': {'pass_fraction': passed / total},
+        'details': f'{passed}/{total} passed' + ('. ' + '; '.join(details) if details else ''),
         'cases': cases,
         'seed': seed,
     }
-
-
-def _balanced(cases, labels):
-    """Recall on True cases plus recall on False cases, minus 1 (0 at worst).
-
-    A constant answer or a coin flip earns 0 however the cases are balanced, and only
-    getting every case right earns 1.
-    """
-    recall = []
-    for label in (True, False):
-        hits = [case['passed'] for case, want in zip(cases, labels) if want is label]
-        recall.append(sum(hits) / len(hits) if hits else 1.0)
-    return max(0.0, sum(recall) - 1.0)
 
 
 if __name__ == '__main__':

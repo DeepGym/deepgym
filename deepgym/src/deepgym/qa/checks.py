@@ -10,7 +10,7 @@ import ast
 from collections.abc import Sequence
 from typing import TYPE_CHECKING
 
-from deepgym.adversarial import DEFAULT_STRATEGIES, PASS_THRESHOLD, AdversarialTester
+from deepgym.adversarial import DEFAULT_STRATEGIES, AdversarialTester
 from deepgym.exceptions import DeepGymError, error_type_for
 from deepgym.models import (
     MODEL_FAULT_ERRORS,
@@ -187,7 +187,7 @@ def episode_results(
 
 
 def hack_resistant(env: Environment, dg: DeepGym, strategies: list[str] | None = None) -> QACheck:
-    """Run reward-hack attacks; fail if any reaches the exploit threshold (0.50).
+    """Run reward-hack attacks; fail if any earns reward above float noise.
 
     Inconclusive, not passed, when no attack got through but some got no verdict (the run
     failed, the verifier reported an error, or the attack never ran). Skipped, not passed,
@@ -220,7 +220,5 @@ def hack_resistant(env: Environment, dg: DeepGym, strategies: list[str] | None =
         details = f'{len(not_run)} of {report.attacks_run} attacks got no verdict: {reasons}'
         return QACheck(name='hack_resistant', status='inconclusive', details=details)
     top = max(result.score for result in report.results)
-    details = (
-        f'{report.attacks_run} attacks, max score {top:.2f} (an exploit is {PASS_THRESHOLD:.2f})'
-    )
+    details = f'{report.attacks_run} attacks, max score {top:.2f} (any reward is an exploit)'
     return QACheck(name='hack_resistant', status='pass', details=details)

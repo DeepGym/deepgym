@@ -274,15 +274,17 @@ def test_setup_script_decodes_the_staged_file() -> None:
 def test_scores_untouched_half_done_and_finished_files(tmp_path: Path, work: Path) -> None:
     env, _ = _calc_env(tmp_path)
     home = tmp_path / 'home'
-    for label, cells, merges, score in (
+    for label, cells, merges, fraction in (
         ('untouched', _START, [], 0.0),
         ('total only', {**_START, 'B4': 1500}, [], 0.5),
         ('finished', _GOLD, _MERGED, 1.0),
     ):
         _save(tmp_path, home, cells, merges)
         result = _run_verifier(env, home, work)
-        assert result['score'] == score, label
-        assert result['passed'] is (score == 1.0), label
+        # All or nothing; the share of rules met stays in metrics.
+        assert result['score'] == (1.0 if fraction == 1.0 else 0.0), label
+        assert result['passed'] is (fraction == 1.0), label
+        assert result['metrics'] == {'pass_fraction': fraction}, label
         assert {case['id'] for case in result['cases']} == {
             'workbook_saved',
             'rule0_check_cell',

@@ -116,10 +116,12 @@ def verify(solution_path, test_cases_path=None):
         server.server_close()
 
     passed = sum(case['passed'] for case in cases)
+    # All or nothing: partial credit would pay a shortcut that gets a few cases right.
     return {
         'schema_version': '1.0',
-        'score': passed / len(cases),
+        'score': 1.0 if passed == len(cases) else 0.0,
         'passed': passed == len(cases),
+        'metrics': {'pass_fraction': passed / len(cases)},
         'details': f'{passed}/{len(cases)} documents: printed slideshow.title exactly',
         'cases': cases,
         'seed': seed,

@@ -7,7 +7,7 @@ import pytest
 from deepgym.adversarial import environment_id, grading_fingerprint
 from deepgym.benchmark_ops import build_benchmark_audit, load_environments_from_dir
 from deepgym.core import DeepGym
-from deepgym.exploit_db import ExploitDB
+from deepgym.exploit_db import ExploitDB, ExploitRecord
 from deepgym.models import Environment
 from deepgym.reward_qa import RewardAuditor
 from tests.test_adversarial import CRASHING_VERIFIER, ROBUST_VERIFIER
@@ -48,6 +48,16 @@ class TestRewardAuditor:
         assert 'few-test-cases' in report.patterns
         assert report.recommendations
         assert report.stored is False
+
+    def test_partial_credit_is_an_exploit_unless_the_caller_sets_a_higher_line(
+        self, dg: DeepGym
+    ) -> None:
+        env = Environment(task='Do anything', verifier_code='return 0.3\n')
+
+        default = RewardAuditor(dg).audit(env, strategies=['empty'])
+        lenient = RewardAuditor(dg, pass_threshold=0.5).audit(env, strategies=['empty'])
+
+        assert (default.status, lenient.status) == ('exploitable', 'robust')
 
     def test_attacks_that_cannot_run_are_not_exploits(self, dg: DeepGym) -> None:
         env = Environment(task='Do anything', verifier_code=CRASHING_VERIFIER)
@@ -95,6 +105,34 @@ class TestRewardAuditor:
         db = ExploitDB(db_path=db_path)
         try:
             assert db.get('v', benchmark='custom') is None
+        finally:
+            db.close()
+
+    def test_a_robust_result_saved_under_the_old_threshold_does_not_survive_a_retest(
+        self, tmp_path: Path, dg: DeepGym
+    ) -> None:
+        """Saved as robust when only 0.5 was an exploit, though an attack scored 0.3."""
+        env = Environment(task='Do anything', verifier_code=CRASHING_VERIFIER)
+        db = ExploitDB(db_path=tmp_path / 'audits.db')
+        attack = {'strategy': 'empty', 'score': 0.3, 'exploited': False, 'inconclusive': False}
+        old = ExploitRecord(
+            verifier_id='v',
+            benchmark='custom',
+            exploitable=False,
+            num_attacks=1,
+            attacks=[attack],
+            verifier_hash=grading_fingerprint(env),
+        )
+        try:
+            assert db.save(old)  # attack_config '' as the auditor saved it before
+
+            report = RewardAuditor(dg, db=db).audit(
+                env, verifier_id='v', strategies=['empty'], persist=True
+            )
+
+            assert report.status == 'inconclusive'
+            assert db.get('v', benchmark='custom') is None
+            assert db.stats()['total_tested'] == 0
         finally:
             db.close()
 

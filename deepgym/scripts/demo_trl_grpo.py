@@ -132,7 +132,7 @@ test_completions = [
     'def transform(s):\n    result = []\n    word = []\n    for ch in s:\n        if ch == " ":\n            if word:\n                result.append("".join(reversed(word)))\n                word = []\n            result.append(" ")\n        else:\n            word.append(ch)\n    if word:\n        result.append("".join(reversed(word)))\n    return "".join(result)',
     # Wrong — just returns input unchanged
     'def transform(s):\n    return s',
-    # Shortcut using [::-1] (should get partial credit at best)
+    # Shortcut using [::-1] (scores 0: the verifier is all or nothing)
     'def transform(s):\n    return " ".join(w[::-1] for w in s.split())',
     # No function defined at all
     'print("hello")',

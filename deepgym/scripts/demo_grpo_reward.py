@@ -64,7 +64,7 @@ def sort_list(lst):
     result.extend(right[j:])
     return result
 ''',
-        # Correct but uses built-in (may lose partial credit)
+        # Correct but uses built-in sorted(): not genuine, so it scores 0
         '''
 def sort_list(lst):
     return sorted(lst)

@@ -16,10 +16,11 @@ import pytest
 from deepgym import solution_runtime
 from deepgym.core import DeepGym
 from deepgym.models import Environment
-from deepgym.registry import load_environment
+from deepgym.registry import load_environment, load_environment_dir
 from deepgym.sandbox import build_run_result, parse_verifier_output
 
 ENVS_DIR = Path(__file__).resolve().parent.parent / 'src' / 'deepgym' / 'envs'
+EXAMPLES_DIR = ENVS_DIR.parents[2] / 'examples'
 
 
 @pytest.fixture(scope='module')
@@ -73,6 +74,26 @@ def test_level_order_scores_a_parent_following_bfs(dg: DeepGym) -> None:
     assert wrong.score < 1.0
 
 
+def test_a_partly_right_answer_earns_nothing_but_keeps_its_pass_fraction(dg: DeepGym) -> None:
+    """All or nothing: 3 of 25 coin_change cases right still scores 0; the share stays visible."""
+    wrong = 'def coin_change(coins, amount):\n    return -1\n'
+
+    result = dg.run(load_environment('coin_change'), wrong)
+
+    assert (result.score, result.passed) == (0.0, False)
+    assert result.metrics == {'pass_fraction': 0.12}
+    assert sum(case.passed for case in result.cases) == 3
+
+
+def test_a_correct_but_built_in_sort_earns_nothing(dg: DeepGym, sorting_env: Environment) -> None:
+    """The example envs are all or nothing too: every case right, but via sorted(), is 0."""
+    result = dg.run(sorting_env, 'def sort_list(lst):\n    return sorted(lst)\n')
+
+    assert (result.score, result.passed) == (0.0, False)
+    assert result.metrics == {'pass_fraction': 1.0}
+    assert result.reward_components == {'correctness': 1.0, 'implementation_quality': 0.0}
+
+
 def test_string_manipulation_scores_split_and_slice(dg: DeepGym, string_env: Environment) -> None:
     split_and_slice = "def transform(s):\n    return ' '.join(w[::-1] for w in s.split(' '))\n"
     collapses_spaces = "def transform(s):\n    return ' '.join(w[::-1] for w in s.split())\n"
@@ -99,6 +120,70 @@ for name, readme in [
     (root / name / 'README.md').write_text(readme + '\\n')
 print('done')
 """
+
+
+def test_the_string_manipulation_example_scores_split_and_slice(dg: DeepGym) -> None:
+    """The examples/ copy, not the built-in: its task allows any correct implementation."""
+    env = load_environment_dir(EXAMPLES_DIR / 'string_manipulation')
+    split_and_slice = "def transform(s):\n    return ' '.join(w[::-1] for w in s.split(' '))\n"
+
+    result = dg.run(env, split_and_slice)
+
+    assert (result.score, result.passed) == (1.0, True), result.output
+
+
+_TWO_SUM_VIA_HELPER = """
+def _first_pair(nums, target):
+    seen = {}
+    for i, n in enumerate(nums):
+        if target - n in seen:
+            return [seen[target - n], i]
+        seen[n] = i
+    return []
+
+
+def two_sum(nums, target):
+    return _first_pair(nums, target)
+"""
+
+_SORT_VIA_HELPER = """
+def _merge(left, right):
+    out, i, j = [], 0, 0
+    while i < len(left) and j < len(right):
+        if left[i] <= right[j]:
+            out.append(left[i])
+            i += 1
+        else:
+            out.append(right[j])
+            j += 1
+    return out + left[i:] + right[j:]
+
+
+def _merge_sort(lst):
+    if len(lst) <= 1:
+        return list(lst)
+    mid = len(lst) // 2
+    return _merge(_merge_sort(lst[:mid]), _merge_sort(lst[mid:]))
+
+
+def sort_list(lst):
+    return _merge_sort(lst)
+"""
+
+
+@pytest.mark.parametrize('root', [ENVS_DIR, EXAMPLES_DIR], ids=['built-in', 'examples'])
+@pytest.mark.parametrize(
+    ('name', 'solution'),
+    [('two_sum', _TWO_SUM_VIA_HELPER), ('python_sorting', _SORT_VIA_HELPER)],
+    ids=['two_sum', 'python_sorting'],
+)
+def test_a_correct_answer_built_on_a_helper_scores_1(
+    dg: DeepGym, root: Path, name: str, solution: str
+) -> None:
+    """The implementation check reads the whole module, not only the entry function."""
+    result = dg.run(load_environment_dir(root / name), solution)
+
+    assert (result.score, result.passed) == (1.0, True), result.output
 
 
 def test_file_organizer_prompt_names_the_checked_directory(dg: DeepGym) -> None:

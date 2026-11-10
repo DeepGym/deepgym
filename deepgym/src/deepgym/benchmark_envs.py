@@ -1046,7 +1046,7 @@ class PatchVerifier:
                 deadline = started + timeout
                 setup_commands = task.get('setup_commands', '')
                 test_patch = task.get('test_patch', '')
-                apply_credit = float(task.get('apply_credit', 0.3))
+                apply_credit = float(task.get('apply_credit', 0.0))
 
                 with tempfile.TemporaryDirectory(prefix='deepgym_patch_repo_') as temp_dir_name:
                     temp_dir = Path(temp_dir_name)
@@ -1389,29 +1389,33 @@ class PatchVerifier:
                             }
                         )
 
-                    # An uncertain edit gains nothing: failing tests score the normal 0 below, and a
-                    # pass that edit may have caused can't be trusted, so it gets no verdict (masked).
-                    if uncertain and passed_count:
+                    # All or nothing, like SWE-bench's "resolved": a pass-to-pass command passes
+                    # before any fix, so a share of commands would pay a patch that fixes nothing.
+                    pass_fraction = passed_count / len(test_commands)
+                    resolved = passed_count == len(test_commands)
+                    # An uncertain edit gains nothing: an unresolved patch scores the normal 0 below,
+                    # and a pass that edit may have caused can't be trusted, so it gets no verdict.
+                    if uncertain and resolved:
                         return _path_verdict(
                             'validation_uncertain',
                             'Tests passed, but the patch edits paths the guard cannot classify, so the pass was not scored: ',
                             dict(sorted(uncertain.items())),
                         )
 
-                    pass_fraction = passed_count / len(test_commands)
-                    score = apply_credit + (1 - apply_credit) * pass_fraction
+                    tests_credit = 1 - apply_credit if resolved else 0.0
+                    score = apply_credit + tests_credit
                     return _emit(
                         {
                             'schema_version': '1.0',
                             'score': round(max(0.0, min(1.0, score)), 6),
-                            'passed': passed_count == len(test_commands),
+                            'passed': resolved,
                             'details': (
                                 f'Patch applies cleanly; '
                                 f'{passed_count}/{len(test_commands)} test commands passed.'
                             ),
                             'reward_components': {
                                 'apply': apply_credit,
-                                'tests': round((1 - apply_credit) * pass_fraction, 6),
+                                'tests': round(tests_credit, 6),
                             },
                             'metrics': {
                                 'pass_fraction': pass_fraction,
@@ -1421,7 +1425,7 @@ class PatchVerifier:
                             'truncated': False,
                             'cases': cases,
                         },
-                        0 if passed_count == len(test_commands) else 1,
+                        0 if resolved else 1,
                     )
 
 

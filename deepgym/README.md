@@ -54,7 +54,8 @@ result = dg.run(env, model_output=solution)
 print(f'Score: {result.score}, Passed: {result.passed}')   # Score: 1.0, Passed: True
 
 wrong = dg.run(env, model_output='def coin_change(coins, amount):\n    return -1\n')
-print(wrong.score, wrong.passed)   # 0.12 False: 3 of 25 cases pass, each in wrong.cases
+print(wrong.score, wrong.passed)   # 0.0 False: built-ins pay only when every case passes
+print(wrong.metrics)   # {'pass_fraction': 0.12}: 3 of 25 cases pass, each in wrong.cases
 ```
 
 `mode='local'` is for trying things out. For model-generated code, switch to a sandbox
@@ -120,9 +121,9 @@ VM-based providers.
   keyboard out, scored on the state the agent leaves ([computer use][computer-use]).
 - **Multi-turn sessions:** one live sandbox per episode, from Python (`dg.session()`) or
   HTTP (`/v1/sessions`) ([sessions][sessions]).
-- **QA gate:** `deepgym qa` checks that the reference passes, empty and stub answers earn
-  nothing and no reward-hack answer reaches 0.5; with `--mutants` it also checks that no
-  mutant of the reference passes ([QA gate][qa-gate]).
+- **QA gate:** `deepgym qa` checks that the reference passes and that empty, stub and
+  reward-hack answers earn nothing; with `--mutants` it also checks that no mutant of the
+  reference passes ([QA gate][qa-gate]).
 - **Environment authoring:** `deepgym new`, `deepgym check` and `deepgym qa --approve`,
   from an idea to an approved environment folder ([authoring][authoring],
   [approvals][approvals]).
@@ -144,8 +145,8 @@ statistics (continues the quickstart):
 completions = [solution, 'def coin_change(coins, amount):\n    return -1\n']
 batch = dg.run_batch(env, completions, max_parallel=8)
 
-rewards = [r.score if r.has_verdict else None for r in batch.results]   # [1.0, 0.12]
-print(batch.avg_score, batch.judged_count, batch.no_verdict_count)      # 0.56 2 0
+rewards = [r.score if r.has_verdict else None for r in batch.results]   # [1.0, 0.0]
+print(batch.avg_score, batch.judged_count, batch.no_verdict_count)      # 0.5 2 0
 ```
 
 `batch.avg_score` and `batch.passed` count a run without a verdict as a failed 0;
@@ -462,7 +463,7 @@ verl loads DeepGym's reward function with one config line (see
 | Does the training | Yes: rollouts on vLLM/SGLang, updates on FSDP/Megatron, PPO, GRPO, DAPO and more | No, it plugs into verl, TRL, OpenRLHF or your own loop |
 | Tasks | You bring the dataset and write the reward function | 31 built-in environments; importers for HumanEval, MBPP, EvalPlus, BigCodeBench, SWE-bench Pro, MiMo, CyberGym and Harbor datasets such as Terminal-Bench 2.0 |
 | Running model code | Your reward function, or a remote code sandbox service | Daytona, Modal, E2B, Docker, Apple container, or locally under sandbox-exec/bwrap (without them, local runs refuse unless `DEEPGYM_ALLOW_UNSANDBOXED=1`) |
-| Reward hacking | Up to your reward function | The solution runs apart from the verifier with no network, so it can't read the expected answers or print a fake score; `deepgym qa` checks that empty and stub solutions earn nothing and reward-hack ones stay below 0.5 before you train |
+| Reward hacking | Up to your reward function | The solution runs apart from the verifier with no network, so it can't read the expected answers or print a fake score; `deepgym qa` checks that empty and stub solutions and reward-hack ones earn nothing before you train |
 | Multi-turn agents | Agent loop and tool interface | One live sandbox per episode (shell or desktop), with a verl agent loop and session tool |
 | Computer use | Not built in | Desktop tasks, scored on the state the agent leaves behind |
 | Failed runs | A reward function returns a score; it can't mark a sample as unscored | A run whose sandbox or verifier failed has no verdict: verl's v1 trainer drops the sample, and DeepGym's agent loops drop or mask it |

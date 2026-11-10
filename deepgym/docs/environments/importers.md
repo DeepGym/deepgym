@@ -76,9 +76,10 @@ never become test commands: the tests that run are `test_commands`, or else the 
 - The model's diff goes first. Every path the hidden test patch touches is put back to its
   state before the diff, and the test patch goes last, so a diff can't edit the hidden
   tests.
-- A patch that applies scores 0.3, plus 0.7 times the share of the task's test commands
-  that pass; `passed` needs all of them. A diff that is missing (`invalid_patch`) or
-  doesn't apply (`patch_apply_failed`) scores 0.
+- A patch scores 1.0 only when every test command passes, and 0 otherwise, like
+  SWE-bench's "resolved": applying alone, or tests that already passed before the fix,
+  earn nothing. The share of commands that pass is in `metrics['pass_fraction']`. A diff
+  that is missing (`invalid_patch`) or doesn't apply (`patch_apply_failed`) scores 0.
 - A task with no test runner (no `test_commands`, and either no
   `selected_test_files_to_run` or a language other than Python or JS/TS) gets
   `error_type='unsupported_runner'`: no verdict, so trainers mask it.
@@ -96,10 +97,9 @@ that creates a symlink or an unusual file mode, scores 0 with
 - To keep false zeros on correct fixes rare, the guard allows data fixtures under a test
   directory, dependency and version edits, lockfiles, and ordinary files that only share
   a word with a test name. A correct fix that edits a file it refuses still scores 0.
-- An edit the guard can't classify still runs the tests. If any test command passes, the
-  run gets `error_type='validation_uncertain'` with no verdict, so trainers mask it; if
-  all fail, it is scored as usual (0.3 for SWE-bench Pro, whose applied patch earns that,
-  0 for MiMo).
+- An edit the guard can't classify still runs the tests. If every test command passes,
+  the run gets `error_type='validation_uncertain'` with no verdict, so trainers mask it;
+  otherwise it is scored as usual: 0.
   `validation_timeout` and `validation_error` (git couldn't list the paths in time, or
   couldn't find the repository) have no verdict either.
 - The guard is a stopgap denylist, so it can't be exhaustive, and a diff to the code
@@ -305,8 +305,8 @@ deepgym qa --mode daytona ~/.deepgym/environments/osworld/<task id>
 
 - A rule the starting file already holds, or holds once an empty sheet is added, is a
   guard rather than progress, so saving the untouched file or adding a blank sheet
-  earns nothing. OSWorld's evaluator is all-or-nothing; here a task with several rules
-  pays the share it got right.
+  earns nothing. As in OSWorld's evaluator, a task scores 1.0 only when every rule
+  passes; the share of rules met is in `metrics['pass_fraction']`.
 - Whatever is at the result path, the verifier gives a verdict: a file it can't read
   (missing, corrupt, not a regular file, or past the size limits) scores 0, and a rule
   it can't evaluate fails every rule. Reading and scoring run in a child process with

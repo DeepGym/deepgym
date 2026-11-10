@@ -10,6 +10,7 @@ from typing import Literal
 from pydantic import BaseModel, Field
 
 from deepgym.adversarial import (
+    PASS_THRESHOLD,
     AdversarialReport,
     AdversarialTester,
     environment_id,
@@ -192,10 +193,12 @@ class RewardAuditor:
         self,
         dg,
         *,
-        pass_threshold: float = 0.5,
+        pass_threshold: float = PASS_THRESHOLD,
         db: ExploitDB | None = None,
     ) -> None:
         self._tester = AdversarialTester(dg, pass_threshold=pass_threshold)
+        # Part of a stored result's identity: one judged at another exploit line is stale.
+        self._attack_config = f'threshold={pass_threshold}'
         self._db_given = db
 
     def audit(
@@ -213,15 +216,16 @@ class RewardAuditor:
         resolved_verifier_id = verifier_id or environment_id(env)
         verifier_hash = grading_fingerprint(env)
         if persist:
-            # Before the retest, as the scanners do: a stored result for a changed verifier
-            # is dropped, or an inconclusive retest (never saved) would leave it standing.
+            # Before the retest, as the scanners do: a stored result for a changed verifier or
+            # exploit threshold is dropped, or an inconclusive retest (never saved) would leave
+            # it standing.
             with self._db(db_path) as db:
                 db.current(
                     resolved_verifier_id,
                     benchmark=benchmark,
                     attack_type='white-box',
                     verifier_hash=verifier_hash,
-                    attack_config='',
+                    attack_config=self._attack_config,
                 )
         report = self._tester.test(env, strategies=strategies)
         patterns = classify_patterns(verifier_source, report)
@@ -231,16 +235,15 @@ class RewardAuditor:
         stored = False
         if persist:
             with self._db(db_path) as db:
-                # False for an inconclusive audit: it never judged the verifier.
-                stored = db.save(
-                    build_exploit_record(
-                        verifier_id=resolved_verifier_id,
-                        benchmark=benchmark,
-                        verifier_hash=verifier_hash,
-                        patterns=patterns,
-                        report=report,
-                    )
+                record = build_exploit_record(
+                    verifier_id=resolved_verifier_id,
+                    benchmark=benchmark,
+                    verifier_hash=verifier_hash,
+                    patterns=patterns,
+                    report=report,
                 )
+                # False for an inconclusive audit: it never judged the verifier.
+                stored = db.save(record.model_copy(update={'attack_config': self._attack_config}))
 
         return VerifierAuditReport(
             verifier_id=resolved_verifier_id,

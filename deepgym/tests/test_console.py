@@ -101,17 +101,16 @@ class TestRuns:
         assert run['solution']
         assert len(run['result']['cases']) > 1
 
-    def test_wrong_solution_scores_partially(self, client: TestClient) -> None:
+    def test_partly_wrong_solution_scores_zero_with_its_cases(self, client: TestClient) -> None:
         body = {'environments': ['reverse_string'], 'solution': REVERSE_WRONG, 'mode': 'local'}
         (queued,) = client.post('/api/runs', json=body).json()
 
         run = _wait_finished(client, queued['id'])
 
         assert run['status'] == 'completed'
-        assert run['passed'] is False
-        assert 0 < run['score'] < 1
+        assert (run['passed'], run['score']) == (False, 0.0)  # built-ins are all or nothing
         assert run['reference'] is False
-        assert any(not case['passed'] for case in run['result']['cases'])
+        assert {case['passed'] for case in run['result']['cases']} == {True, False}
 
     def test_small_eval_shares_a_group(self, client: TestClient) -> None:
         body = {'environments': ['reverse_string', 'fizzbuzz']}

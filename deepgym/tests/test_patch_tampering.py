@@ -1185,6 +1185,53 @@ def test_time_limit(
     assert time.monotonic() - started < task['timeout'] + 2
 
 
+@pytest.mark.parametrize(
+    ('task', 'score', 'fraction'),
+    [
+        # Half the commands pass without a fix (pass-to-pass): no partial credit for that.
+        pytest.param({'test_commands': ['true', 'false']}, 0.0, 0.5, id='some-pass'),
+        pytest.param({'test_commands': ['true', 'true']}, 1.0, 1.0, id='all-pass'),
+        # A task's explicit apply_credit is still paid to a patch that applies.
+        pytest.param(
+            {'apply_credit': 0.3, 'test_commands': ['true', 'false']}, 0.3, 0.5, id='credit'
+        ),
+    ],
+)
+def test_tests_score_all_or_nothing(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture,
+    task: dict,
+    score: float,
+    fraction: float,
+) -> None:
+    _, result = _run_main(tmp_path, monkeypatch, capsys, _runner(), task)
+
+    assert (result.score, result.metrics['pass_fraction']) == (score, fraction)
+
+
+def test_a_failed_patch_with_an_uncertain_edit_is_a_judged_0(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture
+) -> None:
+    # One command passes (it reads ci.ini, which the patch edits: uncertain) and one fails.
+    # The patch failed whatever the edit did, so it is the trained 0; only a full pass the
+    # edit may have caused is masked.
+    env = _env(tmp_path, {'ci.ini': '[pytest]\n'})
+    patch_file = tmp_path / 'candidate.diff'
+    patch_file.write_text(_diff(Path(env.repo_dir), {**_FIX, 'ci.ini': _EDITED_INI}))
+    task_file = tmp_path / 'task.json'
+    commands = ['cat ci.ini', 'false']
+    task = {'repo_dir': env.repo_dir, 'test_patch': env.test_patch, 'test_commands': commands}
+    task_file.write_text(json.dumps(task))
+    monkeypatch.setattr(sys, 'argv', ['runner', str(task_file), str(patch_file)])
+
+    exit_code = _runner()['main']()
+
+    result = VerifierResult.model_validate_json(capsys.readouterr().out.splitlines()[-1])
+    assert (result.error_type, result.score, result.metrics['pass_fraction']) == (None, 0.0, 0.5)
+    assert is_verdict(exit_code, result.error_type)
+
+
 def test_no_time_left_for_the_tests_has_no_verdict(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture
 ) -> None:

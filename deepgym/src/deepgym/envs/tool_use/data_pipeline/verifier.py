@@ -82,7 +82,8 @@ def verify(solution_path, test_cases_path=None):
 
     passed_count = sum(checks.values())
     total = len(checks)
-    score = passed_count / total
+    # All or nothing: partial credit would pay a shortcut that gets a few cases right.
+    score = 1.0 if passed_count == total else 0.0
 
     details_parts = [f'{k}={v}' for k, v in checks.items()]
     if proc.stderr.strip():
@@ -106,9 +107,8 @@ def verify(solution_path, test_cases_path=None):
     return {
         'schema_version': '1.0',
         'score': score,
-        # Threshold < 1.0: a minor miss (e.g. the count print) doesn't fail an
-        # otherwise correct solution, but the written rows must be exactly right.
-        'passed': checks['correct_records'] and score >= 0.8,
+        'passed': score == 1.0,
+        'metrics': {'pass_fraction': passed_count / total},
         'details': f'{passed_count}/{total} checks passed. ' + ', '.join(details_parts),
         'cases': cases,
     }

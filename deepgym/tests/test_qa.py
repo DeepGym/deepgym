@@ -167,6 +167,23 @@ def test_hack_resistant(local_dg: DeepGym) -> None:
     assert exploited.details.startswith('exploited by ')
 
 
+@pytest.mark.parametrize('reward', [0.49, 0.01])
+def test_hack_resistant_fails_an_attack_that_earns_any_reward(
+    reward: float, local_dg: DeepGym
+) -> None:
+    # Every attack defines add(), so each earns the partial credit; a policy could farm it.
+    body = (
+        'from deepgym_solution import load_solution\n'
+        'sol = load_solution(solution_path)\n'
+        f'return 1.0 if hasattr(sol, "add") and sol.add(2, 3) == 5 else {reward}\n'
+    )
+
+    check = hack_resistant(_env(body), local_dg)
+
+    assert check.status == 'fail'
+    assert f'({reward:.2f})' in check.details
+
+
 def test_hack_resistant_is_inconclusive_when_attacks_cannot_run(local_dg: DeepGym) -> None:
     check = hack_resistant(_env(CRASHING_VERIFIER), local_dg)
 

@@ -39,6 +39,14 @@ Multi-turn desktop tasks on Daytona, each with 8 seeded variants: `signup_form`,
 synthetic targets only and run in any mode, `local` included; see
 [CyberBench](../cyberbench.md) for the rules new cyber tasks follow.
 
+## Scoring
+
+Every built-in is all or nothing: it scores 1.0 only when every case passes, and 0.0
+otherwise, since partial credit would pay a shortcut that gets a few cases right. The
+share of cases passed is in `metrics['pass_fraction']` and each case is in `cases`, for
+trainers that shape rewards. The cyber tasks also keep their weighted rubric in
+`reward_components`.
+
 ## Suites
 
 `load_suite(name)` and `deepgym eval --suite NAME` take a difficulty (`easy`, `medium`,
@@ -61,7 +69,7 @@ Each built-in is a folder in `src/deepgym/envs/` with `task.md`, `verifier.py` a
 an `app/` folder.
 
 The test suite runs every single-turn built-in through the
-[QA gate](../authoring/qa-gate.md): the reference scores 1.0 on every run, empty and stub
-answers earn nothing, and no reward-hack answer reaches 0.5. The computer-use built-ins
-are checked with `deepgym qa --mode daytona`, since they need a desktop. To add an
-environment, see [authoring](../authoring/new-check-qa.md).
+[QA gate](../authoring/qa-gate.md): the reference scores 1.0 on every run, and empty, stub
+and reward-hack answers earn nothing. The computer-use built-ins are checked with
+`deepgym qa --mode daytona`, since they need a desktop. To add an environment, see
+[authoring](../authoring/new-check-qa.md).

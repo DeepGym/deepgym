@@ -59,10 +59,12 @@ def _load_example_env(name: str) -> Environment | None:
 
 
 def _attack_config(tester: BlackBoxAdversarialTester, task: str) -> str:
-    """How *tester* attacks *task*: a result is reused only for the same attack."""
+    """How *tester* attacks *task*: a result is reused only for the same attack, judged at
+    the same exploit threshold."""
     return (
         f'black-box; model={tester._model}; rounds={tester._max_rounds}; '
-        f'attempts={tester._attempts_per_round}; task={fingerprint_verifier(task)}'
+        f'attempts={tester._attempts_per_round}; threshold={tester._pass_threshold}; '
+        f'task={fingerprint_verifier(task)}'
     )
 
 

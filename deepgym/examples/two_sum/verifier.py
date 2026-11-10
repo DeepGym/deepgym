@@ -85,7 +85,8 @@ def verify(solution_path, test_cases_path=None):
         }
 
     # --- Implementation analysis ---
-    source = solution_source(solution_path, 'two_sum')
+    # The whole module: a correct two_sum may keep its loop in a helper it calls.
+    source = solution_source(solution_path)
     is_genuine, impl_reason = _check_implementation(source)
 
     # Static test cases: (nums, target, expected_indices)

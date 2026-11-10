@@ -132,6 +132,60 @@ def test_the_string_manipulation_example_scores_split_and_slice(dg: DeepGym) -> 
     assert (result.score, result.passed) == (1.0, True), result.output
 
 
+_TWO_SUM_VIA_HELPER = """
+def _first_pair(nums, target):
+    seen = {}
+    for i, n in enumerate(nums):
+        if target - n in seen:
+            return [seen[target - n], i]
+        seen[n] = i
+    return []
+
+
+def two_sum(nums, target):
+    return _first_pair(nums, target)
+"""
+
+_SORT_VIA_HELPER = """
+def _merge(left, right):
+    out, i, j = [], 0, 0
+    while i < len(left) and j < len(right):
+        if left[i] <= right[j]:
+            out.append(left[i])
+            i += 1
+        else:
+            out.append(right[j])
+            j += 1
+    return out + left[i:] + right[j:]
+
+
+def _merge_sort(lst):
+    if len(lst) <= 1:
+        return list(lst)
+    mid = len(lst) // 2
+    return _merge(_merge_sort(lst[:mid]), _merge_sort(lst[mid:]))
+
+
+def sort_list(lst):
+    return _merge_sort(lst)
+"""
+
+
+@pytest.mark.parametrize('root', [ENVS_DIR, EXAMPLES_DIR], ids=['built-in', 'examples'])
+@pytest.mark.parametrize(
+    ('name', 'solution'),
+    [('two_sum', _TWO_SUM_VIA_HELPER), ('python_sorting', _SORT_VIA_HELPER)],
+    ids=['two_sum', 'python_sorting'],
+)
+def test_a_correct_answer_built_on_a_helper_scores_1(
+    dg: DeepGym, root: Path, name: str, solution: str
+) -> None:
+    """The implementation check reads the whole module, not only the entry function."""
+    result = dg.run(load_environment_dir(root / name), solution)
+
+    assert (result.score, result.passed) == (1.0, True), result.output
+
+
 def test_file_organizer_prompt_names_the_checked_directory(dg: DeepGym) -> None:
     env = load_environment('file_organizer')
     in_cwd = _ORGANIZE.replace("Path(os.environ['PROJECT_DIR'])", "Path('.')")

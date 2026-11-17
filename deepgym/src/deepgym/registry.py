@@ -12,12 +12,12 @@ from string import Template
 
 from deepgym.computer_use import ComputerUseEnvironment
 from deepgym.models import (
-    CONTROLS_DIR,
     REFERENCE_ACTIONS,
     REFERENCE_FILES,
     Action,
     Environment,
     MultiTurnEnvironment,
+    is_control,
 )
 from deepgym.verifier_template import split_future_imports
 
@@ -373,7 +373,7 @@ def _load_computer_use_env(env_dir: Path, metadata: dict, variant: int) -> Compu
     files |= {
         rel: text
         for rel, text in _read_text_files(env_dir).items()
-        if rel not in _COMPUTER_USE_SPEC_FILES and not rel.startswith(f'{CONTROLS_DIR}/')
+        if rel not in _COMPUTER_USE_SPEC_FILES and not is_control(rel)
     }
     setup_path = env_dir / 'setup.sh'
     return ComputerUseEnvironment(
@@ -422,7 +422,7 @@ def _load_multi_turn_env(env_dir: Path, settings: dict) -> MultiTurnEnvironment:
             rel: text
             for rel, text in _read_text_files(env_dir).items()
             if rel not in _MULTI_TURN_SPEC_FILES
-            and not rel.startswith(f'{CONTROLS_DIR}/')
+            and not is_control(rel)
             and (env_dir / rel).resolve() not in support_paths
         },
         setup_script=setup_path.read_text(encoding='utf-8') if setup_path.exists() else '',

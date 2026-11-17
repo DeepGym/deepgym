@@ -170,6 +170,9 @@ def test_multi_turn_controls_replay_as_episodes_and_never_reach_the_agent(
     checks = {check.name: check for check in report.checks}
     assert checks['controls'].status == 'pass', checks['controls']
     assert not any(rel.startswith('controls/') for rel in load_environment_dir(path).files)
+    (path / 'controls').rename(path / 'Controls')  # same folder on a case-insensitive disk
+    assert not any(rel.startswith('Controls/') for rel in load_environment_dir(path).files)
+    (path / 'Controls').rename(path / 'controls')
     (path / 'controls' / 'must_fail' / 'quits.json').write_text(json.dumps({'not': 'a list'}))
     broken = {check.name: check for check in run_qa(path, local_dg, QAOptions(reruns=0)).checks}
     assert broken['controls'].status == 'fail'

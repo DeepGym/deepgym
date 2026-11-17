@@ -99,6 +99,12 @@ CONTROLS_DIR = 'controls'
 the reference's form that must score 1.0, and below it, on every run."""
 
 
+def is_control(rel: str) -> bool:
+    """Whether env-folder path *rel* is under :data:`CONTROLS_DIR`, in any case: on a
+    case-insensitive filesystem ``Controls/`` is the same folder QA reads."""
+    return rel.split('/', 1)[0].casefold() == CONTROLS_DIR
+
+
 class Environment(BaseModel):
     """Define a task environment for RL evaluation.
 

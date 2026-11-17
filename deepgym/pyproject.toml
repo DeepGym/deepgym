@@ -33,7 +33,7 @@ dependencies = [
 
 [project.optional-dependencies]
 server = ["fastapi>=0.100", "uvicorn[standard]>=0.20"]
-daytona = ["daytona>=0.223"]
+daytona = ["daytona>=0.223,<1"]
 modal = ["modal>=1.6"]
 e2b = ["e2b>=2.55"]
 hf = ["datasets>=2.16", "huggingface_hub>=0.20"]
@@ -44,7 +44,7 @@ openai = ["openai>=2"]
 # pytest 9.2 stops xdist's --dist loadgroup from grouping (pytest-dev/pytest-xdist#1386),
 # which the live container leak checks rely on.
 dev = ["pytest<9.2", "pytest-asyncio", "pytest-xdist", "ruff", "fastapi>=0.100", "uvicorn[standard]>=0.20", "pyarrow>=14"]
-all = ["daytona>=0.223", "modal>=1.6", "e2b>=2.55", "fastapi>=0.100", "uvicorn[standard]>=0.20", "datasets>=2.16", "huggingface_hub>=0.20", "pyarrow>=14", "pytest", "pytest-asyncio", "ruff"]
+all = ["daytona>=0.223,<1", "modal>=1.6", "e2b>=2.55", "fastapi>=0.100", "uvicorn[standard]>=0.20", "datasets>=2.16", "huggingface_hub>=0.20", "pyarrow>=14", "pytest", "pytest-asyncio", "ruff"]
 
 [project.urls]
 Homepage = "https://deepgym.io"

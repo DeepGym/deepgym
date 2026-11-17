@@ -108,8 +108,14 @@ def controls_check(
         none; 'fail' naming every control a run went against, and any stray path or
         unreadable episode; else 'pass'.
     """
-    if not (folder / CONTROLS_DIR).is_dir():
+    root = folder / CONTROLS_DIR
+    if not root.is_dir():
         return None
+    links = [path.relative_to(folder).as_posix() for path in (root, *root.rglob('*'))]
+    links = [rel for rel in links if (folder / rel).is_symlink()]
+    if links:  # a link can point at, or from, a file the agent is given
+        details = f'{", ".join(links)} is a link; controls must be plain files'
+        return QACheck(name=CONTROLS_CHECK, status='fail', details=details)
     controls, stray = _read_controls(folder)
     if stray:
         details = (

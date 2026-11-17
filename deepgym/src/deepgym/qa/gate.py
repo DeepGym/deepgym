@@ -97,8 +97,8 @@ def run_qa(target: str | Path, dg: DeepGym, options: QAOptions | None = None) ->
         # A self-contained patch task (e.g. mimo_code) has no reference patch to check,
         # but its runner must still refuse diffs that add test infrastructure.
         if 'patch' in env.tags and not hasattr(env, 'prepare_batch_requests'):
-            check = hack_resistant(env, dg, ['patch_tampering'])
-            return QAReport(environment=label, checks=[check])
+            checks = [hack_resistant(env, dg, ['patch_tampering'])]
+            return QAReport(environment=label, checks=checks + _controls(target, env, dg, options))
         return _skipped(label, 'benchmark-backed env scores through its own runner')
 
     checks = single_turn_checks(env, reference, dg, options.reruns)

@@ -12,6 +12,7 @@ from string import Template
 
 from deepgym.computer_use import ComputerUseEnvironment
 from deepgym.models import (
+    CONTROLS_DIR,
     REFERENCE_ACTIONS,
     REFERENCE_FILES,
     Action,
@@ -436,8 +437,10 @@ def _load_multi_turn_env(env_dir: Path, settings: dict) -> MultiTurnEnvironment:
 def _agent_may_see(env_dir: Path, rel: str) -> bool:
     """Whether env file *rel* may reach the agent: not a QA control, by its own name or by
     what it links to (a link to a must_pass control is a right answer)."""
-    target = (env_dir / rel).resolve().relative_to(env_dir.resolve()).as_posix()
-    return not is_control(rel) and not is_control(target)
+    target = (env_dir / rel).resolve()
+    under = target.relative_to(env_dir.resolve()).as_posix()
+    controls = (env_dir / CONTROLS_DIR).resolve()  # wherever a linked controls/ really is
+    return not is_control(rel) and not is_control(under) and not target.is_relative_to(controls)
 
 
 def load_environment_dir(env_dir: Path) -> Environment | MultiTurnEnvironment:

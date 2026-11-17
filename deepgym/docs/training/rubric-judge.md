@@ -86,4 +86,51 @@ A custom judge client gets the probe by raising `ContextOverflowError(message, a
 without `accepts`, an overflow gets no verdict. A run without a verdict is rewarded `None`,
 as in [the reward contract](reward-contract.md).
 
-Checking a judge against answers with known verdicts is planned as a separate feature.
+## Calibrate the judge
+
+Before training on a judge's reward, measure how often it agrees with expert labels on
+answers that were not used to write the rubric:
+
+```python
+from deepgym.rubric_calibration import LabeledAnswer, calibrate
+
+answers = [
+    LabeledAnswer(id='a17', answer=text, passed=True, blind=True, checks={'c1': True}),
+    ...
+]
+report = calibrate(reward_fn, answers, judge_id='judge-model, reasoning_effort=high',
+                   built_from=['a01', 'a02'])
+print(report.meets(min_tpr=0.9, min_tnr=0.9))
+Path('calibration.json').write_text(report.to_json())
+```
+
+- Each answer is graded `runs` times (3 by default), with at most the reward's
+  `max_parallel` judge calls at once. The judge passes an answer whose score is at least
+  `threshold` (1.0 by default).
+- `built_from` lists the ids of the answers used to write the rubric. If any of them is
+  among the labeled answers, `calibrate` raises `ValueError` naming them before calling the
+  judge. It also refuses duplicate ids, labels for checks the rubric doesn't have, and
+  `runs` below 1.
+- `blind` says whether the expert labeled the answer without seeing the judge's output.
+  `checks` holds the expert's per-check verdicts, where given: `True` is the judge's `MET`,
+  the answer meets the requirement as written (for a `fatal` check, it makes the mistake).
+
+The report keeps every run of every answer (`answers`: score, check verdicts and
+`error_type` per run) and computes everything else from them:
+
+| Field | What it is |
+|---|---|
+| `judge_id`, `prompt_version`, `rubric_sha256` | The judge as you named it, the prompt version, a SHA-256 of the task and the checks. |
+| `judged_runs`, `no_verdict_runs`, `no_verdict_by_type` | Runs with and without a verdict, the latter per `error_type`. |
+| `overall`, `blind`, `assisted` | Judge pass against expert pass over judged runs: `tp`, `fn`, `tn`, `fp`, `tpr`, `tnr`, `agreement`. |
+| `self_consistency` | Answers whose judged runs all pass or all fail, out of those judged at least twice. |
+| `check_consistency` | Per check, answers whose runs all gave the same verdict. |
+| `check_agreement` | Per check an expert labeled, the judge's `MET` against the expert's. |
+
+A run without a verdict is left out of every number above, never counted as a fail. A rate
+with nothing to measure is `null`. `blind` and `assisted` are kept apart because an expert
+who saw the judge's output may lean toward it. `report.meets(min_tpr, min_tnr)` checks the
+overall rates and that no more than `max_no_verdict` of all runs (0.05 by default, the share
+above which reward functions warn) got no verdict, and returns `passed` with one reason per
+bar; a `null` rate fails.
+`CalibrationReport.model_validate_json` reads a saved report back.

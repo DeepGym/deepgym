@@ -1,0 +1,37 @@
+name: DeepGym newest dependencies
+
+# Nightly: the newest release of every optional SDK, pre-releases included, checked against
+# the names DeepGym imports from it, so a breaking release shows up before users install it.
+on:
+  schedule:
+    - cron: '41 3 * * *'
+  workflow_dispatch:
+
+defaults:
+  run:
+    working-directory: deepgym
+
+jobs:
+  newest:
+    name: Newest SDK releases
+    runs-on: blacksmith-4vcpu-ubuntu-2404
+    steps:
+      - uses: useblacksmith/checkout@v1
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install every extra at its newest allowed release, pre-releases included
+        run: pip install --pre -e ".[dev,all,anthropic,openai]"
+
+      - name: Within our pins
+        run: pytest -q tests/test_sdk_surface.py
+
+      # A new major outside our pins (daytona 2.x, say): a warning that a pin will need
+      # lifting, not a failure.
+      - name: Past our pins
+        continue-on-error: true
+        run: |
+          pip install --pre --upgrade daytona modal e2b anthropic openai
+          pytest -q tests/test_sdk_surface.py

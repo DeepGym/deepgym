@@ -22,7 +22,7 @@ from deepgym.qa.controls import controls_check
 from deepgym.qa.difficulty import difficulty_check
 from deepgym.qa.mutants import mutation_check
 from deepgym.qa.report import DIFFICULTY_CHECK, MUTANTS_CHECK, SKIPPED, QACheck, QAReport
-from deepgym.registry import load_environment, load_environment_dir
+from deepgym.registry import environment_dir, load_environment, load_environment_dir
 
 if TYPE_CHECKING:
     from deepgym.core import DeepGym
@@ -149,12 +149,9 @@ def _controls(
 ) -> list[QACheck]:
     """The controls check, run as often as the reference, if the env's folder ships any.
 
-    The folder is *target*, or for a registered single-turn env the one its reference is
-    read from. A registered multi-turn env has no known folder: run QA on its folder.
+    The folder is *target*, or for a registered env the one the registry loads it from.
     """
-    folder = target if isinstance(target, Path) else None
-    if folder is None and isinstance(env, Environment) and env.verifier_path is not None:
-        folder = env.verifier_path.parent
+    folder = target if isinstance(target, Path) else environment_dir(target)
     check = controls_check(env, folder, dg, 1 + options.reruns) if folder else None
     return [check] if check else []
 

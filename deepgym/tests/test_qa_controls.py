@@ -3,7 +3,10 @@
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
+
+import pytest
 
 from deepgym.core import DeepGym
 from deepgym.factory.scaffold import scaffold
@@ -179,3 +182,30 @@ def test_multi_turn_controls_replay_as_episodes_and_never_reach_the_agent(
     assert broken['controls'].details.startswith(
         'must_fail/quits.json is not an episode like reference_actions.json'
     )
+
+
+def test_a_named_env_runs_the_controls_in_its_registered_folder(
+    tmp_path: Path, local_dg: DeepGym, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """By name, as `deepgym qa NAME` and --all run it, not only by folder."""
+    import deepgym.registry as registry_module
+
+    path = scaffold('named_env', 'multi-turn', tmp_path)
+    _folder(path, {'must_pass/quits.json': '[]'})  # wrong: quitting earns nothing
+    monkeypatch.setattr(registry_module, '_get_cache_dir', lambda: tmp_path)
+
+    checks = {
+        check.name: check for check in run_qa('named_env', local_dg, QAOptions(reruns=0)).checks
+    }
+
+    assert checks['controls'].status == 'fail', checks['controls']
+
+
+@pytest.mark.skipif(not hasattr(os, 'symlink'), reason='needs symlinks')
+def test_a_link_to_a_control_never_reaches_the_agent(tmp_path: Path) -> None:
+    path = scaffold('env', 'multi-turn', tmp_path)
+    reference = (path / 'reference_actions.json').read_text(encoding='utf-8')
+    _folder(path, {'must_pass/reference.json': reference})
+    (path / 'answer.json').symlink_to(Path('controls/must_pass/reference.json'))
+
+    assert 'answer.json' not in load_environment_dir(path).files

@@ -86,8 +86,8 @@ A folder without `controls/` doesn't get the check. One whose `controls/` holds 
 but files directly in `must_pass/` and `must_fail/` fails it, so a misnamed folder can't
 go unrun. Controls are never copied into a multi-turn session, and an approval covers
 them like every other file. `deepgym new --kind function` ships one of each to copy.
-Controls are read from the folder you pass, or from a registered single-turn env's own
-folder; for a registered multi-turn env, pass its folder.
+Controls are read from the folder you pass, or for an env you name, from the folder the
+registry loads it from. A file that links into `controls/` is kept from the agent too.
 
 ## Mutation testing
 

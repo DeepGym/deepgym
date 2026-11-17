@@ -212,20 +212,27 @@ def test_a_link_to_a_control_never_reaches_the_agent(tmp_path: Path) -> None:
 
 
 @pytest.mark.skipif(not hasattr(os, 'symlink'), reason='needs symlinks')
-def test_controls_that_are_links_fail_and_a_linked_folder_stays_from_the_agent(
-    tmp_path: Path, local_dg: DeepGym
+@pytest.mark.parametrize(
+    ('link', 'to'),
+    [
+        ('controls', 'answers'),  # the folder itself
+        ('controls/must_pass/right.json', '../../answers/right.json'),  # out of it
+        ('controls', 'controls'),  # a loop
+    ],
+)
+def test_an_env_with_a_link_in_or_as_controls_does_not_load(
+    tmp_path: Path, local_dg: DeepGym, link: str, to: str
 ) -> None:
     path = scaffold('env', 'multi-turn', tmp_path)
-    reference = (path / 'reference_actions.json').read_text(encoding='utf-8')
-    (path / 'answers' / 'must_pass').mkdir(parents=True)
-    (path / 'answers' / 'must_pass' / 'reference.json').write_text(reference, encoding='utf-8')
-    (path / 'controls').symlink_to('answers')
+    (path / 'answers').mkdir()
+    (path / 'answers' / 'right.json').write_text('[]', encoding='utf-8')
+    (path / link).parent.mkdir(parents=True, exist_ok=True)
+    (path / link).symlink_to(to)
 
-    check = controls_check(load_environment_dir(path), path, local_dg, runs=1)
-
-    assert check is not None and check.status == 'fail'
-    assert check.details == 'controls is a link; controls must be plain files'
-    assert not any(rel.startswith('answers/') for rel in load_environment_dir(path).files)
+    with pytest.raises(ValueError, match='is a link; controls must be plain files'):
+        load_environment_dir(path)
+    report = run_qa(path, local_dg, QAOptions(reruns=0))
+    assert [(check.name, check.status) for check in report.checks] == [('load', 'fail')]
 
 
 def test_a_patch_task_without_a_reference_still_runs_its_controls(

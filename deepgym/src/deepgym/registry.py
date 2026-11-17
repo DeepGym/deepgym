@@ -12,7 +12,6 @@ from string import Template
 
 from deepgym.computer_use import ComputerUseEnvironment
 from deepgym.models import (
-    CONTROLS_DIR,
     REFERENCE_ACTIONS,
     REFERENCE_FILES,
     Action,
@@ -434,13 +433,26 @@ def _load_multi_turn_env(env_dir: Path, settings: dict) -> MultiTurnEnvironment:
     )
 
 
+def _refuse_linked_controls(env_dir: Path) -> None:
+    """Refuse a link in or as ``controls/``: controls are right answers, and a link could
+    hand one to the agent under another name (or loop).
+
+    Raises:
+        ValueError: Naming the link.
+    """
+    for top in env_dir.iterdir():
+        if is_control(top.name):
+            paths = [top] if top.is_symlink() else [top, *top.rglob('*')]
+            links = [path.relative_to(env_dir).as_posix() for path in paths if path.is_symlink()]
+            if links:
+                raise ValueError(f'{", ".join(links)} is a link; controls must be plain files')
+
+
 def _agent_may_see(env_dir: Path, rel: str) -> bool:
     """Whether env file *rel* may reach the agent: not a QA control, by its own name or by
     what it links to (a link to a must_pass control is a right answer)."""
-    target = (env_dir / rel).resolve()
-    under = target.relative_to(env_dir.resolve()).as_posix()
-    controls = (env_dir / CONTROLS_DIR).resolve()  # wherever a linked controls/ really is
-    return not is_control(rel) and not is_control(under) and not target.is_relative_to(controls)
+    target = (env_dir / rel).resolve().relative_to(env_dir.resolve()).as_posix()
+    return not is_control(rel) and not is_control(target)
 
 
 def load_environment_dir(env_dir: Path) -> Environment | MultiTurnEnvironment:
@@ -470,6 +482,7 @@ def _load_env_from_dir(
     Raises:
         ValueError: If required files are missing.
     """
+    _refuse_linked_controls(env_dir)
     if (env_dir / 'task.toml').is_file():
         if variant:
             raise ValueError(f'{env_dir.name} is a Harbor task; it has no variants')

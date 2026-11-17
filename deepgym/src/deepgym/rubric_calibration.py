@@ -17,7 +17,7 @@ from collections.abc import Iterable, Sequence
 from concurrent.futures import ThreadPoolExecutor
 from typing import Literal
 
-from pydantic import BaseModel, ConfigDict, Field, StrictStr, computed_field
+from pydantic import BaseModel, ConfigDict, Field, StrictStr, computed_field, model_validator
 
 from deepgym.integrations.reward import MASKED_WARN_RATE, reward
 from deepgym.models import RunResult
@@ -153,6 +153,19 @@ class CalibrationReport(BaseModel):
     threshold: float
     """The judge passes an answer whose score is at least this."""
     answers: tuple[AnswerRow, ...]
+
+    @model_validator(mode='after')
+    def _verdicts_cover_every_check(self) -> CalibrationReport:
+        """A run's check verdicts, when it has them, name exactly the report's checks."""
+        expected = set(self.check_ids)
+        for row in self.answers:
+            for run in row.runs:
+                if run.verdicts is not None and set(run.verdicts) != expected:
+                    raise ValueError(
+                        f'answer {row.id}: a run has verdicts for {sorted(run.verdicts)}, '
+                        f'not the checks {sorted(expected)}'
+                    )
+        return self
 
     def _confusion(self, blind: bool | None) -> Confusion:
         """Judge pass against expert pass over judged runs, of answers labeled *blind* (any
@@ -351,7 +364,10 @@ def calibrate(
     with ThreadPoolExecutor(max_workers=reward_fn.max_parallel) as pool:
         results = [_judge_run(result) for result in pool.map(reward_fn.grade, texts)]
     rows = tuple(
-        AnswerRow(**answer.model_dump(), runs=tuple(results[i * runs : (i + 1) * runs]))
+        AnswerRow(
+            **answer.model_dump(include=set(LabeledAnswer.model_fields)),
+            runs=tuple(results[i * runs : (i + 1) * runs]),
+        )
         for i, answer in enumerate(answers)
     )
     return CalibrationReport(

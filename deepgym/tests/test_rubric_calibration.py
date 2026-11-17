@@ -343,3 +343,20 @@ def test_check_verdicts_of_a_run_without_a_verdict_are_left_out() -> None:
 
     assert stored.check_agreement['c1'] == Confusion(tp=1, fn=0, tn=0, fp=0)
     assert stored.check_consistency['c1'] == Consistency(same=3, answers=3)
+
+
+def test_answers_from_a_saved_report_can_be_calibrated_again() -> None:
+    saved = run(evidence_judge, labeled(), runs=1)
+
+    again = run(evidence_judge, list(saved.answers), runs=2)
+
+    assert [len(row.runs) for row in again.answers] == [2, 2, 2, 2]
+    assert again.overall == Confusion(tp=2, fn=0, tn=6, fp=0)
+
+
+def test_a_stored_run_must_mark_every_check() -> None:
+    data = json.loads(run(evidence_judge, labeled()).to_json())
+    data['answers'][0]['runs'][0]['verdicts'] = {'c1': 'MET'}
+
+    with pytest.raises(ValidationError, match='not the checks'):
+        CalibrationReport.model_validate(data)

@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- **QA runs your own controls:** an environment folder can ship answers its verifier must fail (`controls/must_fail/`) or pass (`controls/must_pass/`), in the reference's form. `deepgym qa` runs each as the reference runs, `1 + --reruns` times, and the new `controls` check fails if a must_fail run scores 1.0, a must_pass run scores below it, or a run gets no verdict. A first line `# expect: TEXT` also requires TEXT in each run's details or case errors. A folder without `controls/` doesn't get the check. Multi-turn sessions never receive the controls, and `deepgym new --kind function` ships one of each.
 - **Budget stops show as cut short:** an agent episode that ran out of its turn, time or cost budget is graded with `truncated` set, as an `output_limit` stop already was, in `run_episode` and when an agent runs on a session or traced session you score yourself. The score is unchanged, so a run cut short can be told apart from one the model got wrong. `Budget()` still defaults to 30 turns and 300 seconds. API agents take `Budget(max_turns=None, max_seconds=None)` for no limit; CLI agents need a finite `max_seconds`.
 
 ## 0.6.5 (2026-11-17)

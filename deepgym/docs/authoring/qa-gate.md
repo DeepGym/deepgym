@@ -1,8 +1,8 @@
 # The QA gate
 
 This page covers `deepgym qa`, which checks an environment before you train on it: the
-checks for single-turn and multi-turn environments, mutation testing, the difficulty
-probe, statuses and exit codes, and the report it writes.
+checks for single-turn and multi-turn environments, your own controls, mutation testing,
+the difficulty probe, statuses and exit codes, and the report it writes.
 
 ```bash
 deepgym qa coin_change two_sum          # or --all
@@ -33,6 +33,8 @@ Each single-turn environment must pass:
   apply: a Harbor task runs bash, and a verifier that rejects every attack as a malformed
   answer (a repo-patch env takes diffs) was never attacked. Self-contained patch tasks
   such as `mimo_code` get `patch_tampering` attacks instead.
+- `controls` (when the folder has `controls/`): the answers you ship score as they say
+  (see below).
 - `mutants_killed` (with `--mutants`): no mutant of the reference passes or scores full
   marks (see below).
 - `difficulty` (with `--model`): see below.
@@ -56,6 +58,36 @@ A verifier that pays for activity instead of the outcome fails. Computer-use env
 desktop, so they run with `--mode daytona` and are skipped elsewhere. Multi-turn envs
 without a reference, and benchmark-backed ones such as `swebench_pro`, are skipped:
 neither passed nor failed.
+
+## Controls
+
+The checks above try answers the gate makes up. Controls are answers you know about: a
+wrong answer your verifier once paid for, or a right one it once scored 0. Put each in
+the environment folder, in the same form as the reference (a solution `.py`, a diff for
+repo-patch, a JSON list of actions for multi-turn):
+
+```
+word_stats/controls/must_fail/nan_string.py     # the string "NaN" where a number belongs
+word_stats/controls/must_fail/off_by_one.py
+word_stats/controls/must_pass/other_order.py    # right, in an order the reference doesn't use
+```
+
+Each control runs exactly as the reference does, as many times (`1 + --reruns`). The
+`controls` check fails if any run of a `must_pass` control scores below 1.0, any run of a
+`must_fail` control scores 1.0, or the verifier errors on a run instead of judging it,
+since a crash's 0 says nothing about the answer. Every failure names the control.
+
+A control can start with `# expect: TEXT`. Every run's details, or one of its cases'
+errors, must then contain TEXT, so a `must_fail` control that fails for some other reason
+(a typo in it, say) fails the check instead of passing it. The line is removed before the
+control runs, so it works in a JSON control too.
+
+A folder without `controls/` doesn't get the check. One whose `controls/` holds anything
+but files directly in `must_pass/` and `must_fail/` fails it, so a misnamed folder can't
+go unrun. Controls are never copied into a multi-turn session, and an approval covers
+them like every other file. `deepgym new --kind function` ships one of each to copy.
+Controls are read from the folder you pass, or from a registered single-turn env's own
+folder; for a registered multi-turn env, pass its folder.
 
 ## Mutation testing
 

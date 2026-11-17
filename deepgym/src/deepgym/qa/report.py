@@ -25,6 +25,9 @@ MUTANTS_CHECK = 'mutants_killed'
 DIFFICULTY_CHECK = 'difficulty'
 """Name of the model difficulty probe's check (see :mod:`deepgym.qa.difficulty`)."""
 
+CONTROLS_CHECK = 'controls'
+"""Name of the check that runs an env's own controls (see :mod:`deepgym.qa.controls`)."""
+
 _ALWAYS_NOTED = frozenset({DIFFICULTY_CHECK, MUTANTS_CHECK})
 """Checks whose details the table prints even when they pass: they carry a score."""
 
@@ -36,6 +39,7 @@ _COLUMNS = {
     'busy_fails': 'busy',
     'random_fails': 'rand',
     'hack_resistant': 'hack',
+    CONTROLS_CHECK: 'ctrl',
     MUTANTS_CHECK: 'mut',
     DIFFICULTY_CHECK: 'diff',
 }

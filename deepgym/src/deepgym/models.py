@@ -94,6 +94,10 @@ REFERENCE_ACTIONS = 'reference_actions.json'
 """Where a multi-turn env folder keeps the scripted episode that must score 1.0: a JSON list
 of actions, or for a computer-use env one such list per variant, in variants.json order."""
 
+CONTROLS_DIR = 'controls'
+"""Where an env folder keeps its own QA controls: must_pass/ and must_fail/ hold answers in
+the reference's form that must score 1.0, and below it, on every run."""
+
 
 class Environment(BaseModel):
     """Define a task environment for RL evaluation.

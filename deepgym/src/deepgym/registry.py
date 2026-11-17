@@ -12,6 +12,7 @@ from string import Template
 
 from deepgym.computer_use import ComputerUseEnvironment
 from deepgym.models import (
+    CONTROLS_DIR,
     REFERENCE_ACTIONS,
     REFERENCE_FILES,
     Action,
@@ -299,27 +300,36 @@ def _read_text_files(root: Path, prefix: str = '') -> dict[str, str]:
     return files
 
 
-def _read_reference_actions(env_dir: Path, variant: int = 0) -> list[Action] | None:
-    """Return the scripted reference episode in *env_dir*, or None if it has none.
+def parse_actions(text: str, variant: int = 0) -> list[Action]:
+    """Parse *text*, a scripted episode in the form of reference_actions.json.
 
     A computer-use env keeps one per variant: a list of episodes in variants.json order.
 
     Raises:
-        ValueError: If the file isn't a list of actions (or of episodes), or has no
+        ValueError: If *text* isn't a JSON list of actions (or of episodes), or has no
             episode for *variant*.
+    """
+    data = json.loads(text)
+    if isinstance(data, list) and data and all(isinstance(item, list) for item in data):
+        if not 0 <= variant < len(data):
+            raise ValueError(f'no episode for variant {variant}')
+        data = data[variant]
+    if not isinstance(data, list):
+        raise ValueError('expected a JSON list of actions')
+    return [Action.model_validate(item) for item in data]
+
+
+def _read_reference_actions(env_dir: Path, variant: int = 0) -> list[Action] | None:
+    """Return the scripted reference episode in *env_dir*, or None if it has none.
+
+    Raises:
+        ValueError: If the file doesn't parse (see :func:`parse_actions`).
     """
     path = env_dir / REFERENCE_ACTIONS
     if not path.is_file():
         return None
     try:
-        data = json.loads(path.read_text(encoding='utf-8'))
-        if isinstance(data, list) and data and all(isinstance(item, list) for item in data):
-            if not 0 <= variant < len(data):
-                raise ValueError(f'no episode for variant {variant}')
-            data = data[variant]
-        if not isinstance(data, list):
-            raise ValueError('expected a JSON list of actions')
-        return [Action.model_validate(item) for item in data]
+        return parse_actions(path.read_text(encoding='utf-8'), variant)
     except ValueError as exc:
         raise ValueError(f'{REFERENCE_ACTIONS}: {exc}') from exc
 
@@ -343,11 +353,11 @@ trusted configuration, so its tools' credentials and root commands are too."""
 def _load_computer_use_env(env_dir: Path, metadata: dict, variant: int) -> ComputerUseEnvironment:
     """Build a ComputerUseEnvironment from task.md, verifier.py, setup.sh, and app files.
 
-    Every other file in the directory, plus the sibling ``_shared/`` runtime files,
-    is written into the session work directory before setup runs. The verifier gets
-    ``_checks.py`` and the variant's ``PARAMS`` prepended rather than importing
-    anything from disk, so nothing the agent can reach is executed at scoring time.
-    ``$name`` placeholders in task.md are filled from the same params.
+    Every other file in the directory but its QA controls, plus the sibling ``_shared/``
+    runtime files, is written into the session work directory before setup runs. The
+    verifier gets ``_checks.py`` and the variant's ``PARAMS`` prepended rather than
+    importing anything from disk, so nothing the agent can reach is executed at scoring
+    time. ``$name`` placeholders in task.md are filled from the same params.
 
     Raises:
         ValueError: If *variant* is out of range.
@@ -363,7 +373,7 @@ def _load_computer_use_env(env_dir: Path, metadata: dict, variant: int) -> Compu
     files |= {
         rel: text
         for rel, text in _read_text_files(env_dir).items()
-        if rel not in _COMPUTER_USE_SPEC_FILES
+        if rel not in _COMPUTER_USE_SPEC_FILES and not rel.startswith(f'{CONTROLS_DIR}/')
     }
     setup_path = env_dir / 'setup.sh'
     return ComputerUseEnvironment(
@@ -395,10 +405,10 @@ _MULTI_TURN_SPEC_FILES = frozenset(
 def _load_multi_turn_env(env_dir: Path, settings: dict) -> MultiTurnEnvironment:
     """Build a MultiTurnEnvironment from task.md, verifier.py, setup.sh and starting files.
 
-    Every other file (minus support files) is written into the session work directory
-    before setup runs. The final verifier runs inline in that directory, where the agent
-    could rewrite anything it imported, so support files are prepended to it instead,
-    with every part's ``from __future__`` imports hoisted to the top.
+    Every other file (minus support files and QA controls) is written into the session
+    work directory before setup runs. The final verifier runs inline in that directory,
+    where the agent could rewrite anything it imported, so support files are prepended to
+    it instead, with every part's ``from __future__`` imports hoisted to the top.
     """
     support = _read_support_files(env_dir, settings.get('support_files', []))
     verifier = (env_dir / 'verifier.py').read_text(encoding='utf-8')
@@ -411,7 +421,9 @@ def _load_multi_turn_env(env_dir: Path, settings: dict) -> MultiTurnEnvironment:
         files={
             rel: text
             for rel, text in _read_text_files(env_dir).items()
-            if rel not in _MULTI_TURN_SPEC_FILES and (env_dir / rel).resolve() not in support_paths
+            if rel not in _MULTI_TURN_SPEC_FILES
+            and not rel.startswith(f'{CONTROLS_DIR}/')
+            and (env_dir / rel).resolve() not in support_paths
         },
         setup_script=setup_path.read_text(encoding='utf-8') if setup_path.exists() else '',
         final_verifier_code=''.join(future for future, _ in parts)

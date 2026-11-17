@@ -7,7 +7,7 @@ with `deepgym new`, the files it contains, the four kinds, validating it with
 ```bash
 deepgym new word_stats --kind function   # or script, repo-patch, multi-turn
 deepgym check word_stats                 # passes as generated
-# edit word_stats/: task.md, the reference, expected() in verifier.py, variants.py
+# edit word_stats/: task.md, the reference, expected() in verifier.py, variants.py, controls/
 deepgym check word_stats
 deepgym qa word_stats --mutants          # adds reward-hack attacks and mutation testing
 deepgym qa word_stats --mutants --mode docker --approve --by "Jane Doe"
@@ -26,6 +26,7 @@ picks the parent folder.
 | `reference_solution.py` | Must score 1.0. A `.diff` for repo-patch, `reference_actions.json` for multi-turn. |
 | `variants.py` | `generate(seed, count)`: edge cases plus seeded random inputs. The fixed seed keeps runs reproducible. |
 | `metadata.json` | Name, type, difficulty, tags and the `support_files` the verifier imports. Unknown keys are rejected. |
+| `controls/` | Optional answers the verifier must fail (`must_fail/`) or pass (`must_pass/`); `deepgym qa` runs them (see [controls](qa-gate.md#controls)). The `function` template ships one of each. |
 
 How to write the verifier itself, and what it may and may not do with the solution, is
 in [verifiers](verifiers.md).

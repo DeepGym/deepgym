@@ -214,6 +214,8 @@ def _labels(**changes: object) -> list[LabeledAnswer]:
         ),
         ({'answers': _labels(checks={'c9': True})}, ValueError, "does not have: ['good: c9']"),
         ({'runs': 0}, ValueError, 'runs must be at least 1, got 0'),
+        ({'threshold': float('nan')}, ValueError, 'threshold must be a finite number, got nan'),
+        ({'built_from': [b'good']}, TypeError, "built_from ids must be strings, got [b'good']"),
     ],
 )
 def test_bad_input_is_refused_before_any_judge_call(
@@ -304,3 +306,40 @@ def test_a_rate_with_nothing_to_measure_fails_the_bar() -> None:
         'TPR is missing: no judged run of an answer the expert passed',
         'TNR 9/9 (1.000) reaches 0.9',
     )
+
+
+@pytest.mark.parametrize(
+    'bars', [(float('nan'), 0.9), (0.9, float('nan')), (0.9, 0.9, float('inf'))]
+)
+def test_a_bar_that_is_not_a_finite_number_is_refused(bars: tuple[float, ...]) -> None:
+    report = run(replying('{"c1": "UNMET", "c2": "UNMET", "c3": "MET"}'), labeled())
+
+    with pytest.raises(ValueError, match='bars must be finite numbers'):
+        report.meets(*bars)
+
+
+def test_an_answer_id_must_be_a_string() -> None:
+    with pytest.raises(ValidationError):
+        LabeledAnswer(id=b'good', answer='x', passed=True, blind=True)  # type: ignore[arg-type]
+
+
+def test_a_stored_report_never_holds_a_non_finite_number() -> None:
+    data = json.loads(run(evidence_judge, labeled()).to_json())
+    data['answers'][0]['runs'][0]['score'] = float('inf')
+
+    with pytest.raises(ValidationError):
+        CalibrationReport.model_validate(data)
+
+
+def test_check_verdicts_of_a_run_without_a_verdict_are_left_out() -> None:
+    report = run(evidence_judge, labeled(good={'c1': True}), runs=2)
+    good, *rest = report.answers
+    judged = good.runs[0]
+    flipped = {**(judged.verdicts or {}), 'c1': 'UNMET'}
+    unjudged = JudgeRun(score=None, verdicts=flipped, error_type='judge_error')  # type: ignore[arg-type]
+    stored = report.model_copy(
+        update={'answers': (good.model_copy(update={'runs': (judged, unjudged)}), *rest)}
+    )
+
+    assert stored.check_agreement['c1'] == Confusion(tp=1, fn=0, tn=0, fp=0)
+    assert stored.check_consistency['c1'] == Consistency(same=3, answers=3)

@@ -11,12 +11,13 @@ as in the reward contract.
 from __future__ import annotations
 
 import json
+import math
 from collections import Counter
 from collections.abc import Iterable, Sequence
 from concurrent.futures import ThreadPoolExecutor
 from typing import Literal
 
-from pydantic import BaseModel, ConfigDict, Field, computed_field
+from pydantic import BaseModel, ConfigDict, Field, StrictStr, computed_field
 
 from deepgym.integrations.reward import MASKED_WARN_RATE, reward
 from deepgym.models import RunResult
@@ -34,7 +35,7 @@ class LabeledAnswer(BaseModel):
 
     model_config = ConfigDict(frozen=True)
 
-    id: str
+    id: StrictStr
     answer: str
     passed: bool
     """Whether the expert passes the answer."""
@@ -109,7 +110,7 @@ class Consistency(BaseModel):
 class JudgeRun(BaseModel):
     """One judge run of an answer."""
 
-    model_config = ConfigDict(frozen=True)
+    model_config = ConfigDict(frozen=True, allow_inf_nan=False)
 
     score: float | None
     """None without a verdict."""
@@ -137,7 +138,7 @@ class BarCheck(BaseModel):
 class CalibrationReport(BaseModel):
     """Every judge run of every labeled answer, and the agreement numbers computed from them."""
 
-    model_config = ConfigDict(frozen=True)
+    model_config = ConfigDict(frozen=True, allow_inf_nan=False)
 
     judge_id: str
     """The judge model and its settings, as the caller named them."""
@@ -219,7 +220,8 @@ class CalibrationReport(BaseModel):
         """Per check, answers whose runs with check verdicts all gave the same one."""
         return {
             cid: Consistency.of(
-                [run.verdicts[cid] for run in row.runs if run.verdicts] for row in self.answers
+                [run.verdicts[cid] for run in row.runs if run.verdicts and run.score is not None]
+                for row in self.answers
             )
             for cid in self.check_ids
         }
@@ -235,7 +237,7 @@ class CalibrationReport(BaseModel):
                 for row in self.answers
                 if cid in row.checks
                 for run in row.runs
-                if run.verdicts
+                if run.verdicts and run.score is not None
             )
             for cid in self.check_ids
             if any(cid in row.checks for row in self.answers)
@@ -250,7 +252,15 @@ class CalibrationReport(BaseModel):
     ) -> BarCheck:
         """Whether the overall TPR and TNR reach *min_tpr* and *min_tnr*, with no more than
         *max_no_verdict* of all runs left without a verdict (by default the share above
-        which reward functions warn). A rate with no judged run to measure it fails."""
+        which reward functions warn). A rate with no judged run to measure it fails.
+
+        Raises:
+            ValueError: When a bar isn't a finite number.
+        """
+        if not all(math.isfinite(bar) for bar in (min_tpr, min_tnr, max_no_verdict)):
+            raise ValueError(
+                f'bars must be finite numbers, got {min_tpr=}, {min_tnr=}, {max_no_verdict=}'
+            )
         overall = self.overall
         total_runs = self.judged_runs + self.no_verdict_runs
         share = self.no_verdict_runs / total_runs if total_runs else 0.0
@@ -315,17 +325,22 @@ def calibrate(
     Raises:
         ValueError: Before any judge call, when an answer's id is in *built_from*, two
             answers share an id, an expert labels a check the rubric doesn't have, or
-            *runs* is below 1.
-        TypeError: When *built_from* is one string instead of a list of ids.
+            *runs* is below 1, or *threshold* isn't finite.
+        TypeError: When *built_from* is one string, or holds an id that isn't a string.
     """
     if runs < 1:
         raise ValueError(f'runs must be at least 1, got {runs}')
+    if not math.isfinite(threshold):
+        raise ValueError(f'threshold must be a finite number, got {threshold}')
     if isinstance(built_from, str):  # its characters would be checked, not the id
         raise TypeError(f'built_from is a list of answer ids, got the string {built_from!r}')
+    built = set(built_from)
+    if not_ids := [i for i in built if not isinstance(i, str)]:
+        raise TypeError(f'built_from ids must be strings, got {not_ids!r}')
     ids = Counter(answer.id for answer in answers)
     if repeated := sorted(i for i, n in ids.items() if n > 1):
         raise ValueError(f'answer ids must be unique; given more than once: {repeated}')
-    if used := sorted(ids.keys() & set(built_from)):
+    if used := sorted(ids.keys() & built):
         raise ValueError(
             f'answers used to write the rubric can not validate it; hold them out: {used}'
         )

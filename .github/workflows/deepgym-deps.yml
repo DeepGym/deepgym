@@ -7,6 +7,11 @@ on:
     - cron: '41 3 * * *'
   workflow_dispatch:
 
+# It runs freshly released package code: no secrets, a read-only token, and no token left
+# in the checkout's git config.
+permissions:
+  contents: read
+
 defaults:
   run:
     working-directory: deepgym
@@ -17,6 +22,8 @@ jobs:
     runs-on: blacksmith-4vcpu-ubuntu-2404
     steps:
       - uses: useblacksmith/checkout@v1
+        with:
+          persist-credentials: false
 
       - uses: actions/setup-python@v5
         with:

@@ -17,6 +17,7 @@ from deepgym.models import (
     Action,
     Environment,
     MultiTurnEnvironment,
+    is_control,
 )
 from deepgym.verifier_template import split_future_imports
 
@@ -299,27 +300,36 @@ def _read_text_files(root: Path, prefix: str = '') -> dict[str, str]:
     return files
 
 
-def _read_reference_actions(env_dir: Path, variant: int = 0) -> list[Action] | None:
-    """Return the scripted reference episode in *env_dir*, or None if it has none.
+def parse_actions(text: str, variant: int = 0) -> list[Action]:
+    """Parse *text*, a scripted episode in the form of reference_actions.json.
 
     A computer-use env keeps one per variant: a list of episodes in variants.json order.
 
     Raises:
-        ValueError: If the file isn't a list of actions (or of episodes), or has no
+        ValueError: If *text* isn't a JSON list of actions (or of episodes), or has no
             episode for *variant*.
+    """
+    data = json.loads(text)
+    if isinstance(data, list) and data and all(isinstance(item, list) for item in data):
+        if not 0 <= variant < len(data):
+            raise ValueError(f'no episode for variant {variant}')
+        data = data[variant]
+    if not isinstance(data, list):
+        raise ValueError('expected a JSON list of actions')
+    return [Action.model_validate(item) for item in data]
+
+
+def _read_reference_actions(env_dir: Path, variant: int = 0) -> list[Action] | None:
+    """Return the scripted reference episode in *env_dir*, or None if it has none.
+
+    Raises:
+        ValueError: If the file doesn't parse (see :func:`parse_actions`).
     """
     path = env_dir / REFERENCE_ACTIONS
     if not path.is_file():
         return None
     try:
-        data = json.loads(path.read_text(encoding='utf-8'))
-        if isinstance(data, list) and data and all(isinstance(item, list) for item in data):
-            if not 0 <= variant < len(data):
-                raise ValueError(f'no episode for variant {variant}')
-            data = data[variant]
-        if not isinstance(data, list):
-            raise ValueError('expected a JSON list of actions')
-        return [Action.model_validate(item) for item in data]
+        return parse_actions(path.read_text(encoding='utf-8'), variant)
     except ValueError as exc:
         raise ValueError(f'{REFERENCE_ACTIONS}: {exc}') from exc
 
@@ -343,11 +353,11 @@ trusted configuration, so its tools' credentials and root commands are too."""
 def _load_computer_use_env(env_dir: Path, metadata: dict, variant: int) -> ComputerUseEnvironment:
     """Build a ComputerUseEnvironment from task.md, verifier.py, setup.sh, and app files.
 
-    Every other file in the directory, plus the sibling ``_shared/`` runtime files,
-    is written into the session work directory before setup runs. The verifier gets
-    ``_checks.py`` and the variant's ``PARAMS`` prepended rather than importing
-    anything from disk, so nothing the agent can reach is executed at scoring time.
-    ``$name`` placeholders in task.md are filled from the same params.
+    Every other file in the directory but its QA controls, plus the sibling ``_shared/``
+    runtime files, is written into the session work directory before setup runs. The
+    verifier gets ``_checks.py`` and the variant's ``PARAMS`` prepended rather than
+    importing anything from disk, so nothing the agent can reach is executed at scoring
+    time. ``$name`` placeholders in task.md are filled from the same params.
 
     Raises:
         ValueError: If *variant* is out of range.
@@ -363,7 +373,7 @@ def _load_computer_use_env(env_dir: Path, metadata: dict, variant: int) -> Compu
     files |= {
         rel: text
         for rel, text in _read_text_files(env_dir).items()
-        if rel not in _COMPUTER_USE_SPEC_FILES
+        if rel not in _COMPUTER_USE_SPEC_FILES and _agent_may_see(env_dir, rel)
     }
     setup_path = env_dir / 'setup.sh'
     return ComputerUseEnvironment(
@@ -395,10 +405,10 @@ _MULTI_TURN_SPEC_FILES = frozenset(
 def _load_multi_turn_env(env_dir: Path, settings: dict) -> MultiTurnEnvironment:
     """Build a MultiTurnEnvironment from task.md, verifier.py, setup.sh and starting files.
 
-    Every other file (minus support files) is written into the session work directory
-    before setup runs. The final verifier runs inline in that directory, where the agent
-    could rewrite anything it imported, so support files are prepended to it instead,
-    with every part's ``from __future__`` imports hoisted to the top.
+    Every other file (minus support files and QA controls) is written into the session
+    work directory before setup runs. The final verifier runs inline in that directory,
+    where the agent could rewrite anything it imported, so support files are prepended to
+    it instead, with every part's ``from __future__`` imports hoisted to the top.
     """
     support = _read_support_files(env_dir, settings.get('support_files', []))
     verifier = (env_dir / 'verifier.py').read_text(encoding='utf-8')
@@ -411,7 +421,9 @@ def _load_multi_turn_env(env_dir: Path, settings: dict) -> MultiTurnEnvironment:
         files={
             rel: text
             for rel, text in _read_text_files(env_dir).items()
-            if rel not in _MULTI_TURN_SPEC_FILES and (env_dir / rel).resolve() not in support_paths
+            if rel not in _MULTI_TURN_SPEC_FILES
+            and _agent_may_see(env_dir, rel)
+            and (env_dir / rel).resolve() not in support_paths
         },
         setup_script=setup_path.read_text(encoding='utf-8') if setup_path.exists() else '',
         final_verifier_code=''.join(future for future, _ in parts)
@@ -419,6 +431,28 @@ def _load_multi_turn_env(env_dir: Path, settings: dict) -> MultiTurnEnvironment:
         reference_actions=_read_reference_actions(env_dir),
         **{key: settings[key] for key in _SESSION_SETTINGS if key in settings},
     )
+
+
+def _refuse_linked_controls(env_dir: Path) -> None:
+    """Refuse a link in or as ``controls/``: controls are right answers, and a link could
+    hand one to the agent under another name (or loop).
+
+    Raises:
+        ValueError: Naming the link.
+    """
+    for top in env_dir.iterdir():
+        if is_control(top.name):
+            paths = [top] if top.is_symlink() else [top, *top.rglob('*')]
+            links = [path.relative_to(env_dir).as_posix() for path in paths if path.is_symlink()]
+            if links:
+                raise ValueError(f'{", ".join(links)} is a link; controls must be plain files')
+
+
+def _agent_may_see(env_dir: Path, rel: str) -> bool:
+    """Whether env file *rel* may reach the agent: not a QA control, by its own name or by
+    what it links to (a link to a must_pass control is a right answer)."""
+    target = (env_dir / rel).resolve().relative_to(env_dir.resolve()).as_posix()
+    return not is_control(rel) and not is_control(target)
 
 
 def load_environment_dir(env_dir: Path) -> Environment | MultiTurnEnvironment:
@@ -448,6 +482,7 @@ def _load_env_from_dir(
     Raises:
         ValueError: If required files are missing.
     """
+    _refuse_linked_controls(env_dir)
     if (env_dir / 'task.toml').is_file():
         if variant:
             raise ValueError(f'{env_dir.name} is a Harbor task; it has no variants')
@@ -575,6 +610,32 @@ def load_environment(name: str, variant: int = 0) -> Environment | MultiTurnEnvi
     Raises:
         ValueError: If environment not found or name looks like a path.
     """
+    found = _resolve(name)
+    if found is None:
+        from deepgym.benchmark_envs import SWEBenchProEnvironment, TerminalBenchEnvironment
+
+        factory_map = {
+            'swebench_pro': SWEBenchProEnvironment,
+            'terminal_bench_2': TerminalBenchEnvironment,
+        }
+        return factory_map[name]()
+    env_dir, entry = found
+    return _load_env_from_dir(env_dir, metadata=entry, variant=variant)
+
+
+def environment_dir(name: str) -> Path | None:
+    """The folder registered environment *name* loads from; None for one built in code.
+
+    Raises:
+        ValueError: As :func:`load_environment`.
+    """
+    found = _resolve(name)
+    return found[0] if found else None
+
+
+def _resolve(name: str) -> tuple[Path, dict | None] | None:
+    """Find registered environment *name*: its folder and registry entry, or None for one
+    built in code (``_SPECIAL_ENV_FACTORIES``). Raises as :func:`load_environment`."""
     normalized_name = name.replace('\\', '/')
 
     # Reject paths that escape the registry namespace.
@@ -596,13 +657,7 @@ def load_environment(name: str, variant: int = 0) -> Environment | MultiTurnEnvi
         )
 
     if name in _SPECIAL_ENV_FACTORIES:
-        from deepgym.benchmark_envs import SWEBenchProEnvironment, TerminalBenchEnvironment
-
-        factory_map = {
-            'swebench_pro': SWEBenchProEnvironment,
-            'terminal_bench_2': TerminalBenchEnvironment,
-        }
-        return factory_map[name]()
+        return None
 
     # 1. Check registry.json for a matching path.
     try:
@@ -618,7 +673,7 @@ def load_environment(name: str, variant: int = 0) -> Environment | MultiTurnEnvi
             entry = benchmark_entries[0]
             env_dir = _find_env_dir(entry['path'])
             if env_dir is not None:
-                return _load_env_from_dir(env_dir, metadata=entry, variant=variant)
+                return env_dir, entry
 
     # Benchmarks share task ids (humaneval vs humaneval_plus both have HumanEval_0),
     # so a fully qualified name beats loose token matches, and a name that still
@@ -636,13 +691,12 @@ def load_environment(name: str, variant: int = 0) -> Environment | MultiTurnEnvi
         options = sorted(entry_label(entry) for _, entry in candidates.values())
         raise ValueError(f'Environment name {name!r} is ambiguous; use one of: {options}')
     if candidates:
-        env_dir, entry = next(iter(candidates.values()))
-        return _load_env_from_dir(env_dir, metadata=entry, variant=variant)
+        return next(iter(candidates.values()))
 
     # 2. Direct directory lookup across all sources.
     env_dir = _find_env_dir(normalized_name)
     if env_dir is not None:
-        return _load_env_from_dir(env_dir, variant=variant)
+        return env_dir, None
 
     available = [e.get('path', e.get('name')) for e in registry]
     raise ValueError(f"Environment '{name}' not found. Available: {available}")

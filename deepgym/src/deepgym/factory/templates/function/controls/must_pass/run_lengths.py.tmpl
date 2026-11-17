@@ -1,0 +1,13 @@
+"""A right answer for $name written another way: the verifier must give it full marks.
+
+A verifier fitted to the reference's own approach, rather than to the task, fails it.
+"""
+
+
+def longest_run(values: list[int]) -> int:
+    """Each value's run is one longer than its neighbor's when it is greater, else 1."""
+    lengths = [1] * len(values)
+    for index in range(1, len(values)):
+        if values[index] > values[index - 1]:
+            lengths[index] = lengths[index - 1] + 1
+    return max(lengths, default=0)

@@ -1,0 +1,18 @@
+# expect: expected 1, got 3
+"""A known mistake for $name that the verifier must fail: equal neighbors extend a run.
+
+task.md says equal neighbors end a run, so [3, 3, 3] has runs of length 1, not 3. The
+first line names text the verifier's details must contain, so this control counts only
+when it fails for that reason. QA removes the line before the control runs.
+"""
+
+
+def longest_run(values: list[int]) -> int:
+    """Count a run while each value is at least the one before it (>= where > is right)."""
+    if not values:
+        return 0
+    best = current = 1
+    for previous, value in zip(values, values[1:]):
+        current = current + 1 if value >= previous else 1
+        best = max(best, current)
+    return best

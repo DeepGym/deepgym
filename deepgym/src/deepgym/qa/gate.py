@@ -8,7 +8,7 @@ from typing import TYPE_CHECKING
 from pydantic import BaseModel, ConfigDict, Field
 
 from deepgym.integrations.zai import ZaiChatClient
-from deepgym.models import REFERENCE_ACTIONS, MultiTurnEnvironment
+from deepgym.models import REFERENCE_ACTIONS, Environment, MultiTurnEnvironment
 from deepgym.qa.agents import do_everything, random_agent
 from deepgym.qa.checks import (
     earns_nothing,
@@ -18,10 +18,11 @@ from deepgym.qa.checks import (
     run_verdicts,
     single_turn_checks,
 )
+from deepgym.qa.controls import controls_check
 from deepgym.qa.difficulty import difficulty_check
 from deepgym.qa.mutants import mutation_check
 from deepgym.qa.report import DIFFICULTY_CHECK, MUTANTS_CHECK, SKIPPED, QACheck, QAReport
-from deepgym.registry import load_environment, load_environment_dir
+from deepgym.registry import environment_dir, load_environment, load_environment_dir
 
 if TYPE_CHECKING:
     from deepgym.core import DeepGym
@@ -58,7 +59,8 @@ def run_qa(target: str | Path, dg: DeepGym, options: QAOptions | None = None) ->
     bash runner. A Python env whose verifier rejects every attack as a malformed
     answer (a repo-patch env, which takes diffs) gets hack_resistant 'skip' too. A
     skipped check counts neither way and is listed in the report's ``not_run``. An
-    environment that fails to load gets a failed 'load' check.
+    environment that fails to load gets a failed 'load' check. An env folder that ships
+    controls/ also gets a controls check (see :mod:`deepgym.qa.controls`).
 
     Args:
         target: Registered environment name, e.g. 'coin_change', or a folder Path.
@@ -84,7 +86,8 @@ def run_qa(target: str | Path, dg: DeepGym, options: QAOptions | None = None) ->
             return _skipped(label, f'multi-turn env without {REFERENCE_ACTIONS} needs an agent')
         if env.desktop and dg.backend != 'daytona':
             return _skipped(label, 'computer-use env needs a desktop: run with --mode daytona')
-        return QAReport(environment=label, checks=_multi_turn_checks(env, dg, options))
+        checks = _multi_turn_checks(env, dg, options)
+        return QAReport(environment=label, checks=checks + _controls(target, env, dg, options))
     # The tests core.run_batch and core.run use to route a run to a benchmark runner. One
     # with a reference solution of its own (a Harbor task's solve.sh) is still checkable.
     reference = env.reference_solution
@@ -94,8 +97,8 @@ def run_qa(target: str | Path, dg: DeepGym, options: QAOptions | None = None) ->
         # A self-contained patch task (e.g. mimo_code) has no reference patch to check,
         # but its runner must still refuse diffs that add test infrastructure.
         if 'patch' in env.tags and not hasattr(env, 'prepare_batch_requests'):
-            check = hack_resistant(env, dg, ['patch_tampering'])
-            return QAReport(environment=label, checks=[check])
+            checks = [hack_resistant(env, dg, ['patch_tampering'])]
+            return QAReport(environment=label, checks=checks + _controls(target, env, dg, options))
         return _skipped(label, 'benchmark-backed env scores through its own runner')
 
     checks = single_turn_checks(env, reference, dg, options.reruns)
@@ -109,6 +112,7 @@ def run_qa(target: str | Path, dg: DeepGym, options: QAOptions | None = None) ->
     else:
         details = f'the attacks are Python solutions; this environment runs {env.language}'
         checks.append(QACheck(name='hack_resistant', status='skip', details=details))
+    checks += _controls(target, env, dg, options)
     if options.mutants:
         checks.append(mutation_check(env, (reference or '') if python else '', dg))
     if options.client is not None:
@@ -138,6 +142,18 @@ def _multi_turn_checks(env: MultiTurnEnvironment, dg: DeepGym, options: QAOption
         skipped[DIFFICULTY_CHECK] = 'the probe samples single-turn answers; this env needs an agent'
     checks += [QACheck(name=name, status='skip', details=why) for name, why in skipped.items()]
     return checks
+
+
+def _controls(
+    target: str | Path, env: Environment | MultiTurnEnvironment, dg: DeepGym, options: QAOptions
+) -> list[QACheck]:
+    """The controls check, run as often as the reference, if the env's folder ships any.
+
+    The folder is *target*, or for a registered env the one the registry loads it from.
+    """
+    folder = target if isinstance(target, Path) else environment_dir(target)
+    check = controls_check(env, folder, dg, 1 + options.reruns) if folder else None
+    return [check] if check else []
 
 
 def _skipped(name: str, reason: str) -> QAReport:

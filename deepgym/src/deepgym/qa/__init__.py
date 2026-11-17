@@ -2,11 +2,12 @@
 
 Checks that an environment is fit to train on: its reference solution scores
 1.0 every time, empty and stub solutions don't, the heuristic reward-hack attacks
-fail, (optionally) every mutant of the reference fails, and (optionally) a model's
-pass rate is neither 0 nor 1.
+fail, the env's own controls score as they say, (optionally) every mutant of the
+reference fails, and (optionally) a model's pass rate is neither 0 nor 1.
 
 Modules:
     checks: reference, determinism, empty/stub and reward-hack checks.
+    controls: the answers an env folder ships that its verifier must pass or fail.
     mutants: mutation testing of the verifier with AST mutants of the reference.
     difficulty: pass@1 / pass@k from an OpenAI-compatible model endpoint.
     report: QAReport model, per-environment JSON files, CLI table.

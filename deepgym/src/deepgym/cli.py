@@ -533,7 +533,7 @@ def _cmd_new(args: argparse.Namespace) -> None:
         print(f'  {file}')
     print(
         '\nIt is a working example. Rewrite task.md, the reference, expected() in '
-        f'verifier.py and variants.py for your task, then run:\n'
+        f'verifier.py, variants.py and any controls/ for your task, then run:\n'
         f'  deepgym check {path}\n'
         f'  deepgym qa {path} --mutants'
     )

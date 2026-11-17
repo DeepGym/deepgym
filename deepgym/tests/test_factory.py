@@ -36,7 +36,15 @@ from deepgym.registry import load_environment_dir
 from deepgym.verifier_lint import ADVISORY_NOTE, lint_verifier
 
 _FILES = {
-    'function': {'task.md', 'verifier.py', 'reference_solution.py', 'variants.py', 'metadata.json'},
+    'function': {
+        'task.md',
+        'verifier.py',
+        'reference_solution.py',
+        'variants.py',
+        'metadata.json',
+        'controls/must_fail/equal_neighbors.py',
+        'controls/must_pass/run_lengths.py',
+    },
     'script': {'task.md', 'verifier.py', 'reference_solution.py', 'variants.py', 'metadata.json'},
     'repo-patch': {
         'task.md',
@@ -535,7 +543,8 @@ def test_qa_approve_writes_a_read_only_record_that_check_verifies(
     data = json.loads(record.read_text(encoding='utf-8'))
     assert stat.S_IMODE(record.stat().st_mode) == 0o444
     assert (data['approved_by'], data['deepgym_version']) == ('Jane Doe', __version__)
-    assert set(data['hashes']) == _FILES['function']
+    controls = {'controls', 'controls/must_fail', 'controls/must_pass'}  # directories too
+    assert set(data['hashes']) == _FILES['function'] | controls
     assert (data['report']['environment'], data['report']['status']) == ('env', 'pass')
     assert data['lint'] == {'advisory': True, 'note': ADVISORY_NOTE, 'warnings': []}
     assert approval_check(path).status == 'pass'

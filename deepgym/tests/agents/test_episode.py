@@ -91,10 +91,21 @@ def test_any_agent_that_stopped_through_no_policy_fault_gets_no_verdict(reason: 
     assert not grade.has_verdict and grade.error_type == reason
 
 
-def test_a_run_the_harness_cut_short_is_graded_as_truncated() -> None:
+@pytest.mark.parametrize('reason', ['output_limit', 'turn_budget', 'time_budget', 'cost_budget'])
+def test_a_run_the_harness_cut_short_is_graded_as_truncated(reason: str) -> None:
     passes = 'import json\nprint(json.dumps({"score": 1.0, "passed": True}))'
     env = MultiTurnEnvironment(task='finish', final_verifier_code=passes)
 
-    _, grade = DeepGym(mode='local').run_episode(env, StoppedAgent('output_limit'), budget=Budget())
+    _, grade = DeepGym(mode='local').run_episode(env, StoppedAgent(reason), budget=Budget())
 
     assert grade.has_verdict and grade.truncated
+
+
+@pytest.mark.parametrize('reason', ['completed', 'error', 'refusal'])
+def test_a_run_that_stopped_on_its_own_is_not_truncated(reason: str) -> None:
+    passes = 'import json\nprint(json.dumps({"score": 1.0, "passed": True}))'
+    env = MultiTurnEnvironment(task='finish', final_verifier_code=passes)
+
+    _, grade = DeepGym(mode='local').run_episode(env, StoppedAgent(reason), budget=Budget())
+
+    assert grade.has_verdict and not grade.truncated

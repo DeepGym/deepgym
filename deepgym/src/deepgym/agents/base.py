@@ -29,9 +29,10 @@ TerminationReason = Literal[
 """Why an agent stopped. ``provider_error`` (the model or sandbox provider, or the network,
 failed) and ``setup_error`` (the harness never started the model: its CLI missing or
 refused) are nothing the policy did, so the episode gets no verdict (see
-:meth:`BudgetTracker.result`). Every other reason is scored, ``output_limit`` too: a CLI
-run stopped for printing more than the host keeps (see
-:data:`deepgym._cli_worker.OUTPUT_LIMIT_BYTES`), shown as cut short rather than failed."""
+:meth:`BudgetTracker.result`). Every other reason is scored. A run the harness cut short is
+graded with ``truncated`` set, so it shows as cut short rather than failed: a turn, time or
+cost budget ran out, or (``output_limit``) a CLI run printed more than the host keeps (see
+:data:`deepgym._cli_worker.OUTPUT_LIMIT_BYTES`)."""
 
 
 # Error types a provider names in an error body, mid-stream too (sent under the stream's 200).

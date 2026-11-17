@@ -1,5 +1,8 @@
 # Changelog
 
+## Unreleased
+
+- **Budget stops show as cut short:** an agent episode that ran out of its turn, time or cost budget is graded with `truncated` set, as an `output_limit` stop already was. The score is unchanged, so a run cut short can be told apart from one the model got wrong. `Budget()` still defaults to 30 turns and 300 seconds; pass `Budget(max_turns=None, max_seconds=None)` for no limit.
 ## 0.6.5 (2026-11-17)
 
 - **Daytona SDK stays below 1.0:** `deepgym[daytona]` and `deepgym[all]` require `daytona>=0.223,<1`. Daytona SDK 2.0 changes its API, and a fresh install would have pulled it (#116).

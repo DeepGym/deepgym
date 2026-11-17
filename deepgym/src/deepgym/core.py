@@ -237,7 +237,8 @@ class DeepGym:
             Tuple of (AgentResult, final_result) for a harness, or
             (trajectory, final_result) for a legacy callable. An agent that stopped through
             nothing the policy did (``provider_error``, ``setup_error``) gets no verdict;
-            one the harness cut short (``output_limit``) is graded with ``truncated`` set.
+            one the harness cut short (``output_limit``, or a turn, time or cost budget) is
+            graded with ``truncated`` set.
 
         Raises:
             ValueError: If a budget is supplied to a legacy callable.
@@ -252,7 +253,7 @@ class DeepGym:
                 if reason in ('provider_error', 'setup_error'):  # any Agent, not only ours
                     session.abandon(reason, result.error or reason)
                 grade = session.score()
-                if reason == 'output_limit':  # the harness cut the run short
+                if reason in ('output_limit', 'turn_budget', 'time_budget', 'cost_budget'):
                     grade = grade.model_copy(update={'truncated': True})
                 return result, grade
         if budget is not None:

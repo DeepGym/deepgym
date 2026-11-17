@@ -201,6 +201,12 @@ class TracedSession:
             self._check_open()
             self._session.abandon(error_type, detail)
 
+    def cut_short(self) -> None:
+        """Mark the episode as cut short, as :meth:`Session.cut_short`."""
+        with self._lock:
+            self._check_open()
+            self._session.cut_short()
+
     def finalize_cli(self) -> None:
         """Finalize CLI containment without inventing an action in the trace.
 

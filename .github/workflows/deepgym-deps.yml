@@ -30,9 +30,11 @@ jobs:
           python-version: '3.12'
 
       - name: Install every extra at its newest allowed release, pre-releases included
-        run: pip install --pre -e ".[dev,all,anthropic,openai]"
+        run: pip install --pre -e ".[dev,all,anthropic,openai,lm_eval]"
 
       - name: Within our pins
+        env:
+          DEEPGYM_REQUIRE_SDKS: '1'
         run: pytest -q tests/test_sdk_surface.py
 
       # A new major outside our pins (daytona 2.x, say): a warning that a pin will need
@@ -40,5 +42,5 @@ jobs:
       - name: Past our pins
         continue-on-error: true
         run: |
-          pip install --pre --upgrade daytona modal e2b anthropic openai
-          pytest -q tests/test_sdk_surface.py
+          pip install --pre --upgrade daytona modal e2b anthropic openai lm_eval
+          DEEPGYM_REQUIRE_SDKS=1 pytest -q tests/test_sdk_surface.py

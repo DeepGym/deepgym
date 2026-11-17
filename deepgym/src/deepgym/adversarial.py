@@ -65,19 +65,30 @@ def grading_fingerprint(env: Environment) -> str:
     return environment_sha256(env)[:16]
 
 
-def claude_reply(client: Any, model: str, prompt: str) -> str:
-    """Return Claude's whole reply to *prompt*, generated up to the model's own maximum.
+class ClaudeRequestError(DeepGymError):
+    """Raise when a Claude request fails; ``max_tokens`` is the output limit it was last sent
+    with (see :func:`claude_message`)."""
+
+    def __init__(self, message: str, max_tokens: int) -> None:
+        super().__init__(message)
+        self.max_tokens = max_tokens
+
+
+def claude_message(
+    client: Any, model: str, prompt: str, *, max_tokens: int = _CLAUDE_MAX_TOKENS, **request: Any
+) -> Any:
+    """Return Claude's whole final message for *prompt*, generated up to *max_tokens*.
 
     Streamed, as the SDK requires for long outputs, and taken only once message_stop
-    arrives: a stream that just ends leaves the SDK a partial message. A model whose
-    maximum is below Opus 5.5's is asked again at the maximum its error states.
+    arrives: a stream that just ends leaves the SDK a partial message. *max_tokens* starts
+    at Opus 5.5's maximum; a model whose maximum is below it is asked again at the maximum
+    its error states. *request* goes into the request as given (``system``, ``thinking``).
 
     Raises:
-        DeepGymError: If the request fails, the stream ended before message_stop, or the
-            reply stopped at the output limit (a list cut off either way isn't the model's
-            whole answer).
+        ClaudeRequestError: If the request fails.
+        DeepGymError: If the stream ended before message_stop, or the reply stopped at the
+            output limit (a list cut off either way isn't the model's whole answer).
     """
-    max_tokens = _CLAUDE_MAX_TOKENS
     try:
         while True:
             try:
@@ -85,6 +96,7 @@ def claude_reply(client: Any, model: str, prompt: str) -> str:
                     model=model,
                     max_tokens=max_tokens,
                     messages=[{'role': 'user', 'content': prompt}],
+                    **request,
                 ) as stream:
                     events = [event.type for event in stream]  # all of them: a whole message
                     message = stream.get_final_message()
@@ -95,11 +107,22 @@ def claude_reply(client: Any, model: str, prompt: str) -> str:
                     raise
                 max_tokens = int(stated.group(1))
     except Exception as exc:
-        raise DeepGymError(f'Anthropic API call failed: {type(exc).__name__}: {exc}') from exc
+        failure = f'Anthropic API call failed: {type(exc).__name__}: {exc}'
+        raise ClaudeRequestError(failure, max_tokens) from exc
     if 'message_stop' not in events:
         raise DeepGymError(f'The {model} reply stream ended before it completed')
     if message.stop_reason == 'max_tokens':
         raise DeepGymError(f'{model} stopped at its {max_tokens}-token output limit mid-reply')
+    return message
+
+
+def claude_reply(client: Any, model: str, prompt: str) -> str:
+    """Return the text of Claude's whole reply to *prompt* (see :func:`claude_message`).
+
+    Raises:
+        DeepGymError: As :func:`claude_message` does.
+    """
+    message = claude_message(client, model, prompt)
     return ''.join(block.text for block in message.content if block.type == 'text')
 
 

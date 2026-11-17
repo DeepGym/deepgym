@@ -9,7 +9,7 @@ source of truth.
 from __future__ import annotations
 
 import os
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from pathlib import Path
 from typing import Any, Literal
 
@@ -98,25 +98,26 @@ class ZaiChatClient:
         messages: Sequence[dict[str, str]],
         *,
         max_tokens: int | None = None,
-        temperature: float = 0.2,
+        temperature: float | None = 0.2,
         thinking: str | None = 'enabled',
+        settings: Mapping[str, object] | None = None,
     ) -> Completion:
         """Return the assistant's reply to a chat-completions request, with its finish reason.
 
         No output limit is sent unless *max_tokens* is given, so the model may answer up to
         its own maximum; check ``Completion.whole`` before scoring the reply as the model's.
         Pass ``thinking=None`` to omit the Z.ai-specific field for other
-        OpenAI-compatible endpoints.
+        OpenAI-compatible endpoints, and ``temperature=None`` to send none (the endpoint's
+        default). *settings* go into the request body as given (``reasoning_effort``, say).
         """
-        payload: dict[str, Any] = {
-            'model': self.model,
-            'messages': list(messages),
-            'temperature': temperature,
-        }
+        payload: dict[str, Any] = {'model': self.model, 'messages': list(messages)}
+        if temperature is not None:
+            payload['temperature'] = temperature
         if max_tokens is not None:
             payload['max_tokens'] = max_tokens
         if thinking is not None:
             payload['thinking'] = {'type': thinking}
+        payload.update(settings or {})
         headers = {
             'Authorization': f'Bearer {self._api_key}',
             'Content-Type': 'application/json',

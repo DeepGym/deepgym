@@ -8,7 +8,7 @@ from pathlib import Path
 import pytest
 
 from deepgym import Action, DeepGym, MultiTurnEnvironment
-from deepgym.agents.base import AgentResult, Budget
+from deepgym.agents.base import AgentResult, Budget, BudgetTracker
 from deepgym.models import Observation, Trajectory
 from deepgym.session import Session
 
@@ -109,3 +109,34 @@ def test_a_run_that_stopped_on_its_own_is_not_truncated(reason: str) -> None:
     _, grade = DeepGym(mode='local').run_episode(env, StoppedAgent(reason), budget=Budget())
 
     assert grade.has_verdict and not grade.truncated
+
+
+class OutOfBudgetAgent:
+    """Stops through the shared tracker, as the built-in agents do."""
+
+    def run(
+        self, session: Session, initial: Observation, *, task: str, budget: Budget
+    ) -> AgentResult:
+        session.step(Action(action_type='done'))
+        return BudgetTracker(budget).result(session, 'cost_budget')
+
+
+@pytest.mark.parametrize('traced', [False, True])
+def test_a_session_scored_by_its_caller_keeps_the_cut(
+    traced: bool, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Scoring the session yourself, outside run_episode, still shows the budget stop."""
+    from deepgym.traces import AgentMeta, load_trace
+
+    monkeypatch.setenv('DEEPGYM_TRACES_DIR', str(tmp_path))
+    passes = 'import json\nprint(json.dumps({"score": 1.0, "passed": True}))'
+    env = MultiTurnEnvironment(task='finish', final_verifier_code=passes)
+    dg = DeepGym(mode='local')
+
+    with dg.trace(env, AgentMeta(name='t')) if traced else dg.session(env) as session:
+        OutOfBudgetAgent().run(session, session.start(), task=env.task, budget=Budget())
+        grade = session.score()
+
+    assert grade.has_verdict and grade.truncated
+    if traced:
+        assert load_trace(session.path).result.truncated

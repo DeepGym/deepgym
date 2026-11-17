@@ -337,6 +337,9 @@ class RecordingSession:
         self.abandoned.append((error_type, detail))
         self.done = True
 
+    def cut_short(self) -> None:
+        self.truncated = True
+
     def finalize_cli(self) -> None:
         self.finalizations += 1
         self.done = True

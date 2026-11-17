@@ -107,6 +107,9 @@ class FakeSession:
         self.abandoned.append((error_type, detail))
         self.done = True
 
+    def cut_short(self) -> None:
+        self.truncated = True
+
     def step(self, action: Action, *, timeout=None):
         assert timeout > 0
         self.trajectory.steps.append((self.observation, action))

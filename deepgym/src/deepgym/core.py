@@ -243,7 +243,7 @@ class DeepGym:
         Raises:
             ValueError: If a budget is supplied to a legacy callable.
         """
-        from deepgym.agents.base import Agent, Budget
+        from deepgym.agents.base import CUT_SHORT, Agent, Budget
 
         if isinstance(agent, Agent):
             with self.session(env) as session:
@@ -252,10 +252,9 @@ class DeepGym:
                 reason = result.termination_reason
                 if reason in ('provider_error', 'setup_error'):  # any Agent, not only ours
                     session.abandon(reason, result.error or reason)
-                grade = session.score()
-                if reason in ('output_limit', 'turn_budget', 'time_budget', 'cost_budget'):
-                    grade = grade.model_copy(update={'truncated': True})
-                return result, grade
+                elif reason in CUT_SHORT:
+                    session.cut_short()
+                return result, session.score()
         if budget is not None:
             raise ValueError('budget requires an Agent harness with a run method')
         return run_episode(self.session(env), agent)

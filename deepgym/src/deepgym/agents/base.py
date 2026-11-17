@@ -34,6 +34,10 @@ graded with ``truncated`` set, so it shows as cut short rather than failed: a tu
 cost budget ran out, or (``output_limit``) a CLI run printed more than the host keeps (see
 :data:`deepgym._cli_worker.OUTPUT_LIMIT_BYTES`)."""
 
+CUT_SHORT: frozenset[TerminationReason] = frozenset(
+    {'turn_budget', 'time_budget', 'cost_budget', 'output_limit'}
+)
+"""Reasons the harness cut a run short; it is graded with ``truncated`` set."""
 
 # Error types a provider names in an error body, mid-stream too (sent under the stream's 200).
 _PROVIDER_ERROR_TYPES = frozenset(
@@ -234,6 +238,8 @@ class BudgetTracker:
         """
         if reason in ('provider_error', 'setup_error'):
             session.abandon(reason, error or reason)
+        elif reason in CUT_SHORT:
+            session.cut_short()
         return AgentResult(
             trajectory=session.trajectory.model_copy(deep=True),
             usage=self.usage,

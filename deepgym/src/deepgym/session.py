@@ -1017,6 +1017,7 @@ class Session:
         self._step_verdict: dict[str, object] | None = None
         # The episode's result, once a failed step fixed it (see step()).
         self._failed_result: RunResult | None = None
+        self._cut_short = False
         # The session's start, and the seconds spent applying the agent's actions since.
         self._opened = time.monotonic()
         self._acting_s = 0.0
@@ -1308,6 +1309,12 @@ class Session:
                 )
             self._done = True
 
+    def cut_short(self) -> None:
+        """Mark the episode as cut short by its harness (a turn, time or cost budget or the
+        output limit ran out): :meth:`score` still grades it, with ``truncated`` set."""
+        with self._lock:
+            self._cut_short = True
+
     def score(self) -> RunResult:
         """Run the final verifier against the current state.
 
@@ -1389,6 +1396,8 @@ class Session:
         """*result*, with how the agent's actions were isolated: a :class:`LocalBackend`
         runs them as plain host processes (``none``), whatever its verifier isolates. A
         sandbox provider's result keeps None: there they run as a separate user."""
+        if self._cut_short:
+            result = result.model_copy(update={'truncated': True})
         if isinstance(self._backend, LocalBackend):
             return result.model_copy(update={'isolation': 'none'})
         return result

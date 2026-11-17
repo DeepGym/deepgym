@@ -307,7 +307,7 @@ class RubricReward:
         self.task = task
         self.rubric = rubric
         self.judge = judge
-        self._max_parallel = max_parallel
+        self.max_parallel = max_parallel
         self._masked = MaskedRate('RubricReward')
 
     def __call__(self, outputs: Sequence[Completion]) -> list[float | None]:
@@ -317,7 +317,7 @@ class RubricReward:
     def call_with_details(self, outputs: Sequence[Completion]) -> BatchResult:
         """Grade each output's last assistant turn (see :meth:`grade`), judge calls in parallel."""
         start = time.perf_counter()
-        with ThreadPoolExecutor(max_workers=self._max_parallel) as pool:
+        with ThreadPoolExecutor(max_workers=self.max_parallel) as pool:
             results = list(pool.map(self.grade, map(_answer_text, outputs)))
         batch = build_batch_result(results, (time.perf_counter() - start) * 1000)
         self._masked.record_batch(batch)

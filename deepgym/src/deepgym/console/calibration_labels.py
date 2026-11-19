@@ -7,7 +7,7 @@
 
 from __future__ import annotations
 
-from collections import defaultdict
+from collections import Counter, defaultdict
 from collections.abc import Iterable, Sequence
 from typing import Literal
 
@@ -53,9 +53,12 @@ class LabeledRuns(BaseModel):
 
     answers: tuple[LabeledAnswer, ...]
     skipped: tuple[Skipped, ...]
+    rubric_hashes: dict[str, int]
+    """Each rubric hash recorded on the verdicts behind ``answers``, with how many: more
+    than one means the labels span rubric versions."""
     no_rubric_hash: int
-    """Expert verdicts read (on runs neither excluded nor missing) that record no rubric
-    hash: kept, though they can't be checked against ``rubric_sha256``."""
+    """Verdicts behind ``answers`` that record no rubric hash, so can't be checked against
+    ``rubric_sha256``. Only verdicts in an expert label that made it into an answer count."""
 
 
 def labeled_answers(
@@ -70,7 +73,10 @@ def labeled_answers(
     author) gives one :class:`~deepgym.rubric_calibration.ExpertLabel`, blind only when
     every one of their verdicts on the run is labeled blind (unrecorded counts as not
     blind). With *rubric_sha256*, verdicts recorded against another rubric hash are left
-    out; those recording none are kept and counted in ``no_rubric_hash``.
+    out; those recording none are kept. Either way the result counts the rubric hashes on
+    the verdicts used (``rubric_hashes``, ``no_rubric_hash``). Check ids are positions in
+    the rubric, so editing a rubric renumbers them: a ``c2`` labeled before the edit may
+    be another requirement now.
 
     The label the judge is measured against is the experts' majority, on ``passed`` and on
     each check, blind only when every expert's is. On a tie ``passed`` is None, or the
@@ -80,7 +86,8 @@ def labeled_answers(
     Args:
         labels: The label store.
         runs: The run store holding the runs' solutions.
-        run_ids: The runs, in the order the answers should take. For the runs a label
+        run_ids: The runs, in the order the answers should take; a run given twice is
+            read once. For the runs a label
             query matches, pass ``dict.fromkeys(label.target.id for label in
             labels.page(query, 0, None).labels)`` with ``target_kind='run'`` in the query.
         rubric_sha256: The hash of the task and rubric being calibrated
@@ -91,8 +98,8 @@ def labeled_answers(
     """
     answers: list[LabeledAnswer] = []
     skipped: list[Skipped] = []
-    no_rubric_hash = 0
-    for run_id in run_ids:
+    hashes: Counter[str | None] = Counter()
+    for run_id in dict.fromkeys(run_ids):
         current = labels.current('run', run_id)
         if why := [label.comment or '' for label in current if label.type == 'invalidate']:
             skipped.append(Skipped(run_id=run_id, reason='excluded', detail='; '.join(why)))
@@ -101,27 +108,31 @@ def labeled_answers(
         if run is None:
             skipped.append(Skipped(run_id=run_id, reason='no_run', detail='no such run'))
             continue
-        experts, unhashed = _experts(run_id, current, rubric_sha256, skipped)
-        no_rubric_hash += unhashed
+        experts, used = _experts(run_id, current, rubric_sha256, skipped)
         if not experts:
             detail = 'no expert passed or failed it; the run is left out'
             skipped.append(Skipped(run_id=run_id, reason='no_passed', detail=detail))
             continue
         answers.append(_majority(run_id, run.solution, experts, skipped))
+        hashes.update(used)
     return LabeledRuns(
-        answers=tuple(answers), skipped=tuple(skipped), no_rubric_hash=no_rubric_hash
+        answers=tuple(answers),
+        skipped=tuple(skipped),
+        rubric_hashes={digest: hashes[digest] for digest in sorted(filter(None, hashes))},
+        no_rubric_hash=hashes[None],
     )
 
 
 def _experts(
     run_id: str, current: Sequence[Label], rubric_sha256: str | None, skipped: list[Skipped]
-) -> tuple[dict[str, ExpertLabel], int]:
-    """Return each expert's label from their current verdicts on the run, and how many of
-    those verdicts record no rubric hash, noting in *skipped* what is left out."""
-    values: defaultdict[str, defaultdict[str, set[bool]]] = defaultdict(lambda: defaultdict(set))
+) -> tuple[dict[str, ExpertLabel], Counter[str | None]]:
+    """Return each expert's label from their current verdicts on the run, and the rubric
+    hash (or None) of each verdict in those labels, noting in *skipped* what is left out."""
+    given: defaultdict[str, defaultdict[str, list[tuple[bool, str | None]]]] = defaultdict(
+        lambda: defaultdict(list)
+    )
     blind: dict[str, bool] = {}
     other_rubric: defaultdict[tuple[str, str], list[str]] = defaultdict(list)
-    unhashed = 0
     for label in current:
         name, digest = label.name, label.rubric_sha256
         if label.source != 'human' or name is None or not is_verdict(name):
@@ -129,30 +140,32 @@ def _experts(
         if rubric_sha256 is not None and digest is not None and digest != rubric_sha256:
             other_rubric[label.author, digest].append(name)
             continue
-        unhashed += digest is None
-        values[label.author][name].add(label.value is True)
+        given[label.author][name].append((label.value is True, digest))
         blind[label.author] = blind.get(label.author, True) and label.blind is True
     for (author, digest), names in other_rubric.items():
         detail = f'{author} {", ".join(names)} labeled against {digest}'
         skipped.append(Skipped(run_id=run_id, reason='rubric_mismatch', detail=detail))
     experts: dict[str, ExpertLabel] = {}
-    for author, marks in values.items():
-        for name in (name for name, given in marks.items() if len(given) > 1):
+    used: Counter[str | None] = Counter()
+    for author, records in given.items():
+        marks = {name: {value for value, _ in each} for name, each in records.items()}
+        for name in (name for name, values in marks.items() if len(values) > 1):
             left_out = f'{author} is left out of the run'
             if name != PASS_MARK:
                 left_out = f"it is left out of {author}'s label"
             detail = f'{author} marks {name} both true and false; {left_out}'
             skipped.append(Skipped(run_id=run_id, reason='conflicting_author', detail=detail))
-        checks = {name: next(iter(given)) for name, given in marks.items() if len(given) == 1}
+        checks = {name: next(iter(values)) for name, values in marks.items() if len(values) == 1}
         if len(marks.get(PASS_MARK, ())) > 1:  # contradicts its own pass mark
             continue
         if PASS_MARK not in checks:
             detail = f'{author} gave check verdicts but no passed; left out'
             skipped.append(Skipped(run_id=run_id, reason='no_passed', detail=detail))
             continue
+        used.update(digest for name in checks for _, digest in records[name])
         passed = checks.pop(PASS_MARK)
         experts[author] = ExpertLabel(passed=passed, blind=blind[author], checks=checks)
-    return experts, unhashed
+    return experts, used
 
 
 def _majority(

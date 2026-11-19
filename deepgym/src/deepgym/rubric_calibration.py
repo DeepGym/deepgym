@@ -182,12 +182,13 @@ def macro_f1(tables: Iterable[Confusion]) -> float | None:
 
 def pooled_kappa(tables: Iterable[Confusion]) -> float | None:
     """One kappa over several tables, each keeping its own chance agreement: the summed
-    agreement less the summed agreement chance gives, over the summed pairs less that
-    (pooled kappa, De Vries et al. 2008).
+    agreement less the summed agreement chance gives, over the summed pairs less that.
 
     A table weighs by its pairs, so one sharing a single answer barely moves it, and one
-    table alone gives its own ``kappa``. The order of each table's two sides doesn't matter.
-    None when nothing was compared, or chance explains all the agreement in every table.
+    table alone gives its own ``kappa``. With tables of one size this is the pooled kappa
+    of De Vries et al. (2008), which weighs tables equally; with sizes that differ it is
+    not. The order of each table's two sides doesn't matter. None when nothing was
+    compared, or chance explains all the agreement in every table.
     """
     agreed = chance = pairs = Fraction(0)
     for table in tables:
@@ -319,6 +320,12 @@ class BarCheck(BaseModel):
     reasons: tuple[str, ...]
 
 
+def _refuse_repeated(ids: Iterable[str]) -> None:
+    """Raise ValueError naming each id given more than once."""
+    if repeated := sorted(i for i, n in Counter(ids).items() if n > 1):
+        raise ValueError(f'answer ids must be unique; given more than once: {repeated}')
+
+
 def _passed(pairs: dict[str, dict[str, PairAgreement]]) -> list[Confusion]:
     """The ``passed`` table of each pair in *pairs*."""
     return [pair.passed for row in pairs.values() for pair in row.values()]
@@ -330,10 +337,11 @@ class HumanBaseline(BaseModel):
     assisted) that have a judged run.
 
     Each pair of experts is compared on the answers both labeled, and the judge against each
-    of the two on the judged runs of those answers. The pairs are pooled
-    (:func:`pooled_kappa`), so each comparison counts once: a pair sharing one answer
-    barely moves the numbers, and an answer with fewer judged runs weighs less on the
-    judge's side.
+    of the two on the judged runs of those answers. Each side's tables are pooled
+    (:func:`pooled_kappa`), weighing each by its comparisons, so a pair sharing one answer
+    barely moves the numbers. On the experts' side an answer counts once per pair that
+    labeled it; on the judge's side each judged run counts once per expert per pair, so an
+    answer with fewer judged runs weighs less.
     """
 
     model_config = ConfigDict(frozen=True)
@@ -404,6 +412,12 @@ class CalibrationReport(BaseModel):
     answers: tuple[AnswerRow, ...]
 
     @model_validator(mode='after')
+    def _answer_ids_are_unique(self) -> CalibrationReport:
+        """Each answer is in the report once."""
+        _refuse_repeated(row.id for row in self.answers)
+        return self
+
+    @model_validator(mode='after')
     def _verdicts_cover_every_check(self) -> CalibrationReport:
         """A run's check verdicts, when it has them, name exactly the report's checks."""
         expected = set(self.check_ids)
@@ -448,6 +462,13 @@ class CalibrationReport(BaseModel):
                 str(run.error_type) for row in self.answers for run in row.runs if run.score is None
             )
         )
+
+    @computed_field  # type: ignore[prop-decorator]
+    @property
+    def tied_answers(self) -> int:
+        """Answers whose experts tie on ``passed``, left out of ``overall``, ``blind``,
+        ``assisted`` and the ``min_kappa`` bar."""
+        return sum(row.passed is None for row in self.answers)
 
     @computed_field  # type: ignore[prop-decorator]
     @property
@@ -572,6 +593,7 @@ class CalibrationReport(BaseModel):
         *,
         min_kappa: float | None = None,
         max_kappa_gap: float | None = None,
+        min_baseline_answers: int | None = None,
     ) -> BarCheck:
         """Whether the overall TPR and TNR reach *min_tpr* and *min_tnr*, with no more than
         *max_no_verdict* of all runs left without a verdict (by default the share above
@@ -582,16 +604,27 @@ class CalibrationReport(BaseModel):
         *max_kappa_gap*, how far the judge's pooled kappa with the experts may fall below
         the experts' with each other, from blind labels only (``blind_baseline``), within
         :data:`KAPPA_GAP_TOLERANCE`. An undefined kappa fails its bar, and so does a
-        missing baseline.
+        missing baseline. The gap bar also fails when the baseline is uninformative (the
+        experts' kappa is undefined or at most 0: no agreement beyond chance to come close
+        to) and, with *min_baseline_answers*, when it has fewer answers than that.
+
+        Tied answers (``tied_answers``) are left out of TPR, TNR and kappa, and their
+        reasons say how many.
 
         Raises:
-            ValueError: When a bar isn't a finite number.
+            ValueError: When a bar isn't a finite number, or *min_baseline_answers* is
+                below 1 or given without *max_kappa_gap*.
         """
         given = [bar for bar in (min_kappa, max_kappa_gap) if bar is not None]
         if not all(math.isfinite(bar) for bar in (min_tpr, min_tnr, max_no_verdict, *given)):
             raise ValueError(
                 f'bars must be finite numbers, got {min_tpr=}, {min_tnr=}, {max_no_verdict=}, '
                 f'{min_kappa=}, {max_kappa_gap=}'
+            )
+        if min_baseline_answers is not None and (max_kappa_gap is None or min_baseline_answers < 1):
+            raise ValueError(
+                'min_baseline_answers is a count of at least 1 for the max_kappa_gap bar, got '
+                f'{min_baseline_answers=}, {max_kappa_gap=}'
             )
         overall = self.overall
         total_runs = self.judged_runs + self.no_verdict_runs
@@ -602,6 +635,7 @@ class CalibrationReport(BaseModel):
             + ('is within ' if passed else 'is above ')
             + str(max_no_verdict)
         ]
+        ties = self._ties_left_out()
         for name, hits, total, bar, labeled in (
             ('TPR', overall.tp, overall.tp + overall.fn, min_tpr, 'passed'),
             ('TNR', overall.tn, overall.tn + overall.fp, min_tnr, 'failed'),
@@ -609,41 +643,47 @@ class CalibrationReport(BaseModel):
             if not total:
                 passed = False
                 reasons.append(
-                    f'{name} is missing: no judged run of an answer the expert {labeled}'
+                    f'{name} is missing: no judged run of an answer the expert {labeled}{ties}'
                 )
             elif hits / total < bar:
                 passed = False
-                reasons.append(f'{name} {hits}/{total} ({hits / total:.3f}) is below {bar}')
+                reasons.append(f'{name} {hits}/{total} ({hits / total:.3f}) is below {bar}{ties}')
             else:
-                reasons.append(f'{name} {hits}/{total} ({hits / total:.3f}) reaches {bar}')
+                reasons.append(f'{name} {hits}/{total} ({hits / total:.3f}) reaches {bar}{ties}')
         optional = []
         if min_kappa is not None:
             optional.append(self._kappa_bar(min_kappa))
         if max_kappa_gap is not None:
-            optional.append(self._gap_bar(max_kappa_gap))
+            optional.append(self._gap_bar(max_kappa_gap, min_baseline_answers))
         for reached, reason in optional:
             passed = passed and reached
             reasons.append(reason)
         return BarCheck(passed=passed, reasons=tuple(reasons))
 
+    def _ties_left_out(self) -> str:
+        """A note naming the tied answers left out, for a bar's reason; empty without any."""
+        tied = self.tied_answers
+        return f'; {tied} tied answer{"" if tied == 1 else "s"} left out' if tied else ''
+
     def _kappa_bar(self, min_kappa: float) -> tuple[bool, str]:
         """Whether the overall kappa reaches *min_kappa*, and why."""
-        overall = self.overall
+        overall, ties = self.overall, self._ties_left_out()
         if overall.kappa is None:
             why = (
                 'the judge and the experts made one and the same call on every judged run'
                 if _size(overall)
                 else 'no judged run of an answer with an expert pass mark'
             )
-            return False, f'kappa is undefined: {why}'
+            return False, f'kappa is undefined: {why}{ties}'
         over = f'over {_size(overall)} judged runs'
         if overall.kappa < min_kappa:
-            return False, f'kappa {overall.kappa:.3f} {over} is below {min_kappa}'
-        return True, f'kappa {overall.kappa:.3f} {over} reaches {min_kappa}'
+            return False, f'kappa {overall.kappa:.3f} {over} is below {min_kappa}{ties}'
+        return True, f'kappa {overall.kappa:.3f} {over} reaches {min_kappa}{ties}'
 
-    def _gap_bar(self, max_gap: float) -> tuple[bool, str]:
+    def _gap_bar(self, max_gap: float, min_answers: int | None) -> tuple[bool, str]:
         """Whether the judge's pooled kappa with the blind experts is within *max_gap* below
-        the experts' with each other, and why."""
+        the experts' with each other, on a baseline of at least *min_answers* answers where
+        the experts agree beyond chance, and why."""
         baseline = self.blind_baseline
         if baseline is None:
             return False, (
@@ -655,10 +695,16 @@ class CalibrationReport(BaseModel):
             f'{baseline.judge_comparisons} judged-run comparisons; experts '
             f'{baseline.expert_comparisons} comparisons on {baseline.answers} answers'
         )
-        if experts is None or judge is None:
+        if min_answers is not None and baseline.answers < min_answers:
             return False, (
-                f'blind baseline kappa is undefined (experts {experts}, judge {judge}; '
-                f'{counts}): chance explains all the agreement in every pair compared'
+                f'blind baseline has {baseline.answers} answers, fewer than {min_answers} '
+                f'({counts})'
+            )
+        if experts is None or judge is None or experts <= 0:  # judge is None only if experts is
+            kappa = 'is undefined' if experts is None else f'{experts:.3f} is not above 0'
+            return False, (
+                f"blind baseline is uninformative: the experts' kappa {kappa}, no agreement "
+                f'beyond chance to come close to ({counts})'
             )
         if judge < experts - max_gap - KAPPA_GAP_TOLERANCE:
             return False, (
@@ -725,10 +771,8 @@ def calibrate(
         raise TypeError(f'built_from ids must be strings, got {not_ids!r}')
     fields = set(LabeledAnswer.model_fields)
     answers = [LabeledAnswer.model_validate(a.model_dump(include=fields)) for a in answers]
-    ids = Counter(answer.id for answer in answers)
-    if repeated := sorted(i for i, n in ids.items() if n > 1):
-        raise ValueError(f'answer ids must be unique; given more than once: {repeated}')
-    if used := sorted(ids.keys() & built):
+    _refuse_repeated(answer.id for answer in answers)
+    if used := sorted({answer.id for answer in answers} & built):
         raise ValueError(
             f'answers used to write the rubric can not validate it; hold them out: {used}'
         )

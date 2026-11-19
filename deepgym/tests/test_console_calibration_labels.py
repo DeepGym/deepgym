@@ -87,7 +87,8 @@ def test_one_experts_verdicts_on_a_run_become_its_label(db: Path) -> None:
         ),
     )
     assert result.skipped == ()
-    assert result.no_rubric_hash == 3  # ana's verdicts; the judge's label isn't read
+    assert (result.rubric_hashes, result.no_rubric_hash) == ({}, 3)  # the judge's isn't read
+    assert _read(db, [run_id, run_id]) == result  # a run given twice is read once
 
 
 def test_corrections_count_and_retracted_labels_do_not(db: Path) -> None:
@@ -162,6 +163,7 @@ def test_only_the_verdicts_an_expert_contradicts_are_left_out(db: Path) -> None:
 
     (answer,) = result.answers
     assert answer.experts == {'bo': ExpertLabel(passed=True, blind=True, checks={'c2': True})}
+    assert result.no_rubric_hash == 3  # bo's two passed and c2; not ana's, nor bo's c1
     assert result.skipped == (
         Skipped(
             run_id=run_id,
@@ -210,10 +212,14 @@ def test_verdicts_against_another_rubric_are_left_out(db: Path) -> None:
             detail='bo gave check verdicts but no passed; left out',
         ),
     )
-    assert checked.no_rubric_hash == 2
+    # bo's c1 records no hash but bo is left out, so only cy's passed counts
+    assert (checked.rubric_hashes, checked.no_rubric_hash) == ({THIS_RUBRIC: 1}, 1)
     unchecked = _read(db, [run_id])
     assert list(unchecked.answers[0].experts) == ['ana', 'bo', 'cy']
     assert unchecked.skipped == ()
+    # Without a filter the mix of rubric versions still shows.
+    assert unchecked.rubric_hashes == {THIS_RUBRIC: 1, OLD_RUBRIC: 2}
+    assert unchecked.no_rubric_hash == 2
 
 
 def test_the_majority_is_the_judges_reference_and_ties_are_reported(db: Path) -> None:
@@ -275,7 +281,7 @@ def test_stored_labels_calibrate_a_judge_with_a_human_baseline(db: Path) -> None
 
     report = calibrate(reward_fn, labeled.answers, judge_id='stub', built_from=[])
 
-    assert labeled.no_rubric_hash == 0
+    assert (labeled.rubric_hashes, labeled.no_rubric_hash) == ({THIS_RUBRIC: 4}, 0)
     assert report.overall == Confusion(tp=3, fn=0, tn=0, fp=0)  # the tie is left out
     baseline = report.blind_baseline
     assert baseline is not None

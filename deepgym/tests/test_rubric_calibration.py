@@ -738,9 +738,9 @@ def test_a_gap_at_the_bar_passes_within_float_rounding() -> None:
                 )
             ],
             {'max_kappa_gap': 0.1},
-            'blind baseline kappa is undefined (experts None, judge None; 6 judged-run '
-            'comparisons; experts 1 comparisons on 1 answers): chance explains all the '
-            'agreement in every pair compared',
+            "blind baseline is uninformative: the experts' kappa is undefined, no agreement "
+            'beyond chance to come close to (6 judged-run comparisons; experts 1 comparisons '
+            'on 1 answers)',
         ),
     ],
 )
@@ -753,12 +753,87 @@ def test_an_undefined_kappa_or_missing_baseline_fails_its_bar(
     assert bar.reasons[-1] == reason
 
 
-@pytest.mark.parametrize('kwargs', [{'min_kappa': float('nan')}, {'max_kappa_gap': float('inf')}])
-def test_a_kappa_bar_that_is_not_a_finite_number_is_refused(kwargs: dict[str, float]) -> None:
+@pytest.mark.parametrize(
+    ('kwargs', 'message'),
+    [
+        ({'min_kappa': float('nan')}, 'bars must be finite numbers'),
+        ({'max_kappa_gap': float('inf')}, 'bars must be finite numbers'),
+        ({'min_baseline_answers': 2}, 'for the max_kappa_gap bar'),
+        ({'max_kappa_gap': 0.1, 'min_baseline_answers': 0}, 'a count of at least 1'),
+    ],
+)
+def test_a_bad_kappa_bar_is_refused(kwargs: dict[str, float], message: str) -> None:
     report = run(evidence_judge, labeled())
 
-    with pytest.raises(ValueError, match='bars must be finite numbers'):
+    with pytest.raises(ValueError, match=message):
         report.meets(0.9, 0.9, **kwargs)
+
+
+def test_experts_who_agree_no_better_than_chance_make_no_baseline() -> None:
+    """ana and bo give opposite calls on both answers: kappa -1."""
+    answers = [
+        LabeledAnswer(
+            id=key,
+            answer=TEXTS[key],
+            passed=None,
+            blind=True,
+            experts={'ana': expert(key == 'good'), 'bo': expert(key != 'good')},
+        )
+        for key in ('good', 'wrong')
+    ]
+    report = run(evidence_judge, answers)
+
+    bar = report.meets(0.0, 0.0, max_no_verdict=1.0, max_kappa_gap=1.0)
+
+    assert not bar.passed
+    assert bar.reasons[-1] == (
+        "blind baseline is uninformative: the experts' kappa -1.000 is not above 0, no "
+        'agreement beyond chance to come close to (12 judged-run comparisons; experts 2 '
+        'comparisons on 2 answers)'
+    )
+
+
+def test_a_baseline_with_too_few_answers_fails_the_gap_bar() -> None:
+    report = run(evidence_judge, _two_experts())  # 3 baseline answers
+
+    assert report.meets(1.0, 1.0, max_kappa_gap=0.0, min_baseline_answers=3).passed
+    bar = report.meets(1.0, 1.0, max_kappa_gap=0.0, min_baseline_answers=4)
+    assert not bar.passed
+    assert bar.reasons[-1] == (
+        'blind baseline has 3 answers, fewer than 4 '
+        '(18 judged-run comparisons; experts 3 comparisons on 3 answers)'
+    )
+
+
+def test_bar_reasons_say_how_many_tied_answers_were_left_out() -> None:
+    report = run(evidence_judge, _two_experts())
+
+    bar = report.meets(1.0, 1.0, min_kappa=0.5)
+
+    assert report.tied_answers == 1
+    assert bar.reasons[1:] == (
+        'TPR 3/3 (1.000) reaches 1.0; 1 tied answer left out',
+        'TNR 6/6 (1.000) reaches 1.0; 1 tied answer left out',
+        'kappa 1.000 over 9 judged runs reaches 0.5; 1 tied answer left out',
+    )
+    good, partial, wrong, stale = _two_experts()
+    split = wrong.model_dump() | {
+        'passed': None,
+        'experts': {'ana': expert(False), 'bo': expert(True)},
+    }
+    two_tied = run(evidence_judge, [good, partial, LabeledAnswer.model_validate(split), stale])
+    assert two_tied.tied_answers == 2
+    assert two_tied.meets(1.0, 1.0).reasons[1] == (
+        'TPR 3/3 (1.000) reaches 1.0; 2 tied answers left out'
+    )
+
+
+def test_a_stored_report_must_not_repeat_an_answer() -> None:
+    data = json.loads(run(evidence_judge, labeled()).to_json())
+    data['answers'].append(data['answers'][0])
+
+    with pytest.raises(ValidationError, match="given more than once: \\['good'\\]"):
+        CalibrationReport.model_validate(data)
 
 
 @pytest.mark.parametrize(

@@ -120,7 +120,9 @@ Path('calibration.json').write_text(report.to_json())
   judge is measured against, which you choose. `passed=None` is allowed only when as many
   experts pass the answer as fail it: the answer is then left out of `overall`, `blind`,
   `assisted` and the `min_kappa` bar, while its agreed `checks` still count in
-  `check_agreement` and its experts' labels in the baselines.
+  `check_agreement` and its experts' labels in the baselines. `tied_answers` counts them,
+  and the TPR, TNR and kappa reasons of `meets` say how many were left out. An odd number
+  of experts per answer avoids ties on `passed`.
 - `calibrate` validates every answer again before any judge call, so an answer changed with
   `model_copy` (which skips validation) is refused. To change one, rebuild it:
   `LabeledAnswer.model_validate({**answer.model_dump(), 'passed': True})`.
@@ -137,6 +139,7 @@ The report keeps every run of every answer (`answers`: score, check verdicts and
 | `check_consistency` | Per check, answers whose runs all gave the same verdict. |
 | `check_agreement` | Per check an expert labeled, the judge's `MET` against the expert's, with the same numbers. |
 | `check_summary` | `check_agreement` averaged over the checks, unweighted: `macro_f1` (the F1 of the `MET` call, not of `MET` and `UNMET` averaged) over `f1_checks` checks, and `mean_kappa` over `kappa_checks` checks, each leaving out checks where it is `null`. |
+| `tied_answers` | Answers whose experts tie on `passed`, left out of `overall`, `blind`, `assisted` and `min_kappa`. |
 | `blind_baseline`, `assisted_baseline` | The human baseline from blind labels, and apart from it the one from labels given after seeing the judge's output. `null` without an answer to use. |
 
 A run without a verdict is left out of every number above, never counted as a fail. A rate
@@ -163,10 +166,13 @@ with its counts.
 
 `expert_kappa` and `judge_kappa` pool the tables of each side into one kappa
 (`pooled_kappa`): the summed agreement less the summed agreement chance gives, over the
-summed comparisons less that, each table keeping its own chance agreement. Each comparison
-counts once, so a pair of experts sharing one answer barely moves the number, and one pair
-alone gives its own Cohen's kappa. On the judge's side every judged run counts once, so an
-answer with fewer judged runs (some without a verdict) weighs less. `expert_agreement` and
+summed comparisons less that, each table keeping its own chance agreement. A table weighs
+by its comparisons, so a pair of experts sharing one answer barely moves the number, and
+one pair alone gives its own Cohen's kappa. This equals the pooled kappa of De Vries et al.
+(2008) only when the tables are the same size, since that one weighs tables equally. On
+the experts' side an answer counts once per pair of experts that labeled it. On the
+judge's side each judged run counts once per expert per pair, so an answer with fewer
+judged runs (some without a verdict) weighs less. `expert_agreement` and
 `judge_agreement` are the shares of `expert_comparisons` and `judge_comparisons` that
 agree. `deepgym.rubric_calibration.pair_agreement(rater, reference)` compares any two score
 sources the same way, given each one's marks per target
@@ -183,7 +189,12 @@ bars apply only when given, and a `null` kappa or a missing baseline fails its b
   (with stored labels, the majority; ties left out), blind and assisted labels alike.
 - `max_kappa_gap=`: how far `blind_baseline.judge_kappa` may fall below
   `blind_baseline.expert_kappa`, within 1e-9 for float rounding. Its reason gives the
-  comparison counts.
+  comparison counts. It also fails when the baseline is uninformative: an `expert_kappa`
+  that is `null` or at most 0 means the experts agree no better than chance, so there is
+  nothing to come close to.
+- `min_baseline_answers=`, with `max_kappa_gap`: the gap bar also fails when the blind
+  baseline has fewer answers than this. Off by default; a handful of answers gives a kappa
+  too noisy to compare.
 
 The two measure different things: `min_kappa` compares the judge with one reference label
 per answer, while `judge_kappa` compares it with each expert's own label, beside how well
@@ -217,8 +228,13 @@ report = calibrate(reward_fn, labeled.answers, judge_id='...',
   current human verdicts count: `passed` is the pass mark and check ids the per-check
   marks. Superseded and retracted labels are ignored, and judge and verifier labels are
   left out, since `calibrate` runs the judge itself.
-- With `rubric_sha256`, verdicts recorded against another rubric hash are left out. Those
-  recording no hash are kept, and `labeled.no_rubric_hash` counts them.
+- With `rubric_sha256`, verdicts recorded against another rubric hash are left out, and
+  those recording no hash are kept. With or without it, `labeled.rubric_hashes` counts the
+  verdicts behind the answers per rubric hash, and `labeled.no_rubric_hash` those with
+  none; only verdicts in an expert label that made it into an answer count. More than one
+  hash means the labels span rubric versions. Check ids are positions in the rubric
+  (`c1` is the first check), so editing a rubric renumbers them: a `c2` labeled before
+  the edit may name another requirement now.
 - An expert's label is blind only when every one of their verdicts on the run is labeled
   blind; an unrecorded `blind` counts as not blind.
 - The judge is measured against the experts' majority, on `passed` and on each check, blind
@@ -237,6 +253,7 @@ report = calibrate(reward_fn, labeled.answers, judge_id='...',
     (none was given, or each was left out above) and the run is left out.
   - `tie`: as many experts mark a verdict true as false; `passed` is `None` or the check
     is left out of `checks`.
+- A run given twice in `run_ids` is read once.
 - For the runs a label query matches, pass
   `dict.fromkeys(label.target.id for label in store.page(query, 0, None).labels)` with
   `target_kind='run'` in the query.

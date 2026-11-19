@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- **Harbor solutions pack the same every time:** the gzipped tar a Harbor task's reference solution is shipped in had the current time in its header, so the same solution packed a second apart differed. Its time is now 0.
 - **Serve your own console UI:** `deepgym console --ui-dir PATH` (or `DEEPGYM_CONSOLE_UI_DIR`, or `create_app(static_dir=...)`) serves another static export in place of the bundled UI, with the launch token written into every HTML page and no caching, as the bundled UI gets. The console refuses to start when the folder doesn't exist or has no `index.html`. See `docs/console.md`.
 
 ## 0.6.9 (2026-11-19)

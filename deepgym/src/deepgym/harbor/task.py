@@ -10,6 +10,7 @@ tasks and ignores task.toml fields it doesn't use.
 from __future__ import annotations
 
 import base64
+import gzip
 import hashlib
 import io
 import os
@@ -54,9 +55,16 @@ _ENV_NAME = re.compile(r'[A-Za-z_][A-Za-z0-9_]*')
 
 
 def pack_files(files: Mapping[str, bytes]) -> bytes:
-    """Return *files* (relative path -> content) as a gzipped tar, every file mode 755."""
+    """Return *files* (relative path -> content) as a gzipped tar, every file mode 755.
+
+    The same files give the same bytes on any Python with the same zlib: the gzip header's
+    time is 0, not now, and the level is pinned (Python 3.15 lowers the default).
+    """
     buffer = io.BytesIO()
-    with tarfile.open(fileobj=buffer, mode='w:gz') as archive:
+    with (
+        gzip.GzipFile(fileobj=buffer, mode='wb', compresslevel=9, mtime=0) as compressed,
+        tarfile.open(fileobj=compressed, mode='w') as archive,
+    ):
         for name, data in files.items():
             info = tarfile.TarInfo(name)
             info.size, info.mode = len(data), 0o755

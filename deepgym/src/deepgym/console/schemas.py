@@ -5,12 +5,17 @@ from __future__ import annotations
 from datetime import datetime, timezone
 from typing import Annotated, Literal
 
-from pydantic import AfterValidator, AwareDatetime, BaseModel, ConfigDict, Field
+from pydantic import AfterValidator, AwareDatetime, BaseModel, ConfigDict, Field, model_validator
 
+from deepgym.dataset import DatasetCounts, DatasetManifest, DatasetSpec
+from deepgym.dataset.manifest import MAX_FOLDER_BYTES
 from deepgym.labels import SQLITE_MAX_INT, Label, LabelSource, LabelType, Name, TargetKind
 from deepgym.models import Action, RunResult, Trajectory
 from deepgym.review_queues import ReviewLabel
 from deepgym.sandboxes.cli import RunningSandbox
+from deepgym.scanners import RuleScanner, ScanReport
+from deepgym.traces import Trace, Usage
+from deepgym.traces.export import ExportFormat
 
 RunMode = Literal['local', 'daytona', 'auto', 'apple', 'docker', 'modal', 'e2b']
 RunStatus = Literal['queued', 'running', 'completed', 'failed']
@@ -302,3 +307,225 @@ class ReviewSubmit(ReviewerBody):
     """A reviewer's review of an item they hold."""
 
     labels: list[ReviewLabel] = Field(min_length=1)
+
+
+class TraceQuery(BaseModel):
+    """Which traces to list: those matching every filter given."""
+
+    model_config = ConfigDict(frozen=True, extra='forbid')
+
+    environment: str | None = None
+    """``EnvFingerprint.name``."""
+
+    agent: str | None = None
+    """``AgentMeta.name``."""
+
+    model: str | None = None
+    """``AgentMeta.model``."""
+
+    has_verdict: bool | None = None
+
+    def matches(self, trace: Trace) -> bool:
+        """Return whether *trace* matches every filter given."""
+        provenance = trace.provenance
+        actual = {
+            'environment': provenance.env.name,
+            'agent': provenance.agent.name,
+            'model': provenance.agent.model,
+            'has_verdict': trace.has_verdict,
+        }
+        return all(wanted is None or actual[name] == wanted for name, wanted in self)
+
+
+class TraceSummary(BaseModel):
+    """A trace as listed: :func:`deepgym.traces.summary_row` without the trace itself."""
+
+    trace_id: str
+    env_name: str | None
+    env_variant: int | None
+    agent: str
+    model: str | None
+    provider: str
+    status: Literal['complete', 'incomplete']
+    has_verdict: bool
+    score: float | None
+    """None without a verdict."""
+
+    passed: bool | None
+    steps: int
+    usage: Usage | None
+    cost_usd: float | None
+    usage_complete: bool
+    started_at: AwareDatetime
+
+
+class TraceConflict(BaseModel):
+    """A trace id whose stored copies don't read as one trace, so it is left out."""
+
+    model_config = ConfigDict(frozen=True)
+
+    trace_id: str
+    reason: Literal['copies_disagree', 'case_collision']
+    """``copies_disagree``: keeping either copy would drop the other
+    (:func:`deepgym.traces.merge_copies`). ``case_collision``: another trace's id is the same
+    but for case, which exports can't tell apart."""
+    episodes: tuple[str, ...]
+    """The console episodes holding its copies."""
+    detail: str
+
+
+class StoredProblems(BaseModel):
+    """Stored traces a route left out: whatever was asked, these never read as one trace."""
+
+    conflicts: list[TraceConflict] = Field(default_factory=list)
+    unreadable: list[str] = Field(default_factory=list)
+    """Episodes whose stored trace doesn't read as a trace."""
+
+
+class TracePage(StoredProblems):
+    """One page of the traces the console holds, newest first, and every stored trace left out."""
+
+    traces: list[TraceSummary]
+    total: int
+    """Matching traces across every page."""
+
+
+class TraceDetail(BaseModel):
+    """A whole trace, its usage and cost totals included, with its current labels."""
+
+    trace: Trace
+    labels: list[Label]
+    """The trace's records still in force, its steps' included (``/api/labels/current``)."""
+    episode_labels: list[Label]
+    """The records in force on the console episodes recorded from it, in ``seq`` order. An
+    episode numbers its replay frames, not the trace's steps: frame k shows step k's
+    observation (the initial one for k = 0) and step k + 1's action, when no action was
+    rejected."""
+    unreadable: list[str]
+    """Episodes holding a copy of it (or of an id differing only in case) that doesn't
+    read as a trace; the copies that do read are merged without them."""
+
+
+class ScanCreate(BaseModel):
+    """Rule scanners to run over the console's traces."""
+
+    model_config = ConfigDict(frozen=True, extra='forbid')
+
+    scanners: list[RuleScanner] = Field(min_length=1)
+    """What ``deepgym traces scan --config`` reads: ``pattern`` and ``protected_paths``."""
+
+    trace_ids: list[Name] | None = Field(default=None, min_length=1)
+    """The traces to scan, each read once; None scans every one."""
+
+    write_labels: bool = False
+    """Store a label per finding and per scan error, all in one transaction."""
+
+    run_id: Name | None = None
+    """The report's ``run_id``, so the labels' ids and ``group_id``; a retry with the same
+    one stores nothing new. Generated when None."""
+
+
+class ScanResult(ScanReport, StoredProblems):
+    """A scan report, and the stored traces left out of it because they don't read as one."""
+
+
+def _dataset_folder(folder: str) -> str:
+    """Refuse a dataset folder name that isn't one visible folder in the datasets directory.
+
+    Raises:
+        ValueError: If it holds ``/``, ``\\`` or ``:``, starts with a dot, or is longer than
+            :data:`~deepgym.dataset.manifest.MAX_FOLDER_BYTES` in UTF-8.
+    """
+    if any(char in folder for char in '/\\:') or folder.startswith('.'):
+        raise ValueError(
+            f'{folder!r} is not a folder name in the datasets directory: it may not hold '
+            '"/", "\\" or ":", or start with "."'
+        )
+    if (size := len(folder.encode())) > MAX_FOLDER_BYTES:
+        raise ValueError(
+            f'the folder name is {size} bytes in UTF-8; at most {MAX_FOLDER_BYTES} fit'
+        )
+    return folder
+
+
+DatasetFolder = Annotated[Name, AfterValidator(_dataset_folder)]
+"""A dataset's folder in the console's datasets directory: ``<name>-<version>``."""
+
+
+class DatasetBuild(BaseModel):
+    """A dataset to build from the console's traces and labels."""
+
+    model_config = ConfigDict(frozen=True, extra='forbid')
+
+    spec: DatasetSpec
+    name: Name
+    version: Name
+    formats: tuple[ExportFormat, ...] = Field(default=('jsonl',), min_length=1)
+
+    @property
+    def folder(self) -> str:
+        """The folder it is written to in the datasets directory."""
+        return f'{self.name}-{self.version}'
+
+    @model_validator(mode='after')
+    def check_folder(self) -> DatasetBuild:
+        """Refuse a name and version that would leave the datasets directory."""
+        _dataset_folder(self.folder)
+        return self
+
+
+class DatasetBuilt(StoredProblems):
+    """A dataset written into the datasets directory."""
+
+    dataset: str
+    """Its folder, ``<name>-<version>``."""
+
+    sha256: str
+    """SHA-256 of its ``manifest.json``: the identifier to publish."""
+
+    counts: DatasetCounts
+
+
+class DatasetListing(BaseModel):
+    """A folder of the datasets directory, with its manifest as read (not verified)."""
+
+    dataset: str
+    sha256: str | None
+    """SHA-256 of its ``manifest.json``; None without one."""
+
+    manifest: DatasetManifest | None
+    error: str | None = None
+    """Why there is no manifest: none, or one that doesn't read as a manifest."""
+
+
+class DatasetPage(BaseModel):
+    """One page of the datasets directory, by folder name."""
+
+    datasets: list[DatasetListing]
+    total: int
+    """Folders across every page."""
+
+
+class DatasetVerify(BaseModel):
+    """A dataset of the datasets directory to check against its manifest."""
+
+    model_config = ConfigDict(frozen=True, extra='forbid')
+
+    dataset: DatasetFolder
+    sha256: str | None = Field(default=None, pattern=r'^[0-9a-fA-F]{64}$')
+    """The SHA-256 it was published with; without one, only self-consistency is checked."""
+
+
+class DatasetVerification(BaseModel):
+    """What :func:`deepgym.dataset.verify_dataset` found."""
+
+    dataset: str
+    valid: bool
+    sha256: str | None
+    """SHA-256 of its ``manifest.json`` as it is now; None without one."""
+
+    manifest: DatasetManifest | None
+    """The manifest, when the folder matches it."""
+
+    problems: list[str]
+    """Every problem found; empty when valid."""

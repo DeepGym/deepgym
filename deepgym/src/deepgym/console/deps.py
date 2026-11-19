@@ -69,9 +69,15 @@ def get_qa_dir(request: Request) -> Path:
     return request.app.state.qa_dir
 
 
+def get_datasets_dir(request: Request) -> Path:
+    """Return the directory datasets are built into and verified in."""
+    return request.app.state.datasets_dir
+
+
 RunStoreDep = Annotated[RunStore, Depends(get_run_store)]
 EpisodeStoreDep = Annotated[EpisodeStore, Depends(get_episode_store)]
 LabelStoreDep = Annotated[LabelStore, Depends(get_label_store)]
 QueueStoreDep = Annotated[QueueStore, Depends(get_queue_store)]
 RunnerDep = Annotated[Runner, Depends(get_runner)]
 QADirDep = Annotated[Path, Depends(get_qa_dir)]
+DatasetsDirDep = Annotated[Path, Depends(get_datasets_dir)]

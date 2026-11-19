@@ -171,9 +171,20 @@ class TestConsoleCommand:
             allow_local_exec=True,
             allowed_hosts=['127.0.0.1', '[::1]', 'localhost'],
             static_dir=None,
+            datasets_dir=None,
         )
         run.assert_called_once_with(create_app.return_value, host='127.0.0.1', port=9191)
         assert 'http://127.0.0.1:9191' in capsys.readouterr().out
+
+    def test_datasets_dir_reaches_the_app(self, tmp_path: Path) -> None:
+        argv = ['deepgym', 'console', '--datasets-dir', str(tmp_path / 'sets')]
+        with (
+            patch.object(sys, 'argv', argv),
+            patch('deepgym.console.app.create_app') as create_app,
+            patch('uvicorn.run'),
+        ):
+            main()
+        assert create_app.call_args.kwargs['datasets_dir'] == tmp_path / 'sets'
 
     @pytest.mark.parametrize(
         ('host', 'netloc', 'browser'),
@@ -276,6 +287,18 @@ class TestConsoleCommand:
             main()
         assert exc_info.value.code == 1
         assert 'Error: --ui-dir is empty' in capsys.readouterr().err
+        create_app.assert_not_called()
+
+    def test_refuses_an_empty_datasets_dir(self, capsys: pytest.CaptureFixture) -> None:
+        with (
+            patch.object(sys, 'argv', ['deepgym', 'console', '--datasets-dir', '']),
+            patch('deepgym.console.app.create_app') as create_app,
+            patch('uvicorn.run'),
+            pytest.raises(SystemExit) as exc_info,
+        ):
+            main()
+        assert exc_info.value.code == 1
+        assert 'Error: --datasets-dir is empty' in capsys.readouterr().err
         create_app.assert_not_called()
 
     def test_an_empty_ui_dir_env_var_means_unset(self, monkeypatch: pytest.MonkeyPatch) -> None:

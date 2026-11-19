@@ -22,6 +22,7 @@ from deepgym.dataset.build import (
 from deepgym.dataset.manifest import (
     MANIFEST,
     DatasetManifest,
+    DatasetMismatchError,
     checked_write,
     manifest_sha256,
     verify_dataset,
@@ -34,6 +35,7 @@ __all__ = [
     'DatasetCounts',
     'DatasetEntry',
     'DatasetManifest',
+    'DatasetMismatchError',
     'DatasetSpec',
     'DropReason',
     'DuplicateGroup',

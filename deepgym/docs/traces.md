@@ -519,7 +519,8 @@ format asked for, `<split>.jsonl`, `<split>.parquet` or `atif/<split>/` (whole t
 can be checked), and `manifest.json`. `write_dataset` checks the name, version (one line
 each, no whitespace at either end), formats and pyarrow first, writes into a new folder
 next to the output (created under your umask), verifies it with `verify_dataset`, then
-renames it to the output, and refuses an output that isn't a new or empty directory.
+renames it to the output, and refuses an output that isn't a new or empty directory, or
+one another build created while it ran.
 
 - **Read verdicts and rewards from `<split>.verdicts.jsonl`**, one JSON object per kept
   trace: `trace_id`, `passed`, `verdict_source` (`verifier` or `human`), `score` (the
@@ -564,8 +565,11 @@ renames it to the output, and refuses an output that isn't a new or empty direct
   range, and band by the manifest's `bands`); that each JSONL and verdict file ends with
   a newline and each `<split>.verdicts.jsonl` is, byte for byte, the lines its entries
   give; and that each ATIF folder has one document per
-  trace of its split. They raise listing every problem, and refuse a manifest with a key
-  given twice.
+  trace of its split. A folder that doesn't match raises `DatasetMismatchError` (a
+  `DeepGymError`, from `deepgym.dataset`) whose `problems` lists every problem, one string
+  each, and whose message lists them too; it pickles with them. They refuse a manifest with
+  a key given twice, and a `manifest.json` that is a symlink (it is never followed, nor by
+  `manifest_sha256`).
 - Without `sha256`, verifying shows only that the folder is self-consistent: someone who
   rewrote the files and the manifest together passes. It doesn't check the summary
   columns of Parquet rows or the content of ATIF documents beyond their file hashes, so

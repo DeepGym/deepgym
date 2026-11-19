@@ -383,6 +383,11 @@ def _build_parser() -> argparse.ArgumentParser:
         help='Serve this UI build (a folder with index.html) instead of the bundled UI '
         '(or set DEEPGYM_CONSOLE_UI_DIR)',
     )
+    console_p.add_argument(
+        '--datasets-dir',
+        default=None,
+        help='Folder the console builds datasets into (~/.deepgym/datasets)',
+    )
 
     return parser
 
@@ -1049,6 +1054,9 @@ def _cmd_console(args: argparse.Namespace) -> None:
     if ui_dir == '':
         print('Error: --ui-dir is empty', file=sys.stderr)
         sys.exit(1)
+    if args.datasets_dir == '':
+        print('Error: --datasets-dir is empty', file=sys.stderr)
+        sys.exit(1)
     if ui_dir is None and not ui_built():
         print(MISSING_UI_MESSAGE, file=sys.stderr)
     allow_local = args.allow_local_exec or os.environ.get(
@@ -1060,6 +1068,7 @@ def _cmd_console(args: argparse.Namespace) -> None:
         allow_local_exec=allow_local,
         allowed_hosts=_loopback_hosts(args.host, netloc),
         static_dir=None if ui_dir is None else Path(ui_dir),
+        datasets_dir=None if args.datasets_dir is None else Path(args.datasets_dir),
     )
     print(f'DeepGym Console: http://{netloc}:{args.port}')
     uvicorn.run(app, host=args.host, port=args.port)

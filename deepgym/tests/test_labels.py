@@ -85,6 +85,9 @@ class TestTarget:
             {'kind': 'episode', 'id': 'e1', 'step': 0, 'field': 'message:0'},
             {'kind': 'run', 'id': 'r1', 'quote': 'x'},
             {'kind': 'run', 'id': 'r1', 'field': 'answer', 'span': [0, 3], 'quote': 'ab'},
+            {'kind': 'run', 'id': 'r1', 'field': 'answer', 'span': [0, 1], 'quote': '\ud800'},
+            {'kind': 'episode', 'id': 'e1', 'field': 'answer'},
+            {'kind': 'trace', 'id': 't1', 'field': 'answer'},
         ],
     )
     def test_bad(self, target: dict) -> None:
@@ -95,8 +98,7 @@ class TestTarget:
         'target',
         [
             {'kind': 'run', 'id': 'r1', 'field': 'answer', 'span': [3, 9]},
-            {'kind': 'episode', 'id': 'e1', 'field': 'answer'},
-            {'kind': 'trace', 'id': 't1', 'field': 'answer'},
+            {'kind': 'run', 'id': 'r1', 'field': 'answer'},
             {'kind': 'episode', 'id': 'e1', 'step': 0, 'field': 'observation', 'span': [0, 1]},
             {'kind': 'trace', 'id': 't1', 'step': 2, 'field': 'action'},
             {'kind': 'trace', 'id': 't1', 'step': 2, 'field': 'message:12', 'span': [5, 7]},
@@ -147,6 +149,8 @@ class TestFields:
             {'group_id': ''},
             {'group_id': 'g\x001'},
             {'id': ''},
+            {'comment': 'fine\ud800'},
+            {'comment': '\udfff'},
             {'type': 'delete'},
             {'supersedes': ''},
             {'score': 1.0},
@@ -389,6 +393,15 @@ class TestOneCurrentVerdict:
         ]
 
         assert len(store.add_many(labels)) == len(labels)
+
+    def test_the_rule_is_per_source(self, store: LabelStore) -> None:
+        store.add(_passed())
+        store.add(_passed(source='judge', comment=None))
+
+        with pytest.raises(ValueError, match="judge ana already has a current 'passed'"):
+            store.add(_passed(source='judge', value=False))
+
+        assert len(_all(store, current=True)) == 2
 
     def test_two_verdicts_in_one_batch_store_none(self, store: LabelStore) -> None:
         with pytest.raises(ValueError, match='supersede it'):

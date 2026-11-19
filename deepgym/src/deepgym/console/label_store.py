@@ -2,15 +2,25 @@
 
 from __future__ import annotations
 
+import json
 import sqlite3
 from collections.abc import Sequence
 from datetime import datetime, timezone
 from pathlib import Path
 from uuid import uuid4
 
+from pydantic import AwareDatetime, TypeAdapter
+
 from deepgym.console.db import connect, init_db
 from deepgym.console.schemas import LabelPage, LabelQuery
-from deepgym.labels import Label, LabelCreate, TargetKind, is_verdict
+from deepgym.labels import (
+    Label,
+    LabelCreate,
+    LabelFields,
+    LabelTarget,
+    TargetKind,
+    is_verdict,
+)
 from deepgym.labels import excluded as excluded_targets
 
 _COLUMNS = (
@@ -32,6 +42,7 @@ _CURRENT = (
     "type != 'retract' AND "
     'NOT EXISTS (SELECT 1 FROM labels AS later WHERE later.supersedes = labels.id)'
 )
+_TIME = TypeAdapter(AwareDatetime)
 
 
 class LabelStore:
@@ -107,8 +118,7 @@ class LabelStore:
                 f'SELECT record FROM labels WHERE {where} ORDER BY seq LIMIT ? OFFSET ?',
                 (*params, -1 if limit is None else limit, offset),  # SQLite: LIMIT -1 is none
             ).fetchall()
-        labels = [Label.model_validate_json(row['record']) for row in rows]
-        return LabelPage(labels=labels, total=total)
+        return LabelPage(labels=[_stored(row['record']) for row in rows], total=total)
 
     def current(self, kind: TargetKind, target_id: str) -> list[Label]:
         """Return the target's records still in force, its steps' too, in ``seq`` order.
@@ -151,9 +161,28 @@ def _row(label: Label) -> dict[str, object]:
     }  # fmt: skip
 
 
-def _body(label: LabelCreate) -> dict[str, object]:
+def _stored(record: str) -> Label:
+    """Rebuild a stored record as it was written.
+
+    Only its JSON types are parsed; today's rules aren't checked again, so a rule added
+    since it was stored can't make it unreadable.
+    """
+    data = json.loads(record)
+    target = data['target']
+    if target.get('span') is not None:
+        target = {**target, 'span': tuple(target['span'])}
+    return Label.model_construct(
+        **{
+            **data,
+            'target': LabelTarget.model_construct(**target),
+            'created_at': _TIME.validate_python(data['created_at']),
+        }
+    )
+
+
+def _body(label: LabelFields) -> dict[str, object]:
     """Return what *label*'s author gave, without a stored record's seq and time."""
-    return label.model_dump(include=set(LabelCreate.model_fields))
+    return label.model_dump(include=set(LabelFields.model_fields))
 
 
 def _last_position(conn: sqlite3.Connection) -> tuple[int, datetime]:
@@ -177,7 +206,7 @@ def _retried(conn: sqlite3.Connection, label: LabelCreate) -> Label | None:
     row = conn.execute('SELECT record FROM labels WHERE id = ?', (label.id,)).fetchone()
     if row is None:
         return None
-    stored = Label.model_validate_json(row['record'])
+    stored = _stored(row['record'])
     if _body(stored) != _body(label):
         raise ValueError(f'Label {label.id} is stored with another body; use a new id')
     return stored
@@ -217,25 +246,26 @@ def _check_supersedes(conn: sqlite3.Connection, label: Label) -> None:
 
 
 def _check_verdict(conn: sqlite3.Connection, label: Label) -> None:
-    """Refuse a verdict its author already holds on the target, name and group.
+    """Refuse a verdict its source and author already hold on the target, name and group.
 
     Raises:
         ValueError: If *label* is a verdict and a current one of the same target, name,
-            author and ``group_id`` exists that *label* doesn't supersede.
+            source, author and ``group_id`` exists that *label* doesn't supersede.
     """
     if not is_verdict(label.name):
         return
     rows = conn.execute(
         'SELECT id FROM labels WHERE target_kind = ? AND target_id = ? AND name = ? '
-        f'AND author = ? AND group_id IS ? AND {_CURRENT}',
-        (label.target.kind, label.target.id, label.name, label.author, label.group_id),
-    ).fetchall()
+        f'AND source = ? AND author = ? AND group_id IS ? AND {_CURRENT}',
+        (label.target.kind, label.target.id, label.name, label.source, label.author,
+         label.group_id),
+    ).fetchall()  # fmt: skip
     held = [row['id'] for row in rows if row['id'] != label.supersedes]
     if held:
         raise ValueError(
-            f"{label.author} already has a current '{label.name}' on {label.target.kind} "
-            f'{label.target.id} (label {held[0]}); supersede it to change it, or give a '
-            'repeat its own group_id'
+            f"{label.source} {label.author} already has a current '{label.name}' on "
+            f'{label.target.kind} {label.target.id} (label {held[0]}); supersede it to '
+            'change it, or give a repeat its own group_id'
         )
 
 

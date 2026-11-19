@@ -69,11 +69,12 @@ store.add(LabelCreate(
 - `target`: `kind` (`run`, `episode` or `trace`) and `id`, then optionally:
   - `step`: a trace numbers steps by `TraceStep.index`, from 1, and an episode by replay
     frame, from 0; a run has no steps. A console episode has its own id, even when it was
-    recorded from a trace; its frame k is trace step k + 1 when the trace has no rejected
-    actions, which the replay leaves out.
-  - `field`: which text. `answer`, without a step, is the final text the target was
-    graded on: a run's solution, or an episode's or trace's final answer. With a step:
-    `action` (`Action.content`), `observation` (`Observation.content`) or `message:<i>`
+    recorded from a trace. When that trace has no rejected actions (the replay leaves them
+    out), frame k shows trace step k's observation (the initial observation for k = 0)
+    and trace step k + 1's action and reward.
+  - `field`: which text. `answer` is a run's solution, the text it was graded on;
+    episodes and traces have no answer text. With a step: `action` (`Action.content`),
+    `observation` (`Observation.content`) or `message:<i>`
     (`TraceStep.messages[i].content`, traces only).
   - `span`: `(start, end)` offsets into that text, end exclusive, counted in Unicode code
     points (Python string indexes; a UI that counts UTF-16 units converts). A span needs a
@@ -90,18 +91,22 @@ store.add(LabelCreate(
   one repeat), and `id`: a client id for safe retries, generated when left out.
 - The store adds `seq` and `created_at`. `seq` increases with each label stored, and
   `created_at` never runs back, so they sort the same.
-- Ids, names, authors and categories are one line, with no control or format characters.
+- Ids, names, authors and categories are one line that doesn't start or end with
+  whitespace, with no control or format characters. A comment or quote may be any valid
+  Unicode text.
 
 ### Verdicts
 
 Experts and judges give verdicts the same way. The verdict on an answer is a bool named
 `passed`, and the verdict on one rubric check a bool named by its check id (`c1`, `c2`,
 ...), `true` meaning MET. These names take only bools, and only on a whole target: a mark
-on a step or a span of text takes another name, such as `mark`. An author holds one
-current verdict per target, name and `group_id`: to change it, supersede it. Each repeat
-of a judge gets its own `group_id`. A label holds what a `rubric_calibration.LabeledAnswer`
-needs (the pass verdict, the check verdicts and `blind`); there is no adapter from stored
-labels to it yet.
+on a step or a span of text takes another name, such as `mark`. Each source and author
+holds one current verdict per target, name and `group_id`: to change it, supersede it.
+Each repeat of a judge gets its own `group_id`.
+
+These are the verdicts and the blind flag a `rubric_calibration.LabeledAnswer` takes, but
+there is no adapter from stored labels to it yet, and labels alone don't make one: the
+answer text comes from the run, and `blind` is set per label, not per answer.
 
 ### Corrections, retractions and invalidations
 
@@ -122,6 +127,7 @@ label, so disagreement stays visible.
 
 ### Reading labels
 
+`LabelQuery` is in `deepgym.console.schemas`.
 `store.page(LabelQuery(...), offset, limit)` filters by `type`, `target_kind`,
 `target_id`, `step`, `name`, `source`, `author`, `blind`, `rubric_version`,
 `rubric_sha256`, `group_id`, `since` (inclusive), `until` (exclusive), `after_seq` (labels
@@ -135,15 +141,22 @@ those targets before using labels. For records already in hand, such as an expor
 `deepgym.labels.current_labels(labels)` and `deepgym.labels.excluded(labels)` do the same,
 given every record of the targets in question.
 
-`store.add_many(labels)` stores a batch in one transaction: one refused record stores
-none. `store.export_jsonl(path)` writes every record, superseded ones included, one JSON
+Records read back as they were written: a rule added since a record was stored never
+makes it unreadable. `store.add_many(labels)` stores a batch in one transaction: one
+refused record stores none. `store.export_jsonl(path)` writes every record, superseded ones included, one JSON
 object per line.
 
 The console serves the same under `/api/labels`:
 
 - `POST /api/labels` stores one label, `POST /api/labels/batch` a list. An invalid record
-  is refused with 422. One the store refuses gets 409: it doesn't fit the record it
-  supersedes, repeats a verdict its author holds, or reuses an id with another body.
+  is refused with 422. A record the store refuses gets 409, when:
+  - the record it supersedes is not stored, is on another target, is from another source
+    or author (a human retracting an invalidation excepted), is a retraction, has another
+    type than a correction of it, or is already superseded;
+  - it is a verdict its source and author already hold on that target, name and
+    `group_id`;
+  - its id is stored with another body.
+
   Posting the same id and body again returns the stored record.
 - `GET /api/labels` takes the filters above as query parameters, with `offset` and
   `limit` (none by default), and returns `{"labels": [...], "total": N}`.

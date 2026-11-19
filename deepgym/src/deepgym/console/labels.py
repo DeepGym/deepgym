@@ -101,4 +101,5 @@ def get_current(target_kind: TargetKind, target_id: str, labels: LabelStoreDep) 
 )
 def get_excluded(labels: LabelStoreDep) -> list[LabelTarget]:
     """Return the targets a current invalidation excludes, as ``{"kind": ..., "id": ...}``."""
-    return [LabelTarget(kind=kind, id=target_id) for kind, target_id in sorted(labels.excluded())]
+    targets = sorted(labels.excluded())
+    return [LabelTarget.model_construct(kind=kind, id=target_id) for kind, target_id in targets]

@@ -8,12 +8,13 @@ one, and an ``invalidate`` record excludes a whole target, giving the reason.
 :func:`current_labels` keeps the records still in force, and :func:`excluded` names the
 targets to leave out.
 
-One convention covers experts and judges alike, holding what a
-``rubric_calibration.LabeledAnswer`` needs (there is no adapter yet): the verdict on an
-answer is a bool label named ``passed``, and the verdict on one rubric check a bool label
-named by its check id (``c1``, ``c2``, ...), True meaning MET. These verdict names take
-only bools, on a whole target, and an author keeps one current verdict per name and
-``group_id`` on a target: changing it means superseding it.
+One convention covers experts and judges alike: the verdict on an answer is a bool label
+named ``passed``, and the verdict on one rubric check a bool label named by its check id
+(``c1``, ``c2``, ...), True meaning MET. These verdict names take only bools, on a whole
+target, and each source and author keeps one current verdict per target, name and
+``group_id``: changing it means superseding it. These are the verdicts and blind flag a
+``rubric_calibration.LabeledAnswer`` takes, but there is no adapter yet: the answer text
+comes from the run, and ``blind`` is set per label, not per answer.
 
 The console keeps labels in its database (:class:`deepgym.console.label_store.LabelStore`).
 """
@@ -58,6 +59,9 @@ control or format characters (NUL, bidi controls, U+2028, ...)."""
 Offset = Annotated[StrictInt, Field(ge=0, le=SQLITE_MAX_INT)]
 """A step number or text offset."""
 
+Text = Annotated[str, StringConstraints(pattern=r'(?s)^.*$')]
+"""Free text that is valid Unicode: a lone surrogate is refused (``string_unicode``)."""
+
 LabelValue = StrictBool | FiniteFloat | Name
 """A pass or MET mark, a number such as a score or rating, or a one-line category."""
 
@@ -79,22 +83,23 @@ class LabelTarget(BaseModel):
 
     step: Offset | None = None
     """The step, numbered as its target numbers it: ``TraceStep.index`` for a trace (from 1),
-    the replay frame index for an episode (from 0). A run has no steps. Frame k of an
-    episode recorded from a trace is trace step k + 1 when the trace has no rejected
-    actions (the replay leaves those out)."""
+    the replay frame index for an episode (from 0). A run has no steps. In an episode
+    recorded from a trace without rejected actions (the replay leaves those out), frame k
+    shows trace step k's observation (the initial one for k = 0) and trace step k + 1's
+    action and reward."""
 
     field: str | None = Field(
         default=None, pattern=r'^(answer|action|observation|message:(0|[1-9][0-9]*))$'
     )
-    """Which text: ``'answer'`` (without a step) is the final text the target was graded
-    on, such as a run's solution or an episode's or trace's final answer; with a step,
-    ``'action'`` is ``Action.content``, ``'observation'`` is ``Observation.content``, and
-    ``'message:<i>'`` is ``TraceStep.messages[i].content`` (traces only)."""
+    """Which text: ``'answer'`` is a run's solution, the text it was graded on (episodes and
+    traces have none); with a step, ``'action'`` is ``Action.content``, ``'observation'``
+    is ``Observation.content``, and ``'message:<i>'`` is ``TraceStep.messages[i].content``
+    (traces only)."""
 
     span: tuple[Offset, Offset] | None = None
     """``(start, end)`` code point offsets into ``field``'s text, end exclusive."""
 
-    quote: str | None = None
+    quote: Text | None = None
     """The spanned text as the labeler saw it, so a span that no longer fits shows."""
 
     @model_validator(mode='after')
@@ -109,8 +114,10 @@ class LabelTarget(BaseModel):
     @model_validator(mode='after')
     def check_text(self) -> LabelTarget:
         """Require a field that fits the step for a span, and a quote as long as the span."""
-        if self.field is not None and (self.field == 'answer') != (self.step is None):
-            raise ValueError("field 'answer' takes no step; the other fields need one")
+        if self.field == 'answer' and self.kind != 'run':
+            raise ValueError("only a run has answer text; mark an episode's or trace's on a step")
+        if self.field not in (None, 'answer') and self.step is None:
+            raise ValueError(f"field '{self.field}' is a step's text: it needs a step")
         if self.field is not None and self.field.startswith('message:') and self.kind != 'trace':
             raise ValueError('only trace steps have messages')
         if self.span is not None and self.field is None:
@@ -124,8 +131,8 @@ class LabelTarget(BaseModel):
         return self
 
 
-class LabelCreate(BaseModel):
-    """A label as its author gives it; storing it adds seq and time (:class:`Label`)."""
+class LabelFields(BaseModel):
+    """What a labeler gives, shared by :class:`LabelCreate` and the stored :class:`Label`."""
 
     model_config = ConfigDict(frozen=True, extra='forbid')
 
@@ -150,7 +157,7 @@ class LabelCreate(BaseModel):
     author: Name
     """Who labeled: an expert's handle, or the judge or verifier that did."""
 
-    comment: str | None = None
+    comment: Text | None = None
     """Why: required on a human's ``passed`` verdict (a right answer too), an invalidation and
     a retraction; optional on every other label."""
 
@@ -171,6 +178,11 @@ class LabelCreate(BaseModel):
     the same source and author, not a retraction, and not already superseded; a correction
     keeps its type. Someone else's view is a new label, so disagreement stays visible. Any
     human may retract an invalidation, whoever made it."""
+
+
+class LabelCreate(LabelFields):
+    """A label as its author gives it, checked against today's rules; storing it adds seq
+    and time (:class:`Label`)."""
 
     @model_validator(mode='after')
     def check_type(self) -> LabelCreate:
@@ -207,8 +219,12 @@ class LabelCreate(BaseModel):
         return self
 
 
-class Label(LabelCreate):
-    """A stored label record; it never changes."""
+class Label(LabelFields):
+    """A stored label record, as it was written; it never changes.
+
+    It carries no write-time rules, so a record stored under older rules still reads back
+    and serializes (:class:`LabelCreate` checks new labels).
+    """
 
     seq: int = Field(ge=1)
     """Position in the store, increasing with each record stored; a sync cursor (``after_seq``)."""

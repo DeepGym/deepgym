@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import os
 import secrets
 from collections.abc import AsyncIterator, Sequence
@@ -9,8 +10,10 @@ from contextlib import asynccontextmanager
 from pathlib import Path
 
 try:
-    from fastapi import APIRouter, Depends, FastAPI
-    from fastapi.responses import PlainTextResponse
+    from fastapi import APIRouter, Depends, FastAPI, Request
+    from fastapi.encoders import jsonable_encoder
+    from fastapi.exceptions import RequestValidationError
+    from fastapi.responses import JSONResponse, PlainTextResponse
     from starlette.middleware.trustedhost import TrustedHostMiddleware
 except ImportError as _exc:
     raise ImportError(
@@ -79,6 +82,7 @@ def create_app(
     app.state.runner = runner
     app.state.qa_dir = qa_dir or report_dir()
     app.state.token = token or os.environ.get('DEEPGYM_CONSOLE_TOKEN') or secrets.token_urlsafe(32)
+    app.add_exception_handler(RequestValidationError, _validation_error)
     if allowed_hosts:
         app.add_middleware(TrustedHostMiddleware, allowed_hosts=list(allowed_hosts))
 
@@ -92,6 +96,23 @@ def create_app(
     else:
         app.add_api_route('/', _missing_ui, include_in_schema=False)
     return app
+
+
+class _AsciiJSONResponse(JSONResponse):
+    """JSON escaped to ASCII, so text that isn't valid Unicode (a lone surrogate) renders."""
+
+    def render(self, content: object) -> bytes:
+        """Serialize *content* as compact, ASCII-only JSON."""
+        return json.dumps(content, allow_nan=False, separators=(',', ':')).encode('ascii')
+
+
+async def _validation_error(_request: Request, exc: RequestValidationError) -> JSONResponse:
+    """Answer a refused request as FastAPI does (422), with its inputs escaped to ASCII.
+
+    FastAPI's own renderer writes UTF-8, which fails, as a 500, on a refused input
+    holding a lone surrogate.
+    """
+    return _AsciiJSONResponse(status_code=422, content={'detail': jsonable_encoder(exc.errors())})
 
 
 def _missing_ui() -> PlainTextResponse:

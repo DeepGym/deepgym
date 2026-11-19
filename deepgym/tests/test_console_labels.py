@@ -1,10 +1,16 @@
 """Tests for the console's label API: store, correct, retract, list, current and excluded."""
 
+import json
 from pathlib import Path
 
 import pytest
 from fastapi.testclient import TestClient
+from pydantic import ValidationError
 
+from deepgym.console import label_store
+from deepgym.console.db import connect
+from deepgym.console.label_store import LabelStore
+from deepgym.labels import Label, LabelCreate
 from tests.console_client import make_client
 
 STEP = {'kind': 'trace', 'id': 't1', 'step': 3, 'field': 'observation', 'span': [10, 14],
@@ -263,3 +269,89 @@ def test_writes_need_token_and_origin(client: TestClient) -> None:
 
     assert (no_token.status_code, foreign.status_code) == (403, 403)
     assert client.get('/api/labels').json()['total'] == 0
+
+
+@pytest.mark.parametrize(
+    ('path', 'raw'),
+    [
+        ('/api/labels', '{"target": {"kind": "trace", "id": "t1"}, "name": "tone", '
+                        '"value": "clear", "source": "human", "author": "ana", '
+                        '"comment": "fine\\ud800"}'),
+        ('/api/labels', '{"target": {"kind": "run", "id": "r1", "field": "answer", '
+                        '"span": [0, 1], "quote": "\\udfff"}, "name": "tone", '
+                        '"value": "clear", "source": "human", "author": "ana"}'),
+        ('/api/runs', '{"environments": ["fizzbuzz"], "mode": "\\ud800"}'),
+    ],
+)  # fmt: skip
+def test_lone_surrogates_get_a_422(client: TestClient, path: str, raw: str) -> None:
+    response = client.post(path, content=raw, headers={'Content-Type': 'application/json'})
+
+    assert response.status_code == 422
+    assert response.content.isascii()
+    assert response.json()['detail']
+    assert client.get('/api/labels').json()['total'] == 0
+
+
+def _store_old(db: Path, *records: dict) -> None:
+    """Store *records* as an older deepgym wrote them, without today's checks."""
+    with connect(db) as conn:
+        for seq, record in enumerate(records, 1):
+            target = record['target']
+            conn.execute(
+                label_store._INSERT,
+                {'seq': seq, 'id': record['id'], 'type': record['type'],
+                 'target_kind': target['kind'], 'target_id': target['id'],
+                 'step': target.get('step'), 'name': record['name'], 'source': record['source'],
+                 'author': record['author'], 'blind': None, 'rubric_version': None,
+                 'rubric_sha256': None, 'group_id': None, 'supersedes': None,
+                 'created_at': '2026-11-01T00:00:00.000000+00:00', 'record': json.dumps(record)},
+            )  # fmt: skip
+
+
+def test_old_rows_stay_readable(client: TestClient, tmp_path: Path) -> None:
+    common = {'source': 'human', 'created_at': '2026-11-01T00:00:00Z', 'retired_field': 1}
+    verdict = {
+        **common,
+        'seq': 1,
+        'id': 'old-1',
+        'type': 'label',
+        'name': 'passed',
+        'value': True,
+        'author': 'a\u200bna',
+        'comment': None,
+        'target': {'kind': 'trace', 'id': 't1', 'step': 2, 'field': 'answer'},
+    }
+    exclusion = {
+        **common,
+        'seq': 2,
+        'id': 'old-2',
+        'type': 'invalidate',
+        'name': None,
+        'value': None,
+        'author': 'ana',
+        'comment': 'broken',
+        'target': {'kind': 'trace', 'id': 't1', 'step': 2},
+    }
+    odd_id = {**exclusion, 'seq': 3, 'id': 'old-3', 'target': {'kind': 'run', 'id': 'r\u200b1'}}
+    for record in (verdict, exclusion, odd_id):
+        with pytest.raises(ValidationError):
+            Label.model_validate(record)
+    db = tmp_path / 'console.db'
+    _store_old(db, verdict, exclusion, odd_id)
+    store = LabelStore(db)
+
+    listed = client.get('/api/labels')
+    current = client.get('/api/labels/current', params=TRACE)
+    excluded = client.get('/api/labels/excluded')
+
+    assert [label['id'] for label in listed.json()['labels']] == ['old-1', 'old-2', 'old-3']
+    assert listed.json()['labels'][0]['target']['field'] == 'answer'
+    assert [label['id'] for label in current.json()] == ['old-1', 'old-2']
+    assert excluded.json() == [{'kind': 'run', 'id': 'r\u200b1'}, {'kind': 'trace', 'id': 't1'}]
+    assert [label.id for label in store.current('trace', 't1')] == ['old-1', 'old-2']
+    assert store.excluded() == {('trace', 't1'), ('run', 'r\u200b1')}
+    retry = LabelCreate.model_validate(_body(id='old-1'))
+    with pytest.raises(ValueError, match='another body'):
+        store.add(retry)
+    assert client.post('/api/labels', json=_body(id='old-1')).status_code == 409
+    assert client.post('/api/labels', json=_body()).json()['seq'] == 4

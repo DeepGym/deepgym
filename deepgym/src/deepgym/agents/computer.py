@@ -4,7 +4,9 @@ USD enforcement uses returned usage and caller-supplied prices, so one response
 can overshoot the cap. SDK retries are disabled and request timeouts use remaining
 wall time. Session propagates remaining deadlines through actions and screenshots;
 SDK transport timeouts do not guarantee an absolute response deadline. These agents
-do not score, close, or acknowledge provider safety checks automatically.
+do not score, close, or acknowledge provider safety checks automatically. Under a
+TracedSession, the first action of each reply carries that reply's usage (see
+:func:`.base.apply_action`).
 """
 
 from __future__ import annotations
@@ -19,7 +21,7 @@ from deepgym.agents.base import (
     BudgetTracker,
     Cost,
     TokenPrices,
-    Usage,
+    apply_action,
 )
 from deepgym.agents.providers import (
     ANTHROPIC_MAX_TOKENS,
@@ -55,7 +57,7 @@ def _step(session: Session, action: Action, tracker: BudgetTracker) -> Observati
         raise BudgetExceeded('session_done')
     if action.action_type == 'wait' and action.amount > tracker.remaining_seconds:
         raise BudgetExceeded('time_budget')
-    observation = session.step(action, timeout=tracker.request_timeout).observation
+    observation = apply_action(session, action, tracker).observation
     tracker.check()
     return observation
 
@@ -211,13 +213,14 @@ class AnthropicComputerAgent:
                 session, reason, error=f'Session step failed: {type(exc).__name__}'
             )
         except anthropic.APIError as exc:
-            tracker.add_usage(Usage(), Cost(provenance='Anthropic failed request; billing unknown'))
+            tracker.add_usage(None, Cost(provenance='Anthropic failed request; billing unknown'))
             reason = tracker.failure(exc)
             return tracker.result(session, reason, error=f'Anthropic {api_error(exc)}')
         except (ValueError, KeyError, TypeError) as exc:
             return tracker.result(session, 'error', error=f'Invalid Anthropic response: {exc}')
         finally:
             client.close()
+            tracker.record_unattached(session)
 
 
 class OpenAIComputerAgent:
@@ -352,10 +355,11 @@ class OpenAIComputerAgent:
                 session, reason, error=f'Session step failed: {type(exc).__name__}'
             )
         except openai.APIError as exc:
-            tracker.add_usage(Usage(), Cost(provenance='OpenAI failed request; billing unknown'))
+            tracker.add_usage(None, Cost(provenance='OpenAI failed request; billing unknown'))
             reason = tracker.failure(exc)
             return tracker.result(session, reason, error=f'OpenAI {api_error(exc)}')
         except (ValueError, KeyError, TypeError) as exc:
             return tracker.result(session, 'error', error=f'Invalid OpenAI response: {exc}')
         finally:
             client.close()
+            tracker.record_unattached(session)

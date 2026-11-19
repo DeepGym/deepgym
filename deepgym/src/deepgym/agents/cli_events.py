@@ -184,22 +184,28 @@ class CliEvents:
             )
         return reason
 
+    def hold_usage(self, *, completed: bool) -> None:
+        """Hold the run's usage and cost, as the agent's result reports them, for the
+        trace's unattached usage: a CLI run is one step, recorded before its usage is known.
+
+        Args:
+            completed: Whether the run completed, so the CLI reported all its usage.
+        """
+        usage = self.tracker.usage if self._reported_usage else None
+        complete = completed and not self._unreported_messages
+        self.tracker.hold(usage, self.tracker.cost.usd, complete=complete)
+
     def _record_usage(self, usage: Usage, *, cumulative: bool = False) -> None:
         if cumulative:
             if any(
                 value < getattr(self.tracker.usage, key)
-                for key, value in usage.model_dump().items()
+                for key, value in usage.model_dump(exclude_none=True).items()
             ):
                 raise ValueError('cumulative result usage is below observed assistant usage')
             self.tracker.usage = usage
             self._unreported_messages.clear()
         else:
-            self.tracker.usage = Usage(
-                **{
-                    key: getattr(self.tracker.usage, key) + value
-                    for key, value in usage.model_dump().items()
-                }
-            )
+            self.tracker.usage = self.tracker.usage + usage
         self._reported_usage = True
         self.tracker.cost = (
             self.prices.estimate(self.tracker.usage)
@@ -230,7 +236,8 @@ class CliEvents:
                 usage = _usage(_object(message['usage'], 'assistant usage'), self.provider)
                 previous = self._messages.get(identity) or Usage()
                 delta = {
-                    key: value - getattr(previous, key) for key, value in usage.model_dump().items()
+                    key: value - getattr(previous, key)
+                    for key, value in usage.model_dump(exclude_none=True).items()
                 }
                 if any(value < 0 for value in delta.values()):
                     raise ValueError('assistant message usage counters regressed')

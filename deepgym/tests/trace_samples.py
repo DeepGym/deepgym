@@ -4,7 +4,15 @@ import base64
 from datetime import datetime, timezone
 
 from deepgym.models import Action, MultiTurnEnvironment, Observation, RunResult
-from deepgym.traces import AgentMeta, EnvFingerprint, Provenance, Trace, TraceMessage, TraceStep
+from deepgym.traces import (
+    AgentMeta,
+    EnvFingerprint,
+    Provenance,
+    Trace,
+    TraceMessage,
+    TraceStep,
+    Usage,
+)
 
 PNG = b'\x89PNG\r\n\x1a\n sample screenshot'
 STARTED = datetime(2026, 10, 1, 12, 0, tzinfo=timezone.utc)
@@ -51,7 +59,8 @@ def _result(**overrides: object) -> RunResult:
 
 
 def graded_trace() -> Trace:
-    """A scored three-step episode: a command, a rejected action, then done."""
+    """A scored three-step episode: a command, a rejected action, then done, with usage on
+    each step and on a model call that led to no action."""
     shot = base64.b64encode(PNG).decode()
     return Trace(
         trace_id='trace0001',
@@ -79,6 +88,14 @@ def graded_trace() -> Trace:
                 step_verifier={'score': 0.5},
                 timestamp=_at(1),
                 duration_ms=40.0,
+                usage=Usage(
+                    input_tokens=1200,
+                    output_tokens=40,
+                    cache_read_tokens=800,
+                    cache_write_tokens=300,
+                    reasoning_tokens=12,
+                ),
+                cost_usd=0.0042,
             ),
             TraceStep(
                 index=2,
@@ -91,6 +108,10 @@ def graded_trace() -> Trace:
                 error="ActionError: Action 'write_file' not allowed here.",
                 timestamp=_at(2),
                 duration_ms=1.0,
+                usage=Usage(
+                    input_tokens=60, output_tokens=8, cache_read_tokens=2100, reasoning_tokens=3
+                ),
+                cost_usd=0.0011,
             ),
             TraceStep(
                 index=3,
@@ -104,20 +125,31 @@ def graded_trace() -> Trace:
                 step_verifier={'score': 0.5},
                 timestamp=_at(3),
                 duration_ms=30.0,
+                usage=Usage(
+                    input_tokens=30, output_tokens=5, cache_read_tokens=2160, reasoning_tokens=0
+                ),
+                cost_usd=0.0009,
             ),
         ),
         result=_result(),
+        unattached_usage=Usage(
+            input_tokens=40, output_tokens=6, cache_read_tokens=2190, reasoning_tokens=2
+        ),
+        unattached_cost_usd=0.0008,
         finished_at=_at(4),
     )
 
 
 def crashed_trace() -> Trace:
-    """An episode cut off after one step, before scoring; no model messages recorded."""
+    """An episode cut off after one step, before scoring; no model messages or usage recorded."""
     first = graded_trace().steps[0]
+    bare = first.model_copy(update={'messages': (), 'usage': None, 'cost_usd': None})
     return graded_trace().model_copy(
         update={
             'trace_id': 'trace0002',
-            'steps': (first.model_copy(update={'messages': ()}),),
+            'steps': (bare,),
+            'unattached_usage': None,
+            'unattached_cost_usd': None,
             'result': None,
             'error': 'SandboxError: sandbox vanished',
             'finished_at': None,

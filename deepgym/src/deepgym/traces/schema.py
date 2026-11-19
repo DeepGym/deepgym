@@ -7,8 +7,9 @@ who acted (agent, model and sampling config, as the caller describes them), ever
 verifier output) and every grade, the last of them the verdict.
 
 Schema 1.1 added the deepgym commit, the image digest the provider resolved (or why
-there is none) and every grade but the last. Traces written as 1.0 still load, with
-those fields empty.
+there is none) and every grade but the last. Schema 1.2 added each step's provider token
+usage and its cost, and the usage of model calls that led to no action. Traces written as
+1.0 or 1.1 still load, with those fields empty.
 """
 
 from __future__ import annotations
@@ -16,10 +17,11 @@ from __future__ import annotations
 import functools
 import hashlib
 import json
+import math
 import operator
 from collections import Counter
-from collections.abc import Sequence
-from typing import Literal
+from collections.abc import Iterable, Sequence
+from typing import Annotated, Literal
 
 from pydantic import (
     AwareDatetime,
@@ -36,11 +38,14 @@ from pydantic_core import to_json
 from deepgym.models import Action, MultiTurnEnvironment, Observation, RunResult, Trajectory
 from deepgym.sandboxes import SandboxImage
 
-TRACE_SCHEMA_VERSION = '1.1'
+TRACE_SCHEMA_VERSION = '1.2'
 
 NOT_RESOLVED = 'not resolved: no sandbox reported which image it booted'
 
 SamplingValue = str | int | FiniteFloat | bool | None
+
+Usd = Annotated[FiniteFloat, Field(ge=0)]
+"""An amount in US dollars: finite and not negative."""
 
 
 def sha256_text(text: str) -> str:
@@ -224,6 +229,50 @@ class TraceMessage(BaseModel):
         return self
 
 
+class Usage(BaseModel):
+    """Provider-reported tokens in disjoint categories, each billed at its own rate.
+
+    ``reasoning_tokens`` is the part of ``output_tokens`` the provider reports as reasoning,
+    not a category of its own (so it is never priced twice); None when the provider doesn't
+    report it, and in a sum when any part doesn't.
+    """
+
+    model_config = ConfigDict(frozen=True)
+    input_tokens: int = Field(default=0, ge=0)
+    output_tokens: int = Field(default=0, ge=0)
+    cache_read_tokens: int = Field(default=0, ge=0)
+    cache_write_tokens: int = Field(default=0, ge=0)
+    reasoning_tokens: int | None = Field(default=None, ge=0)
+
+    def __add__(self, other: Usage) -> Usage:
+        """Add *other* field by field; reasoning is None when either side's is unknown."""
+        mine, theirs = self.reasoning_tokens, other.reasoning_tokens
+        return Usage(
+            input_tokens=self.input_tokens + other.input_tokens,
+            output_tokens=self.output_tokens + other.output_tokens,
+            cache_read_tokens=self.cache_read_tokens + other.cache_read_tokens,
+            cache_write_tokens=self.cache_write_tokens + other.cache_write_tokens,
+            reasoning_tokens=None if mine is None or theirs is None else mine + theirs,
+        )
+
+
+def sum_usage(
+    parts: Iterable[tuple[Usage | None, float | None]],
+) -> tuple[Usage | None, float | None]:
+    """Sum (usage, USD cost) pairs, leaving out those without usage.
+
+    Returns:
+        The total usage and cost: None for both when no pair has usage, and the cost None
+        when a pair with usage has none, since part of the bill is then unknown.
+    """
+    reported = [(usage, cost) for usage, cost in parts if usage is not None]
+    if not reported:
+        return None, None
+    costs = [cost for _, cost in reported if cost is not None]
+    total = functools.reduce(operator.add, (usage for usage, _ in reported))
+    return total, math.fsum(costs) if len(costs) == len(reported) else None
+
+
 class TraceStep(BaseModel):
     """One agent action and what it produced."""
 
@@ -260,6 +309,23 @@ class TraceStep(BaseModel):
     timestamp: AwareDatetime
     duration_ms: float = Field(ge=0)
 
+    usage: Usage | None = None
+    """Provider-reported tokens of the model calls since the previous step, the reply that
+    produced this action included; None when not reported (and in traces before schema
+    1.2). The second and later actions of one reply have None: the reply's usage is on its
+    first action only, so sums never count it twice."""
+
+    cost_usd: Usd | None = None
+    """What that usage cost in USD, from caller-supplied rates (the agents'
+    ``TokenPrices``); None without them, never a guessed price."""
+
+    @model_validator(mode='after')
+    def check_cost_has_usage(self) -> TraceStep:
+        """Reject a cost without the usage it was computed from."""
+        if self.cost_usd is not None and self.usage is None:
+            raise ValueError('cost_usd needs the usage it was computed from')
+        return self
+
     @computed_field  # type: ignore[prop-decorator]
     @property
     def exit_code(self) -> int | None:
@@ -274,7 +340,7 @@ class Trace(BaseModel):
 
     model_config = ConfigDict(frozen=True)
 
-    schema_version: Literal['1.0', '1.1'] = TRACE_SCHEMA_VERSION
+    schema_version: Literal['1.0', '1.1', '1.2'] = TRACE_SCHEMA_VERSION
     trace_id: str = Field(pattern=r'^[A-Za-z0-9_-]{1,64}$')
     task: str
     provenance: Provenance
@@ -290,6 +356,21 @@ class Trace(BaseModel):
     error: str | None = None
     """What ended the episode early, if anything did."""
 
+    unattached_usage: Usage | None = None
+    """Provider-reported tokens of model calls that led to no action, so are on no step: a
+    closing answer, a refusal, a reply cut off or one after which a budget ran out. None
+    when there were none (and in traces before schema 1.2)."""
+
+    unattached_cost_usd: Usd | None = None
+    """What that usage cost in USD: from caller-supplied rates (the agents' ``TokenPrices``)
+    or a CLI's own reported total (Claude Code's ``total_cost_usd``); None without either."""
+
+    usage_complete: bool = True
+    """True when no model call was flagged incomplete. False when some call reported no
+    usage, or only part of it (a failed request, a response cut off, an error that ended
+    the run mid-call, an interrupted CLI run): token totals then count only what was
+    reported, a lower bound, and the cost total is None."""
+
     finished_at: AwareDatetime | None = None
 
     @model_validator(mode='after')
@@ -304,6 +385,13 @@ class Trace(BaseModel):
         """Reject earlier grades without a last one."""
         if self.prior_results and self.result is None:
             raise ValueError('prior_results need a final result')
+        return self
+
+    @model_validator(mode='after')
+    def check_unattached_cost_has_usage(self) -> Trace:
+        """Reject an unattached cost without the usage it was computed from."""
+        if self.unattached_cost_usd is not None and self.unattached_usage is None:
+            raise ValueError('unattached_cost_usd needs the usage it was computed from')
         return self
 
     @computed_field  # type: ignore[prop-decorator]
@@ -328,6 +416,28 @@ class Trace(BaseModel):
             else:
                 turns.append([step.index])
         return turns
+
+    @computed_field  # type: ignore[prop-decorator]
+    @property
+    def usage(self) -> Usage | None:
+        """Token usage of the whole episode: the steps' and :attr:`unattached_usage`; None
+        when none was reported, so unknown never reads as 0. A lower bound unless
+        :attr:`usage_complete`."""
+        return self._totals()[0]
+
+    @computed_field  # type: ignore[prop-decorator]
+    @property
+    def cost_usd(self) -> float | None:
+        """USD cost of that usage, summing the steps' and the unattached cost (from
+        ``TokenPrices``, or a CLI's own reported total such as Claude Code's
+        ``total_cost_usd``); None without usage, when any part of it has no cost, or when not
+        :attr:`usage_complete` (part of the bill is unknown)."""
+        return self._totals()[1]
+
+    def _totals(self) -> tuple[Usage | None, float | None]:
+        parts = [(step.usage, step.cost_usd) for step in self.steps]
+        usage, cost = sum_usage([*parts, (self.unattached_usage, self.unattached_cost_usd)])
+        return usage, cost if self.usage_complete else None
 
     @computed_field  # type: ignore[prop-decorator]
     @property

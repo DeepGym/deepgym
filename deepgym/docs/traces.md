@@ -29,6 +29,14 @@ print(tr.trace.has_verdict)
   message; token ids and logprobs are optional.
 - When one model reply issues several actions, step each one and pass the reply's
   messages with the first only; the others belong to the same turn (`trace.turns`).
+- `tr.step(action, messages, usage=Usage(...), cost_usd=...)` also records the provider
+  token usage of the model calls since the previous step (`deepgym.traces.Usage`: input,
+  output, cache-read, cache-write and reasoning tokens, reasoning being part of output)
+  and, if you price it, what it cost in USD. Like messages, pass a reply's usage with its
+  first action only, so totals count it once. Under `dg.trace()` the agents in
+  `deepgym.agents` do this for you. Their costs come from the `TokenPrices` you give them,
+  or, for a CLI run, the CLI's own reported total (Claude Code's `total_cost_usd`, which
+  takes precedence over `TokenPrices`); without either, the cost is null, never a guess.
 - A traced episode refuses actions after `score()`, so its verdict always matches the
   state it ends in.
 - `variant`, `seed` and `reference` (the reference solution's source) only go into the
@@ -42,15 +50,37 @@ print(tr.trace.has_verdict)
   and the git commit of the deepgym checkout (null for an installed package), with whether
   it had local changes; the provider; and the agent, model and sampling config you pass.
 - **Every step:** the action, the model messages behind it with optional token ids and
-  logprobs, what came back, the step reward with the step verifier's output, exit code
-  and error.
+  logprobs, the provider token usage and USD cost of the model calls behind it, what came
+  back, the step reward with the step verifier's output, exit code and error.
+- **Usage outside any step:** a model call that led to no action (a closing answer, a
+  refusal, a reply cut off, or one after which a budget ran out) is on no step, and nor is
+  a CLI agent's run, whose one step is recorded before the CLI reports its usage. Their
+  usage and cost are in `trace.unattached_usage` and `trace.unattached_cost_usd`.
+  `tr.record_unattached_usage(usage, cost_usd)` records it; the agents do when they finish,
+  including when an error ends the run.
+- **Incomplete usage:** `trace.usage_complete` is true when no model call was flagged
+  incomplete. It is false when some call reported no usage, or only part of it (a failed
+  request, a response cut off, an error that ended the run mid-call, an interrupted CLI
+  run). Unknown usage is never counted as 0 tokens: the token totals then count only what
+  was reported, a lower bound, and the cost total is null. `tr.mark_usage_incomplete()`
+  flags it.
+- **Usage totals:** `trace.usage` and `trace.cost_usd` sum the steps and the unattached
+  usage, and are null when nothing reported usage, so unknown never reads as 0; the cost
+  is also null when any part of the usage has no cost. For the agents in
+  `deepgym.agents` they match `AgentResult.usage` and `AgentResult.cost` up to float
+  rounding (the trace sums costs exactly, the agent adds them one by one), with two
+  exceptions. When nothing reported usage, `AgentResult.usage` has zero tokens while the
+  trace's totals are null; `AgentResult.cost` is $0 only if no call was made (a run whose
+  only request failed has a null cost in both). And an incomplete CLI run keeps its
+  partial CLI cost in `AgentResult.cost`, labelled incomplete, while the trace's cost
+  total is null.
 - **Every result of `score()`:** the last is the verdict, with `has_verdict`, and earlier
   ones stay in `prior_results`.
 
-Traces use a versioned, frozen schema (`deepgym.traces.Trace`, schema 1.1); schema 1.0
-traces still load and export. Docker and Apple container report the image digest from the
-container, and Daytona from its snapshot; images Daytona builds, Modal, E2B and the local
-backend give a `digest_unavailable` reason instead.
+Traces use a versioned, frozen schema (`deepgym.traces.Trace`, schema 1.2); schema 1.0
+and 1.1 traces still load and export, without usage. Docker and Apple container report
+the image digest from the container, and Daytona from its snapshot; images Daytona
+builds, Modal, E2B and the local backend give a `digest_unavailable` reason instead.
 
 ## On disk
 
@@ -79,13 +109,20 @@ deepgym traces export --format atif --out atif/ --only-valid        # ATIF docum
   whole-trace JSONL and ATIF (under `extra.deepgym`) keep the result as recorded, with
   its placeholder score of 0.0.
 - `--rows rl` writes one conversation per trace: `messages`, `reward`, `step_rewards`,
-  and `steps` (every action with its observation text and screenshot, done flag, exit
-  code, error, step reward and the index of the reply that produced it). It skips traces
-  with a turn that has no model messages.
+  the unattached usage and cost, the `usage` and `cost_usd` totals, `usage_complete`, and
+  `steps` (every action with its observation text and screenshot, done flag, exit code,
+  error, step reward, usage, cost and the index of the reply that produced it). It skips
+  traces with a turn that has no model messages.
+- Trace-shaped Parquet rows have `usage`, `cost_usd` and `usage_complete` columns.
 - `--format atif` writes one ATIF v1.7 (Agent Trajectory Interchange Format) document per
-  trace, with one agent step per turn and a tool call and result per action. It refuses a
-  non-empty directory, so stale documents never mix in. The mapping is documented in the
-  `deepgym.traces.atif` module.
+  trace, with one agent step per turn and a tool call and result per action. A turn's
+  usage goes in its agent step `metrics`, whose `llm_call_count` is the number of replies
+  in the turn (null for a turn with no recorded messages, as a computer agent's), and the
+  totals in `final_metrics`; when some usage is on no step, the root `notes` say
+  `final_metrics` include it. ATIF's prompt tokens count every input token, cached and cache-written ones
+  too, and cache writes and reasoning tokens, which ATIF has no field for, go in
+  `metrics.extra`. It refuses a non-empty directory, so stale documents never mix in. The
+  mapping is documented in the `deepgym.traces.atif` module.
 - Exports are strict JSON: a NaN in verifier output becomes null.
 - Parquet needs `pip install "deepgym[traces]"`.
 

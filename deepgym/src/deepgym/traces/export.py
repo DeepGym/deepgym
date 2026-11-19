@@ -3,8 +3,9 @@
 Row shapes (``rows=``):
 
 * ``trace``: the whole trace. A JSONL line is the full trace. A Parquet row has
-  summary columns plus the full trace as JSON in ``trace``, because traces hold
-  free-form dicts (verifier metrics, observation metadata) that Parquet can't type.
+  summary columns (the trace's ``usage``, ``cost_usd`` and ``usage_complete`` among them)
+  plus the full trace as JSON in ``trace``, because traces hold free-form dicts
+  (verifier metrics, observation metadata) that Parquet can't type.
 * ``rl``: one conversation per trace, for SFT and RL trainers. ``messages`` concatenates
   the model messages recorded at each step (TRL's conversational format, the
   ``messages`` key of verl's multi-turn SFT dataset), with token ids and logprobs where
@@ -12,10 +13,14 @@ Row shapes (``rows=``):
   the episode showed before the first action; ``reward`` and ``passed`` come from the
   final verifier; ``step_rewards`` are the step verifier's scores (null where none
   ran). ``steps`` holds every action in order with what it produced (text, base64 PNG
-  screenshot, done flag, exit code, or the error if nothing), its step reward, and
-  ``message_index``: where in ``messages`` the reply that produced it is, shared by the
-  actions of one turn. A trace with a turn that has no model messages has no whole
-  conversation to train on and is skipped. In RL Parquet, ``action.events`` is a
+  screenshot, done flag, exit code, or the error if nothing), its step reward, its
+  ``usage`` and ``cost_usd`` (see :attr:`.TraceStep.usage`), and ``message_index``: where
+  in ``messages`` the reply that produced it is, shared by the actions of one turn. The
+  row's ``unattached_usage`` and ``unattached_cost_usd`` are the model calls that led to
+  no action, its ``usage`` and ``cost_usd`` the trace's totals, both included, and
+  ``usage_complete`` false when some call reported no usage (the token totals are then a
+  lower bound and the cost unknown). A trace with a turn that has no model messages has no
+  whole conversation to train on and is skipped. In RL Parquet, ``action.events`` is a
   list of JSON strings, preserving arbitrary nested CLI event shapes, and a tool action's
   ``action.arguments`` is one JSON string.
 
@@ -35,7 +40,7 @@ from pydantic import BaseModel, ConfigDict, JsonValue
 
 from deepgym.exceptions import DeepGymError
 from deepgym.traces.atif import write_atif
-from deepgym.traces.schema import Trace, check_unique_ids, json_text
+from deepgym.traces.schema import Trace, Usage, check_unique_ids, json_text
 
 if TYPE_CHECKING:
     import pyarrow as pa
@@ -82,6 +87,8 @@ def rl_row(trace: Trace) -> Row | None:
             'exit_code': step.exit_code,
             'error': step.error,
             'reward': step.reward,
+            'usage': _usage(step.usage),
+            'cost_usd': step.cost_usd,
         })  # fmt: skip
     return {
         'trace_id': trace.trace_id,
@@ -95,6 +102,11 @@ def rl_row(trace: Trace) -> Row | None:
         'passed': None if verdict is None else verdict.passed,
         'step_rewards': [step.reward for step in trace.steps],
         'steps': steps,
+        'unattached_usage': _usage(trace.unattached_usage),
+        'unattached_cost_usd': trace.unattached_cost_usd,
+        'usage': _usage(trace.usage),
+        'cost_usd': trace.cost_usd,
+        'usage_complete': trace.usage_complete,
         'has_verdict': trace.has_verdict,
     }
 
@@ -115,9 +127,16 @@ def summary_row(trace: Trace) -> Row:
         'score': None if verdict is None else verdict.score,
         'passed': None if verdict is None else verdict.passed,
         'steps': len(trace.steps),
+        'usage': _usage(trace.usage),
+        'cost_usd': trace.cost_usd,
+        'usage_complete': trace.usage_complete,
         'started_at': provenance.started_at.isoformat(),
         'trace': trace.model_dump_json(),
     }
+
+
+def _usage(usage: Usage | None) -> Row | None:
+    return None if usage is None else usage.model_dump()
 
 
 def export_traces(
@@ -213,6 +232,7 @@ def _schema(rows: RowShape) -> pa.Schema:
     """Return the Parquet schema of a row shape (pyarrow must be importable)."""
     import pyarrow as pa
 
+    usage = pa.struct([(name, pa.int64()) for name in Usage.model_fields])
     if rows == 'trace':
         return pa.schema([
             ('trace_id', pa.string()),
@@ -226,6 +246,9 @@ def _schema(rows: RowShape) -> pa.Schema:
             ('score', pa.float64()),
             ('passed', pa.bool_()),
             ('steps', pa.int64()),
+            ('usage', usage),
+            ('cost_usd', pa.float64()),
+            ('usage_complete', pa.bool_()),
             ('started_at', pa.string()),
             ('trace', pa.string()),
         ])  # fmt: skip
@@ -257,6 +280,8 @@ def _schema(rows: RowShape) -> pa.Schema:
         ('exit_code', pa.int64()),
         ('error', pa.string()),
         ('reward', pa.float64()),
+        ('usage', usage),
+        ('cost_usd', pa.float64()),
     ])  # fmt: skip
     return pa.schema([
         ('trace_id', pa.string()),
@@ -270,5 +295,10 @@ def _schema(rows: RowShape) -> pa.Schema:
         ('passed', pa.bool_()),
         ('step_rewards', pa.list_(pa.float64())),
         ('steps', pa.list_(step)),
+        ('unattached_usage', usage),
+        ('unattached_cost_usd', pa.float64()),
+        ('usage', usage),
+        ('cost_usd', pa.float64()),
+        ('usage_complete', pa.bool_()),
         ('has_verdict', pa.bool_()),
     ])  # fmt: skip

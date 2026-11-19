@@ -14,7 +14,7 @@ gets a reminder instead. Streaming, accounting and incomplete-response handling 
 computer agents' (see :mod:`deepgym.agents.providers`). Every model message goes to
 ``AgentResult.messages``, a response that never completed too (what arrived of it, marked
 ``status: incomplete``; its tool calls never run); under a TracedSession, each step also
-carries the messages that produced it.
+carries the messages that produced it and their usage (see :func:`.base.apply_action`).
 """
 
 from __future__ import annotations
@@ -31,7 +31,7 @@ from deepgym.agents.base import (
     Cost,
     TerminationReason,
     TokenPrices,
-    Usage,
+    apply_action,
 )
 from deepgym.agents.providers import (
     ANTHROPIC_MAX_TOKENS,
@@ -49,7 +49,6 @@ from deepgym.exceptions import ActionError, DeepGymError
 from deepgym.models import Action, Observation
 from deepgym.session import Session
 from deepgym.tools import DONE_TOOL
-from deepgym.traces.capture import TracedSession
 from deepgym.traces.schema import TraceMessage, json_text
 
 _SYSTEM = (
@@ -85,8 +84,9 @@ def _prompt(task: str, initial: Observation) -> str:
 class _Episode:
     """One run's session, accounting and model messages.
 
-    Every message goes to the result. Under a TracedSession the messages not yet on a step
-    also go with the next action, so each step carries the messages that produced it.
+    Every message goes to the result. Under a TracedSession the messages not yet on a step,
+    and the usage of the responses among them, also go with the next action, so each step
+    carries the messages that produced it.
     """
 
     def __init__(self, session: Session, budget: Budget, prompt: str) -> None:
@@ -109,11 +109,7 @@ class _Episode:
         if self.session.done:
             raise BudgetExceeded('session_done')
         new, self._sent = self.messages[self._sent :], len(self.messages)
-        timeout = self.tracker.request_timeout
-        if isinstance(self.session, TracedSession):
-            result = self.session.step(action, new, timeout=timeout)
-        else:
-            result = self.session.step(action, timeout=timeout)
+        result = apply_action(self.session, action, self.tracker, new)
         self.tracker.check()
         return result.observation
 
@@ -275,13 +271,14 @@ class AnthropicToolAgent:
             reason = tracker.failure(exc)
             return episode.result(reason, error=f'Session step failed: {type(exc).__name__}')
         except anthropic.APIError as exc:
-            tracker.add_usage(Usage(), Cost(provenance='Anthropic failed request; billing unknown'))
+            tracker.add_usage(None, Cost(provenance='Anthropic failed request; billing unknown'))
             reason = tracker.failure(exc)
             return episode.result(reason, error=f'Anthropic {api_error(exc)}')
         except (ValueError, KeyError, TypeError) as exc:
             return episode.result('error', error=f'Invalid Anthropic response: {exc}')
         finally:
             client.close()
+            tracker.record_unattached(session)
 
 
 def _arguments(text: str) -> object:
@@ -401,10 +398,11 @@ class OpenAIToolAgent:
             reason = tracker.failure(exc)
             return episode.result(reason, error=f'Session step failed: {type(exc).__name__}')
         except openai.APIError as exc:
-            tracker.add_usage(Usage(), Cost(provenance='OpenAI failed request; billing unknown'))
+            tracker.add_usage(None, Cost(provenance='OpenAI failed request; billing unknown'))
             reason = tracker.failure(exc)
             return episode.result(reason, error=f'OpenAI {api_error(exc)}')
         except (ValueError, KeyError, TypeError) as exc:
             return episode.result('error', error=f'Invalid OpenAI response: {exc}')
         finally:
             client.close()
+            tracker.record_unattached(session)

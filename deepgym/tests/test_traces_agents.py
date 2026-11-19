@@ -6,7 +6,7 @@ from pathlib import Path
 
 import pytest
 
-from deepgym.agents import Budget, ClaudeCodeAgent
+from deepgym.agents import Budget, ClaudeCodeAgent, CodexAgent, TokenPrices, Usage
 from deepgym.agents.versions import SUPPORTED_CLIS
 from deepgym.cli_runtime import CliExecution, CliExecutionError, CliRequest, EventObserver
 from deepgym.exceptions import DeepGymError, SandboxError
@@ -159,6 +159,52 @@ def test_no_launch_cli_finalization_is_forwarded_without_a_trace_action(
         restored = load_trace(traced.path)
         assert 'setup population' in restored.error
         assert not restored.has_verdict
+
+
+def test_cli_usage_is_recorded_as_the_agent_reports_it(tmp_path: Path) -> None:
+    prices = TokenPrices(
+        input_per_million=3,
+        output_per_million=15,
+        cache_read_per_million=0.3,
+        cache_write_per_million=3.75,
+        source='test rates',
+    )
+    agent = CodexAgent(
+        model='m', api_key='fixture-key-not-a-secret', allow_model_credentials=True, prices=prices
+    )
+    with make_trace(tmp_path / 'cli.jsonl', RecordedBackend()) as traced:
+        initial = traced.start()
+        result = agent.run(traced, initial, task='task', budget=Budget(max_seconds=60))
+
+    trace = load_trace(traced.path)
+    usage = Usage(input_tokens=12, output_tokens=3)  # the fixture's turn.completed usage
+    assert result.termination_reason == 'completed'
+    # The CLI's one step is recorded before its usage is known: the run's usage is on no step.
+    assert [step.usage for step in trace.steps] == [None]
+    assert (trace.unattached_usage, trace.unattached_cost_usd) == (usage, result.cost.usd)
+    assert (trace.usage, trace.cost_usd) == (result.usage, result.cost.usd)
+    assert result.cost.usd == prices.estimate(usage).usd
+    assert trace.usage_complete
+
+
+def test_an_error_escaping_a_cli_run_keeps_its_usage_marked_incomplete(
+    monkeypatch, tmp_path: Path
+) -> None:
+    backend = RecordedBackend()
+    backend.failure = ValueError('unexpected supervisor reply')  # after the events streamed
+    monkeypatch.setattr(backend, 'stop_agent', lambda: None)  # the run never closed cleanly
+    agent = CodexAgent(model='m', api_key='fixture-key-not-a-secret', allow_model_credentials=True)
+    with make_trace(tmp_path / 'cli-error.jsonl', backend) as traced:
+        initial = traced.start()
+        with pytest.raises(ValueError, match='unexpected supervisor reply'):
+            agent.run(traced, initial, task='task', budget=Budget(max_seconds=60))
+
+    trace = load_trace(traced.path)
+    assert trace.steps[0].error == 'ValueError: unexpected supervisor reply'
+    # The usage reported before the error is kept; the run never finished, so it may be more.
+    assert trace.unattached_usage == Usage(input_tokens=12, output_tokens=3)
+    assert trace.usage_complete is False
+    assert trace.cost_usd is None
 
 
 def test_cli_failure_preserves_observed_version_in_persisted_trace(tmp_path: Path) -> None:

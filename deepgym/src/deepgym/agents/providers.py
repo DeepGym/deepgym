@@ -41,13 +41,13 @@ def unresolved_usage(
     tracker: BudgetTracker, data: object, provider: Literal['anthropic', 'openai']
 ) -> None:
     """Keep the usage an unfinished response reported, if any (a failed one may carry
-    none), with the total bill marked unresolved."""
-    usage = Usage()
+    none), as part of what it used, with the total bill marked unresolved."""
+    usage: Usage | None = None
     if isinstance(data, dict):
         with contextlib.suppress(KeyError, TypeError, ValueError):
             usage = _anthropic_usage(data) if provider == 'anthropic' else _openai_usage(data)
     unresolved = f'unfinished {provider} response: partial usage, billing unresolved'
-    tracker.add_usage(usage, Cost(provenance=unresolved))
+    tracker.add_usage(usage, Cost(provenance=unresolved), complete=False)
 
 
 def anthropic_message(
@@ -162,9 +162,7 @@ def account(
             raise ValueError('provider did not return token usage')
         usage = _anthropic_usage(data) if provider == 'anthropic' else _openai_usage(data)
     except (KeyError, TypeError, ValueError):
-        tracker.add_usage(
-            Usage(), Cost(provenance=f'{provider} usage unavailable; billing unknown')
-        )
+        tracker.add_usage(None, Cost(provenance=f'{provider} usage unavailable; billing unknown'))
         raise
     tracker.add_usage(
         usage,
@@ -193,6 +191,7 @@ def _anthropic_usage(data: dict[str, Any]) -> Usage:
         output_tokens=data['output_tokens'],
         cache_read_tokens=data.get('cache_read_input_tokens') or 0,
         cache_write_tokens=data.get('cache_creation_input_tokens') or 0,
+        reasoning_tokens=(data.get('output_tokens_details') or {}).get('thinking_tokens'),
     )
 
 
@@ -205,6 +204,7 @@ def _openai_usage(data: dict[str, Any]) -> Usage:
         output_tokens=data['output_tokens'],
         cache_read_tokens=cached,
         cache_write_tokens=written,
+        reasoning_tokens=(data.get('output_tokens_details') or {}).get('reasoning_tokens'),
     )
 
 

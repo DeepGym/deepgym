@@ -3,7 +3,8 @@
 Every write takes the database's write lock first (``BEGIN IMMEDIATE``) and reads the time
 under it, so reservations never exceed an item's overlap, across threads and processes
 alike. A reservation whose time ran out is marked expired by the next request for an item of
-its queue; until then it reads back as expired and counts as free.
+its queue; until then it reads back as expired and counts as free. An item's content is read
+from the runs and episodes in the same database.
 """
 
 from __future__ import annotations
@@ -18,12 +19,15 @@ from uuid import uuid4
 
 from pydantic import TypeAdapter, ValidationError
 
-from deepgym.console.db import connect, init_db, iso_utc
+from deepgym.console.db import TRACE_ID, connect, init_db, iso_utc
+from deepgym.console.episode_store import select_screenshot
+from deepgym.console.item_content import item_content
 from deepgym.console.label_store import insert_labels, select_labels, stored_target
 from deepgym.console.schemas import LabelQuery
 from deepgym.labels import Label, LabelCreate, LabelFields, LabelTarget, Name, is_verdict
 from deepgym.review_queues import (
     Assignment,
+    ItemContent,
     ItemCreate,
     ItemPage,
     ItemProgress,
@@ -39,7 +43,7 @@ from deepgym.review_queues import (
 
 _QUEUE_COLUMNS = (
     'id', 'name', 'description', 'instructions', 'label_names', 'overlap', 'blind',
-    'reservation_seconds', 'reviewers', 'closed', 'created_at',
+    'reservation_seconds', 'reviewers', 'closed', 'created_at', 'reveal',
 )  # fmt: skip
 _INSERT_QUEUE = (
     f'INSERT INTO queues ({", ".join(_QUEUE_COLUMNS)}) '
@@ -48,7 +52,7 @@ _INSERT_QUEUE = (
 _UPDATE_QUEUE = (
     'UPDATE queues SET closed = :closed, description = :description, '
     'instructions = :instructions, reservation_seconds = :reservation_seconds, '
-    'reviewers = :reviewers WHERE id = :id'
+    'reviewers = :reviewers, reveal = :reveal WHERE id = :id'
 )
 _INSERT_ITEM = (
     'INSERT INTO queue_items (id, queue_id, position, target, recording_kind, recording_id, '
@@ -180,7 +184,8 @@ class ErrorDetail(TypedDict):
 
 
 class QueueNotFoundError(LookupError):
-    """An unknown queue, or an item its queue doesn't hold."""
+    """An unknown queue, an item its queue doesn't hold, or a run, episode or trace the
+    console doesn't hold for an item's content."""
 
 
 class NotReviewerError(PermissionError):
@@ -249,7 +254,8 @@ class QueueStore:
 
         Raises:
             ValueError: If the new reviewers leave out a current one, or the queue lets
-                anyone review.
+                anyone review; or *update* changes ``reveal`` once a blind queue has a
+                submitted review, or one that isn't blind has handed out an item.
         """
         changes = update.model_dump(exclude_unset=True)
         with connect(self._path) as conn:
@@ -257,6 +263,8 @@ class QueueStore:
             queue = _get_queue(conn, queue_id)
             if 'reviewers' in changes:
                 _check_added(queue, changes['reviewers'])
+            if changes.get('reveal', queue.reveal) != queue.reveal:
+                _check_reveal_unused(conn, queue)
             updated = queue.model_copy(update=changes)
             conn.execute(_UPDATE_QUEUE, _queue_row(updated))
         return updated
@@ -432,6 +440,50 @@ class QueueStore:
             view = _view(conn, queue, item, assignment, now)
         return view
 
+    def content(self, queue_id: str, item_id: str, reviewer: str) -> ItemContent:
+        """Return what *reviewer* needs to grade an item, and nothing that reveals a grade
+        (see :class:`deepgym.review_queues.ItemContent`).
+
+        A reviewer may read it while they could submit a review of the item (see
+        :meth:`submit`), and once they have.
+
+        Raises:
+            NotReviewerError: If the queue lists its reviewers and *reviewer* isn't one.
+            ValueError: If *reviewer* hasn't reviewed the item and couldn't submit a review
+                of it now.
+            QueueNotFoundError: Also if the console holds no run, episode or trace for the
+                item's target.
+            ConflictingRecordingError: A ``ValueError``, if a trace's stored copies disagree
+                or another trace's id matches but for case.
+            UnreadableRecordingError: If the stored recording, or a file its content needs,
+                can't be read.
+        """
+        with connect(self._path) as conn:
+            item = _readable(conn, queue_id, item_id, reviewer)
+            content = item_content(conn, item)
+        if content is None:
+            raise QueueNotFoundError(f'The console holds no {item.target.kind} {item.target.id}')
+        return content
+
+    def screenshot(self, queue_id: str, item_id: str, reviewer: str, frame: int) -> bytes:
+        """Return the PNG shown at *frame* of an episode item, to the reviewers who may read
+        its content (see :meth:`content`).
+
+        Raises:
+            NotReviewerError: If the queue lists its reviewers and *reviewer* isn't one.
+            ValueError: If *reviewer* may not read the item's content.
+            QueueNotFoundError: Also if the item isn't an episode, or that frame of it has no
+                screenshot.
+        """
+        with connect(self._path) as conn:
+            target = _readable(conn, queue_id, item_id, reviewer).target
+            png = None if target.kind != 'episode' else select_screenshot(conn, target.id, frame)
+        if png is None:
+            raise QueueNotFoundError(
+                f'The console holds no screenshot of {target.kind} {target.id} at frame {frame}'
+            )
+        return png
+
     def submit(
         self, queue_id: str, item_id: str, reviewer: str, labels: Sequence[ReviewLabel]
     ) -> ReviewView:
@@ -545,6 +597,29 @@ def _get_item(conn: sqlite3.Connection, queue_id: str, item_id: str) -> QueueIte
     return _item(row)
 
 
+def _readable(conn: sqlite3.Connection, queue_id: str, item_id: str, reviewer: str) -> QueueItem:
+    """Start a read transaction, and return the item if *reviewer* may read its content:
+    the queue lets them review, and they have reviewed it or could submit a review of it now
+    (``_submittable``), so the two rules never drift apart.
+
+    Raises:
+        NotReviewerError: If the queue lists its reviewers and *reviewer* isn't one.
+        ValueError: If they never had a turn at it, or ``_submittable`` refuses theirs.
+    """
+    now = _snapshot(conn)
+    queue = _get_queue(conn, queue_id)
+    _check_reviewer(queue, reviewer)
+    item = _get_item(conn, queue_id, item_id)
+    latest = _latest(conn, item_id, reviewer, now)
+    if latest is None:
+        raise ValueError(
+            f'{reviewer} holds no reservation of item {item_id}; ask for the next item'
+        )
+    if latest.status != 'submitted':
+        _submittable(conn, queue, item, latest, now)
+    return item
+
+
 def _check_reviewer(queue: Queue, reviewer: str) -> None:
     """Refuse a reviewer the queue doesn't list, if it lists any."""
     if queue.reviewers and reviewer not in queue.reviewers:
@@ -558,6 +633,23 @@ def _check_added(queue: Queue, reviewers: Sequence[str]) -> None:
     dropped = [reviewer for reviewer in queue.reviewers if reviewer not in reviewers]
     if dropped:
         raise ValueError(f'Reviewers can only be added; the new list drops {dropped}')
+
+
+def _check_reveal_unused(conn: sqlite3.Connection, queue: Queue) -> None:
+    """Refuse a change of reveal policy once it has decided what a reviewer saw: in a blind
+    queue once a review is submitted, and in one that isn't once an item was handed out,
+    since a reviewer there sees labels from their first turn."""
+    used = conn.execute(
+        'SELECT 1 FROM queue_assignments WHERE queue_id = :queue_id '
+        "AND (:any_turn OR status = 'submitted') LIMIT 1",
+        {'queue_id': queue.id, 'any_turn': not queue.blind},
+    ).fetchone()
+    if used is not None:
+        done = 'submitted reviews' if queue.blind else 'handed out items'
+        raise ValueError(
+            f'Queue {queue.id} has {done} under reveal {queue.reveal!r}; '
+            'its reveal policy no longer changes'
+        )
 
 
 def _check_whole(queue: Queue, items: Sequence[ItemCreate]) -> None:
@@ -652,6 +744,8 @@ def _view(
         labels = select_labels(conn, query)
     if scope == 'own' and assignment is not None:
         labels = [label for label in labels if label.group_id == assignment.id]
+    if queue.reveal == 'humans_only':
+        labels = [label for label in labels if label.source == 'human']
     if assignment is not None and any(not _own(label, assignment.reviewer) for label in labels):
         conn.execute(
             _EXPOSE,
@@ -670,13 +764,16 @@ def _scope(
     """Return which labels on *item*'s kind and id the reviewer of *assignment* may see:
     every one in a queue that isn't blind; in a blind one, none before they submit, then
     only their review's own while they may still review another item on the recording in a
-    blind queue (see ``_PENDING``), and every one after that."""
+    blind queue (see ``_PENDING``), and every one after that. Under ``reveal='on_close'``,
+    never more than their review's own while the queue is open."""
     if assignment is None:
         return 'none'
+    if queue.blind and assignment.status != 'submitted':
+        return 'none'
+    if queue.reveal == 'on_close' and not queue.closed:
+        return 'own'
     if not queue.blind:
         return 'all'
-    if assignment.status != 'submitted':
-        return 'none'
     pending = conn.execute(
         _PENDING, {'item_id': item.id, 'reviewer': assignment.reviewer, 'now': iso_utc(now)}
     ).fetchone()
@@ -700,9 +797,7 @@ def _recording(conn: sqlite3.Connection, target: LabelTarget) -> tuple[str, str]
     """Return the kind and id of the recording *target* is on: for a console episode
     recorded from a trace, that trace; for anything else, its own."""
     if target.kind == 'episode':
-        row = conn.execute(
-            "SELECT json_extract(trace, '$.trace_id') FROM episodes WHERE id = ?", (target.id,)
-        ).fetchone()
+        row = conn.execute(f'SELECT {TRACE_ID} FROM episodes WHERE id = ?', (target.id,)).fetchone()
         if row is not None and row[0] is not None:
             return 'trace', row[0]
     return target.kind, target.id

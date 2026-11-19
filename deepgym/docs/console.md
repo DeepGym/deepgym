@@ -195,7 +195,8 @@ from deepgym.review_queues import ItemCreate, QueueCreate, ReviewLabel
 queues = QueueStore(DEFAULT_DB_PATH)
 queue = queues.create(QueueCreate(
     name='judge v3 calibration', instructions='Pass only if the config is fixed.',
-    label_names=('passed', 'c1', 'c2'), overlap=3, blind=True, reservation_seconds=1800,
+    label_names=('passed', 'c1', 'c2'), overlap=3, blind=True, reveal='on_close',
+    reservation_seconds=1800,
 ))
 queues.add_items(queue.id, [
     ItemCreate(target=LabelTarget(kind='run', id=run_id), context=task_text)
@@ -203,6 +204,7 @@ queues.add_items(queue.id, [
 ])
 
 view = queues.next_item(queue.id, 'ana')  # None when nothing is left for ana
+content = queues.content(queue.id, view.item.id, 'ana')  # task, answer, steps; no grades
 queues.submit(queue.id, view.item.id, 'ana', [
     ReviewLabel(name='passed', value=False, comment='Opens port 80 instead.'),
     ReviewLabel(name='c1', value=True),
@@ -220,6 +222,8 @@ queues.submit(queue.id, view.item.id, 'ana', [
   takes only whole targets as items, since verdicts are on whole targets.
 - `overlap` (default 1): how many different reviewers review each item.
 - `blind` (default `true`): see [Blind review](#blind-review).
+- `reveal` (default `after_submit`): which labels a reviewer sees once the queue would show
+  them; see [Reveal policy](#reveal-policy).
 - `reservation_seconds` (default 3600): how long a reviewer holds an item they were
   handed before it is free again.
 - `reviewers`: who may ask for, view and review items; empty (the default) lets anyone
@@ -230,8 +234,11 @@ queues.submit(queue.id, view.item.id, 'ana', [
 `update(queue_id, QueueUpdate(...))` changes what may change: `closed`, `description`,
 `instructions`, `reservation_seconds` (for reservations made or extended from then on) and
 `reviewers`, which takes the whole new list and only adds to it; a queue that lets anyone
-review keeps doing so. `overlap`, `blind` and `label_names` never change. A closed queue
-hands out no items; a reviewer who still holds a live reservation may submit it.
+review keeps doing so. `reveal` changes only until it has decided what a reviewer saw: in
+a blind queue until a review is submitted, and in one that isn't until an item is handed
+out, since reviewers there see labels from their first turn. `overlap`, `blind` and
+`label_names` never change. A closed queue hands out no items; a reviewer who
+still holds a live reservation may submit it.
 
 ### Items and reservations
 
@@ -279,6 +286,61 @@ review's labels doesn't reopen its item, which still counts the review. An item 
 target is invalidated (`store.excluded()`) is still handed out; close the queue, or skip
 the item.
 
+### Item content
+
+`content(queue_id, item_id, reviewer)` returns what a reviewer needs to grade an item, as
+an `ItemContent`:
+
+- `item`: the queue item, with its `context`.
+- `task`: a trace's task, and an episode's when it was recorded from a trace; a run's,
+  read from the registry, when its environment still hashes to what the run ran. A run
+  of a benchmark adapter that picks its task per instance when the run starts
+  (`swebench_pro`, `terminal_bench_2`) has none: the adapter's own task is a generic
+  instruction, not the instance's problem. Otherwise none too: give the task as the
+  item's `context`.
+- `answer`: a run's solution, the text it was graded on.
+- `initial_observation` (a trace's) and `steps`: every step of the recording, whatever
+  step the item is. Each step has its `index`, as the item's target numbers it; its
+  `action` (an `Action` without a CLI agent's `events`); its `observation` text; the
+  `exit_code` of its own action (for an episode, read from the next frame, which shows
+  what the action produced); `has_screenshot`; `applied` (false for a trace step whose
+  action was rejected); a trace step's `error`; and a trace step's `messages` (role and
+  content).
+
+It never returns a score, pass, reward, step verifier output, verifier result, error type,
+verifier source, usage, cost or label: the response model lists every field it returns.
+Two fields are cut where they could carry one:
+
+- A trace step's `error` is the whole text only when the step wasn't applied (refused
+  before anything ran) or the trace has no step verifier. Otherwise it is only the
+  exception's name, such as `SandboxDiedError`: the message of an error raised while the
+  step verifier ran can quote what it printed. A text that names no exception gives none.
+- Output a CLI action produced (Claude Code stream-json, Codex `--json`) loses the usage,
+  token count and cost keys of each line that is JSON, at any depth; other lines are kept
+  as stored. A span marked on a changed line counts in the text shown, not the stored one.
+
+Content is otherwise what the agent saw and did, so an environment that showed the agent
+its reward in an observation or message shows it to the reviewer too. A trace stored more
+than once is read as `GET /api/traces/{trace_id}` reads it: its copies merged into the one
+that got furthest. Copies that disagree, or another trace whose id matches but for case,
+get 409, as there.
+
+`screenshot(queue_id, item_id, reviewer, frame)` returns the PNG shown at one frame of an
+episode item, the steps whose `has_screenshot` is true, under the same rules as `content`.
+A trace item's steps have no screenshots there: to review a computer-use trace's
+screenshots, queue the episode recorded from it, which is the same recording for blind
+review.
+
+A reviewer may read an item's content and screenshots once they have reviewed it, and
+while they could submit a review of it: a live reservation, or one that expired or was
+released while the item has a free slot in an open queue (see above). Anyone else is
+refused (409 over REST), and a reviewer the queue doesn't list gets 403. An item whose
+run, episode or trace the console doesn't hold (a trace kept only in a traces directory,
+say) gets 404, and so does a frame with no screenshot or an item that isn't an episode. A
+trace whose copies don't read as one trace gets 409 (above). A stored recording that
+doesn't parse, or a file its content needs that can't be read, gets 500 with a fixed
+message that quotes nothing stored.
+
 ### Blind review
 
 Blind review works per recording: a run, a console episode or a trace, by its kind and id,
@@ -308,14 +370,60 @@ only ever sees their own labels, reviews every step blind. Exposures are recorde
 what queue responses return: labels seen anywhere else (below) are not. The scope decision,
 the label read and the exposure are made in the request's own transaction.
 
-Blind mode covers what the queue routes return, and nothing else:
+### Reveal policy
 
-- `/api/labels` lists every label.
-- The run and episode routes show the verifier's score and pass, and an episode's rewards.
-- The console has no login: any client can pass another reviewer's name.
+`reveal` narrows which labels `next_item`, `view` and `submit` return once the rules
+above would show them:
 
-A reviewer UI for a blind queue should read labels through the queue routes only, and
-show nothing of the target that the queue doesn't.
+- `after_submit` (the default): as above.
+- `humans_only`: only humans' labels, never a judge's or a verifier's.
+- `on_close`: only the reviewer's own review's labels while the queue is open; once it is
+  closed, as `after_submit`.
+
+Use `on_close` to validate a judge: while the queue is open, its responses show no
+reviewer the judge's verdict, the verifier's score or another expert's labels. Use
+`humans_only` when reviewers may compare notes with each other but must never anchor on a
+judge or verifier, and `after_submit` when seeing the judge after submitting is wanted
+feedback, such as when training reviewers.
+
+Exposures follow what a response returns, under every policy: a judge's, a verifier's or
+another expert's label shown is an exposure. Under `humans_only` a reviewer is exposed once
+another human's label is shown to them; under `on_close` nothing is exposed while the queue
+is open. In a queue that isn't blind, `humans_only` shows only humans' labels from the
+reviewer's first turn and `on_close` only their own review's until the queue is closed.
+
+A reviewer in an `on_close` queue can still be exposed, and their later reviews of that
+recording are then marked not blind:
+
+- by a turn at an item on the same recording in a queue that isn't blind, whatever it
+  showed them;
+- by another queue's response on the same recording that shows labels, such as an
+  `after_submit` queue;
+- by viewing an item of the `on_close` queue while it is closed: reopening it then leaves
+  them exposed for the items still open to them.
+
+### What blind review doesn't cover
+
+Blind mode, the reveal policy and the content route cover what the queue routes return, and
+nothing else. The local console has no login: any client can pass another reviewer's name,
+and a client that calls any of the general routes can still see grades. For example:
+
+- `GET /api/traces/{trace_id}` returns a whole trace with its verdict, step rewards, step
+  verifier output and labels, the most direct way to see a trace item's grade, and
+  `GET /api/traces` lists traces with their verdicts.
+- `GET /api/labels` and `GET /api/labels/current` list labels, the judge's included, and
+  `GET /api/calibration/agreement` compares the judge's verdicts with the experts'.
+- `GET /api/runs` lists runs with their score and pass, `GET /api/runs/stats` totals them
+  with score bins, `GET /api/runs/compare` compares groups' solve rates, and
+  `GET /api/runs/{id}` returns a run's score, pass and verifier result.
+- `GET /api/episodes` lists episodes with their score and pass, and `GET /api/episodes/{id}`
+  returns an episode's score, rewards and result.
+- `GET /api/environments/{name}` returns the verifier's source and the reference solution.
+
+A reviewer UI should call only the queue routes (`next`, the item view, `content`, the
+frame screenshots, `submit`, `release` and `skip`). A hosted deployment must enforce this
+server-side: give reviewers access to the queue routes only, and tie each reviewer name to
+a login.
 
 ### Progress
 
@@ -343,6 +451,14 @@ The console serves the same under `/api/queues`:
   when nothing is left for that reviewer now.
 - `GET /api/queues/{id}/items/{item_id}?reviewer=ana` returns the item as ana may see it,
   recording an exposure when it shows her someone else's label.
+- `GET /api/queues/{id}/items/{item_id}/content?reviewer=ana` returns the item's content
+  while ana could submit a review of it or once she has (see
+  [Item content](#item-content)), 404 when the console doesn't hold its run, episode or
+  trace, 409 when a trace's copies don't read as one trace, and 500 when the stored
+  recording can't be read.
+  `GET /api/queues/{id}/items/{item_id}/frames/{frame}/screenshot?reviewer=ana` returns
+  the PNG shown at that frame of an episode item, under the same rules, and 404 when it
+  has none.
 - `POST /api/queues/{id}/items/{item_id}/submit` with `{"reviewer": "ana", "labels":
   [...]}` stores a review (201). `.../release` and `.../skip` take `{"reviewer": "ana"}`.
 
@@ -351,10 +467,11 @@ Input that breaks a rule gets 422, with each problem's `loc` in the body: an inv
 a review with no labels, missing a `label_names` label, with two labels sharing an `id`, or
 with a label outside the item's target or breaking a label rule (`loc`
 `["body", "labels", i, ...]`), and a step or text item in a queue that asks for a verdict.
-Any other refusal gets 409: a closed queue, a turn that can't be submitted, an item already
+Any other refusal gets 409: a closed queue, a turn that can't be submitted, content asked
+for by a reviewer who couldn't submit a review of the item and hasn't, an item already
 reviewed with other labels, a verdict the label store refuses, a reviewer list that drops
-someone, or a client id stored with other settings. An unknown or repeated query parameter
-is refused with 422.
+someone, a `reveal` change once it has decided what a reviewer saw, or a client id stored
+with other settings. An unknown or repeated query parameter is refused with 422.
 
 ## Traces
 

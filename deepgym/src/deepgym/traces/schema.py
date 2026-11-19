@@ -55,6 +55,8 @@ SamplingValue = str | int | FiniteFloat | bool | None
 Usd = Annotated[FiniteFloat, Field(ge=0)]
 """An amount in US dollars: finite and not negative."""
 
+MessageRole = Literal['system', 'user', 'assistant', 'tool']
+
 
 def sha256_text(text: str) -> str:
     """Return the hex SHA-256 of *text* encoded as UTF-8."""
@@ -231,7 +233,7 @@ class TraceMessage(BaseModel):
 
     model_config = ConfigDict(frozen=True)
 
-    role: Literal['system', 'user', 'assistant', 'tool']
+    role: MessageRole
     content: str
     token_ids: tuple[int, ...] | None = None
     logprobs: tuple[FiniteFloat, ...] | None = None

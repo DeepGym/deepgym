@@ -1,6 +1,7 @@
 """Tests for trace scanners: rule and model scanners, scan runs, groups, labels, agreement, CLI."""
 
 import json
+import re
 import sys
 import time
 from pathlib import Path
@@ -31,10 +32,11 @@ from deepgym.scanners import (
     load_rule_scanners,
     scan_traces,
     scanner_agreement,
+    scanner_forbids,
 )
 from deepgym.scanners.writes import cli_writes, python_writes
 from deepgym.traces import Trace, TraceMessage, TraceStep
-from deepgym.traces.schema import sha256_text
+from deepgym.traces.schema import json_text, sha256_text
 from tests.test_traces_export import _event_log
 from tests.trace_samples import STARTED, graded_trace
 
@@ -199,6 +201,18 @@ class TestProtectedPaths:
             ('git clean -fd -e tests src/', []),
             ('git clean -fdx', []),
             ('rm tests/*', ['tests/*']),
+            ("sed -i 's/tests/specs/' README.md", []),
+            ("sed -i -e 's/a/b/' -f prog.sed tests/x.py", ['tests/x.py']),
+            ("sed --expression='s/tests/x/' -i tests/x.py", ['tests/x.py']),
+            ("sed -ie 's/a/b/' tests/x.py", ['tests/x.py']),
+            ("perl -i -pe 's/tests/x/' docs.md", []),
+            ('cp -t tests/ a.py b.py', ['tests/', 'tests/']),
+            ('cp --target-directory=tests a.py', ['--target-directory=tests']),
+            ('install -ttests a.py', ['-ttests']),
+            ('mv -t /tmp tests/a.py', ['tests/a.py']),
+            ('rm -rf .', ['.']),
+            ('rm -rf ../..', ['../..']),
+            ('git checkout .', ['.']),
         ],
     )
     def test_bash(self, command: str, quotes: list[str]) -> None:
@@ -221,7 +235,8 @@ class TestProtectedPaths:
             (('tests/test_*.py',), 'rm -r tests', True),
             (('**/fixtures/*.json',), 'rm a/b/fixtures/x.json', True),
             (('tests/**',), 'rm tests/../src/a.py', False),
-            (('tests/**',), 'rm -rf .', False),
+            (('tests/**',), 'rm -rf .', True),
+            (('/repo/tests/**',), 'rm -rf .', False),
             (('tests',), 'rm tests/test_x.py', True),
             (('tests/',), 'rm tests/test_x.py', True),
             (('./tests/**',), 'rm tests/test_x.py', True),
@@ -315,6 +330,28 @@ class TestProtectedPaths:
             ('tests/n.py', 'tests/n.py'),
         ]
 
+    def test_python_keywords_and_path_parts(self) -> None:
+        code = (
+            'import os\nfrom pathlib import Path\n'
+            "open(file='tests/a.py', mode='w')\n"
+            "open(mode='a', file='tests/b.py')\n"
+            "open(file='tests/c.py')\n"
+            "os.remove(path='tests/d.py')\n"
+            "os.rename(src='src/x', dst='tests/e.py')\n"
+            "Path('tests', 'f.py').unlink()\n"
+        )
+
+        writes = python_writes(code)
+
+        assert [(w.path, code[slice(*w.span)]) for w in writes] == [
+            ('tests/a.py', 'tests/a.py'),
+            ('tests/b.py', 'tests/b.py'),
+            ('tests/d.py', 'tests/d.py'),
+            ('src/x', 'src/x'),
+            ('tests/e.py', 'tests/e.py'),
+            ('tests/f.py', "Path('tests', 'f.py')"),
+        ]
+
     @pytest.mark.parametrize(
         ('code', 'paths'),
         [
@@ -395,12 +432,16 @@ class TestProtectedPaths:
         changes = [{'path': '/w/tests/f.py', 'kind': 'update'}, {'path': '/w/ok.py', 'kind': 'add'}]
         command = "bash -lc 'echo > tests/g.py'"
         failed = {'type': 'file_change', 'status': 'failed', 'changes': [{'path': 'tests/m.py'}]}
+        run = {'id': 'c1', 'type': 'command_execution', 'command': command}
+        cut = {'id': 'c2', 'type': 'command_execution', 'command': 'rm tests/s.py'}
         events = (
             {'type': 'assistant', 'message': {'content': claude}},
             {'type': 'user', 'message': {'content': [refused]}},
             {'type': 'item.completed', 'item': {'type': 'file_change', 'changes': changes}},
             {'type': 'item.completed', 'item': failed},
-            {'type': 'item.completed', 'item': {'type': 'command_execution', 'command': command}},
+            {'type': 'item.started', 'item': run},
+            {'type': 'item.completed', 'item': run},
+            {'type': 'item.started', 'item': cut},
             {'type': 'turn.completed', 'usage': {'input_tokens': 1, 'output_tokens': 1}},
         )
         action = Action(action_type='cli', content='codex exec --json task', events=events)
@@ -415,6 +456,7 @@ class TestProtectedPaths:
             ('/w/ok.py', False),
             ('tests/m.py', True),
             ('tests/g.py', False),
+            ('tests/s.py', False),
         ]
         failure = 'matching tests/**; the tool reported failure'
         assert [f.message for f in found] == [
@@ -424,6 +466,7 @@ class TestProtectedPaths:
             'changes /w/tests/f.py matching tests/**',
             f'tried to change tests/m.py {failure}',
             'changes tests/g.py matching tests/**',
+            'changes tests/s.py matching tests/**',
         ]
         assert {(f.span, f.quote, f.field, f.severity) for f in found} == {
             (None, None, 'action', 'high')
@@ -602,9 +645,11 @@ class TestLLMScanner:
 
         assert "the trace does not fit the judge's context; scope='step'" in error.error
 
-    def test_name_must_be_one_line(self) -> None:
+    def test_name_must_be_one_line_and_scope_trace_or_step(self) -> None:
         with pytest.raises(ValidationError):
             LLMScanner('two\nlines', 'Find edits.', FakeJudge())
+        with pytest.raises(ValueError, match="scope must be 'trace' or 'step'"):
+            LLMScanner('tamper', 'Find edits.', FakeJudge(), scope='steps')
 
 
 class Broken:
@@ -612,6 +657,7 @@ class Broken:
     source = 'verifier'
     version = 'broken/1'
     instruction_sha256 = None
+    judge_id = None
 
     def scan(self, trace: Trace) -> list[Finding]:
         raise RuntimeError(f'cannot read {trace.trace_id}')
@@ -623,6 +669,7 @@ class Fixed:
     source = 'verifier'
     version = 'fixed/1'
     instruction_sha256 = None
+    judge_id = None
 
     def __init__(self, name: str, *findings: object, kind: type = list) -> None:
         self.name = name
@@ -631,6 +678,22 @@ class Fixed:
 
     def scan(self, trace: Trace) -> object:
         return None if self.kind is type(None) else self.kind(iter(self.findings))
+
+
+class Returns:
+    """Return the value it was given from every scan."""
+
+    name = 'returns'
+    source = 'verifier'
+    version = 'returns/1'
+    instruction_sha256 = None
+    judge_id = None
+
+    def __init__(self, value: object) -> None:
+        self.value = value
+
+    def scan(self, trace: Trace) -> object:
+        return self.value
 
 
 def _finding(**changes: object) -> Finding:
@@ -689,12 +752,34 @@ class TestScanTraces:
 
         assert report.findings == () and report.errors[0].error == error
 
-    def test_rule_versions_hash_their_config(self) -> None:
-        other = ProtectedPathScanner(name='protected', globs=('tests/**', 'conftest.py'))
+    @pytest.mark.parametrize('value', ['', 'findings', b'', {}, {'step': 1}])
+    def test_a_string_bytes_or_mapping_result_is_an_error(self, value: object) -> None:
+        report = scan_traces([_bash('rm a')], [Returns(value)])
 
-        assert PROTECTED.version == f'config-sha256:{sha256_text(PROTECTED.model_dump_json())}'
+        assert report.errors[0].error == (
+            f'TypeError: scan returned a {type(value).__name__}, not findings'
+        )
+
+    def test_rule_versions_name_their_reading_and_hash_their_config(self) -> None:
+        other = ProtectedPathScanner(name='protected', globs=('tests/**', 'conftest.py'))
+        plain = PatternScanner(name='p', patterns=[{'regex': 'rm', 'message': 'Rm'}])
+        folded = PatternScanner(
+            name='p', patterns=[{'regex': re.compile('rm', re.I), 'message': 'Rm'}]
+        )
+
+        config = sha256_text(json_text(PROTECTED.model_dump(mode='json')))
+        assert PROTECTED.version == f'protected-paths/1+config-sha256:{config}'
         assert other.version != PROTECTED.version
-        assert PROTECTED.instruction_sha256 is None
+        assert plain.version.startswith('pattern/1+config-sha256:')
+        assert plain.model_dump_json() == folded.model_dump_json()
+        assert plain.version != folded.version  # the flags count, though the JSON drops them
+        assert (PROTECTED.instruction_sha256, PROTECTED.judge_id) == (None, None)
+
+    def test_needs_a_scanner(self) -> None:
+        with pytest.raises(ValueError, match='at least one scanner'):
+            scan_traces([_bash('ls')], [])
+        with pytest.raises(ValidationError):
+            load_rule_scanners('[]')
 
     def test_refuses_shared_names_verdict_names_and_shared_trace_ids(self) -> None:
         with pytest.raises(ValueError, match='share names'):
@@ -743,7 +828,8 @@ def _scan_for_labels() -> tuple[Trace, ScanReport]:
     command = f'echo {WIDE} > tests/a.py'
     trace = _bash(command)
     judge = FakeJudge(_reply(_cited(1, 'action', WIDE, severity='low')))
-    report = scan_traces([trace], [PROTECTED, LLMScanner('tamper', 'Find edits.', judge)])
+    scanner = LLMScanner('tamper', 'Find edits.', judge, judge_id='judge-model, effort high')
+    report = scan_traces([trace], [PROTECTED, scanner])
     return trace, report
 
 
@@ -765,8 +851,14 @@ class TestLabels:
         ]  # fmt: skip
         assert stored[1].target.quote == WIDE and stored[1].target.span == (5, 6)
         assert stored[1].rubric_version == 'trace-scan/2'
+        assert [label.rubric_sha256 for label in stored] == [None, sha256_text('Find edits.')]
         assert all(label.type == 'label' for label in stored)
-        assert report.scanners['tamper'].instruction_sha256 == sha256_text('Find edits.')
+        assert report.scanners['tamper'] == ScannerInfo(
+            source='judge',
+            version='trace-scan/2',
+            instruction_sha256=sha256_text('Find edits.'),
+            judge_id='judge-model, effort high',
+        )
 
     def test_a_scan_error_is_a_whole_trace_mark(self, tmp_path: Path) -> None:
         trace = _bash('rm tests/a.py')
@@ -786,6 +878,51 @@ class TestLabels:
         )
         spec = DatasetSpec(forbid_labels=(LabelMatch(name='broken'),), test_ratio=0, val_ratio=0)
         assert list(build_dataset([trace], spec, labels).entries) == []
+
+    def test_scanner_forbids_drop_errored_traces_under_a_value_filter(self, tmp_path: Path) -> None:
+        trace = _bash('ls')
+        report = scan_traces([trace], [Broken()])
+        LabelStore(tmp_path / 'console.db').add_many(finding_labels(report))
+        labels = read_labels(tmp_path / 'console.db')
+
+        def kept(forbid: tuple[LabelMatch, ...]) -> list[str]:
+            spec = DatasetSpec(forbid_labels=forbid, test_ratio=0, val_ratio=0)
+            return list(build_dataset([trace], spec, labels).entries)
+
+        forbids = scanner_forbids('broken', source='verifier', values=('high',))
+        assert forbids == (
+            LabelMatch(name='broken', source='verifier', value='high'),
+            LabelMatch(name='broken', source='verifier', value=SCAN_ERROR),
+        )
+        assert kept((LabelMatch(name='broken', source='verifier', value='high'),)) == ['t1']
+        assert kept(forbids) == []
+        assert scanner_forbids('broken') == (
+            LabelMatch(name='broken'),
+            LabelMatch(name='broken', value=SCAN_ERROR),
+        )
+
+    def test_retracting_an_old_scan_error_mark_lifts_it(self, tmp_path: Path) -> None:
+        trace = _bash('ls')
+        report = scan_traces([trace], [Broken()])
+        store = LabelStore(tmp_path / 'console.db')
+        (mark,) = store.add_many(finding_labels(report))
+        spec = DatasetSpec(forbid_labels=scanner_forbids('broken'), test_ratio=0, val_ratio=0)
+
+        assert (
+            list(build_dataset([trace], spec, read_labels(tmp_path / 'console.db')).entries) == []
+        )
+        store.add(
+            LabelCreate(
+                type='retract',
+                target={'kind': 'trace', 'id': 't1'},
+                source='verifier',
+                author='broken',
+                supersedes=mark.id,
+                comment='Rescanned cleanly.',
+            )
+        )
+        labels = read_labels(tmp_path / 'console.db')
+        assert list(build_dataset([trace], spec, labels).entries) == ['t1']
 
     def test_dataset_forbid_labels_drop_the_flagged_trace(self, tmp_path: Path) -> None:
         trace, report = _scan_for_labels()
@@ -929,7 +1066,7 @@ class TestCli:
             self._run(monkeypatch, '--config', config, '--traces', folder, '--db', str(db),
                       '--write-labels')  # fmt: skip
 
-        assert exit_info.value.code == 2
+        assert exit_info.value.code == 3
         captured = capsys.readouterr()
         assert '0 findings in 0 groups, 1 errors' in captured.out
         assert 'stored 1 labels (0 findings, 1 scan errors)' in captured.out

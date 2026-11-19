@@ -24,6 +24,7 @@ from deepgym.scanners.core import (
     group_findings,
     scan_traces,
     scanner_agreement,
+    scanner_forbids,
 )
 from deepgym.scanners.llm import SCAN_PROMPT, SCAN_PROMPT_VERSION, LLMScanner
 from deepgym.scanners.rules import (
@@ -61,4 +62,5 @@ __all__ = [
     'load_rule_scanners',
     'scan_traces',
     'scanner_agreement',
+    'scanner_forbids',
 ]

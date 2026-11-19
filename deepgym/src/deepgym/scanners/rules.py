@@ -10,14 +10,14 @@ from __future__ import annotations
 import posixpath
 import re
 from collections.abc import Iterator
-from typing import Annotated, Literal, NamedTuple
+from typing import Annotated, ClassVar, Literal, NamedTuple
 
 from pydantic import BaseModel, ConfigDict, Field, PrivateAttr, TypeAdapter
 
 from deepgym.labels import Name
 from deepgym.scanners.core import Finding, ScannerSource, Severity
 from deepgym.scanners.writes import action_writes
-from deepgym.traces.schema import Trace, TraceStep, sha256_text
+from deepgym.traces.schema import Trace, TraceStep, json_text, sha256_text
 
 ScanField = Literal['action', 'observation', 'system', 'user', 'assistant', 'tool']
 """A step's text to scan: its action, its observation, or its messages of one role."""
@@ -38,6 +38,8 @@ class _Rule(BaseModel):
     """What the rule scanners share: a JSON config, the ``verifier`` source, no instruction."""
 
     model_config = ConfigDict(frozen=True, extra='forbid')
+    reads: ClassVar[str]
+    """The version of how the scanner reads a trace; bump it whenever that changes."""
 
     name: Name
 
@@ -52,9 +54,19 @@ class _Rule(BaseModel):
         return None
 
     @property
+    def judge_id(self) -> None:
+        """None: a rule asks no judge."""
+        return None
+
+    @property
     def version(self) -> str:
-        """``config-sha256:`` and the SHA-256 of the scanner's JSON config."""
-        return f'config-sha256:{sha256_text(self.model_dump_json())}'
+        """The version of the scanner's reading logic, ``+config-sha256:`` and the SHA-256 of
+        its config as JSON (with each regex's flags, which the JSON leaves out)."""
+        return f'{self.reads}+config-sha256:{sha256_text(json_text(self.config()))}'
+
+    def config(self) -> dict[str, object]:
+        """Return what decides the scanner's findings besides its reading logic."""
+        return self.model_dump(mode='json')
 
 
 class PatternScanner(_Rule):
@@ -64,9 +76,15 @@ class PatternScanner(_Rule):
     and is skipped.
     """
 
+    reads: ClassVar[str] = 'pattern/1'
+
     kind: Literal['pattern'] = 'pattern'
     patterns: tuple[Pattern, ...] = Field(min_length=1)
     fields: tuple[ScanField, ...] = Field(default=('action',), min_length=1)
+
+    def config(self) -> dict[str, object]:
+        """Return the JSON config with each regex's flags."""
+        return {**super().config(), 'flags': [pattern.regex.flags for pattern in self.patterns]}
 
     def scan(self, trace: Trace) -> list[Finding]:
         """Return a finding per match."""
@@ -122,13 +140,16 @@ class ProtectedPathScanner(_Rule):
     so ``tests`` protects ``tests/test_x.py``. A glob starting with ``/`` matches absolute
     paths only, never a relative one (so never a ``write_file`` path). Any other matches
     the path's names wherever they are: ``tests/**`` matches ``/repo/tests/a.py``,
-    ``conftest.py`` any ``conftest.py``, and ``tests`` a folder named ``tests`` anywhere. A
-    folder holding a glob's fixed leading part counts too: ``rm -r tests`` changes
-    ``tests/conftest.py``. A finding quotes the path where the action's text has it; where
-    it doesn't (``write_file``, ``cli``), its message names the path. An edit a CLI's tool
-    reported failing is still flagged, as an attempt: "tried to change <path> ...; the tool
-    reported failure", with the same severity.
+    ``conftest.py`` any ``conftest.py``, ``tests`` a folder named ``tests`` anywhere, and
+    each also ``.`` and ``..`` (``rm -rf .``). A folder holding a glob's fixed leading part
+    counts too: ``rm -r tests`` changes ``tests/conftest.py``. A finding quotes the path
+    where the action's text has it; where it doesn't (``write_file``, ``cli``), its message
+    names the path. An edit a CLI's tool reported failing is still flagged, as an attempt:
+    "tried to change <path> ...; the tool reported failure", with the same severity.
     """
+
+    reads: ClassVar[str] = 'protected-paths/1'
+    """Covers :mod:`deepgym.scanners.writes`: bump it whenever what that reads changes."""
 
     kind: Literal['protected_paths'] = 'protected_paths'
     globs: tuple[Name, ...] = Field(min_length=1)
@@ -180,7 +201,8 @@ def _compile(glob: str) -> re.Pattern[str]:
     ``**/`` is any run of folders, ``**`` anything, ``*`` and ``?`` part of one name. A glob
     not starting with ``/`` may start after any folder (``(?:.*/)?``, so its own leading
     ``**/`` adds nothing and is dropped), and anything under a match counts
-    (``(?:/.*)?``). One match per path, never a match per slice of it.
+    (``(?:/.*)?``). Such a glob also matches ``.`` and ``..``, folders that hold every
+    relative path (``rm -rf .``). One match per path, never a match per slice of it.
     """
     norm = posixpath.normpath(glob)
     anchored = norm.startswith('/')
@@ -190,19 +212,21 @@ def _compile(glob: str) -> re.Pattern[str]:
     pattern = ''.join(wild.get(part) or re.escape(part) for part in parts)
     fixed = re.split(r'[*?]', norm)[0]
     folders = [re.escape(fixed[:at] or '/') for at, char in enumerate(fixed) if char == '/']
+    if not anchored:  # the work directory, or a folder above it, holds every relative path
+        folders.append(r'\.|\.\.(?:/\.\.)*')
     alternatives = '|'.join([f'{pattern}(?:/.*)?', *folders])
     return re.compile(f'{"" if anchored else "(?:.*/)?"}(?:{alternatives})', re.DOTALL)
 
 
 RuleScanner = Annotated[PatternScanner | ProtectedPathScanner, Field(discriminator='kind')]
 
-_RULE_SCANNERS = TypeAdapter(list[RuleScanner])
+_RULE_SCANNERS = TypeAdapter(Annotated[list[RuleScanner], Field(min_length=1)])
 
 
 def load_rule_scanners(text: str) -> list[PatternScanner | ProtectedPathScanner]:
-    """Read a JSON list of rule scanners, each told apart by ``kind``.
+    """Read a JSON list of one or more rule scanners, each told apart by ``kind``.
 
     Raises:
-        pydantic.ValidationError: If the JSON doesn't describe valid scanners.
+        pydantic.ValidationError: If the JSON doesn't describe one or more valid scanners.
     """
     return _RULE_SCANNERS.validate_json(text)

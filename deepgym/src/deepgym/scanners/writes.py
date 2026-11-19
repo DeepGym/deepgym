@@ -6,33 +6,40 @@ Nothing is run, and only these forms are read:
 * ``bash``: redirection targets (``>``, ``>>``, ``&>``, ...); the operands of ``rm``,
   ``rmdir``, ``unlink``, ``shred``, ``mv``, ``touch``, ``truncate``, ``tee``, ``mkdir``,
   ``chmod``, ``chown`` and ``chgrp``; the destination of ``cp``, ``install``, ``ln`` and
-  ``rsync``; ``sed``, ``perl`` and ``ruby`` with ``-i``; the paths named after ``git rm``,
+  ``rsync`` (with ``-t DIR``, ``DIR/<name>`` of each source); the files of ``sed``,
+  ``perl`` and ``ruby`` with ``-i`` (not the script: the first operand, unless ``-e``,
+  ``-f`` or ``--expression`` gives it); the paths named after ``git rm``,
   ``git mv``, ``git checkout``, ``git restore`` and ``git clean`` (which deletes untracked
   files); and ``find ... -delete``. A command may follow ``if``, ``then``, ``do``, ``!``,
   ``{`` and the like, ``VAR=value``, and ``sudo``, ``env``, ``nice``, ``timeout``,
   ``nohup``, ``time``, ``command`` or ``exec`` with their options; ``bash -c`` /
   ``sh -c`` scripts are read the same way. A heredoc's body is data.
-* ``code`` (Python): literal paths given to ``open`` with a write mode, to ``os`` and
-  ``shutil`` calls that change files, to ``Path(...)`` methods that do, and literal
+* ``code`` (Python): literal paths given to ``open`` with a write mode (``file=`` and
+  ``mode=`` too), to ``os`` and ``shutil`` calls that change files (``path=``, ``src=``
+  and ``dst=`` too), to ``Path(...)`` methods that do, and literal
   shell commands given to ``os.system`` or ``subprocess``. Imports are resolved
   (``from pathlib import Path as P``, ``import shutil as sh``) regardless of scope or
   order: a name bound in several places takes every meaning, and module names and
   builtins keep their own, so a conditional ``import foo as os`` can't hide
   ``os.remove``. A literal counts through calls that keep the path (``str``,
   ``os.fspath``, ``os.path.abspath``, ``realpath``, ``normpath``, ``Path(...).resolve()``)
-  or join literals (``Path('a') / 'b'``, ``os.path.join('a', 'b')``, ``joinpath``).
+  or join literals (``Path('a') / 'b'``, ``Path('a', 'b')``, ``os.path.join('a', 'b')``,
+  ``joinpath``).
   Methods of anything else, such as ``str(...).replace``, change no file.
 * ``cli``: the files Claude Code's Write, Edit, MultiEdit and NotebookEdit calls and
   Codex's file changes touched or tried to (an attempt the tool reported failing is
-  marked ``failed``), and what the shell commands each ran name as above.
+  marked ``failed``), and what the shell commands each ran name as above, a Codex command
+  seen only starting (a run cut off) included.
 
 So an empty result means none of these forms named the path, not that nothing changed it.
-Not read: commands that change the whole work tree (``git checkout .`` or a branch,
-``git reset --hard``, ``git stash``, ``git clean`` without paths), patches (``git apply``,
-``patch``), paths held in variables or built at run time, shell globs (read as written,
-never expanded: ``rm t*/a.py``), scripts run from a file or heredoc, a ``cd`` before a
-relative path, and text typed into a GUI. Diff the final workspace when you need to know
-every file that changed.
+Not read: commands that change the whole work tree without naming a path (``git
+checkout`` of a branch, ``git reset --hard``, ``git stash``, ``git clean`` without paths),
+patches (``git apply``, ``patch``), paths held in variables or built at run time, shell
+globs (read as written, never expanded: ``rm t*/a.py``), scripts run from a file or
+heredoc, a ``cd`` before a relative path, ``tool`` actions (HTTP tool calls), and text
+typed into a GUI. Diff the final workspace when you need to know every file that changed.
+
+Whenever what this reads changes, bump ``ProtectedPathScanner.reads``.
 """
 
 from __future__ import annotations
@@ -99,10 +106,30 @@ _GIT_CHANGES = {
     'clean': frozenset({'-e', '--exclude'}),
 }
 """git subcommands that change the paths they name, with their options that take the next word."""
-_IN_PLACE = {'sed': 'efl', 'perl': 'IMmreExCdDFl0', 'ruby': 'IMmreExCdDFl0'}
-"""In-place editors, with their short options that take the rest of a cluster as their
-argument (so ``-Mstrict`` holds no ``-i``)."""
+
+
+class _Editor(NamedTuple):
+    """How an in-place editor's options take their arguments."""
+
+    next_word: str
+    """Short options taking the rest of their cluster, or else the next word."""
+    attached: str
+    """Short options taking only the rest of their cluster (so ``-Mstrict`` holds no ``-i``)."""
+    script: str
+    """Short options that give the script, so that no operand is one."""
+    long_next: frozenset[str] = frozenset()
+    """Long options taking the next word unless given as ``--option=value``."""
+
+
+_EDITORS = {
+    'sed': _Editor('efl', 'i', 'ef', frozenset({'--expression', '--file', '--line-length'})),
+    'perl': _Editor('eE', 'iIMmxCdDFl0', 'eE'),
+    'ruby': _Editor('eIrEC', 'ixFl0', 'e'),
+}
+_SCRIPT_OPTIONS = frozenset({'--expression', '--file'})
 _TO_LAST = frozenset({'cp', 'install', 'ln', 'rsync'})
+_INTO_DIRECTORY = frozenset({'cp', 'install', 'ln', 'mv'})
+"""Commands whose ``-t DIR`` (``--target-directory``) puts each source in DIR."""
 _CHANGES_ALL = frozenset({
     'rm', 'rmdir', 'unlink', 'shred', 'mv', 'touch', 'truncate', 'tee', 'mkdir', 'chmod',
     'chown', 'chgrp',
@@ -245,8 +272,10 @@ def _command_writes(words: Sequence[_Word]) -> list[Write]:
         args = _past_options(args, _GIT_OPTIONS)
         takes = _GIT_CHANGES.get(args[0].value) if args else None
         changed = [] if takes is None else _operands(args[1:], takes)
-    elif command in _IN_PLACE:
-        changed = _operands(args) if _in_place(args, _IN_PLACE[command]) else []
+    elif command in _EDITORS:
+        changed = _edited(args, _EDITORS[command])
+    elif command in _INTO_DIRECTORY and (into := _into_directory(command, args)) is not None:
+        return into
     elif command == 'find':
         deletes = any(word.value == '-delete' for word in args)
         changed = list(takewhile(lambda w: not w.value.startswith('-'), args)) if deletes else []
@@ -287,21 +316,55 @@ def _past_options(words: Sequence[_Word], takes: frozenset[str]) -> Sequence[_Wo
     return words[at:]
 
 
-def _in_place(words: Sequence[_Word], attached: str) -> bool:
-    """Return whether *words* hold ``-i`` (alone or in a cluster such as ``-pi``, before any
-    option in *attached*, whose argument is the rest of the cluster) or ``--in-place``."""
+def _edited(words: Sequence[_Word], editor: _Editor) -> list[_Word]:
+    """Return the files an in-place editor's words name: its operands, less the first (the
+    script) when no option gives the script; none without ``-i`` or ``--in-place``."""
+    in_place = scripted = ended = skip = False
+    files: list[_Word] = []
     for word in words:
         value = word.value
-        if value == '--in-place' or value.startswith('--in-place='):
-            return True
-        if not value.startswith('-') or value.startswith('--'):
+        if skip:
+            skip = False
+        elif ended or not value.startswith('-') or value == '-':
+            files.append(word)
+        elif value == '--':
+            ended = True
+        elif value.startswith('--'):
+            option, given, _ = value.partition('=')
+            in_place |= option == '--in-place'
+            scripted |= option in _SCRIPT_OPTIONS
+            skip = option in editor.long_next and not given
+        else:
+            for at, letter in enumerate(value[1:], 1):
+                in_place |= letter == 'i'
+                scripted |= letter in editor.script
+                if letter in editor.next_word or letter in editor.attached:
+                    skip = letter in editor.next_word and at == len(value) - 1
+                    break
+    if not in_place:
+        return []
+    return files if scripted else files[1:]
+
+
+def _into_directory(command: str, words: Sequence[_Word]) -> list[Write] | None:
+    """Return what ``-t DIR`` (``-tDIR``, ``--target-directory[=]DIR``) makes *command*
+    write: ``DIR/<name>`` of each source, cited at DIR, and for ``mv`` the sources too;
+    None without it."""
+    for at, word in enumerate(words):
+        value = word.value
+        if value in ('-t', '--target-directory') and at + 1 < len(words):
+            directory, cited = words[at + 1].value, words[at + 1].cite().span
+        elif value.startswith('--target-directory='):
+            directory, cited = value.partition('=')[2], word.span
+        elif value.startswith('-t') and not value.startswith('--') and len(value) > 2:
+            directory, cited = value[2:], word.span
+        else:
             continue
-        for letter in value[1:]:
-            if letter == 'i':
-                return True
-            if letter in attached:
-                break
-    return False
+        sources = _operands(words, frozenset({'-t', '--target-directory'}))
+        names = [posixpath.basename(source.value.rstrip('/')) for source in sources]
+        into = [Write(posixpath.join(directory, name), cited) for name in names]
+        return into + ([source.cite() for source in sources] if command == 'mv' else [])
+    return None
 
 
 def _operands(words: Sequence[_Word], takes: frozenset[str] = frozenset()) -> list[_Word]:
@@ -378,9 +441,10 @@ class _PythonSource:
                 and isinstance(mode.value, str)
                 and bool(_WRITE_MODES & set(mode.value))
             )
-            paths = (node.args[:1] if receiver is None else [receiver]) if writing else []
+            path = (node.args[:1] or [_keyword(node, 'file')]) if receiver is None else [receiver]
+            paths = path if writing else []
         elif name in _PY_CHANGES:
-            paths = [*node.args, receiver]
+            paths = [*node.args, *(_keyword(node, key) for key in ('path', 'src', 'dst')), receiver]
         elif name in _PY_WRITES:
             paths = [receiver]
         elif name in _PY_COPIES:
@@ -518,11 +582,19 @@ def cli_writes(events: Sequence[dict[str, JsonValue]]) -> list[Write]:
         and isinstance(call := part.get('tool_use_id'), str)
     }
     writes: list[Write] = []
+    started: dict[object, JsonValue] = {}  # commands by item id, until they complete
     for event in events:
         item = event.get('item')
         if event.get('type') == 'assistant':
             writes += _claude_writes(event.get('message'), failed)
-        elif event.get('type') == 'item.completed' and isinstance(item, dict):
+        elif not isinstance(item, dict):
+            continue
+        elif event.get('type') == 'item.started' and item.get('type') == 'command_execution':
+            key = item.get('id')
+            started[key if isinstance(key, str) else object()] = item.get('command')
+        elif event.get('type') == 'item.completed':
+            key = item.get('id')
+            started.pop(key if isinstance(key, str) else None, None)
             changes = item.get('changes')
             if item.get('type') == 'file_change' and isinstance(changes, list):
                 refused = item.get('status') == 'failed'
@@ -530,7 +602,7 @@ def cli_writes(events: Sequence[dict[str, JsonValue]]) -> list[Write]:
                 writes += [Write(path, None, refused) for path in paths if isinstance(path, str)]
             elif item.get('type') == 'command_execution':
                 writes += _shell_paths(item.get('command'))
-    return writes
+    return writes + [write for command in started.values() for write in _shell_paths(command)]
 
 
 def _parts(message: JsonValue) -> list[dict[str, JsonValue]]:

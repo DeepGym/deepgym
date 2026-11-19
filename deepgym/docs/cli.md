@@ -52,7 +52,7 @@ and [the QA gate](authoring/qa-gate.md).
 | Command | What it does | Main flags |
 |---|---|---|
 | `deepgym traces export` | Export recorded traces as training data | `--format` (`jsonl`, `parquet`, `atif`) and `--out` (required); `--rows` (`trace` or `rl`), `--only-valid`, `--db`, `--traces` |
-| `deepgym traces scan` | Run rule scanners over traces and print their findings, grouped; `--write-labels` stores a label per finding and per scan error; exits 2 when a scanner failed on a trace | `--config` (required); `--out`, `--write-labels`, `--db` (read for traces, and where labels go), `--traces` |
+| `deepgym traces scan` | Run rule scanners over traces and print their findings, grouped; `--write-labels` stores a label per finding and per scan error; exits 3 when a scanner failed on a trace | `--config` (required); `--out`, `--write-labels`, `--db` (read for traces, and where labels go), `--traces` |
 | `deepgym dataset build` | Filter, deduplicate and split traces into a dataset folder with a manifest; prints the manifest's SHA-256 to publish | `--spec`, `--name`, `--version`, `--out` (required); `--format` (default `jsonl`), `--db`, `--traces`, `--labels` |
 | `deepgym dataset verify FOLDER` | Check a dataset folder against its manifest and, with `--sha256`, the published SHA-256 | `--sha256` |
 

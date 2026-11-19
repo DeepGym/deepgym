@@ -278,8 +278,8 @@ def _build_parser() -> argparse.ArgumentParser:
         'scan',
         help='Run rule scanners over traces and print their findings, grouped',
         description='Reads traces as traces export does: --db and --traces name the sources. '
-        '--config is a JSON list of scanners, each {"kind": "pattern", ...} or '
-        '{"kind": "protected_paths", ...}. Exits 2 when a scanner failed on a trace: that '
+        '--config is a JSON list of one or more scanners, each {"kind": "pattern", ...} or '
+        '{"kind": "protected_paths", ...}. Exits 3 when a scanner failed on a trace: that '
         'trace is not cleared.',
     )
     scan_p.add_argument('--config', required=True, help='JSON list of rule scanners')
@@ -867,7 +867,7 @@ def _traces_scan(args: argparse.Namespace) -> None:
         )
     _print_unread(untraced, others)
     if report.errors:
-        sys.exit(2)
+        sys.exit(3)  # 2 is argparse's
 
 
 def _citation(finding: Finding) -> str:

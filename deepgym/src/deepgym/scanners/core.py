@@ -19,6 +19,7 @@ from uuid import uuid4
 
 from pydantic import BaseModel, ConfigDict, Field, StrictBool, model_validator
 
+from deepgym.dataset import LabelMatch
 from deepgym.labels import (
     Label,
     LabelCreate,
@@ -106,6 +107,11 @@ class Scanner(Protocol):
         """SHA-256 of the user-written instruction it follows, if it takes one."""
         ...
 
+    @property
+    def judge_id(self) -> str | None:
+        """Names the judge model it asks, if it asks one and the caller said which."""
+        ...
+
     def scan(self, trace: Trace) -> Iterable[Finding]:
         """Return what *trace* holds that this scanner looks for; raise if it can't tell."""
         ...
@@ -119,6 +125,7 @@ class ScannerInfo(BaseModel):
     source: ScannerSource
     version: Name
     instruction_sha256: str | None = None
+    judge_id: str | None = None
 
 
 class ScanError(BaseModel):
@@ -196,7 +203,10 @@ def _check_citation(trace: Trace, scanner: Scanner, finding: Finding) -> None:
 def _scan_one(trace: Trace, scanner: Scanner) -> list[Finding] | ScanError:
     """Run *scanner* on *trace*: its checked findings, or the error that stopped it."""
     try:
-        found = list(scanner.scan(trace))
+        result = scanner.scan(trace)
+        if isinstance(result, (str, bytes, Mapping)):  # iterable, but not findings
+            raise TypeError(f'scan returned a {type(result).__name__}, not findings')
+        found = list(result)
         for finding in found:
             if not isinstance(finding, Finding):
                 raise TypeError(f'scan returned a {type(finding).__name__}, not a Finding')
@@ -223,9 +233,11 @@ def scan_traces(
         The findings, and an error for each trace a scanner failed on.
 
     Raises:
-        ValueError: If two traces share an id, or two scanners a name, or a scanner is
-            named like a verdict.
+        ValueError: If no scanner is given, two traces share an id, two scanners a name,
+            or a scanner is named like a verdict.
     """
+    if not scanners:
+        raise ValueError('scan_traces needs at least one scanner')
     check_unique_ids(traces)
     names = [scanner.name for scanner in scanners]
     if len(set(names)) < len(names):
@@ -241,6 +253,7 @@ def scan_traces(
                 source=scanner.source,
                 version=scanner.version,
                 instruction_sha256=scanner.instruction_sha256,
+                judge_id=scanner.judge_id,
             )
             for scanner in scanners
         },
@@ -302,11 +315,11 @@ def finding_labels(report: ScanReport) -> list[LabelCreate]:
     severity, with its message as the comment. An error's label marks the whole trace the
     scanner failed on, valued :data:`SCAN_ERROR`, with the error as the comment, so a trace
     the scanner couldn't clear never reads as clean. Each is named and authored by its scanner,
-    with the scanner's source, its version as ``rubric_version``, the run's id as
-    ``group_id`` and the id ``<run_id>-<n>``, so storing the same report again is a retry
-    that stores nothing new. A mark is no verdict, so it works with a dataset's
-    ``forbid_labels`` (``LabelMatch(name=<scanner>, source=<source>)`` drops a trace with
-    a finding or an error of that scanner) and review queues.
+    with the scanner's source, its version as ``rubric_version``, its instruction's SHA-256
+    (if any) as ``rubric_sha256``, the run's id as ``group_id`` and the id
+    ``<run_id>-<n>``, so storing the same report again is a retry that stores nothing new.
+    A mark is no verdict, so it works with a dataset's ``forbid_labels`` (see
+    :func:`scanner_forbids`) and review queues.
     """
     marks = [
         (finding.scanner, finding.target, finding.severity, finding.message)
@@ -326,10 +339,24 @@ def finding_labels(report: ScanReport) -> list[LabelCreate]:
             author=scanner,
             comment=comment,
             rubric_version=report.scanners[scanner].version,
+            rubric_sha256=report.scanners[scanner].instruction_sha256,
             group_id=report.run_id,
         )
         for number, (scanner, target, value, comment) in enumerate(marks)
     ]
+
+
+def scanner_forbids(
+    name: str, *, source: ScannerSource | None = None, values: Sequence[Severity] | None = None
+) -> tuple[LabelMatch, ...]:
+    """Return the ``DatasetSpec.forbid_labels`` entries that drop the traces scanner *name*
+    flagged (only findings of the severities in *values*, when given) and always those it
+    failed on (:data:`SCAN_ERROR`), so a value filter never keeps a trace nobody cleared.
+    """
+    flagged = [None] if values is None else list(values)
+    return tuple(
+        LabelMatch(name=name, source=source, value=value) for value in [*flagged, SCAN_ERROR]
+    )
 
 
 class HumanMark(BaseModel):

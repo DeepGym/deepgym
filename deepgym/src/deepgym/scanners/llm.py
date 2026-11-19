@@ -95,9 +95,12 @@ class LLMScanner:
         instruction: What to look for, in the user's words.
         judge: Sends the prompt to the judge model (see :data:`~deepgym.rubric.JudgeClient`).
         scope: ``'trace'`` or ``'step'``.
+        judge_id: Names the judge model and its settings, for the scan report; the client
+            doesn't say.
 
     Raises:
         pydantic.ValidationError: If *name* isn't one line without surrounding whitespace.
+        ValueError: If *scope* is neither ``'trace'`` nor ``'step'``.
     """
 
     source: ScannerSource = 'judge'
@@ -109,11 +112,15 @@ class LLMScanner:
         instruction: str,
         judge: JudgeClient,
         scope: Scope = 'trace',
+        judge_id: str | None = None,
     ) -> None:
+        if scope not in ('trace', 'step'):
+            raise ValueError(f"scope must be 'trace' or 'step', not {scope!r}")
         self.name = _NAME.validate_python(name)
         self.instruction = instruction
         self.judge = judge
         self.scope = scope
+        self.judge_id = judge_id
 
     @property
     def instruction_sha256(self) -> str:

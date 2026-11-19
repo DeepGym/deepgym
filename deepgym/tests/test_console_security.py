@@ -95,13 +95,43 @@ def test_serves_a_ui_dir_in_place_of_the_bundled_ui(tmp_path: Path, built_ui: Pa
     assert client.get('/api/qa', headers={TOKEN_HEADER: TOKEN}).status_code == 200
 
 
-@pytest.mark.parametrize(
-    ('exists', 'problem'), [(False, 'does not exist'), (True, 'has no index.html')]
-)
-def test_ui_dir_needs_an_index_html(tmp_path: Path, exists: bool, problem: str) -> None:
+def test_ui_dir_404_page_and_uppercase_html_carry_the_token(tmp_path: Path) -> None:
     ui = tmp_path / 'my-ui'
-    if exists:
+    ui.mkdir()
+    (ui / 'index.html').write_text('<html><head></head></html>')
+    (ui / '404.html').write_text('<html><head></head><body>not here</body></html>')
+    (ui / 'PAGE.HTM').write_text('<HTML><HEAD></HEAD><BODY>loud</BODY></HTML>')
+    (tmp_path / 'secret.txt').write_text('secret')
+    (ui / 'secret.txt').symlink_to(tmp_path / 'secret.txt')
+    client = TestClient(create_app(tmp_path / 'c.db', tmp_path / 'qa', token=TOKEN, static_dir=ui))
+    meta = f'<meta name="deepgym-token" content="{TOKEN}"/>'
+
+    missing = client.get('/runs/nope/')
+    loud = client.get('/PAGE.HTM')
+    linked_out = client.get('/secret.txt')
+
+    assert missing.status_code == 404
+    assert 'not here' in missing.text and f'{meta}</head>' in missing.text
+    assert missing.headers['cache-control'] == 'no-store'
+    assert f'{meta}</HEAD>' in loud.text and loud.headers['cache-control'] == 'no-store'
+    assert linked_out.status_code == 404 and 'secret' not in linked_out.text
+
+
+@pytest.mark.parametrize(
+    ('setup', 'problem'),
+    [
+        ('missing', 'does not exist'),
+        ('empty', 'has no index.html'),
+        ('linked_out', 'has an index.html that links outside it'),
+    ],
+)
+def test_ui_dir_needs_its_own_index_html(tmp_path: Path, setup: str, problem: str) -> None:
+    ui = tmp_path / 'my-ui'
+    if setup != 'missing':
         ui.mkdir()
+    if setup == 'linked_out':
+        (tmp_path / 'index.html').write_text('<html><head></head></html>')
+        (ui / 'index.html').symlink_to(tmp_path / 'index.html')
     with pytest.raises(FileNotFoundError, match=re.escape(f'UI folder {ui} {problem}')):
         create_app(tmp_path / 'c.db', tmp_path / 'qa', static_dir=ui)
 

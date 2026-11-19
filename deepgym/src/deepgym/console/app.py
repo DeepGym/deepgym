@@ -71,11 +71,10 @@ def create_app(
         The FastAPI app. Runs left unfinished by a previous process are marked failed.
 
     Raises:
-        FileNotFoundError: *static_dir* doesn't exist or has no index.html.
+        FileNotFoundError: *static_dir* doesn't exist or has no index.html of its own.
     """
-    if static_dir is not None and not (static_dir / 'index.html').is_file():
-        problem = 'has no index.html' if static_dir.exists() else 'does not exist'
-        raise FileNotFoundError(f'UI folder {static_dir} {problem}')
+    if static_dir is not None:
+        _check_ui_dir(static_dir)
     run_store = RunStore(db_path)
     run_store.fail_unfinished()
     runner = Runner(run_store, allow_local_exec=allow_local_exec)
@@ -107,6 +106,20 @@ def create_app(
     else:
         app.add_api_route('/', _missing_ui, include_in_schema=False)
     return app
+
+
+def _check_ui_dir(static_dir: Path) -> None:
+    """Refuse a folder the server couldn't serve index.html from (it never leaves the folder)."""
+    index = static_dir / 'index.html'
+    if not static_dir.exists():
+        problem = 'does not exist'
+    elif not index.is_file():
+        problem = 'has no index.html'
+    elif not index.resolve().is_relative_to(static_dir.resolve()):
+        problem = 'has an index.html that links outside it'
+    else:
+        return
+    raise FileNotFoundError(f'UI folder {static_dir} {problem}')
 
 
 class _AsciiJSONResponse(JSONResponse):

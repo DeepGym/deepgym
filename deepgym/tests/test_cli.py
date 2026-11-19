@@ -266,6 +266,28 @@ class TestConsoleCommand:
         assert f'Error: UI folder {missing} does not exist' in capsys.readouterr().err
         run.assert_not_called()
 
+    def test_refuses_an_empty_ui_dir(self, capsys: pytest.CaptureFixture) -> None:
+        with (
+            patch.object(sys, 'argv', ['deepgym', 'console', '--ui-dir', '']),
+            patch('deepgym.console.app.create_app') as create_app,
+            patch('uvicorn.run'),
+            pytest.raises(SystemExit) as exc_info,
+        ):
+            main()
+        assert exc_info.value.code == 1
+        assert 'Error: --ui-dir is empty' in capsys.readouterr().err
+        create_app.assert_not_called()
+
+    def test_an_empty_ui_dir_env_var_means_unset(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setenv('DEEPGYM_CONSOLE_UI_DIR', '')
+        with (
+            patch.object(sys, 'argv', ['deepgym', 'console']),
+            patch('deepgym.console.app.create_app') as create_app,
+            patch('uvicorn.run'),
+        ):
+            main()
+        assert create_app.call_args.kwargs['static_dir'] is None
+
 
 class TestReadFileOrString:
     """Verify _read_file_or_string helper."""

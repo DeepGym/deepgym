@@ -385,5 +385,8 @@ never cached, and other files are served as they are. Your pages read the token 
 tag and send it as `X-DeepGym-Token` on every `/api` call; the rules under
 [Security](#security) apply unchanged. From Python, pass `create_app(static_dir=...)`.
 
-Point it only at a UI build you trust: every HTML page in the folder receives the token
-and runs on the console's origin, so a page there can call the whole API.
+Point it only at a folder you trust and that only you can write to. Everything in it is
+served as it is on disk, without the token, to anything that can reach the port (dotfiles
+too; symlinks out of the folder are refused). Any page or script in it runs on the
+console's origin, can read the token and can call the whole API, which with
+`--allow-local-exec` runs code on this machine.

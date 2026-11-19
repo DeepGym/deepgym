@@ -2,7 +2,7 @@
 
 This page covers training with verl on DeepGym environments: the reward function verl
 loads from the package, the agent loops that keep failed runs out of training, multi-turn
-agent RL on live sandboxes, and DAPO recipes.
+agent RL on live sandboxes, DAPO recipes, and how DeepGym and verl split the work.
 
 ## Reward function
 
@@ -138,3 +138,21 @@ The config scores through the `deepgym_single_turn` agent loop above, listed in 
 that ships with deepgym, so a sample without a verdict is dropped or masked rather than
 trained on as a 0. verl's reward manager, and with it DAPO's overlong penalty, doesn't run
 on samples the loop scored. For DAPO with TRL, see [TRL](trl.md#dapo).
+
+## DeepGym and verl
+
+verl trains the model. DeepGym gives it tasks and scores the answers. Use them together:
+verl loads DeepGym's reward function with one config line (see
+[Reward function](#reward-function)).
+
+| | verl | DeepGym |
+|---|---|---|
+| What it is | RL training framework | RL environments and verifiable rewards |
+| Does the training | Yes: rollouts on vLLM/SGLang, updates on FSDP/Megatron, PPO, GRPO, DAPO and more | No, it plugs into verl, TRL, OpenRLHF or your own loop |
+| Tasks | You bring the dataset and write the reward function | 31 built-in environments; importers for HumanEval, MBPP, EvalPlus, BigCodeBench, SWE-bench Pro, MiMo, CyberGym and Harbor datasets such as Terminal-Bench 2.0 |
+| Running model code | Your reward function, or a remote code sandbox service | Daytona, Modal, E2B, Docker, Apple container, or locally under sandbox-exec/bwrap (without them, local runs refuse unless `DEEPGYM_ALLOW_UNSANDBOXED=1`) |
+| Reward hacking | Up to your reward function | The solution runs apart from the verifier with no network, so it can't read the expected answers or print a fake score; `deepgym qa` checks that empty and stub solutions and reward-hack ones earn nothing before you train |
+| Multi-turn agents | Agent loop and tool interface | One live sandbox per episode (shell or desktop), with a verl agent loop and session tool |
+| Computer use | Not built in | Desktop tasks, scored on the state the agent leaves behind |
+| Failed runs | A reward function returns a score; it can't mark a sample as unscored | A run whose sandbox or verifier failed has no verdict: verl's v1 trainer drops the sample, and DeepGym's agent loops drop or mask it |
+| Managing it | Training logs (wandb, TensorBoard) | `deepgym console`: environments, runs, episode replay, sandboxes, QA reports |

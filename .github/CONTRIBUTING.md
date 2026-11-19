@@ -22,6 +22,10 @@ pytest                      # no Daytona or API keys needed
 ruff check src/ && ruff format --check src/
 ```
 
+The console UI lives in `deepgym/console-ui/` (Next.js static export, built with bun) and
+ships prebuilt in wheels. From a clone, build it once with
+`cd console-ui && bun install && bun run build`.
+
 ## Add an environment
 
 The fastest way to contribute. Each built-in environment is a folder in
@@ -43,6 +47,13 @@ tells you if it works. Also check that an obviously wrong solution scores below 
 - Python 3.10+, type hints on public functions, docstrings on public classes and methods.
 - Ruff for linting and formatting, single quotes.
 - Tests for new behaviour, in `tests/`.
+
+## Releases
+
+Releases are tag-driven: bump `version` in `pyproject.toml`, then push a `v*` tag
+(`git tag vX.Y.Z && git push origin vX.Y.Z`). Branch pushes and PRs run CI only; a tag
+also publishes to PyPI, and fails if the tag isn't the built version or that version is
+already on PyPI.
 
 ## Submitting changes
 

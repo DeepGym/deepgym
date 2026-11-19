@@ -9,7 +9,7 @@ Modules:
     checks: reference, determinism, empty/stub and reward-hack checks.
     controls: the answers an env folder ships that its verifier must pass or fail.
     mutants: mutation testing of the verifier with AST mutants of the reference.
-    difficulty: pass@1 / pass@k from an OpenAI-compatible model endpoint.
+    difficulty: pass@k / pass^k from an OpenAI-compatible model endpoint.
     report: QAReport model, per-environment JSON files, CLI table.
     gate: run_qa, which runs every check on one environment.
 """

@@ -341,9 +341,21 @@ def _client(
 @pytest.mark.parametrize(
     ('answers', 'details'),
     [
-        ([_RIGHT, _WRONG], 'pass@1=0.50 pass@4=1.00, mean reward 0.50, spread 0.50'),
-        ([_RIGHT], 'too_easy, no_variance: pass@1=1.00 pass@4=1.00, mean reward 1.00, spread 0.00'),
-        ([_WRONG], 'too_hard, no_variance: pass@1=0.00 pass@4=0.00, mean reward 0.00, spread 0.00'),
+        (
+            [_RIGHT, _WRONG],
+            'pass@1=0.50 pass@2=0.83 pass@4=1.00 pass^1=0.50 pass^2=0.17 pass^4=0.00, '
+            'mean reward 0.50, spread 0.50',
+        ),
+        (
+            [_RIGHT],
+            'too_easy, no_variance: pass@1=1.00 pass@2=1.00 pass@4=1.00 '
+            'pass^1=1.00 pass^2=1.00 pass^4=1.00, mean reward 1.00, spread 0.00',
+        ),
+        (
+            [_WRONG],
+            'too_hard, no_variance: pass@1=0.00 pass@2=0.00 pass@4=0.00 '
+            'pass^1=0.00 pass^2=0.00 pass^4=0.00, mean reward 0.00, spread 0.00',
+        ),
     ],
 )
 def test_difficulty_is_reported_never_gated(
@@ -359,6 +371,17 @@ def test_difficulty_is_reported_never_gated(
     assert seen[0]['messages'] == [{'role': 'user', 'content': _ADD_TASK}]
     assert seen[0]['temperature'] == 1.0
     assert 'thinking' not in seen[0]
+
+
+def test_difficulty_reports_k_at_each_power_of_two_and_at_samples(local_dg: DeepGym) -> None:
+    answers = [_RIGHT, _WRONG, _WRONG]
+
+    check = difficulty_check(_env(_ADD_VERIFIER), local_dg, _client(answers, []), samples=6)
+
+    assert check.details.startswith(
+        'pass@1=0.33 pass@2=0.60 pass@4=0.93 pass@6=1.00 '
+        'pass^1=0.33 pass^2=0.07 pass^4=0.00 pass^6=0.00, mean reward 0.33'
+    )
 
 
 def test_difficulty_is_inconclusive_when_a_sample_gets_no_verdict(local_dg: DeepGym) -> None:
@@ -410,7 +433,17 @@ def test_partial_rewards_are_variance_not_too_hard(local_dg: DeepGym) -> None:
 
     check = difficulty_check(_env(body), local_dg, _client(answers, []), samples=2)
 
-    assert check.details.startswith('pass@1=0.00 pass@2=0.00, mean reward 0.50, spread 0.30')
+    assert check.details.startswith(  # solved by none, so outside the band all the same
+        'pass@1=0.00 pass@2=0.00 pass^1=0.00 pass^2=0.00, mean reward 0.50, spread 0.30'
+    )
+
+
+def test_a_rarely_solved_task_is_flagged_outside_the_band(local_dg: DeepGym) -> None:
+    answers = [_RIGHT] + [_WRONG] * 11  # 1 of 12 solved: learnable, under 10%
+
+    check = difficulty_check(_env(_ADD_VERIFIER), local_dg, _client(answers, []), samples=12)
+
+    assert check.details.startswith('outside_band: pass@1=0.08 ')
 
 
 def _flaky_client(statuses: list[int], seen: list[int]) -> ZaiChatClient:

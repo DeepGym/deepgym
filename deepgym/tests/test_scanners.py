@@ -221,6 +221,16 @@ class TestProtectedPaths:
             ('cp tests/a.py -t', ['tests/a.py']),  # no DIR: every operand
             ('cp -t a -t b tests/x.py', ['tests/x.py']),  # two DIRs: every operand
             ('cp tests/a.py', ['tests/a.py']),  # one operand: every operand
+            ('cp --target-dir tests/ x.py', ['tests/']),  # a unique prefix
+            ('cp --target-dir=tests x.py', ['tests']),
+            ('cp --recursive --verb tests/a src/', []),  # known options, the source only read
+            ('cp --sparse always tests/a src/', []),  # its value isn't an operand
+            ('cp --bogus tests/a src/', ['tests/a']),  # unknown: every operand
+            ('cp --bogus=tests/x src/a src/b', ['tests/x']),  # and every option value
+            ('cp --s tests/a src/', ['tests/a']),  # sparse, suffix, ...: ambiguous
+            ('mv --no tests/a src/', ['tests/a']),  # no-clobber, no-copy, ...: ambiguous
+            ('cp -Q tests/a src/', ['tests/a']),  # an unknown short option
+            ('install -Xtests/v a src/', ['tests/v']),  # and its attached value
             ('rm -rf .', ['.']),
             ('rm -rf ../..', ['../..']),
             ('git checkout .', ['.']),
@@ -790,7 +800,7 @@ class TestScanTraces:
         )
 
         config = sha256_text(json_text(PROTECTED.model_dump(mode='json')))
-        assert PROTECTED.version == f'protected-paths/2+config-sha256:{config}'
+        assert PROTECTED.version == f'protected-paths/3+config-sha256:{config}'
         assert other.version != PROTECTED.version
         assert plain.version.startswith('pattern/1+config-sha256:')
         assert plain.model_dump_json() == folded.model_dump_json()

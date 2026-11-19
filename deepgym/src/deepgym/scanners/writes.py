@@ -7,7 +7,9 @@ Nothing is run, and only these forms are read:
   ``rmdir``, ``unlink``, ``shred``, ``mv``, ``touch``, ``truncate``, ``tee``, ``mkdir``,
   ``chmod``, ``chown`` and ``chgrp``; the destination of ``cp``, ``install``, ``ln``,
   ``mv`` and ``rsync`` (with ``-t DIR``, also bundled as ``-rt DIR``, ``DIR/<name>`` of
-  each source; with ``install -d``, every operand; every operand when it can't be told),
+  each source; with ``install -d``, every operand; long options by unique prefix; an
+  unrecognised or ambiguous option, or a destination that can't be told, makes it report
+  every operand and option value),
   and what ``mv`` moves away; the files of ``sed``,
   ``perl`` and ``ruby`` with ``-i`` (not the script: the first operand, unless ``-e``,
   ``-f`` or ``--expression`` gives it); the paths named after ``git rm``,
@@ -130,11 +132,50 @@ _EDITORS = {
 }
 _SCRIPT_OPTIONS = frozenset({'--expression', '--file'})
 _TO_LAST = frozenset({'rsync'})
-_COPIERS = {'cp': 'S', 'install': 'mogS', 'ln': 'S', 'mv': 'S'}
-"""Commands that write a destination or, with ``-t DIR``, put each source in DIR, with
-their short options other than ``-t`` that take an argument."""
-_COPIER_LONG = frozenset({'--suffix', '--mode', '--owner', '--group'})
-"""Their long options that take the next word unless given as ``--option=value``."""
+
+
+def _long_options(spec: str) -> dict[str, str]:
+    """Return each long option *spec* names with how it takes an argument: ``'='`` (always:
+    the next word unless given as ``--option=value``), ``'?'`` (only as ``=value``) or
+    ``''`` (never)."""
+    return {name.rstrip('=?'): name[-1] if name[-1] in '=?' else '' for name in spec.split()}
+
+
+class _Copier(NamedTuple):
+    """The options of a command that writes a destination or, with ``-t DIR``, puts each
+    source in DIR, as GNU coreutils documents them."""
+
+    flags: str
+    """Short options without an argument."""
+    takes: str
+    """Short options with one, ``t`` among them."""
+    long: dict[str, str]
+    """Long options, as :func:`_long_options` returns them."""
+
+
+_COPIERS = {
+    'cp': _Copier('abdfiHlLnPpRrsTuvxZ', 'St', _long_options(
+        'archive attributes-only backup? context? copy-contents debug dereference force '
+        'interactive keep-directory-symlink link no-clobber no-dereference no-preserve= '
+        'no-target-directory one-file-system parents preserve? recursive reflink? '
+        'remove-destination sparse= strip-trailing-slashes suffix= symbolic-link '
+        'target-directory= update? verbose help version'
+    )),
+    'install': _Copier('bcCdDpsTvZ', 'gmoSt', _long_options(
+        'backup? compare context? debug directory group= mode= owner= preserve-context '
+        'preserve-timestamps strip strip-program= suffix= target-directory= '
+        'no-target-directory verbose help version'
+    )),
+    'ln': _Copier('bdFfiLnPrsTv', 'St', _long_options(
+        'backup? directory force interactive logical no-dereference no-target-directory '
+        'physical relative suffix= symbolic target-directory= verbose help version'
+    )),
+    'mv': _Copier('bfinTuvZ', 'St', _long_options(
+        'backup? context debug exchange force interactive no-clobber no-copy '
+        'no-target-directory strip-trailing-slashes suffix= target-directory= update? '
+        'verbose help version'
+    )),
+}  # fmt: skip
 _CHANGES_ALL = frozenset({
     'rm', 'rmdir', 'unlink', 'shred', 'touch', 'truncate', 'tee', 'mkdir', 'chmod',
     'chown', 'chgrp',
@@ -356,52 +397,66 @@ def _copier_writes(command: str, words: Sequence[_Word]) -> list[Write]:
 
     With ``-t DIR`` (also in a cluster such as ``-rt DIR`` or ``-Dttests``, and
     ``--target-directory[=]DIR``) that is ``DIR/<name>`` of each source, cited at DIR;
-    without it, the last operand; with ``install -d``, every operand. Where the destination
-    can't be told (``-t`` with no DIR, two different DIRs, fewer than two operands without
-    ``-t``), every operand and DIR is reported: over-flagged, never missed.
+    without it, the last operand; with ``install -d``, every operand. Long options match
+    by unique prefix, as GNU's do (``--target-dir``). Where the destination can't be told
+    (an option not in :data:`_COPIERS`, a long option prefix that matches several or none,
+    ``-t`` with no DIR, two different DIRs, fewer than two operands without ``-t``), every
+    operand, DIR and option value is reported: over-flagged, never missed.
     """
-    takes = _COPIERS[command]
+    copier = _COPIERS[command]
     operands: list[_Word] = []
     directories: list[Write] = []  # each DIR, as a path cited where it is
-    skip: Literal['dir', 'argument'] | None = None
-    ended = every = False
+    values: list[Write] = []  # every other option value
+    skip: Literal['dir', 'value'] | None = None
+    ended = every = unknown = False
     for word in words:
         value = word.value
         if skip is not None:
-            if skip == 'dir':
-                directories.append(word.cite())
+            (directories if skip == 'dir' else values).append(word.cite())
             skip = None
         elif ended or not value.startswith('-') or value == '-':
             operands.append(word)
         elif value == '--':
             ended = True
         elif value.startswith('--'):
-            option, given, rest = value.partition('=')
-            every |= command == 'install' and option == '--directory'
-            if option == '--target-directory':
-                directories += [_part(word, len(option) + 1)] if given else []
-                skip = None if given else 'dir'
-            elif option in _COPIER_LONG and not given:
-                skip = 'argument'
+            option, given, _ = value.partition('=')
+            name, takes = _long_option(option[2:], copier.long)
+            unknown |= name is None
+            every |= command == 'install' and name == 'directory'
+            if given:
+                is_dir = name == 'target-directory'
+                (directories if is_dir else values).append(_part(word, len(option) + 1))
+            elif takes == '=':
+                skip = 'dir' if name == 'target-directory' else 'value'
         else:
             for at, letter in enumerate(value[1:], 1):
                 every |= command == 'install' and letter == 'd'
-                if letter == 't' or letter in takes:
-                    rest = at + 1 < len(value)
-                    if letter == 't' and rest:
-                        directories.append(_part(word, at + 1))
-                    elif not rest:
-                        skip = 'dir' if letter == 't' else 'argument'
-                    break
+                if letter in copier.flags:
+                    continue
+                unknown |= letter not in copier.takes  # an unknown option may take a value
+                if at + 1 < len(value):
+                    (directories if letter == 't' else values).append(_part(word, at + 1))
+                elif letter in copier.takes:
+                    skip = 'dir' if letter == 't' else 'value'
+                break
     moved = [operand.cite() for operand in operands] if command == 'mv' else []
-    unknown = skip == 'dir' or len({path for path, _, _ in directories}) > 1
-    if every or unknown or (not directories and len(operands) < 2):
-        return [operand.cite() for operand in operands] + directories
+    unclear = unknown or skip == 'dir' or len({path for path, _, _ in directories}) > 1
+    if every or unclear or (not directories and len(operands) < 2):
+        return [operand.cite() for operand in operands] + directories + values
     if directories:
         directory, cited, _ = directories[0]
         names = [posixpath.basename(operand.value.rstrip('/')) for operand in operands]
         return [Write(posixpath.join(directory, name), cited) for name in names] + moved
     return [*moved[:-1], operands[-1].cite()]
+
+
+def _long_option(given: str, options: dict[str, str]) -> tuple[str | None, str]:
+    """Return the long option *given* names, exactly or as the unique prefix of one, and how
+    it takes an argument; ``(None, '')`` when it names none or several."""
+    if given in options:
+        return given, options[given]
+    named = [name for name in options if name.startswith(given)]
+    return (named[0], options[named[0]]) if len(named) == 1 else (None, '')
 
 
 def _part(word: _Word, offset: int) -> Write:

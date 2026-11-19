@@ -143,6 +143,17 @@ def test_a_stale_correction_points_at_the_current_one(client: TestClient) -> Non
     )
 
 
+def test_two_corrections_of_one_label_in_a_batch(client: TestClient) -> None:
+    first = client.post('/api/labels', json=_body()).json()
+    fix = _body(value=False, comment='misses a case', supersedes=first['id'])
+
+    twice = client.post('/api/labels/batch', json=[fix, {**fix, 'comment': 'no'}])
+
+    assert twice.status_code == 409
+    assert twice.json()['detail'] == f'Label {first["id"]} is superseded twice in this batch'
+    assert client.get('/api/labels').json()['total'] == 1
+
+
 def test_a_second_verdict_must_supersede(client: TestClient) -> None:
     first = client.post('/api/labels', json=_body()).json()
 

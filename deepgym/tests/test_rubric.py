@@ -6,7 +6,7 @@ import json
 import math
 import sys
 import types
-from collections.abc import Callable, Iterator
+from collections.abc import Callable
 
 import httpx
 import pytest
@@ -134,18 +134,6 @@ def test_every_problem_is_listed_at_once() -> None:
         'check 2: weight must be a finite number, got True',
         'check 3: duplicate requirement (same as check 1)',
     ]
-
-
-@pytest.fixture
-def digit_limit() -> Iterator[None]:
-    """Python's default limit on printing ints in decimal, which importing deepgym's
-    solution runtime lifts for the whole process."""
-    if not hasattr(sys, 'set_int_max_str_digits'):
-        pytest.skip('this Python has no limit on printing ints')
-    before = sys.get_int_max_str_digits()
-    sys.set_int_max_str_digits(4300)
-    yield
-    sys.set_int_max_str_digits(before)
 
 
 @pytest.mark.usefixtures('digit_limit')

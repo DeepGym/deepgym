@@ -166,6 +166,13 @@ class TestPatternScanner:
              'Input should be a valid regular expression: the repetition number is too large'),
             ({**PATTERN, 'patterns': [{'regex': '(' * 5000 + ')' * 5000, 'message': 'x'}]},
              ('patterns', 0, 'regex'), None),
+            ({**PATTERN, 'patterns': [{'regex': '(?a)(?u)x', 'message': 'x'}]},
+             ('patterns', 0, 'regex'),
+             'Input should be a valid regular expression: ASCII and UNICODE flags are '
+             'incompatible'),
+            ({**PATTERN, 'patterns': [{'regex': 'a{' + '9' * 5000 + '}', 'message': 'x'}]},
+             ('patterns', 0, 'regex'),
+             'Input should be a valid regular expression: Exceeds the limit'),
             ({**PATTERN, 'patterns': [{'regex': 'a', 'message': ''}]}, ('patterns', 0, 'message'),
              None),
             ({**PATTERN, 'fields': ['nope']}, ('fields', 0), None),
@@ -174,6 +181,7 @@ class TestPatternScanner:
             ({**GLOBS, 'globs': []}, ('globs',), TOO_SHORT),
         ],
     )  # fmt: skip
+    @pytest.mark.usefixtures('digit_limit')
     def test_a_bad_config_is_one_error_where_it_is(
         self, scanner: dict, loc: tuple, msg: str | None
     ) -> None:
@@ -182,7 +190,7 @@ class TestPatternScanner:
 
         [error] = refused.value.errors()
         assert error['loc'] == (0, scanner['kind'], *loc)
-        assert msg is None or error['msg'] == msg
+        assert error['msg'].startswith(msg or '')
 
 
 class TestProtectedPaths:

@@ -57,7 +57,7 @@ def _compiled(value: object) -> object:
         return value
     try:
         return re.compile(value)
-    except (re.error, OverflowError, RecursionError) as exc:
+    except (re.error, ValueError, OverflowError, RecursionError) as exc:
         raise PydanticCustomError(
             'pattern_regex',
             'Input should be a valid regular expression: {error}',

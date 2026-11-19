@@ -189,7 +189,8 @@ def insert_labels(conn: sqlite3.Connection, labels: Sequence[LabelCreate]) -> li
             that isn't stored or doesn't fit it (see ``LabelCreate.supersedes``), or it
             is a verdict its author already holds on that target (supersede that one).
     """
-    seq, now = _last_position(conn)
+    before, now = _last_position(conn)
+    seq = before
     stored: list[Label] = []
     for label in labels:
         retried = _retried(conn, label)
@@ -200,7 +201,7 @@ def insert_labels(conn: sqlite3.Connection, labels: Sequence[LabelCreate]) -> li
         record = Label.model_validate(
             {**_body(label), 'seq': seq, 'id': label.id or uuid4().hex, 'created_at': now}
         )
-        _check_supersedes(conn, record)
+        _check_supersedes(conn, record, before)
         _check_verdict(conn, record)
         try:
             conn.execute(_INSERT, _row(record))
@@ -281,15 +282,18 @@ def _retried(conn: sqlite3.Connection, label: LabelCreate) -> Label | None:
     return stored
 
 
-def _check_supersedes(conn: sqlite3.Connection, label: Label) -> None:
+def _check_supersedes(conn: sqlite3.Connection, label: Label, before: int) -> None:
     """Refuse *label* unless the record it supersedes, if any, is stored, fits it and is
     still current.
+
+    *before* is the last ``seq`` stored before this batch: records after it are this
+    batch's, never named, since the batch is refused.
 
     Raises:
         ValueError: If that record isn't stored, is on another target, is a retraction, is
             from another source or author (unless a human retracts an invalidation), has
             another type than a correction of it, or is already superseded (the message
-            names the record that did).
+            names the record to correct instead, or the retraction that ended the line).
     """
     if label.supersedes is None:
         return
@@ -314,18 +318,33 @@ def _check_supersedes(conn: sqlite3.Connection, label: Label) -> None:
             f'Label {label.supersedes} is a {row["type"]} record; a correction keeps its '
             'type, and a retraction withdraws it'
         )
-    later = conn.execute(
-        'SELECT id, type FROM labels WHERE supersedes = ?', (label.supersedes,)
-    ).fetchone()
+    later = _superseder(conn, label.supersedes)
     if later is None:
         return
-    if later['type'] == 'retract':
+    if later['seq'] > before:
+        raise ValueError(f'Label {label.supersedes} is superseded twice in this batch')
+    last = later
+    while (next_row := _superseder(conn, last['id'])) is not None and next_row['seq'] <= before:
+        last = next_row
+    if last['type'] != 'retract':
+        verb = 'retract' if label.type == 'retract' else 'correct'
+        raise ValueError(
+            f'Label {label.supersedes} was already superseded by {later["id"]}; '
+            f'{verb} {last["id"]} instead'
+        )
+    if last is later:
         raise ValueError(f'Label {label.supersedes} was already retracted by {later["id"]}')
-    verb = 'retract' if label.type == 'retract' else 'correct'
     raise ValueError(
-        f'Label {label.supersedes} was already superseded by {later["id"]}; '
-        f'{verb} {later["id"]} instead'
+        f'Label {label.supersedes} was superseded by {later["id"]}, which {last["id"]} retracted'
     )
+
+
+def _superseder(conn: sqlite3.Connection, label_id: str) -> sqlite3.Row | None:
+    """Return the ``id``, ``type`` and ``seq`` of the record superseding *label_id*, if any
+    (at most one, by the unique index on ``supersedes``)."""
+    return conn.execute(
+        'SELECT id, type, seq FROM labels WHERE supersedes = ?', (label_id,)
+    ).fetchone()
 
 
 def _check_verdict(conn: sqlite3.Connection, label: Label) -> None:

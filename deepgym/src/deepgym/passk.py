@@ -66,7 +66,12 @@ def pass_at_k(n: int, c: int, k: int) -> float:
         0.5333
     """
     _validate(n, c, k)
-    return 1.0 - _choose_ratio(n - c, n, k)
+    if c == 0:
+        return 0.0
+    if n - c < k:
+        return 1.0
+    # 1 - prod(1 - c / (n - i)), kept exact when the result is tiny
+    return -math.expm1(math.fsum(math.log1p(-c / (n - i)) for i in range(k)))
 
 
 def pass_hat_k(n: int, c: int, k: int) -> float:
@@ -115,8 +120,7 @@ def task_difficulty(n: int, c: int, low: float = 0.1, high: float = 0.9) -> Task
             ``0 <= low <= high <= 1``.
     """
     _validate(n, c, 1)
-    if not 0 <= low <= high <= 1:
-        raise ValueError(f'need 0 <= low <= high <= 1, got low={low}, high={high}')
+    _validate_band(low, high)
     rate = c / n
     band: Band = 'never_solved' if c == 0 else 'always_solved' if c == n else 'learnable'
     return TaskDifficulty(band=band, solve_rate=rate, outside_band=not low <= rate <= high)
@@ -138,9 +142,12 @@ def summarize(
         how many tasks fall outside ``[low, high]``.
 
     Raises:
-        ValueError: If *tasks* is empty while *ks* isn't, or any input is invalid as in
+        ValueError: If *tasks* is empty, or any input is invalid as in
             :func:`pass_at_k` and :func:`task_difficulty`.
     """
+    _validate_band(low, high)
+    if not tasks:
+        raise ValueError('summarize needs at least one task')
     difficulties = [task_difficulty(n, c, low, high) for n, c in tasks]
     counts = Counter(difficulty.band for difficulty in difficulties)
     return PassKSummary(
@@ -157,6 +164,15 @@ def _choose_ratio(m: int, n: int, k: int) -> float:
     if m < k:
         return 0.0
     return math.prod((m - i) / (n - i) for i in range(k))
+
+
+def _validate_band(low: float, high: float) -> None:
+    """Raise ValueError unless low and high are real numbers with ``0 <= low <= high <= 1``."""
+    for name, value in (('low', low), ('high', high)):
+        if isinstance(value, bool) or not isinstance(value, numbers.Real):
+            raise ValueError(f'{name} must be a number, got {value!r}')
+    if not 0 <= low <= high <= 1:
+        raise ValueError(f'need 0 <= low <= high <= 1, got low={low}, high={high}')
 
 
 def _validate(n: int, c: int, k: int) -> None:

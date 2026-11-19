@@ -478,7 +478,10 @@ class TestCLIQALocalExecGuard:
             main()  # every sample solved: reported as too_easy, never a failed gate
 
         captured = capsys.readouterr()
-        assert 'difficulty: too_easy, no_variance: pass@1=1.00 pass@2=1.00' in captured.out
+        assert (
+            'difficulty: too_easy, no_variance, outside_band: pass@1=1.00 pass@2=1.00'
+            in captured.out
+        )
         assert ('WARNING: no sandbox-exec or bwrap' in captured.err) is (isolation == 'none')
 
 

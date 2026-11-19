@@ -119,3 +119,21 @@ def test_summarize_rejects_a_k_above_any_task_n_and_no_tasks() -> None:
         summarize([(8, 3), (4, 1)], [8])
     with pytest.raises(ValueError):
         summarize([], [1])
+
+
+def test_a_tiny_pass_at_k_keeps_its_precision() -> None:
+    assert pass_at_k(10**9, 1, 1) == pytest.approx(1e-9, rel=1e-12)
+
+
+@pytest.mark.parametrize(
+    ('kwargs', 'message'),
+    [
+        ({'tasks': [], 'ks': [1]}, 'at least one task'),
+        ({'tasks': [], 'ks': [], 'low': 0.9, 'high': 0.1}, 'low <= high'),
+        ({'tasks': [(10, 5)], 'ks': [1], 'low': True}, 'low must be a number'),
+        ({'tasks': [(10, 5)], 'ks': [1], 'high': 'a'}, 'high must be a number'),
+    ],
+)
+def test_summarize_refuses_bad_input_up_front(kwargs: dict, message: str) -> None:
+    with pytest.raises(ValueError, match=message):
+        summarize(**kwargs)

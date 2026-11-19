@@ -13,7 +13,7 @@ import sqlite3
 from collections.abc import Sequence
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Literal, TypedDict
+from typing import Literal, TypedDict, cast
 from uuid import uuid4
 
 from pydantic import TypeAdapter, ValidationError
@@ -595,16 +595,16 @@ def _held(conn: sqlite3.Connection, item: QueueItem, reviewer: str, now: datetim
         ValueError: If it expired, they already reviewed the item, or they hold none.
     """
     assignment = _latest(conn, item.id, reviewer, now)
-    status = None if assignment is None else assignment.status
-    if status == 'reserved':
-        return assignment
-    if status == 'expired':
-        raise ValueError(
-            f"{reviewer}'s reservation of item {item.id} expired at "
-            f'{iso_utc(assignment.expires_at)}'
-        )
-    if status == 'submitted':
-        raise ValueError(f'{reviewer} already reviewed item {item.id}')
+    if assignment is not None:
+        if assignment.status == 'reserved':
+            return assignment
+        if assignment.status == 'expired':
+            raise ValueError(
+                f"{reviewer}'s reservation of item {item.id} expired at "
+                f'{iso_utc(assignment.expires_at)}'
+            )
+        if assignment.status == 'submitted':
+            raise ValueError(f'{reviewer} already reviewed item {item.id}')
     raise ValueError(f'{reviewer} holds no reservation of item {item.id}; ask for the next item')
 
 
@@ -626,8 +626,10 @@ def _submittable(
         raise ValueError(f'Queue {queue.id} is closed, and {ended}')
     taken = conn.execute(_TAKEN, {'item_id': item.id, 'now': iso_utc(now)}).fetchone()[0]
     if taken >= queue.overlap:
+        # Not reserved (that returned above), so the turn has ended and has a finished_at.
+        finished_at = cast(datetime, latest.finished_at)
         raise ValueError(
-            f'{ended} at {iso_utc(latest.finished_at)}, and the item has every review and '
+            f'{ended} at {iso_utc(finished_at)}, and the item has every review and '
             'reservation it needs; ask for the next item'
         )
     return latest
@@ -648,7 +650,7 @@ def _view(
     if scope != 'none':
         query = LabelQuery(target_kind=item.target.kind, target_id=item.target.id, current=True)
         labels = select_labels(conn, query)
-    if scope == 'own':
+    if scope == 'own' and assignment is not None:
         labels = [label for label in labels if label.group_id == assignment.id]
     if assignment is not None and any(not _own(label, assignment.reviewer) for label in labels):
         conn.execute(

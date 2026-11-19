@@ -37,10 +37,12 @@ MAX_RESERVATION_SECONDS = 10**9
 """About 31 years: the longest reservation, so that its expiry time stays a datetime."""
 
 
-class QueueCreate(BaseModel):
+class QueueCreate(BaseModel, frozen=True):
     """A review queue's settings, as its creator gives them."""
 
-    model_config = ConfigDict(frozen=True, extra='forbid')
+    # frozen is a class keyword, not in model_config, so pyright sees the fields are
+    # read-only and lets Queue narrow id; each subclass repeats it, as pyright requires.
+    model_config = ConfigDict(extra='forbid')
 
     id: Name | None = None
     """Optional client id, for safe retries: creating the same id with the same settings
@@ -81,10 +83,11 @@ class QueueCreate(BaseModel):
         return self
 
 
-class Queue(QueueCreate):
+class Queue(QueueCreate, frozen=True):
     """A stored review queue."""
 
-    id: Name
+    # Required: Field() with no default tells pyright the parent's None isn't inherited.
+    id: Name = Field()
     closed: bool = False
     """A closed queue hands out no items until it is reopened. A reviewer still holding a
     live reservation may submit it."""

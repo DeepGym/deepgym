@@ -7,6 +7,7 @@ import sqlite3
 from collections.abc import Sequence
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import Any
 from uuid import uuid4
 
 from pydantic import AwareDatetime, TypeAdapter
@@ -241,7 +242,7 @@ def _constructed(data: dict) -> Label:
     )
 
 
-def stored_target(target: dict[str, object]) -> LabelTarget:
+def stored_target(target: dict[str, Any]) -> LabelTarget:
     """Rebuild a stored target from its JSON object, without checking today's rules."""
     if target.get('span') is not None:
         target = {**target, 'span': tuple(target['span'])}

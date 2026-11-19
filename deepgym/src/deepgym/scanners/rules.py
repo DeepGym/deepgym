@@ -148,8 +148,9 @@ class ProtectedPathScanner(_Rule):
     "tried to change <path> ...; the tool reported failure", with the same severity.
     """
 
-    reads: ClassVar[str] = 'protected-paths/4'
-    """Covers :mod:`deepgym.scanners.writes`: bump it whenever what that reads changes."""
+    reads: ClassVar[str] = 'protected-paths/5'
+    """Covers :mod:`deepgym.scanners.writes` and :func:`_compile`: bump it whenever what an
+    action is read to change, or which paths a glob matches, changes."""
 
     kind: Literal['protected_paths'] = 'protected_paths'
     globs: tuple[Name, ...] = Field(min_length=1)
@@ -202,7 +203,9 @@ def _compile(glob: str) -> re.Pattern[str]:
     not starting with ``/`` may start after any folder (``(?:.*/)?``, so its own leading
     ``**/`` adds nothing and is dropped), and anything under a match counts
     (``(?:/.*)?``). Such a glob also matches ``.`` and ``..``, folders that hold every
-    relative path (``rm -rf .``). One match per path, never a match per slice of it.
+    relative path (``rm -rf .``), but not ``/``. One match per path and glob, never one per
+    slice of the path; a glob with several ``**`` can still backtrack on a deep path that
+    repeats its folder names.
     """
     norm = posixpath.normpath(glob)
     anchored = norm.startswith('/')
@@ -210,7 +213,7 @@ def _compile(glob: str) -> re.Pattern[str]:
     wild = {'**/': '(?:.*/)?', '**': '.*', '*': '[^/]*', '?': '[^/]'}
     parts = re.findall(r'\*\*/|\*\*|\*|\?|[^*?]+', body)
     pattern = ''.join(wild.get(part) or re.escape(part) for part in parts)
-    fixed = re.split(r'[*?]', norm)[0]
+    fixed = re.split(r'[*?]', body)[0]  # after a leading **/: **/tests/** holds tests
     folders = [re.escape(fixed[:at] or '/') for at, char in enumerate(fixed) if char == '/']
     if not anchored:  # the work directory, or a folder above it, holds every relative path
         folders.append(r'\.|\.\.(?:/\.\.)*')

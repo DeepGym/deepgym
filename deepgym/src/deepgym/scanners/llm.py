@@ -65,7 +65,7 @@ class _ReplyFinding(BaseModel):
     step: Annotated[int, Field(ge=1)] | None
     field: Annotated[str, Field(pattern=r'^(action|observation|message:(0|[1-9][0-9]*))$')] | None
     quote: Annotated[str, Field(min_length=1)] | None
-    message: str
+    message: Name
     severity: Severity
 
 
@@ -99,12 +99,12 @@ class LLMScanner:
             doesn't say.
 
     Raises:
-        pydantic.ValidationError: If *name* isn't one line without surrounding whitespace.
+        pydantic.ValidationError: If *name* or *judge_id* isn't one line without
+            surrounding whitespace.
         ValueError: If *scope* is neither ``'trace'`` nor ``'step'``.
     """
 
     source: ScannerSource = 'judge'
-    version: str = SCAN_PROMPT_VERSION
 
     def __init__(
         self,
@@ -120,7 +120,14 @@ class LLMScanner:
         self.instruction = instruction
         self.judge = judge
         self.scope = scope
-        self.judge_id = judge_id
+        self.judge_id = None if judge_id is None else _NAME.validate_python(judge_id)
+
+    @property
+    def version(self) -> str:
+        """The prompt version, the scope and the judge, when named:
+        ``trace-scan/2+scope:step+judge:<judge_id>``."""
+        judge = '' if self.judge_id is None else f'+judge:{self.judge_id}'
+        return f'{SCAN_PROMPT_VERSION}+scope:{self.scope}{judge}'
 
     @property
     def instruction_sha256(self) -> str:

@@ -4,24 +4,27 @@ Nothing is run, and only these forms are read:
 
 * ``write_file``: its path.
 * ``bash``: redirection targets (``>``, ``>>``, ``&>``, ...); the operands of ``rm``,
-  ``rmdir``, ``unlink``, ``shred``, ``mv``, ``touch``, ``truncate``, ``tee``, ``mkdir``,
+  ``rmdir``, ``unlink``, ``shred``, ``touch``, ``truncate``, ``tee``, ``mkdir``,
   ``chmod``, ``chown`` and ``chgrp``; the destination of ``cp``, ``install``, ``ln``,
-  ``mv`` and ``rsync`` (with ``-t DIR``, also bundled as ``-rt DIR``, ``DIR/<name>`` of
-  each source; with ``install -d``, every operand; long options by unique prefix; an
-  unrecognised or ambiguous option, or a destination that can't be told, makes it report
-  every operand and option value),
-  and what ``mv`` moves away; the files of ``sed``,
-  ``perl`` and ``ruby`` with ``-i`` (not the script: the first operand, unless ``-e``,
-  ``-f`` or ``--expression`` gives it); the paths named after ``git rm``,
-  ``git mv``, ``git checkout``, ``git restore`` and ``git clean`` (which deletes untracked
-  files); and ``find ... -delete``. A command may follow ``if``, ``then``, ``do``, ``!``,
+  ``mv`` and ``rsync``, and what ``mv`` moves away. A destination that is a folder by its
+  form (``.``, a ``..`` chain, or ending in ``/``) receives each source by its name, as
+  ``DIR`` does with ``-t DIR`` (also bundled, ``-rt DIR``; not for ``rsync``, whose
+  ``-t`` keeps times). ``install -d`` makes every operand a destination. Long options
+  match by unique prefix; an unrecognised or ambiguous option, or a destination that
+  can't be told, makes every operand a possible destination, and every option value is
+  always one. Then the files of ``sed``, ``perl`` and ``ruby`` with ``-i`` (not the
+  script: the first operand, unless ``-e``, ``-f`` or ``--expression`` gives it); the
+  paths named after ``git rm``, ``git mv``, ``git checkout``, ``git restore`` and ``git
+  clean`` (which deletes untracked files); and ``find ... -delete`` (``find . -delete``
+  changes every relative path). A command may follow ``if``, ``then``, ``do``, ``!``,
   ``{`` and the like, ``VAR=value``, and ``sudo``, ``env``, ``nice``, ``timeout``,
   ``nohup``, ``time``, ``command`` or ``exec`` with their options; ``bash -c`` /
   ``sh -c`` scripts are read the same way. A heredoc's body is data.
 * ``code`` (Python): literal paths given to ``open`` with a write mode (``file=`` and
   ``mode=`` too), to ``os`` and ``shutil`` calls that change files (``path=``, ``src=``
-  and ``dst=`` too), to ``Path(...)`` methods that do, and literal
-  shell commands given to ``os.system`` or ``subprocess``. Imports are resolved
+  and ``dst=`` too), to ``Path(...)`` methods that do, and literal shell commands given to
+  ``os.system`` or ``subprocess``; a ``shutil.copy``, ``copy2`` or ``move`` destination
+  that is a folder by its form receives the source by its name. Imports are resolved
   (``from pathlib import Path as P``, ``import shutil as sh``) regardless of scope or
   order: a name bound in several places takes every meaning, and module names and
   builtins keep their own, so a conditional ``import foo as os`` can't hide
@@ -200,11 +203,13 @@ _PATH_METHODS = frozenset({'resolve', 'absolute', 'expanduser'})
 """``Path`` methods that return the same path."""
 _PY_CHANGES = frozenset({
     'remove', 'unlink', 'rmdir', 'removedirs', 'rename', 'renames', 'replace', 'rmtree',
-    'move', 'touch', 'truncate', 'chmod', 'chown', 'mkdir', 'makedirs', 'symlink_to',
+    'touch', 'truncate', 'chmod', 'chown', 'mkdir', 'makedirs', 'symlink_to',
     'hardlink_to',
 })  # fmt: skip
 _PY_WRITES = frozenset({'write_text', 'write_bytes'})  # Path methods: the arguments are content
-_PY_COPIES = frozenset({'copy', 'copy2', 'copyfile', 'copytree'})
+_PY_COPIES = frozenset({'copyfile', 'copytree'})
+_PY_INTO = frozenset({'copy', 'copy2', 'move'})
+"""Calls whose source lands inside a destination folder: ``shutil.copy('a', 'dir/')``."""
 _PY_SHELL = frozenset({
     'system', 'popen', 'run', 'call', 'check_call', 'check_output', 'Popen', 'getoutput',
     'getstatusoutput',
@@ -453,9 +458,26 @@ def _copier_writes(command: str, words: Sequence[_Word]) -> list[Write]:
         return [operand.cite() for operand in operands] + directories + values
     if directories:
         directory, cited, _ = directories[0]
-        names = [posixpath.basename(operand.value.rstrip('/')) for operand in operands]
-        return [Write(posixpath.join(directory, name), cited) for name in names] + moved + values
-    return [*moved[:-1], operands[-1].cite(), *values]
+        return _into(directory, [operand.value for operand in operands], cited) + moved + values
+    *sources, destination = operands
+    written = [destination.cite()]
+    if _folder_form(destination.value):
+        sources_named = [source.value for source in sources]
+        written = _into(destination.value, sources_named, destination.cite().span)
+    return [*moved[:-1], *written, *values]
+
+
+def _folder_form(path: str) -> bool:
+    """Return whether *path* names a folder by its form: ``.``, a ``..`` chain, or a path
+    ending in ``/``."""
+    norm = posixpath.normpath(path)
+    return path.endswith('/') or norm == '.' or set(norm.split('/')) == {'..'}
+
+
+def _into(directory: str, sources: Sequence[str], cited: tuple[int, int] | None) -> list[Write]:
+    """Return where each source lands in *directory*: ``directory/<its name>``."""
+    names = [posixpath.basename(source.rstrip('/')) for source in sources]
+    return [Write(posixpath.join(directory, name), cited) for name in names]
 
 
 def _long_option(given: str, options: dict[str, str]) -> tuple[str | None, str]:
@@ -552,6 +574,8 @@ class _PythonSource:
             )
             path = (node.args[:1] or [_keyword(node, 'file')]) if receiver is None else [receiver]
             paths = path if writing else []
+        elif name in _PY_INTO:
+            return self._into(node, name, receiver)
         elif name in _PY_CHANGES:
             paths = [*node.args, *(_keyword(node, key) for key in ('path', 'src', 'dst')), receiver]
         elif name in _PY_WRITES:
@@ -563,6 +587,19 @@ class _PythonSource:
         else:
             return []
         return [found.cite() for path in paths if (found := self._word(path)) is not None]
+
+    def _into(self, node: ast.Call, name: str, receiver: ast.expr | None) -> list[Write]:
+        """Return what a copy or move writes, and a move moves away: the destination, or
+        when it is a folder by its form (``.``, ``dir/``), the source's name inside it."""
+        rest = list(node.args) if receiver is None else [receiver, *node.args]
+        source = self._word(rest[0] if rest else _keyword(node, 'src'))
+        destination = self._word(rest[1] if len(rest) > 1 else _keyword(node, 'dst'))
+        moved = [source.cite()] if name == 'move' and source is not None else []
+        if destination is None:
+            return moved
+        if source is None or not _folder_form(destination.value):
+            return [*moved, destination.cite()]
+        return moved + _into(destination.value, [source.value], destination.cite().span)
 
     def _qualified(self, node: ast.expr) -> set[str]:
         """Return every dotted name *node* may refer to; empty if it isn't a name.

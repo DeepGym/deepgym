@@ -235,6 +235,13 @@ class TestProtectedPaths:
             ('cp -S tests/y a b', ['tests/y']),
             ('install -m 755 -o tests a b', ['tests']),
             ('cp -t out --suffix=tests/z a', ['tests/z']),
+            ('cp /tmp/data.csv .', []),  # lands as ./data.csv
+            ('mv /tmp/helper.py .', []),
+            ('ln -s /opt/tool/bin/tool .', []),
+            ('cp /tmp/x.py ../..', []),
+            ('cp /tmp/tests .', ['.']),  # lands as ./tests
+            ('cp a.py b.py tests/', ['tests/', 'tests/']),
+            ("find . -name '*.pyc' -delete", ['.']),  # . holds every relative path
             ('rm -rf .', ['.']),
             ('rm -rf ../..', ['../..']),
             ('git checkout .', ['.']),
@@ -254,6 +261,8 @@ class TestProtectedPaths:
             'install -Dttests f': ['tests/f'],
             'mv --target-directory tests a b/': ['tests/a', 'tests/b', 'a', 'b/'],
             'mv src/a tests/b': ['src/a', 'tests/b'],
+            'mv src/a src/b ./': ['src/a', 'src/b', './a', './b'],
+            'cp /tmp/x ..': ['../x'],
             'cp -t a -t b x': ['x', 'a', 'b'],
         }
 
@@ -273,6 +282,13 @@ class TestProtectedPaths:
             (('tests/**',), 'rm tests/../src/a.py', False),
             (('tests/**',), 'rm -rf .', True),
             (('/repo/tests/**',), 'rm -rf .', False),
+            (('tests/**',), 'rm -rf /', False),  # . and .., not /
+            (('**/tests/**',), 'rm -rf tests', True),
+            (('**/tests/**',), 'git checkout -- tests', True),
+            (('**/tests/**',), 'rm -r src/tests', True),
+            (('**/tests/*.py',), 'rm -rf tests', True),
+            (('**/tests/*.py',), 'git checkout -- tests', True),
+            (('**/tests/*.py',), 'rm -r src/tests', True),
             (('tests',), 'rm tests/test_x.py', True),
             (('tests/',), 'rm tests/test_x.py', True),
             (('./tests/**',), 'rm tests/test_x.py', True),
@@ -364,6 +380,25 @@ class TestProtectedPaths:
             ('tests/l.py', "osp.join('tests', 'l.py')"),
             ('tests/m.py', 'tests/m.py'),
             ('tests/n.py', 'tests/n.py'),
+        ]
+
+    def test_python_copies_into_a_folder(self) -> None:
+        code = (
+            'import shutil\n'
+            "shutil.copy('/tmp/data.csv', '.')\n"
+            "shutil.copy2(src='/tmp/tests', dst='.')\n"
+            "shutil.move('/tmp/h.py', 'tests/')\n"
+            "shutil.copy('/tmp/a.py', 'tests/b.py')\n"
+            "shutil.copytree('/tmp/x', '.')\n"
+        )
+
+        assert [w.path for w in python_writes(code)] == [
+            './data.csv',
+            './tests',
+            '/tmp/h.py',
+            'tests/h.py',
+            'tests/b.py',
+            '.',  # copytree merges into it
         ]
 
     def test_python_keywords_and_path_parts(self) -> None:
@@ -595,7 +630,7 @@ class TestLLMScanner:
         assert sent['steps'][1]['observation'] == f'{WIDE} 3 passed'
         assert sent['steps'][1]['exit_code'] == 0
         assert (scanner.version, scanner.instruction_sha256) == (
-            'trace-scan/2', sha256_text('Find edits to tests.')
+            'trace-scan/2+scope:trace', sha256_text('Find edits to tests.')
         )  # fmt: skip
 
     def test_step_scope_sends_one_step_per_call(self) -> None:
@@ -656,6 +691,15 @@ class TestLLMScanner:
         assert report.findings == ()
         assert [(e.scanner, e.trace_id) for e in report.errors] == [('tamper', 't1')]
 
+    def test_a_bad_message_is_a_reply_not_as_asked(self) -> None:
+        reply = _reply(_cited(1, 'action', 'tests', message=' padded'))
+        scanner = LLMScanner('tamper', 'Find edits.', FakeJudge(reply))
+
+        (error,) = scan_traces([LLM_TRACE], [scanner]).errors
+
+        assert error.error.startswith('JudgeError: the reply is not findings as asked')
+        assert repr(reply) in error.error
+
     def test_a_step_outside_the_call_is_an_error(self) -> None:
         judge = FakeJudge(_reply(_cited(2, 'action', 'pytest')))
         scanner = LLMScanner('tamper', 'Find edits.', judge, scope='step')
@@ -684,6 +728,11 @@ class TestLLMScanner:
     def test_name_must_be_one_line_and_scope_trace_or_step(self) -> None:
         with pytest.raises(ValidationError):
             LLMScanner('two\nlines', 'Find edits.', FakeJudge())
+        with pytest.raises(ValidationError):
+            LLMScanner('tamper', 'Find edits.', FakeJudge(), judge_id='a\nb')
+        assert LLMScanner('t', 'x', FakeJudge(), scope='step', judge_id='m').version == (
+            'trace-scan/2+scope:step+judge:m'
+        )
         with pytest.raises(ValueError, match="scope must be 'trace' or 'step'"):
             LLMScanner('tamper', 'Find edits.', FakeJudge(), scope='steps')
 
@@ -804,7 +853,7 @@ class TestScanTraces:
         )
 
         config = sha256_text(json_text(PROTECTED.model_dump(mode='json')))
-        assert PROTECTED.version == f'protected-paths/4+config-sha256:{config}'
+        assert PROTECTED.version == f'protected-paths/5+config-sha256:{config}'
         assert other.version != PROTECTED.version
         assert plain.version.startswith('pattern/1+config-sha256:')
         assert plain.model_dump_json() == folded.model_dump_json()
@@ -886,12 +935,12 @@ class TestLabels:
             for n, f in enumerate(report.findings)
         ]  # fmt: skip
         assert stored[1].target.quote == WIDE and stored[1].target.span == (5, 6)
-        assert stored[1].rubric_version == 'trace-scan/2'
+        assert stored[1].rubric_version == 'trace-scan/2+scope:trace+judge:judge-model, effort high'
         assert [label.rubric_sha256 for label in stored] == [None, sha256_text('Find edits.')]
         assert all(label.type == 'label' for label in stored)
         assert report.scanners['tamper'] == ScannerInfo(
             source='judge',
-            version='trace-scan/2',
+            version='trace-scan/2+scope:trace+judge:judge-model, effort high',
             instruction_sha256=sha256_text('Find edits.'),
             judge_id='judge-model, effort high',
         )

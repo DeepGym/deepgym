@@ -25,7 +25,7 @@ classifiers = [
     "Topic :: Scientific/Engineering :: Artificial Intelligence",
 ]
 dependencies = [
-    "pydantic>=2.7",
+    "pydantic>=2.9",
     "httpx>=0.24",
     # Harbor's task.toml; the stdlib has tomllib from 3.11.
     "tomli>=1.1; python_version < '3.11'",

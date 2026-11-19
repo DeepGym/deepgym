@@ -1,13 +1,16 @@
-"""Run routes: start runs or a small eval in the background, then list and inspect them."""
+"""Run routes: start runs or a small eval in the background, then list, inspect and compare them."""
 
 from __future__ import annotations
 
 from typing import Annotated
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
+from pydantic_core import PydanticSerializationError
 
-from deepgym.console.deps import RunnerDep, RunStoreDep
+from deepgym.compare import Attempt, CompareReport, compare
+from deepgym.console.deps import RunnerDep, RunStoreDep, strict_query
 from deepgym.console.environments import reference_solution
+from deepgym.console.run_store import RunStore, run_attempt
 from deepgym.console.schemas import (
     RunConfig,
     RunCreate,
@@ -21,6 +24,7 @@ from deepgym.console.schemas import (
 from deepgym.exceptions import DeepGymError
 from deepgym.models import Environment
 from deepgym.registry import load_environment
+from deepgym.traces.schema import environment_sha256
 
 router = APIRouter(prefix='/runs', tags=['runs'])
 
@@ -41,7 +45,8 @@ def _plan(name: str, solution: str | None) -> tuple[RunSpec, Environment]:
     """Load *name* and pick its solution: the given one, or else its reference.
 
     Raises:
-        HTTPException: 404 for an unknown environment, 400 if it can't be run this way.
+        HTTPException: 404 for an unknown environment, 400 if it can't be run this way or
+            its definition can't be hashed (a file it names is unreadable, say).
     """
     try:
         env = load_environment(name)
@@ -59,7 +64,21 @@ def _plan(name: str, solution: str | None) -> tuple[RunSpec, Environment]:
             status_code=status.HTTP_400_BAD_REQUEST,
             detail=f'{name} has no reference solution; pass a solution',
         )
-    return RunSpec(environment=name, solution=code, reference=solution is None), env
+    try:
+        fingerprint = environment_sha256(env)
+    except PydanticSerializationError as exc:
+        reason = exc.__cause__ or exc  # the serializer's own error, without pydantic's wrapper
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Can't hash {name}'s environment definition: {reason}",
+        ) from exc
+    spec = RunSpec(
+        environment=name,
+        solution=code,
+        reference=solution is None,
+        environment_sha256=fingerprint,
+    )
+    return spec, env
 
 
 @router.get('/config', response_model=RunConfig)
@@ -105,6 +124,40 @@ def run_stats(
 ) -> RunStats:
     """Aggregate runs matching every filter, started in the last *hours* (or ever)."""
     return runs.stats(filters, hours)
+
+
+@router.get(
+    '/compare', response_model=CompareReport, dependencies=[Depends(strict_query('a', 'b'))]
+)
+def compare_groups(runs: RunStoreDep, a: str, b: str) -> CompareReport:
+    """Compare run group *b* against run group *a*, environment by environment.
+
+    Raises:
+        HTTPException: 404 if a group has no runs, 409 while one still has runs queued or
+            running, 422 for a missing, unknown or repeated query parameter.
+    """
+    sides = [_finished_group(runs, group_id) for group_id in (a, b)]
+    return compare(*sides)
+
+
+def _finished_group(runs: RunStore, group_id: str) -> list[Attempt]:
+    """Return the runs of *group_id* as attempts, once every one of them has finished.
+
+    Raises:
+        HTTPException: 404 if the group has no runs, 409 if any is queued or running.
+    """
+    group = runs.page({'group_id': group_id}, 0, None).runs
+    if not group:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND, detail=f'Run group {group_id} not found'
+        )
+    if busy := sum(run.status in ('queued', 'running') for run in group):
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=f'Run group {group_id} has {busy} runs queued or running; '
+            'compare it once they finish',
+        )
+    return [run_attempt(run) for run in group]
 
 
 @router.get('/{run_id}', response_model=RunDetail)

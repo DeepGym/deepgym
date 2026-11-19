@@ -127,6 +127,16 @@ def task_difficulty(n: int, c: int, low: float = 0.1, high: float = 0.9) -> Task
     return TaskDifficulty(band=band, solve_rate=rate, outside_band=not low <= rate <= high)
 
 
+def default_ks(n: int) -> list[int]:
+    """Return the k worth reporting for *n* samples: 1, each power of 2 below n, and n.
+
+    Example:
+        >>> default_ks(12)
+        [1, 2, 4, 8, 12]
+    """
+    return sorted({2**power for power in range(n.bit_length())} | {n})
+
+
 def summarize(
     tasks: Sequence[tuple[int, int]], ks: Sequence[int], low: float = 0.1, high: float = 0.9
 ) -> PassKSummary:

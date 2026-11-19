@@ -2,13 +2,14 @@
 
 from __future__ import annotations
 
+import json
 import sqlite3
 from collections.abc import Iterator
 from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
 
-from deepgym.models import RunResult
+from deepgym.models import RunResult, is_verdict
 
 DEFAULT_DB_PATH = Path.home() / '.deepgym' / 'console.db'
 
@@ -29,7 +30,8 @@ CREATE TABLE IF NOT EXISTS runs (
     duration_ms REAL,
     result TEXT,
     created_at TEXT NOT NULL,
-    finished_at TEXT
+    finished_at TEXT,
+    environment_sha256 TEXT
 );
 CREATE INDEX IF NOT EXISTS runs_created_at ON runs (created_at);
 CREATE TABLE IF NOT EXISTS episodes (
@@ -83,14 +85,60 @@ def init_db(path: Path) -> None:
     with connect(path) as conn:
         conn.execute('PRAGMA journal_mode=WAL')
         conn.executescript(_SCHEMA)
-        # Older databases lack the newer episode columns. Holding the write lock makes
+        # Older databases lack the newer columns. Holding the write lock makes
         # check-then-add atomic when two processes open an old database at once.
         conn.execute('BEGIN IMMEDIATE')
-        columns = {row['name'] for row in conn.execute('PRAGMA table_info(episodes)')}
+        if 'environment_sha256' not in _columns(conn, 'runs'):
+            _add_hash_column(conn)
+        columns = _columns(conn, 'episodes')
         if 'trace' not in columns:
             conn.execute('ALTER TABLE episodes ADD COLUMN trace TEXT')
         if 'has_verdict' not in columns:
             _add_verdict_columns(conn)
+
+
+def _columns(conn: sqlite3.Connection, table: str) -> set[str]:
+    """Return the column names of *table* (a name from this module, never user input)."""
+    return {row['name'] for row in conn.execute(f'PRAGMA table_info({table})')}
+
+
+def _add_hash_column(conn: sqlite3.Connection) -> None:
+    """Add the runs' environment_sha256, and store each older run's verdict as runs do now.
+
+    A run stored before it may keep a 0 score for a result without a verdict, or a score
+    on a run that failed: each stored result's verdict is stored again (see
+    :func:`_stored_verdict`), and a failed run keeps no score or pass.
+    """
+    conn.execute('ALTER TABLE runs ADD COLUMN environment_sha256 TEXT')
+    rows = conn.execute('SELECT id, result FROM runs WHERE result IS NOT NULL').fetchall()
+    conn.executemany(
+        'UPDATE runs SET score = ?, passed = ?, error_type = ? WHERE id = ?',
+        [(*_stored_verdict(row['result']), row['id']) for row in rows],
+    )
+    conn.execute("UPDATE runs SET score = NULL, passed = NULL WHERE status = 'failed'")
+
+
+def _stored_verdict(raw: str) -> tuple[float | None, bool | None, str | None]:
+    """Return :func:`verdict_columns` for a stored result's JSON, read field by field.
+
+    Old rows aren't validated as a whole :class:`RunResult`, so one that no longer parses
+    can't stop the console opening. A row that isn't a JSON object, or lacks a numeric
+    score or a boolean pass, has no verdict.
+    """
+    try:
+        data = json.loads(raw)
+    except ValueError:
+        data = None
+    if not isinstance(data, dict):
+        return _columns_of(None, None, judged=False, error_type=None)
+    score, passed, error_type = data.get('score'), data.get('passed'), data.get('error_type')
+    error_type = error_type if isinstance(error_type, str) else None
+    judged = (
+        is_verdict(data.get('exit_code'), error_type)
+        and isinstance(score, (int, float))
+        and isinstance(passed, bool)
+    )
+    return _columns_of(score, passed, judged=judged, error_type=error_type)
 
 
 def _add_verdict_columns(conn: sqlite3.Connection) -> None:
@@ -118,11 +166,19 @@ def verdict_columns(result: RunResult) -> tuple[float | None, bool | None, str |
     A result without a verdict (``RunResult.has_verdict`` False) keeps no score or pass,
     and always has an error type: its own, else ``'verifier_error'``.
     """
-    judged = result.has_verdict
+    return _columns_of(
+        result.score, result.passed, judged=result.has_verdict, error_type=result.error_type
+    )
+
+
+def _columns_of(
+    score: float | None, passed: bool | None, *, judged: bool, error_type: str | None
+) -> tuple[float | None, bool | None, str | None]:
+    """Score, passed and error_type to store; see :func:`verdict_columns`."""
     return (
-        result.score if judged else None,
-        result.passed if judged else None,
-        result.error_type or (None if judged else 'verifier_error'),
+        score if judged else None,
+        passed if judged else None,
+        error_type or (None if judged else 'verifier_error'),
     )
 
 

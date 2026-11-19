@@ -20,6 +20,15 @@ deepgym console --port 8080 --allow-local-exec   # http://127.0.0.1:8080
   execute in the background; the run page shows per-case results and a diff against the
   reference. A run without a verdict keeps no score and counts as an error, and the totals
   show a "No verdict" count with the judged pass rate and score beside the headline ones.
+  `GET /api/runs/compare?a=<group_id>&b=<group_id>` compares two run groups environment
+  by environment, as [`deepgym.compare`](traces.md#compare-two-runs) does; the key is the
+  environment name. It answers 404 for a group with no runs, 409 while a group still has
+  runs queued or running, and 422 when `a` or `b` is missing or given twice, or another
+  query parameter is passed. Each run keeps the hash of the environment it ran, taken
+  again when it starts, so a changed environment is flagged. A run whose environment
+  changed while it ran keeps no hash, and neither do runs stored before the console kept
+  one; both are listed as `unverified`. Starting a run whose
+  environment can't be hashed (a file it names is unreadable, say) answers 400.
 - **Episodes:** replay recorded trajectories step by step, with screenshots for
   computer-use tasks. Record one from your agent loop:
 

@@ -39,7 +39,7 @@ def _wait_finished(client: TestClient, run_id: str, timeout_s: float = 60) -> di
 
 def _queue(db: Path, environment: str, count: int) -> list[RunSummary]:
     """Queue *count* runs of *environment* as one eval; return them newest first."""
-    spec = RunSpec(environment=environment, solution='pass', reference=True)
+    spec = RunSpec(environment=environment, solution='pass', reference=True, environment_sha256='h')
     return RunStore(db).create_group([spec] * count, 'local', 'local')[::-1]
 
 
@@ -165,7 +165,9 @@ class TestRuns:
         assert none == {'runs': [], 'total': 0}
 
     def test_restart_fails_unfinished_runs(self, tmp_path: Path) -> None:
-        spec = RunSpec(environment='fizzbuzz', solution='pass', reference=False)
+        spec = RunSpec(
+            environment='fizzbuzz', solution='pass', reference=False, environment_sha256='h'
+        )
         (run,) = RunStore(tmp_path / 'console.db').create_group([spec], 'local', 'local')
 
         detail = make_client(tmp_path).get(f'/api/runs/{run.id}').json()
@@ -185,7 +187,10 @@ def _seed_runs(db: Path) -> None:
         ('fizzbuzz', 1.0, None, 100.0, 30),
         ('two_sum', 1.0, None, 100.0, 100),
     ]
-    specs = [RunSpec(environment=env, solution='pass', reference=True) for env, *_ in plan]
+    specs = [
+        RunSpec(environment=env, solution='pass', reference=True, environment_sha256='h')
+        for env, *_ in plan
+    ]
     runs = store.create_group(specs, 'local', 'local')
     now = datetime.now(timezone.utc)
     for run, (_, score, error_type, duration_ms, hours_ago) in zip(runs, plan):
@@ -259,7 +264,10 @@ class TestRunStats:
         self, tmp_path: Path
     ) -> None:
         store = RunStore(tmp_path / 'console.db')
-        specs = [RunSpec(environment='fizzbuzz', solution='pass', reference=True)] * 3
+        spec = RunSpec(
+            environment='fizzbuzz', solution='pass', reference=True, environment_sha256='h'
+        )
+        specs = [spec] * 3
         judged, crashed, silent = store.create_group(specs, 'local', 'local')
         result = RunResult(score=1.0, passed=True, output='', stderr='', exit_code=0,
                            execution_time_ms=1.0, sandbox_id='local')  # fmt: skip

@@ -9,16 +9,29 @@ tasks and ignores task.toml fields it doesn't use.
 
 from __future__ import annotations
 
+import base64
+import hashlib
 import io
+import os
 import re
+import stat
 import sys
 import tarfile
 from collections.abc import Mapping
 from pathlib import Path
 from typing import Literal
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    SerializationInfo,
+    ValidationInfo,
+    field_serializer,
+    field_validator,
+)
 
+from deepgym.models import fingerprinting
 from deepgym.session import check_workdir
 
 if sys.version_info >= (3, 11):
@@ -134,7 +147,9 @@ class HarborTask(BaseModel):
         ('ubuntu:24.04', ['test.sh', 'test_outputs.py'])
     """
 
-    model_config = ConfigDict(frozen=True)
+    # Test and solution files may be binary, so JSON carries them as URL-safe base64 (the
+    # alphabet with - and _), and reads them back the same way (see _files_from_json).
+    model_config = ConfigDict(frozen=True, ser_json_bytes='base64')
 
     name: str = Field(min_length=1)
     """The folder's name, unique within its dataset."""
@@ -169,11 +184,44 @@ class HarborTask(BaseModel):
     solution: dict[str, bytes] = Field(default_factory=dict)
     """Files under solution/ by relative path (solve.sh is the reference); may be empty."""
 
+    @field_serializer('path', when_used='json')
+    def _path_json(self, path: Path, info: SerializationInfo) -> str | None:
+        """The folder; in a fingerprint (:data:`~deepgym.models.FINGERPRINT`), the hash of
+        the build context when the task builds its image, else None: where the folder is
+        doesn't change the task, and its tests and solution are fields of their own.
+
+        Raises:
+            ValueError: If the build context links outside the task folder.
+        """
+        if not fingerprinting(info):
+            return str(path)
+        return None if self.docker_image else _tree_sha256(self.build_context)
+
     @field_validator('workdir')
     @classmethod
     def workdir_is_safe(cls, value: str | None) -> str | None:
         """Reject a work directory the agent mustn't own (see ``check_workdir``)."""
         return None if value is None else check_workdir(value, HARNESS_PATHS)
+
+    @field_validator('tests', 'solution', mode='before')
+    @classmethod
+    def _files_from_json(cls, value: object, info: ValidationInfo) -> object:
+        """Decode files from JSON, where they are URL-safe base64 with padding, as written.
+
+        Only JSON input: from Python a str stays pydantic's default, its UTF-8 bytes, so a
+        text script can be passed as a string.
+
+        Raises:
+            ValueError: If a file in JSON isn't valid URL-safe base64.
+        """
+        if info.mode != 'json' or not isinstance(value, dict):
+            return value
+        return {
+            name: base64.b64decode(text, altchars=b'-_', validate=True)
+            if isinstance(text, str)
+            else text
+            for name, text in value.items()
+        }
 
     @field_validator('tests')
     @classmethod
@@ -258,6 +306,44 @@ def _build_context(task_dir: Path) -> Path:
         if path.is_symlink() and not path.resolve().is_relative_to(real):
             raise ValueError(f'{path.relative_to(task_dir)} links outside environment/')
     return real
+
+
+_HASHED_MODE = 0o7000 | 0o555 | 0o002
+"""Mode bits the build-folder hash keeps: setuid, setgid and sticky, read and execute
+for everyone, and write for others. Owner and group write are left out: they are what a
+machine's umask (022 or 002) changes, and a task's files are owned by root in the image."""
+
+
+def _tree_sha256(root: Path) -> str:
+    """Hash the folder at *root* as a builder sends it: every entry under it by its path
+    relative to *root*, its type and mode bits, a file by its content, a link by
+    its target (never followed), and a folder, empty or not, by its path and mode alone.
+    The mode keeps every bit but owner and group write (see :data:`_HASHED_MODE`), so a
+    lost read bit, a world-writable file or a setuid one changes the hash and a different
+    umask doesn't. A missing folder hashes as empty."""
+    digest = hashlib.sha256()
+    for path in sorted(root.rglob('*')):  # doesn't descend into linked folders
+        mode = path.lstat().st_mode
+        if stat.S_ISLNK(mode):
+            content = hashlib.sha256(os.fsencode(os.readlink(path))).hexdigest()
+        elif stat.S_ISREG(mode):
+            content = _file_sha256(path)
+        else:
+            content = ''
+        # A path never holds NUL, and content is empty or 64 hex digits: entries can't run together.
+        kept = stat.S_IFMT(mode) | (mode & _HASHED_MODE)
+        entry = f'{path.relative_to(root).as_posix()}\0{kept:o}\0{content}\n'
+        digest.update(entry.encode('utf-8', 'surrogateescape'))  # any file name hashes
+    return digest.hexdigest()
+
+
+def _file_sha256(path: Path) -> str:
+    """Hash the file at *path*, a megabyte at a time."""
+    digest = hashlib.sha256()
+    with path.open('rb') as file:
+        while chunk := file.read(1 << 20):
+            digest.update(chunk)
+    return digest.hexdigest()
 
 
 def _read(task_dir: Path, rel: str) -> bytes:

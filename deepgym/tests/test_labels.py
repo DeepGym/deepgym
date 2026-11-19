@@ -359,6 +359,46 @@ class TestSupersede:
         with pytest.raises(ValueError, match='already superseded'):
             store.add(_retract(first.id))
 
+    def test_a_stale_correction_names_the_current_record(self, store: LabelStore) -> None:
+        first = store.add(_passed())
+        fixed = store.add(_passed(value=False, supersedes=first.id))
+        mark = store.add(_label())
+        retraction = store.add(_retract(mark.id))
+
+        with pytest.raises(ValueError) as stale:
+            store.add(_passed(comment='Fine after all.', supersedes=first.id))
+        with pytest.raises(ValueError) as late:
+            store.add(_retract(first.id))
+        with pytest.raises(ValueError) as gone:
+            store.add(_label(value='terse', supersedes=mark.id))
+
+        assert str(stale.value) == (
+            f'Label {first.id} was already superseded by {fixed.id}; correct {fixed.id} instead'
+        )
+        assert str(late.value).endswith(f'; retract {fixed.id} instead')
+        assert str(gone.value) == f'Label {mark.id} was already retracted by {retraction.id}'
+        assert store.current('trace', 't1') == [fixed]
+
+    def test_a_stale_correction_names_the_end_of_the_chain(self, store: LabelStore) -> None:
+        first = store.add(_passed())
+        fixed = store.add(_passed(value=False, supersedes=first.id))
+        again = store.add(_passed(comment='Fine after all.', supersedes=fixed.id))
+        mark = store.add(_label())
+        terse = store.add(_label(value='terse', supersedes=mark.id))
+        retraction = store.add(_retract(terse.id))
+
+        with pytest.raises(ValueError) as stale:
+            store.add(_passed(value=False, supersedes=first.id))
+        with pytest.raises(ValueError) as gone:
+            store.add(_label(value='curt', supersedes=mark.id))
+
+        assert str(stale.value) == (
+            f'Label {first.id} was already superseded by {fixed.id}; correct {again.id} instead'
+        )
+        assert str(gone.value) == (
+            f'Label {mark.id} was superseded by {terse.id}, which {retraction.id} retracted'
+        )
+
 
 class TestOneCurrentVerdict:
     @pytest.mark.parametrize('name', ['passed', 'c3'])
@@ -459,11 +499,31 @@ class TestBatch:
 
         with pytest.raises(ValueError, match='not stored'):
             store.add_many([_label(name='mood'), _label(supersedes='nope')])
-        with pytest.raises(ValueError, match='already superseded'):
+        with pytest.raises(
+            ValueError, match=f'^Label {first.id} is superseded twice in this batch$'
+        ):
             store.add_many([_label(value='terse', supersedes=first.id), _retract(first.id)])
 
         assert _all(store) == [first]
         assert store.add(_label(name='mood')).seq == 2
+
+    def test_a_stale_correction_names_no_record_of_its_batch(self, store: LabelStore) -> None:
+        verdict = store.add(_passed())
+        fixed = store.add(_passed(value=False, supersedes=verdict.id))
+        twice = [_passed(value=False, supersedes=fixed.id), _passed(supersedes=fixed.id)]
+        late = [_passed(supersedes=fixed.id), _passed(value=False, supersedes=verdict.id)]
+
+        with pytest.raises(
+            ValueError, match=f'^Label {fixed.id} is superseded twice in this batch$'
+        ):
+            store.add_many(twice)
+        with pytest.raises(ValueError) as stale:
+            store.add_many(late)
+
+        assert str(stale.value) == (
+            f'Label {verdict.id} was already superseded by {fixed.id}; correct {fixed.id} instead'
+        )
+        assert _all(store) == [verdict, fixed]
 
 
 def test_time_never_runs_back(store: LabelStore, monkeypatch: pytest.MonkeyPatch) -> None:

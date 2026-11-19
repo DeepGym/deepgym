@@ -42,6 +42,18 @@ def fresh_solution_runtime(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(solution_runtime, '_announced', False)
 
 
+@pytest.fixture
+def digit_limit() -> Iterator[None]:
+    """Python's default limit on printing ints in decimal, which importing deepgym's
+    solution runtime lifts for the whole process."""
+    if not hasattr(sys, 'set_int_max_str_digits'):
+        pytest.skip('this Python has no limit on printing ints')
+    before = sys.get_int_max_str_digits()
+    sys.set_int_max_str_digits(4300)
+    yield
+    sys.set_int_max_str_digits(before)
+
+
 @pytest.fixture()
 def local_dg() -> DeepGym:
     """Return a DeepGym client in local mode."""

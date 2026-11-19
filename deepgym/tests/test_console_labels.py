@@ -126,6 +126,34 @@ def test_corrections_stay_with_their_author(client: TestClient) -> None:
     assert "another labeler's view is a new label" in other.json()['detail']
 
 
+def test_a_stale_correction_points_at_the_current_one(client: TestClient) -> None:
+    first = client.post('/api/labels', json=_body()).json()
+    fixed = client.post(
+        '/api/labels', json=_body(value=False, comment='misses a case', supersedes=first['id'])
+    ).json()
+
+    stale = client.post(
+        '/api/labels', json=_body(comment='Fine after all.', supersedes=first['id'])
+    )
+
+    assert stale.status_code == 409
+    assert stale.json()['detail'] == (
+        f'Label {first["id"]} was already superseded by {fixed["id"]}; '
+        f'correct {fixed["id"]} instead'
+    )
+
+
+def test_two_corrections_of_one_label_in_a_batch(client: TestClient) -> None:
+    first = client.post('/api/labels', json=_body()).json()
+    fix = _body(value=False, comment='misses a case', supersedes=first['id'])
+
+    twice = client.post('/api/labels/batch', json=[fix, {**fix, 'comment': 'no'}])
+
+    assert twice.status_code == 409
+    assert twice.json()['detail'] == f'Label {first["id"]} is superseded twice in this batch'
+    assert client.get('/api/labels').json()['total'] == 1
+
+
 def test_a_second_verdict_must_supersede(client: TestClient) -> None:
     first = client.post('/api/labels', json=_body()).json()
 

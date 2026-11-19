@@ -10,9 +10,18 @@ from __future__ import annotations
 import posixpath
 import re
 from collections.abc import Iterator
-from typing import Annotated, ClassVar, Literal, NamedTuple
+from typing import Annotated, ClassVar, Literal, NamedTuple, TypeVar
 
-from pydantic import BaseModel, ConfigDict, Field, PrivateAttr, TypeAdapter
+from pydantic import (
+    AfterValidator,
+    BaseModel,
+    BeforeValidator,
+    ConfigDict,
+    Field,
+    PrivateAttr,
+    TypeAdapter,
+)
+from pydantic_core import PydanticCustomError, PydanticKnownError
 
 from deepgym.labels import Name
 from deepgym.scanners.core import Finding, ScannerSource, Severity
@@ -22,13 +31,46 @@ from deepgym.traces.schema import Trace, TraceStep, json_text, sha256_text
 ScanField = Literal['action', 'observation', 'system', 'user', 'assistant', 'tool']
 """A step's text to scan: its action, its observation, or its messages of one role."""
 
+_T = TypeVar('_T')
+
+
+def _non_empty(items: tuple[_T, ...]) -> tuple[_T, ...]:
+    """Refuse an empty tuple with the error ``Field(min_length=1)`` gives."""
+    if not items:
+        ctx = {'field_type': 'Tuple', 'min_length': 1, 'actual_length': 0}
+        raise PydanticKnownError('too_short', ctx)
+    return items
+
+
+_NonEmpty = Annotated[
+    tuple[_T, ...], AfterValidator(_non_empty), Field(json_schema_extra={'minItems': 1})
+]
+"""A tuple of one or more items. Not ``Field(min_length=1)``: pydantic checks a tuple's
+length against the items that validated, so a tuple whose every item failed was also
+reported as too short."""
+
+
+def _compiled(value: object) -> object:
+    """Compile a regex given as text, refusing one ``re`` can't compile with its reason
+    (pydantic's own check drops it)."""
+    if not isinstance(value, str):
+        return value
+    try:
+        return re.compile(value)
+    except (re.error, ValueError, OverflowError, RecursionError) as exc:
+        raise PydanticCustomError(
+            'pattern_regex',
+            'Input should be a valid regular expression: {error}',
+            {'error': str(exc)},
+        ) from exc
+
 
 class Pattern(BaseModel):
     """One regex, and what a match of it means."""
 
     model_config = ConfigDict(frozen=True, extra='forbid')
 
-    regex: re.Pattern[str]
+    regex: Annotated[re.Pattern[str], BeforeValidator(_compiled)]
     """Python ``re`` syntax; flags go inline, e.g. ``(?i)``."""
     message: Name
     severity: Severity = 'medium'
@@ -79,8 +121,8 @@ class PatternScanner(_Rule):
     reads: ClassVar[str] = 'pattern/1'
 
     kind: Literal['pattern'] = 'pattern'
-    patterns: tuple[Pattern, ...] = Field(min_length=1)
-    fields: tuple[ScanField, ...] = Field(default=('action',), min_length=1)
+    patterns: _NonEmpty[Pattern]
+    fields: _NonEmpty[ScanField] = ('action',)
 
     def config(self) -> dict[str, object]:
         """Return the JSON config with each regex's flags."""
@@ -153,7 +195,7 @@ class ProtectedPathScanner(_Rule):
     action is read to change, or which paths a glob matches, changes."""
 
     kind: Literal['protected_paths'] = 'protected_paths'
-    globs: tuple[Name, ...] = Field(min_length=1)
+    globs: _NonEmpty[Name]
     severity: Severity = 'high'
     _globs: list[_Glob] = PrivateAttr()
 

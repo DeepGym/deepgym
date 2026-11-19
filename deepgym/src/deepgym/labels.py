@@ -12,9 +12,9 @@ One convention covers experts and judges alike: the verdict on an answer is a bo
 named ``passed``, and the verdict on one rubric check a bool label named by its check id
 (``c1``, ``c2``, ...), True meaning MET. These verdict names take only bools, on a whole
 target, and each source and author keeps one current verdict per target, name and
-``group_id``: changing it means superseding it. These are the verdicts and blind flag a
-``rubric_calibration.LabeledAnswer`` takes, but there is no adapter yet: the answer text
-comes from the run, and ``blind`` is set per label, not per answer.
+``group_id``: changing it means superseding it.
+``deepgym.console.calibration_labels.labeled_answers`` turns experts' verdicts on runs into
+``rubric_calibration.LabeledAnswer`` items, the answer text coming from the run.
 
 The console keeps labels in its database (:class:`deepgym.console.label_store.LabelStore`).
 """

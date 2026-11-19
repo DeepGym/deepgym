@@ -1,0 +1,196 @@
+{
+  "judge_id": "stub-judge",
+  "prompt_version": "rubric-judge/1",
+  "rubric_sha256": "92adb82f4a70b160d9fbaab0cbd72dcab214830f1c2463f7d5cc23c7e7ce4371",
+  "check_ids": [
+    "c1",
+    "c2",
+    "c3"
+  ],
+  "runs": 2,
+  "threshold": 1.0,
+  "answers": [
+    {
+      "id": "good",
+      "answer": "Raise it to $12; churn is 4.1%.",
+      "passed": true,
+      "blind": true,
+      "checks": {
+        "c1": true
+      },
+      "runs": [
+        {
+          "score": null,
+          "verdicts": null,
+          "error_type": "provider_error"
+        },
+        {
+          "score": 1.0,
+          "verdicts": {
+            "c1": "MET",
+            "c2": "MET",
+            "c3": "UNMET"
+          },
+          "error_type": null
+        }
+      ]
+    },
+    {
+      "id": "partial",
+      "answer": "Raise it to $12.",
+      "passed": false,
+      "blind": true,
+      "checks": {
+        "c2": false
+      },
+      "runs": [
+        {
+          "score": 0.6666666666666666,
+          "verdicts": {
+            "c1": "MET",
+            "c2": "UNMET",
+            "c3": "UNMET"
+          },
+          "error_type": null
+        },
+        {
+          "score": 0.6666666666666666,
+          "verdicts": {
+            "c1": "MET",
+            "c2": "UNMET",
+            "c3": "UNMET"
+          },
+          "error_type": null
+        }
+      ]
+    },
+    {
+      "id": "wrong",
+      "answer": "Keep the price; churn is 4.1%.",
+      "passed": false,
+      "blind": true,
+      "checks": {},
+      "runs": [
+        {
+          "score": 0.0,
+          "verdicts": {
+            "c1": "UNMET",
+            "c2": "MET",
+            "c3": "UNMET"
+          },
+          "error_type": null
+        },
+        {
+          "score": 0.0,
+          "verdicts": {
+            "c1": "UNMET",
+            "c2": "MET",
+            "c3": "UNMET"
+          },
+          "error_type": null
+        }
+      ]
+    },
+    {
+      "id": "stale",
+      "answer": "Raise it to $12; churn is 4.1%, per the 2023 price list.",
+      "passed": false,
+      "blind": true,
+      "checks": {},
+      "runs": [
+        {
+          "score": 0.0,
+          "verdicts": {
+            "c1": "MET",
+            "c2": "MET",
+            "c3": "MET"
+          },
+          "error_type": null
+        },
+        {
+          "score": 0.0,
+          "verdicts": {
+            "c1": "MET",
+            "c2": "MET",
+            "c3": "MET"
+          },
+          "error_type": null
+        }
+      ]
+    }
+  ],
+  "judged_runs": 7,
+  "no_verdict_runs": 1,
+  "no_verdict_by_type": {
+    "provider_error": 1
+  },
+  "overall": {
+    "tp": 1,
+    "fn": 0,
+    "tn": 6,
+    "fp": 0,
+    "tpr": 1.0,
+    "tnr": 1.0,
+    "agreement": 1.0
+  },
+  "blind": {
+    "tp": 1,
+    "fn": 0,
+    "tn": 6,
+    "fp": 0,
+    "tpr": 1.0,
+    "tnr": 1.0,
+    "agreement": 1.0
+  },
+  "assisted": {
+    "tp": 0,
+    "fn": 0,
+    "tn": 0,
+    "fp": 0,
+    "tpr": null,
+    "tnr": null,
+    "agreement": null
+  },
+  "self_consistency": {
+    "same": 3,
+    "answers": 3,
+    "share": 1.0
+  },
+  "check_consistency": {
+    "c1": {
+      "same": 3,
+      "answers": 3,
+      "share": 1.0
+    },
+    "c2": {
+      "same": 3,
+      "answers": 3,
+      "share": 1.0
+    },
+    "c3": {
+      "same": 3,
+      "answers": 3,
+      "share": 1.0
+    }
+  },
+  "check_agreement": {
+    "c1": {
+      "tp": 1,
+      "fn": 0,
+      "tn": 0,
+      "fp": 0,
+      "tpr": 1.0,
+      "tnr": null,
+      "agreement": 1.0
+    },
+    "c2": {
+      "tp": 0,
+      "fn": 0,
+      "tn": 2,
+      "fp": 0,
+      "tpr": null,
+      "tnr": 1.0,
+      "agreement": 1.0
+    }
+  }
+}

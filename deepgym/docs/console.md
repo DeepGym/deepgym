@@ -113,9 +113,9 @@ on a step or a span of text takes another name, such as `mark`. Each source and 
 holds one current verdict per target, name and `group_id`: to change it, supersede it.
 Each repeat of a judge gets its own `group_id`.
 
-These are the verdicts and the blind flag a `rubric_calibration.LabeledAnswer` takes, but
-there is no adapter from stored labels to it yet, and labels alone don't make one: the
-answer text comes from the run, and `blind` is set per label, not per answer.
+`deepgym.console.calibration_labels.labeled_answers` turns experts' verdicts on runs into
+`rubric_calibration.LabeledAnswer` items for judge calibration, with the run's solution as
+the answer text; see [From stored labels](training/rubric-judge.md#from-stored-labels).
 
 ### Corrections, retractions and invalidations
 

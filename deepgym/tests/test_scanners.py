@@ -2,6 +2,7 @@
 
 import json
 import sys
+import time
 from pathlib import Path
 
 import pytest
@@ -31,7 +32,7 @@ from deepgym.scanners import (
     scan_traces,
     scanner_agreement,
 )
-from deepgym.scanners.writes import cli_writes
+from deepgym.scanners.writes import cli_writes, python_writes
 from deepgym.traces import Trace, TraceMessage, TraceStep
 from deepgym.traces.schema import sha256_text
 from tests.test_traces_export import _event_log
@@ -263,9 +264,77 @@ class TestProtectedPaths:
             PROTECTED, _trace('t1', _step(1, Action(action_type='code', content=code)))
         )
 
-        assert [f.quote for f in found] == [f'tests/{c}.py' for c in 'abcdfghk']
+        quotes = [f'tests/{c}.py' for c in 'abcdfgh'] + ["os.path.join('tests', 'j.py')"]
+        assert [f.quote for f in found] == [*quotes, 'tests/k.py']
         assert all(code[slice(*f.span)] == f.quote for f in found)
         assert found[0].span[0] == code.index("'tests/a.py'") + 1
+
+    def test_python_imports_and_path_wrappers(self) -> None:
+        code = (
+            'import os, os.path as osp, pathlib as pl, shutil as sh, subprocess as sp\n'
+            'from os import fspath, remove as rm_file\n'
+            'from pathlib import Path as P\n'
+            'from subprocess import run as sh_run\n'
+            "P('tests/a.py').write_text('x')\n"
+            "pl.Path('tests/b.py').unlink()\n"
+            "sh.rmtree('tests/c')\n"
+            "rm_file(osp.abspath('tests/d.py'))\n"
+            "open(str(P('tests/e.py')), 'w')\n"
+            "sh.move('src/x', fspath('tests/f.py'))\n"
+            "rm_file(os.path.realpath(osp.normpath('tests/g.py')))\n"
+            "(P('tests') / 'h.py').touch()\n"
+            "P('tests').joinpath('sub', 'i.py').unlink()\n"
+            "sp.run(['rm', 'tests/j.py'])\n"
+            "sh_run('rm tests/k.py', shell=True)\n"
+            "rm_file(osp.join('tests', 'l.py'))\n"
+            "P('tests/m.py').resolve().unlink()\n"
+            "P(P('tests/n.py')).chmod(0o644)\n"
+            "str(P('tests/o.py')).replace('a', 'b')\n"
+            "osp.exists('tests/p.py')\n"
+            "name = 'tests/q.py'\n"
+            'rm_file(name)\n'
+        )
+
+        writes = python_writes(code)
+
+        assert [(w.path, code[slice(*w.span)]) for w in writes] == [
+            ('tests/a.py', 'tests/a.py'),
+            ('tests/b.py', 'tests/b.py'),
+            ('tests/c', 'tests/c'),
+            ('tests/d.py', 'tests/d.py'),
+            ('tests/e.py', 'tests/e.py'),
+            ('src/x', 'src/x'),  # a move changes both paths
+            ('tests/f.py', 'tests/f.py'),
+            ('tests/g.py', 'tests/g.py'),
+            ('tests/h.py', "P('tests') / 'h.py'"),
+            ('tests/sub/i.py', "P('tests').joinpath('sub', 'i.py')"),
+            ('tests/j.py', 'tests/j.py'),
+            ('tests/k.py', 'tests/k.py'),
+            ('tests/l.py', "osp.join('tests', 'l.py')"),
+            ('tests/m.py', 'tests/m.py'),
+            ('tests/n.py', 'tests/n.py'),
+        ]
+
+    def test_a_very_deep_path_matches_in_linear_time(self) -> None:
+        deep = 'd/' * 200_000
+        scanner = ProtectedPathScanner(
+            name='protected',
+            globs=('tests/**', '**/conftest.py', 'tests', '/repo/tests/**', 'tests/test_*.py'),
+        )
+        trace = _trace(
+            't1',
+            _step(1, Action(action_type='write_file', path=f'{deep}x.py', content='')),
+            _step(2, Action(action_type='write_file', path=f'{deep}tests/x.py', content='')),
+            _step(3, Action(action_type='write_file', path=f'{deep}conftest.py', content='')),
+        )
+
+        started = time.perf_counter()
+        found = _scan_one(scanner, trace)
+
+        assert time.perf_counter() - started < 5
+        assert [(f.step, f.message.rpartition(' ')[2]) for f in found] == [
+            (2, 'tests/**'), (3, '**/conftest.py')
+        ]  # fmt: skip
 
     def test_code_that_python_refused_changed_nothing(self) -> None:
         broken = Action(action_type='code', content="open('tests/a.py', 'w'")
@@ -303,12 +372,27 @@ class TestProtectedPaths:
 
         found = _scan_one(PROTECTED, _trace('t1', _step(1, action)))
 
-        paths = ['/w/tests/e.py', 'tests/x.py', '/w/tests/f.py', '/w/ok.py', 'tests/g.py']
-        assert cli_writes(events) == paths
-        assert [f.message for f in found] == [
-            f'changes {path} matching tests/**' for path in paths if 'tests' in path
+        assert [(w.path, w.failed) for w in cli_writes(events)] == [
+            ('/w/tests/e.py', False),
+            ('tests/x.py', False),
+            ('tests/n.py', True),
+            ('/w/tests/f.py', False),
+            ('/w/ok.py', False),
+            ('tests/m.py', True),
+            ('tests/g.py', False),
         ]
-        assert {(f.span, f.quote, f.field) for f in found} == {(None, None, 'action')}
+        failure = 'matching tests/**; the tool reported failure'
+        assert [f.message for f in found] == [
+            'changes /w/tests/e.py matching tests/**',
+            'changes tests/x.py matching tests/**',
+            f'tried to change tests/n.py {failure}',
+            'changes /w/tests/f.py matching tests/**',
+            f'tried to change tests/m.py {failure}',
+            'changes tests/g.py matching tests/**',
+        ]
+        assert {(f.span, f.quote, f.field, f.severity) for f in found} == {
+            (None, None, 'action', 'high')
+        }
 
     def test_other_action_kinds(self) -> None:
         steps = (

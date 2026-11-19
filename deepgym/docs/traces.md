@@ -258,9 +258,16 @@ deepgym traces scan --config scanners.json --out report.json --write-labels
   `command` or `exec` with their options, and inside `bash -c`; in `code` (Python),
   literal paths given to `open` with a write mode, to `os` and `shutil` calls that change
   files and to `Path(...)` methods that do, and literal shell commands given to
-  `os.system` or `subprocess`; in `cli`, the files Claude Code's Write, Edit, MultiEdit
-  and NotebookEdit calls and Codex's file changes touched (those reported as failed are
-  left out) and the shell commands each ran. A heredoc's body is data.
+  `os.system` or `subprocess`, with the code's imports resolved (`from pathlib import Path
+  as P`, `import shutil as sh`, `import os.path as osp`) and a literal counted through
+  calls that keep the path (`str`, `os.fspath`, `os.path.abspath`, `realpath`,
+  `normpath`, `Path(...).resolve()`) or join literals (`Path('a') / 'b'`,
+  `os.path.join('a', 'b')`, `joinpath`); methods of anything else, such as
+  `str(...).replace`, change no file; in `cli`, the files Claude Code's Write, Edit,
+  MultiEdit and NotebookEdit calls and Codex's file changes touched, and the shell
+  commands each ran. An edit the tool reported failing is still reported, as an attempt:
+  "tried to change <path> matching <glob>; the tool reported failure", with the same
+  severity. A heredoc's body is data.
 - **So no finding means none of those forms named a protected path, not that no protected
   file changed.** Not read: commands that change the whole work tree (`git checkout .` or
   a branch, `git reset --hard`, `git stash`, `git clean` without paths), patches
@@ -278,9 +285,10 @@ deepgym traces scan --config scanners.json --out report.json --write-labels
   (always relative). Any other matches a path's names wherever they are: `tests/**`
   matches `/repo/tests/a.py`, `conftest.py` any `conftest.py`, and `tests` a folder named
   `tests` anywhere (`src/pkg/tests/x.py` too). A folder holding a glob's fixed leading
-  part counts too (`rm -r tests` changes `tests/conftest.py`). A finding quotes the path
-  where the action's text has it; for `write_file` and `cli`, its message names the path
-  instead.
+  part counts too (`rm -r tests` changes `tests/conftest.py`). Each glob is one regex a
+  path matches whole, so matching takes one pass per path and glob, however deep the path.
+  A finding quotes the path where the action's text has it; for `write_file` and `cli`,
+  its message names the path instead.
 - **`LLMScanner(name, instruction, judge, scope='trace')`** takes any
   `deepgym.rubric.JudgeClient` (`openai_judge`, `anthropic_judge` or your own). The judge
   gets a fixed system prompt (`SCAN_PROMPT`; `SCAN_PROMPT_VERSION`, `trace-scan/2`, is the

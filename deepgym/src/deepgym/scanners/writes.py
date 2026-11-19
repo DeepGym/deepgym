@@ -14,10 +14,15 @@ Nothing is run, and only these forms are read:
   ``sh -c`` scripts are read the same way. A heredoc's body is data.
 * ``code`` (Python): literal paths given to ``open`` with a write mode, to ``os`` and
   ``shutil`` calls that change files, to ``Path(...)`` methods that do, and literal
-  shell commands given to ``os.system`` or ``subprocess``.
+  shell commands given to ``os.system`` or ``subprocess``. Imports are resolved
+  (``from pathlib import Path as P``, ``import shutil as sh``), and a literal counts
+  through calls that keep the path (``str``, ``os.fspath``, ``os.path.abspath``,
+  ``realpath``, ``normpath``, ``Path(...).resolve()``) or join literals
+  (``Path('a') / 'b'``, ``os.path.join('a', 'b')``, ``joinpath``). Methods of anything
+  else, such as ``str(...).replace``, change no file.
 * ``cli``: the files Claude Code's Write, Edit, MultiEdit and NotebookEdit calls and
-  Codex's file changes touched (those that failed are left out), and what the shell
-  commands each ran name as above.
+  Codex's file changes touched or tried to (an attempt the tool reported failing is
+  marked ``failed``), and what the shell commands each ran name as above.
 
 So an empty result means none of these forms named the path, not that nothing changed it.
 Not read: commands that change the whole work tree (``git checkout .`` or a branch,
@@ -34,7 +39,7 @@ import ast
 import posixpath
 import re
 import shlex
-from collections.abc import Callable, Sequence
+from collections.abc import Sequence
 from itertools import takewhile
 from typing import NamedTuple, cast
 
@@ -42,8 +47,16 @@ from pydantic import JsonValue
 
 from deepgym.traces.schema import TraceStep
 
-Write = tuple[str, tuple[int, int] | None]
-"""A path an action changes, and where it is in the action's text (None if it isn't)."""
+
+class Write(NamedTuple):
+    """A path an action changes, or tried to."""
+
+    path: str
+    span: tuple[int, int] | None
+    """Where it is in the action's text; None if it isn't there."""
+    failed: bool = False
+    """True when the tool that tried to change it reported failing."""
+
 
 _SHELL = re.compile(
     r'(?P<skip>\\\n)'
@@ -94,6 +107,14 @@ _CHANGES_ALL = frozenset({
 
 _PY_MODULES = frozenset({'os', 'shutil', 'subprocess', 'io', 'builtins'})
 _PATH_TYPES = frozenset({'Path', 'PosixPath', 'PurePath', 'PurePosixPath'})
+_PATH_CALLS = _PATH_TYPES | {f'pathlib.{name}' for name in _PATH_TYPES}
+_SAME_PATH = frozenset({
+    'str', 'os.fspath', 'os.path.abspath', 'os.path.realpath', 'os.path.normpath',
+    'os.path.expanduser',
+})  # fmt: skip
+"""Calls that return the path they are given, as far as which file it names goes."""
+_PATH_METHODS = frozenset({'resolve', 'absolute', 'expanduser'})
+"""``Path`` methods that return the same path."""
 _PY_CHANGES = frozenset({
     'remove', 'unlink', 'rmdir', 'removedirs', 'rename', 'renames', 'replace', 'rmtree',
     'move', 'touch', 'truncate', 'chmod', 'chown', 'mkdir', 'makedirs', 'symlink_to',
@@ -125,15 +146,15 @@ class _Word(NamedTuple):
     def cite(self) -> Write:
         """Return the word as a path, cited where its value is, or as written."""
         if self.start is None or not self.value:
-            return self.value, self.span
-        return self.value, (self.start, self.start + len(self.value))
+            return Write(self.value, self.span)
+        return Write(self.value, (self.start, self.start + len(self.value)))
 
     def inside(self, write: Write) -> Write:
         """Return *write*, found in this word's value, cited in the whole text."""
-        path, span = write
-        if self.start is None or span is None:
-            return path, self.span
-        return path, (self.start + span[0], self.start + span[1])
+        if self.start is None or write.span is None:
+            return write._replace(span=self.span)
+        start, end = write.span
+        return write._replace(span=(self.start + start, self.start + end))
 
 
 def action_writes(step: TraceStep) -> list[Write]:
@@ -146,11 +167,11 @@ def action_writes(step: TraceStep) -> list[Write]:
     action = step.action
     match action.action_type:
         case 'write_file':
-            return [(action.path or '', None)]
+            return [Write(action.path or '', None)]
         case 'bash':
             return shell_writes(action.content)
         case 'cli':
-            return [(path, None) for path in cli_writes(action.events)]
+            return cli_writes(action.events)
         case 'code':
             try:
                 return python_writes(action.content)
@@ -302,33 +323,40 @@ def python_writes(code: str) -> list[Write]:
     Raises:
         SyntaxError: If *code* doesn't parse.
     """
-    tree = ast.parse(code)
-    lines = _NEWLINE.split(code)
-    starts = [0, *(match.end() for match in _NEWLINE.finditer(code))]
+    return _PythonSource(code).writes()
 
-    def offset(line: int, column: int) -> int:  # ast columns count UTF-8 bytes
-        return starts[line - 1] + len(lines[line - 1].encode()[:column].decode())
 
-    def word(node: ast.expr | None) -> _Word | None:
-        path = _path_call(node)
-        if path is not None and path.args:  # Path('x'), pathlib.Path('x')
-            node = path.args[0]
-        if not (isinstance(node, ast.Constant) and isinstance(node.value, str)):
-            return None
-        start = offset(node.lineno, node.col_offset)
-        end = offset(cast(int, node.end_lineno), cast(int, node.end_col_offset))
-        raw, value = code[start:end], node.value
-        opening = _LITERAL_OPEN.match(raw)
-        inner = None
-        if opening is not None and raw[opening.end() :] == value + opening.group(1):
-            inner = start + opening.end()
-        return _Word(value, (start, end), inner)
+class _PythonSource:
+    """Python code, read for the literal paths its calls change."""
 
-    writes: list[Write] = []
-    for node in ast.walk(tree):
-        if not isinstance(node, ast.Call):
-            continue
-        name, receiver = _callee(node.func)
+    def __init__(self, code: str) -> None:
+        self.code = code
+        self.tree = ast.parse(code)
+        self.lines = _NEWLINE.split(code)
+        self.starts = [0, *(match.end() for match in _NEWLINE.finditer(code))]
+        self.aliases = _aliases(self.tree)
+
+    def writes(self) -> list[Write]:
+        """Return what each call to ``open``, ``os``, ``shutil``, ``subprocess`` or a
+        ``Path`` method changes, by its position in the code."""
+        writes: list[Write] = []
+        for node in ast.walk(self.tree):
+            if isinstance(node, ast.Call):
+                writes += self._call_writes(node)
+        return sorted(writes, key=lambda write: write.span or (0, 0))
+
+    def _call_writes(self, node: ast.Call) -> list[Write]:
+        """Return the paths one call changes."""
+        func, receiver = node.func, None
+        if isinstance(func, ast.Attribute) and self._is_path(func.value):
+            name, receiver = func.attr, func.value
+        else:
+            qualified = self._qualified(func)
+            if qualified is None:
+                return []
+            module, _, name = qualified.rpartition('.')
+            if module and module not in _PY_MODULES:
+                return []  # a method of something else, such as str.replace
         if name == 'open':
             at = 1 if receiver is None else 0  # open(path, mode), Path(path).open(mode)
             mode = node.args[at] if len(node.args) > at else _keyword(node, 'mode')
@@ -344,44 +372,111 @@ def python_writes(code: str) -> list[Write]:
             paths = [receiver]
         elif name in _PY_COPIES:
             paths = [*node.args[1:2], _keyword(node, 'dst')]
-        elif name in _PY_SHELL and node.args:
-            writes += _python_shell(node.args[0], word)
-            continue
+        elif name in _PY_SHELL and receiver is None and node.args:
+            return self._shell(node.args[0])
         else:
-            continue
-        writes += [found.cite() for path in paths if (found := word(path)) is not None]
-    return sorted(writes, key=lambda write: write[1] or (0, 0))
+            return []
+        return [found.cite() for path in paths if (found := self._word(path)) is not None]
 
-
-def _callee(func: ast.expr) -> tuple[str | None, ast.Call | None]:
-    """Return the name a call calls, and the ``Path(...)`` call it is a method of, if any.
-    Methods of anything but ``os``, ``shutil``, ``subprocess``, ``io``, ``builtins`` and a
-    ``Path(...)`` call have no name here (``text.replace`` is no file change)."""
-    if isinstance(func, ast.Name):
-        return func.id, None
-    if not isinstance(func, ast.Attribute):
-        return None, None
-    receiver = _path_call(func.value)
-    if receiver is not None:
-        return func.attr, receiver
-    if isinstance(func.value, ast.Name) and func.value.id in _PY_MODULES:
-        return func.attr, None
-    return None, None
-
-
-def _path_call(node: ast.expr | None) -> ast.Call | None:
-    """Return *node* if it calls ``Path``, ``PosixPath``, ``PurePath`` or ``PurePosixPath``,
-    by name or from ``pathlib``."""
-    if not isinstance(node, ast.Call):
+    def _qualified(self, node: ast.expr) -> str | None:
+        """Return the dotted name *node* refers to, its imports resolved (``P`` from
+        ``from pathlib import Path as P`` is ``pathlib.Path``); None if it isn't a name."""
+        if isinstance(node, ast.Name):
+            return self.aliases.get(node.id, node.id)
+        if isinstance(node, ast.Attribute):
+            base = self._qualified(node.value)
+            return None if base is None else f'{base}.{node.attr}'
         return None
-    func = node.func
-    if isinstance(func, ast.Name):
-        name = func.id
-    elif isinstance(func, ast.Attribute) and isinstance(func.value, ast.Name):
-        name = func.attr if func.value.id == 'pathlib' else None
-    else:
-        name = None
-    return node if name in _PATH_TYPES else None
+
+    def _is_path(self, node: ast.expr) -> bool:
+        """Return whether *node* makes a ``Path``: a call of one, ``/`` on one, or a method
+        of one that returns one (``resolve``, ``joinpath``, ...)."""
+        if isinstance(node, ast.BinOp):
+            return isinstance(node.op, ast.Div) and self._is_path(node.left)
+        if not isinstance(node, ast.Call):
+            return False
+        if self._qualified(node.func) in _PATH_CALLS:
+            return True
+        func = node.func
+        methods = _PATH_METHODS | {'joinpath'}
+        return (
+            isinstance(func, ast.Attribute) and func.attr in methods and self._is_path(func.value)
+        )
+
+    def _word(self, node: ast.expr | None) -> _Word | None:
+        """Return the literal path *node* names: a string literal, through calls that keep
+        it (``str``, ``os.fspath``, ``os.path.abspath``, ``Path(...).resolve()``, ...) or
+        join literals (``Path('a') / 'b'``, ``os.path.join('a', 'b')``); None otherwise."""
+        if isinstance(node, ast.Constant) and isinstance(node.value, str):
+            return self._literal(node)
+        if isinstance(node, ast.BinOp) and self._is_path(node):
+            return self._joined(node, [node.left, node.right])
+        if not isinstance(node, ast.Call):
+            return None
+        qualified, func = self._qualified(node.func), node.func
+        if qualified in _SAME_PATH or qualified in _PATH_CALLS:
+            if len(node.args) == 1:
+                return self._word(node.args[0])
+            return self._joined(node, node.args) if qualified in _PATH_CALLS else None
+        if qualified == 'os.path.join':
+            return self._joined(node, node.args)
+        if isinstance(func, ast.Attribute) and self._is_path(func.value):
+            if func.attr in _PATH_METHODS and not node.args:
+                return self._word(func.value)
+            if func.attr == 'joinpath':
+                return self._joined(node, [func.value, *node.args])
+        return None
+
+    def _joined(self, node: ast.expr, parts: Sequence[ast.expr]) -> _Word | None:
+        """Return the path the literal *parts* join to, cited as the whole of *node*."""
+        words = [found for part in parts if (found := self._word(part)) is not None]
+        if not parts or len(words) < len(parts):
+            return None
+        return _Word(posixpath.join(*(word.value for word in words)), self._span(node), None)
+
+    def _literal(self, node: ast.Constant) -> _Word:
+        """Return a string literal as a word, its value placed when written as is."""
+        start, end = self._span(node)
+        raw, value = self.code[start:end], str(node.value)
+        opening = _LITERAL_OPEN.match(raw)
+        inner = None
+        if opening is not None and raw[opening.end() :] == value + opening.group(1):
+            inner = start + opening.end()
+        return _Word(value, (start, end), inner)
+
+    def _span(self, node: ast.expr) -> tuple[int, int]:
+        """Return where *node* is in the code, in code points (ast counts UTF-8 bytes)."""
+        end_line, end_column = cast(int, node.end_lineno), cast(int, node.end_col_offset)
+        return self._offset(node.lineno, node.col_offset), self._offset(end_line, end_column)
+
+    def _offset(self, line: int, column: int) -> int:
+        """Return the code point offset of a 1-based line and a UTF-8 byte column."""
+        return self.starts[line - 1] + len(self.lines[line - 1].encode()[:column].decode())
+
+    def _shell(self, command: ast.expr) -> list[Write]:
+        """Return what a literal shell command given to ``os.system`` or ``subprocess``
+        changes: a string read as shell, or a list or tuple of strings read as one command."""
+        if isinstance(command, (ast.List, ast.Tuple)):
+            words = [found for item in command.elts if (found := self._word(item)) is not None]
+            return _command_writes(words) if len(words) == len(command.elts) else []
+        script = self._word(command)
+        if script is None:
+            return []
+        return [script.inside(found) for found in shell_writes(script.value)]
+
+
+def _aliases(tree: ast.AST) -> dict[str, str]:
+    """Return the dotted name each name bound by an import in *tree* stands for."""
+    aliases: dict[str, str] = {}
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            for alias in node.names:
+                root = alias.name.partition('.')[0]
+                aliases[alias.asname or root] = alias.name if alias.asname else root
+        elif isinstance(node, ast.ImportFrom) and node.module and not node.level:
+            for alias in node.names:
+                aliases[alias.asname or alias.name] = f'{node.module}.{alias.name}'
+    return aliases
 
 
 def _keyword(node: ast.Call, name: str) -> ast.expr | None:
@@ -389,23 +484,11 @@ def _keyword(node: ast.Call, name: str) -> ast.expr | None:
     return next((keyword.value for keyword in node.keywords if keyword.arg == name), None)
 
 
-def _python_shell(
-    command: ast.expr, word: Callable[[ast.expr | None], _Word | None]
-) -> list[Write]:
-    """Return what a literal shell command given to ``os.system`` or ``subprocess``
-    changes: a string read as shell, or a list or tuple of strings read as one command."""
-    if isinstance(command, (ast.List, ast.Tuple)):
-        words = [found for item in command.elts if (found := word(item)) is not None]
-        return _command_writes(words) if len(words) == len(command.elts) else []
-    script = word(command)
-    return [] if script is None else [script.inside(found) for found in shell_writes(script.value)]
-
-
-def cli_writes(events: Sequence[dict[str, JsonValue]]) -> list[str]:
-    """Return the paths a CLI run's events show it changed: Claude Code's Write, Edit,
-    MultiEdit and NotebookEdit calls whose result isn't an error and Codex's file changes
-    that didn't fail, plus what the shell commands each ran change (see
-    :func:`shell_writes`; a failed command may have changed files before it failed)."""
+def cli_writes(events: Sequence[dict[str, JsonValue]]) -> list[Write]:
+    """Return the paths a CLI run's events show it changed or tried to: Claude Code's
+    Write, Edit, MultiEdit and NotebookEdit calls and Codex's file changes, marked
+    ``failed`` when the tool reported failing, plus what the shell commands each ran change
+    (see :func:`shell_writes`)."""
     failed = {
         call
         for event in events
@@ -415,19 +498,20 @@ def cli_writes(events: Sequence[dict[str, JsonValue]]) -> list[str]:
         and part.get('is_error') is True
         and isinstance(call := part.get('tool_use_id'), str)
     }
-    paths: list[JsonValue] = []
+    writes: list[Write] = []
     for event in events:
         item = event.get('item')
         if event.get('type') == 'assistant':
-            paths += _claude_writes(event.get('message'), failed)
+            writes += _claude_writes(event.get('message'), failed)
         elif event.get('type') == 'item.completed' and isinstance(item, dict):
             changes = item.get('changes')
-            done = item.get('status') != 'failed'
-            if item.get('type') == 'file_change' and done and isinstance(changes, list):
-                paths += [change.get('path') for change in changes if isinstance(change, dict)]
+            if item.get('type') == 'file_change' and isinstance(changes, list):
+                refused = item.get('status') == 'failed'
+                paths = [change.get('path') for change in changes if isinstance(change, dict)]
+                writes += [Write(path, None, refused) for path in paths if isinstance(path, str)]
             elif item.get('type') == 'command_execution':
-                paths += _shell_paths(item.get('command'))
-    return [path for path in paths if isinstance(path, str)]
+                writes += _shell_paths(item.get('command'))
+    return writes
 
 
 def _parts(message: JsonValue) -> list[dict[str, JsonValue]]:
@@ -436,21 +520,26 @@ def _parts(message: JsonValue) -> list[dict[str, JsonValue]]:
     return [part for part in content if isinstance(part, dict)] if isinstance(content, list) else []
 
 
-def _claude_writes(message: JsonValue, failed: set[str]) -> list[JsonValue]:
-    """Return the paths a Claude Code assistant message's tool calls change, leaving out
-    edits whose call id is in *failed*."""
-    paths: list[JsonValue] = []
+def _claude_writes(message: JsonValue, failed: set[str]) -> list[Write]:
+    """Return the paths a Claude Code assistant message's tool calls change, marking edits
+    whose call id is in *failed*."""
+    writes: list[Write] = []
     for part in _parts(message):
         tool_input = part.get('input')
         if part.get('type') != 'tool_use' or not isinstance(tool_input, dict):
             continue
-        if part.get('name') in _CLAUDE_EDITS and part.get('id') not in failed:
-            paths.append(tool_input.get('file_path') or tool_input.get('notebook_path'))
+        if part.get('name') in _CLAUDE_EDITS:
+            path = tool_input.get('file_path') or tool_input.get('notebook_path')
+            if isinstance(path, str):
+                writes.append(Write(path, None, part.get('id') in failed))
         elif part.get('name') == 'Bash':
-            paths += _shell_paths(tool_input.get('command'))
-    return paths
+            writes += _shell_paths(tool_input.get('command'))
+    return writes
 
 
-def _shell_paths(command: JsonValue) -> list[JsonValue]:
-    """Return the paths a shell command recorded in an event changes."""
-    return [path for path, _ in shell_writes(command)] if isinstance(command, str) else []
+def _shell_paths(command: JsonValue) -> list[Write]:
+    """Return the paths a shell command recorded in an event changes; not in the action's
+    text, so without spans."""
+    if not isinstance(command, str):
+        return []
+    return [write._replace(span=None) for write in shell_writes(command)]

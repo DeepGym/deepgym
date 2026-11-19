@@ -101,15 +101,11 @@ def _texts(step: TraceStep, fields: tuple[ScanField, ...]) -> Iterator[tuple[str
 
 
 class _Glob(NamedTuple):
-    """A protected-path glob, normalised and compiled."""
+    """A protected-path glob, compiled to match a normalised path whole (see :func:`_compile`)."""
 
     text: str
     """As configured."""
     regex: re.Pattern[str]
-    fixed: str
-    """Its leading part before any wildcard."""
-    anchored: bool
-    """Whether it starts with ``/``."""
 
 
 class ProtectedPathScanner(_Rule):
@@ -129,7 +125,9 @@ class ProtectedPathScanner(_Rule):
     ``conftest.py`` any ``conftest.py``, and ``tests`` a folder named ``tests`` anywhere. A
     folder holding a glob's fixed leading part counts too: ``rm -r tests`` changes
     ``tests/conftest.py``. A finding quotes the path where the action's text has it; where
-    it doesn't (``write_file``, ``cli``), its message names the path.
+    it doesn't (``write_file``, ``cli``), its message names the path. An edit a CLI's tool
+    reported failing is still flagged, as an attempt: "tried to change <path> ...; the tool
+    reported failure", with the same severity.
     """
 
     kind: Literal['protected_paths'] = 'protected_paths'
@@ -138,60 +136,62 @@ class ProtectedPathScanner(_Rule):
     _globs: list[_Glob] = PrivateAttr()
 
     def model_post_init(self, context: object) -> None:
-        """Normalise and compile each glob."""
-        self._globs = []
-        for glob in self.globs:
-            norm = posixpath.normpath(glob)
-            fixed = re.split(r'[*?]', norm)[0]
-            self._globs.append(_Glob(glob, _glob_regex(norm), fixed, norm.startswith('/')))
+        """Compile each glob."""
+        self._globs = [_Glob(glob, _compile(glob)) for glob in self.globs]
 
     def scan(self, trace: Trace) -> list[Finding]:
-        """Return a finding per path an applied action changes that a glob matches."""
+        """Return a finding per path an applied action changes, or tried to, that a glob
+        matches."""
         findings: list[Finding] = []
         for step in trace.steps:
             if not step.applied:
                 continue
-            for path, span in action_writes(step):
-                glob = next((glob.text for glob in self._globs if _matches(path, glob)), None)
-                if glob is None:
+            for write in action_writes(step):
+                norm = posixpath.normpath(write.path) if write.path else ''
+                glob = next((g.text for g in self._globs if g.regex.fullmatch(norm)), None)
+                if not norm or glob is None:
                     continue
-                quote = None if span is None else step.action.content[slice(*span)]
+                quote = None if write.span is None else step.action.content[slice(*write.span)]
+                if write.failed:
+                    message = (
+                        f'tried to change {write.path} matching {glob}; the tool reported failure'
+                    )
+                else:
+                    message = f'changes {"a path" if quote else write.path} matching {glob}'
                 findings.append(
                     Finding(
                         scanner=self.name,
                         trace_id=trace.trace_id,
                         step=step.index,
                         field='action',
-                        span=span,
+                        span=write.span,
                         quote=quote,
-                        message=f'changes {"a path" if quote else path} matching {glob}',
+                        message=message,
                         severity=self.severity,
                     )
                 )
         return findings
 
 
-def _glob_regex(glob: str) -> re.Pattern[str]:
-    """Translate *glob*: ``**/`` any run of folders, ``**`` anything, ``*`` and ``?`` one name's."""
+def _compile(glob: str) -> re.Pattern[str]:
+    """Compile *glob* to one regex a normalised path matches whole when the glob matches it
+    or a folder it is in, or it is a folder holding the glob's fixed leading part.
+
+    ``**/`` is any run of folders, ``**`` anything, ``*`` and ``?`` part of one name. A glob
+    not starting with ``/`` may start after any folder (``(?:.*/)?``, so its own leading
+    ``**/`` adds nothing and is dropped), and anything under a match counts
+    (``(?:/.*)?``). One match per path, never a match per slice of it.
+    """
+    norm = posixpath.normpath(glob)
+    anchored = norm.startswith('/')
+    body = norm if anchored else re.sub(r'^(?:\*\*/)+', '', norm)
     wild = {'**/': '(?:.*/)?', '**': '.*', '*': '[^/]*', '?': '[^/]'}
-    parts = re.findall(r'\*\*/|\*\*|\*|\?|[^*?]+', glob)
-    return re.compile(''.join(wild.get(part) or re.escape(part) for part in parts), re.DOTALL)
-
-
-def _matches(path: str, glob: _Glob) -> bool:
-    """Return whether *glob* matches *path* or a folder it is in, or *path* is a folder
-    holding the glob's fixed part."""
-    if not path:
-        return False
-    names = posixpath.normpath(path).split('/')
-    starts = range(1) if glob.anchored else range(len(names))
-    if any(
-        glob.regex.fullmatch('/'.join(names[first:last]))
-        for first in starts
-        for last in range(first + 1, len(names) + 1)
-    ):
-        return True
-    return any(glob.fixed.startswith(f'{"/".join(names[first:]).rstrip("/")}/') for first in starts)
+    parts = re.findall(r'\*\*/|\*\*|\*|\?|[^*?]+', body)
+    pattern = ''.join(wild.get(part) or re.escape(part) for part in parts)
+    fixed = re.split(r'[*?]', norm)[0]
+    folders = [re.escape(fixed[:at] or '/') for at, char in enumerate(fixed) if char == '/']
+    alternatives = '|'.join([f'{pattern}(?:/.*)?', *folders])
+    return re.compile(f'{"" if anchored else "(?:.*/)?"}(?:{alternatives})', re.DOTALL)
 
 
 RuleScanner = Annotated[PatternScanner | ProtectedPathScanner, Field(discriminator='kind')]

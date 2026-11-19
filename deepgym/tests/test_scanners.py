@@ -231,6 +231,10 @@ class TestProtectedPaths:
             ('mv --no tests/a src/', ['tests/a']),  # no-clobber, no-copy, ...: ambiguous
             ('cp -Q tests/a src/', ['tests/a']),  # an unknown short option
             ('install -Xtests/v a src/', ['tests/v']),  # and its attached value
+            ('cp --suffix tests/x a b', ['tests/x']),  # option values are reported too
+            ('cp -S tests/y a b', ['tests/y']),
+            ('install -m 755 -o tests a b', ['tests']),
+            ('cp -t out --suffix=tests/z a', ['tests/z']),
             ('rm -rf .', ['.']),
             ('rm -rf ../..', ['../..']),
             ('git checkout .', ['.']),
@@ -800,7 +804,7 @@ class TestScanTraces:
         )
 
         config = sha256_text(json_text(PROTECTED.model_dump(mode='json')))
-        assert PROTECTED.version == f'protected-paths/3+config-sha256:{config}'
+        assert PROTECTED.version == f'protected-paths/4+config-sha256:{config}'
         assert other.version != PROTECTED.version
         assert plain.version.startswith('pattern/1+config-sha256:')
         assert plain.model_dump_json() == folded.model_dump_json()

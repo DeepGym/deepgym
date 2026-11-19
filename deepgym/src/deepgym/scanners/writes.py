@@ -143,7 +143,13 @@ def _long_options(spec: str) -> dict[str, str]:
 
 class _Copier(NamedTuple):
     """The options of a command that writes a destination or, with ``-t DIR``, puts each
-    source in DIR, as GNU coreutils documents them."""
+    source in DIR, from the GNU coreutils documentation.
+
+    The tables decide which words are option values rather than operands. Every value is
+    reported as a possible written path anyway (:func:`_copier_writes`), so a mistake in
+    them can't hide a path: a value is a finding only if it matches a protected glob, so
+    ``-m 755`` or ``--suffix .bak`` stays quiet.
+    """
 
     flags: str
     """Short options without an argument."""
@@ -401,7 +407,9 @@ def _copier_writes(command: str, words: Sequence[_Word]) -> list[Write]:
     by unique prefix, as GNU's do (``--target-dir``). Where the destination can't be told
     (an option not in :data:`_COPIERS`, a long option prefix that matches several or none,
     ``-t`` with no DIR, two different DIRs, fewer than two operands without ``-t``), every
-    operand, DIR and option value is reported: over-flagged, never missed.
+    operand, DIR and option value is reported: over-flagged, never missed. Every option
+    value, and every word taken as an option's argument, is reported in any case (see
+    :class:`_Copier`).
     """
     copier = _COPIERS[command]
     operands: list[_Word] = []
@@ -446,8 +454,8 @@ def _copier_writes(command: str, words: Sequence[_Word]) -> list[Write]:
     if directories:
         directory, cited, _ = directories[0]
         names = [posixpath.basename(operand.value.rstrip('/')) for operand in operands]
-        return [Write(posixpath.join(directory, name), cited) for name in names] + moved
-    return [*moved[:-1], operands[-1].cite()]
+        return [Write(posixpath.join(directory, name), cited) for name in names] + moved + values
+    return [*moved[:-1], operands[-1].cite(), *values]
 
 
 def _long_option(given: str, options: dict[str, str]) -> tuple[str | None, str]:

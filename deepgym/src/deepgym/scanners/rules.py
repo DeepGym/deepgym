@@ -148,7 +148,7 @@ class ProtectedPathScanner(_Rule):
     "tried to change <path> ...; the tool reported failure", with the same severity.
     """
 
-    reads: ClassVar[str] = 'protected-paths/3'
+    reads: ClassVar[str] = 'protected-paths/4'
     """Covers :mod:`deepgym.scanners.writes`: bump it whenever what that reads changes."""
 
     kind: Literal['protected_paths'] = 'protected_paths'

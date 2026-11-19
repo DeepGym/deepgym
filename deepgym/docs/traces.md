@@ -256,7 +256,7 @@ deepgym traces scan --config scanners.json --out report.json --write-labels
   action it sees only the launch command and the CLI's output (`ProtectedPathScanner`
   reads the edits and commands in the events). Its version is `pattern/1+config-sha256:`
   and the SHA-256 of its JSON config with each regex's flags (which the JSON leaves out);
-  `ProtectedPathScanner`'s is `protected-paths/3+config-sha256:...`. The part before `+`
+  `ProtectedPathScanner`'s is `protected-paths/4+config-sha256:...`. The part before `+`
   names how the scanner reads a trace and changes whenever that does.
 - **`ProtectedPathScanner`** flags each applied action whose text names a path matching
   one of its `globs` as one it writes, deletes or moves (severity `high` by default).
@@ -268,7 +268,8 @@ deepgym traces scan --config scanners.json --out report.json --write-labels
   source; with `install -d`, every operand; long options match by unique prefix, as GNU's
   do, such as `--target-dir`; unrecognised options, a prefix that matches several, and a
   destination that can't be told, such as `-t` with no DIR, two DIRs or a single
-  operand, make the scanner report every operand and option value), the files of
+  operand, make the scanner report every operand and option value; option values are
+  always reported too, so a mistake in the option tables can't hide a path), the files of
   `sed`, `perl` and `ruby` with `-i` (not the script: the first operand unless `-e`, `-f`
   or `--expression` gives it), the paths named after
   `git rm`, `git mv`, `git checkout`, `git restore` and `git clean` (which deletes

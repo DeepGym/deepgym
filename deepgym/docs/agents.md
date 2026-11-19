@@ -146,7 +146,15 @@ too, as what arrived marked `"status": "incomplete"`, and its tool calls never r
 do the calls of an Anthropic response that stopped for any reason but tool use
 (`max_tokens` mid-call, say): the run ends with an error, and the response is kept with
 its `stop_reason`, usage and `input_json`, each call's input exactly as it streamed. Under
-`dg.trace`, each step also carries the messages that produced it.
+`dg.trace`, each step also carries the messages that produced it, with the token usage of
+the responses among them and, given `prices`, its cost: a reply's on its first action. The
+computer agents record usage on traced steps the same way, without messages. A response
+that led to no action, such as a closing answer, is recorded as the trace's unattached
+usage when the run ends, as is a CLI agent's run, so the trace's totals match
+`AgentResult.usage` and `AgentResult.cost` up to float rounding. A response that reported
+no usage is never counted as 0 tokens: the trace's `usage_complete` is false instead,
+and its cost total null. So an incomplete CLI run keeps its partial CLI cost in
+`AgentResult.cost`, labelled incomplete, while the trace's cost total is null.
 
 ## CLI isolation and its exposure
 

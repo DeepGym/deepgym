@@ -3,15 +3,18 @@
 import importlib
 import json
 import sys
+from datetime import datetime, timezone
 from types import SimpleNamespace
 
 import pytest
 
 from deepgym.agents.actions import anthropic_actions, openai_actions
-from deepgym.agents.base import Budget, TokenPrices
+from deepgym.agents.base import Budget, BudgetTracker, Cost, TokenPrices, Usage, apply_action
 from deepgym.agents.computer import AnthropicComputerAgent, OpenAIComputerAgent
-from deepgym.models import Action, Observation, Trajectory
+from deepgym.exceptions import DeepGymError
+from deepgym.models import Action, MultiTurnEnvironment, Observation, Trajectory
 from deepgym.session import StepResult
+from deepgym.traces import AgentMeta, EnvFingerprint, Provenance, TracedSession, load_trace
 
 
 @pytest.mark.parametrize(
@@ -207,6 +210,173 @@ def openai_response(output, **kwargs):
         'status': 'completed',
         **kwargs,
     }
+
+
+class _Startable(FakeSession):
+    """A FakeSession a TracedSession can start and close."""
+
+    def start(self) -> Observation:
+        return self.observation
+
+    def close(self) -> None:
+        pass
+
+
+def _traced(path, max_steps: int | None = None) -> TracedSession:
+    """A TracedSession over a fake desktop session, written to *path*."""
+    env = MultiTurnEnvironment(task='Do it')
+    provenance = Provenance(
+        env=EnvFingerprint.of(env),
+        agent=AgentMeta(name='computer', model='test-model'),
+        provider='fake',
+        deepgym_version='test',
+        started_at=datetime.now(timezone.utc),
+    )
+    return TracedSession(_Startable(max_steps), env, provenance, path)
+
+
+PRICES = TokenPrices(
+    input_per_million=3,
+    output_per_million=15,
+    cache_read_per_million=0.3,
+    cache_write_per_million=3.75,
+    source='test rates',
+)
+# One reply acting twice, then a closing answer: each provider's responses, the agent, and
+# the usage each response reports.
+CLOSING = {
+    'anthropic': (
+        [
+            anthropic_response(
+                [
+                    {
+                        'type': 'tool_use',
+                        'id': 'c1',
+                        'name': 'left_click',
+                        'input': {'coordinate': [1, 2]},
+                    },
+                    {'type': 'tool_use', 'id': 'c2', 'name': 'type', 'input': {'text': 'hi'}},
+                ]
+            ),
+            anthropic_response([{'type': 'text', 'text': 'Finished'}]),
+        ],
+        AnthropicComputerAgent,
+        Usage(input_tokens=100, output_tokens=10),
+    ),
+    'openai': (
+        [
+            openai_response(
+                [
+                    {
+                        'type': 'computer_call',
+                        'call_id': 'c1',
+                        'actions': [
+                            {'type': 'click', 'x': 1, 'y': 2, 'button': 'left'},
+                            {'type': 'type', 'text': 'hi'},
+                        ],
+                    }
+                ]
+            ),
+            openai_response(
+                [{'type': 'message', 'content': [{'type': 'output_text', 'text': 'Finished'}]}]
+            ),
+        ],
+        OpenAIComputerAgent,
+        Usage(input_tokens=80, output_tokens=10, cache_read_tokens=20),
+    ),
+}
+
+
+@pytest.mark.parametrize('provider', sorted(CLOSING))
+def test_traced_usage_totals_are_the_agents_after_a_closing_answer(sdk, tmp_path, provider):
+    responses, agent, reply = CLOSING[provider]
+    sdk(provider, responses)
+    with _traced(tmp_path / 't.jsonl') as tr:
+        result = agent('test-model', PRICES).run(tr, tr.start(), task='Do it', budget=Budget())
+
+    trace = load_trace(tmp_path / 't.jsonl')
+    cost = PRICES.estimate(reply).usd
+    assert result.termination_reason == 'completed'
+    assert [step.action.action_type for step in trace.steps] == ['click', 'type']
+    assert [(step.usage, step.cost_usd) for step in trace.steps] == [(reply, cost), (None, None)]
+    # The closing answer took no action: it is recorded outside any step, and counted.
+    assert (trace.unattached_usage, trace.unattached_cost_usd) == (reply, cost)
+    assert trace.usage == result.usage == reply + reply
+    assert trace.cost_usd == result.cost.usd
+
+
+def test_traced_cost_matches_the_agents_up_to_float_rounding(sdk, tmp_path):
+    prices = PRICES.model_copy(update={'input_per_million': 100_000, 'output_per_million': 0})
+    click = {'type': 'tool_use', 'id': 'c1', 'name': 'left_click', 'input': {'coordinate': [1, 2]}}
+    # Responses costing $0.1, $0.2 and $0.3: the agent adds them one by one and gets
+    # 0.6000000000000001; the trace sums them exactly.
+    sdk(
+        'anthropic',
+        [
+            anthropic_response([click], usage={'input_tokens': 1, 'output_tokens': 0}),
+            anthropic_response([click], usage={'input_tokens': 2, 'output_tokens': 0}),
+            anthropic_response(
+                [{'type': 'text', 'text': 'Finished'}],
+                usage={'input_tokens': 3, 'output_tokens': 0},
+            ),
+        ],
+    )
+    with _traced(tmp_path / 't.jsonl') as tr:
+        result = AnthropicComputerAgent('m', prices).run(
+            tr, tr.start(), task='Do it', budget=Budget()
+        )
+
+    trace = load_trace(tmp_path / 't.jsonl')
+    assert [step.cost_usd for step in trace.steps] == [0.1, 0.2]
+    assert trace.unattached_cost_usd == 0.3
+    assert trace.cost_usd == pytest.approx(result.cost.usd)
+    assert trace.usage == result.usage == Usage(input_tokens=6)
+
+
+def test_usage_held_when_an_uncaught_error_ends_the_run_is_recorded(sdk, tmp_path):
+    thinking = anthropic_response([{'type': 'text', 'text': 'Thinking'}], stop_reason='max_tokens')
+    sdk('anthropic', [thinking, OSError('disk full')])  # the second call fails uncaught
+
+    with pytest.raises(OSError, match='disk full'), _traced(tmp_path / 't.jsonl') as tr:
+        AnthropicComputerAgent('m', PRICES).run(tr, tr.start(), task='Do it', budget=Budget())
+
+    trace = load_trace(tmp_path / 't.jsonl')
+    reply = Usage(input_tokens=100, output_tokens=10)
+    assert trace.steps == () and 'disk full' in trace.error
+    assert (trace.unattached_usage, trace.unattached_cost_usd) == (
+        reply,
+        PRICES.estimate(reply).usd,
+    )
+    # The request in flight when the error escaped reported nothing.
+    assert trace.usage_complete is False
+    assert (trace.usage, trace.cost_usd) == (reply, None)
+
+
+def test_held_usage_never_raises_on_a_closed_trace(tmp_path, caplog):
+    tracker = BudgetTracker(Budget())
+    with _traced(tmp_path / 't.jsonl') as tr:
+        tr.start()
+    tracker.add_usage(Usage(input_tokens=5), Cost(usd=0.1, provenance='a'))
+
+    result = tracker.result(tr, 'completed')
+    tracker.record_unattached(tr)  # nothing held any more: a no-op
+
+    assert result.usage == Usage(input_tokens=5)
+    assert 'closed before its last usage was recorded' in caplog.text
+    assert load_trace(tmp_path / 't.jsonl').unattached_usage is None
+
+
+def test_usage_a_refused_step_did_not_record_stays_held(tmp_path):
+    tracker = BudgetTracker(Budget())
+    usage = Usage(input_tokens=5)
+    with _traced(tmp_path / 't.jsonl', max_steps=1) as tr:
+        tr.start()
+        apply_action(tr, Action(action_type='screenshot'), tracker)  # the episode ends
+        tracker.add_usage(usage, Cost(usd=0.1, provenance='a'))
+        with pytest.raises(DeepGymError, match='not running'):
+            apply_action(tr, Action(action_type='screenshot'), tracker)
+
+        assert tracker.take_unrecorded() == (usage, 0.1, True)
 
 
 def test_anthropic_real_loop_tracks_actions_and_usage(sdk):

@@ -60,11 +60,43 @@ def test_disjoint_usage_and_price_provenance():
 
 def test_unknown_cost_stays_unknown_and_fails_closed():
     tracker = BudgetTracker(Budget(max_cost_usd=1))
-    tracker.add_usage(Usage(), Cost(provenance='response missing usage'))
+    tracker.add_usage(None, Cost(provenance='response missing usage'))
     tracker.add_usage(Usage(input_tokens=10), Cost(usd=0.1, provenance='estimate'))
     assert tracker.cost.usd is None
     with pytest.raises(BudgetExceeded, match='cost_budget'):
         tracker.check()
+
+
+def test_unrecorded_usage_is_taken_once_for_the_next_trace_step():
+    tracker = BudgetTracker(Budget())
+    assert tracker.take_unrecorded() == (None, None, True)
+    tracker.add_usage(Usage(input_tokens=10, reasoning_tokens=1), Cost(usd=0.1, provenance='a'))
+    tracker.add_usage(Usage(input_tokens=5, reasoning_tokens=2), Cost(usd=0.2, provenance='a'))
+
+    usage, usd, complete = tracker.take_unrecorded()
+    assert (usage, usd, complete) == (
+        Usage(input_tokens=15, reasoning_tokens=3),
+        pytest.approx(0.3),
+        True,
+    )
+    assert tracker.take_unrecorded() == (None, None, True)
+    tracker.add_usage(Usage(output_tokens=3), Cost(provenance='prices not supplied'))
+    assert tracker.take_unrecorded() == (Usage(output_tokens=3), None, True)
+    # One response didn't report reasoning, so the episode's reasoning is unknown.
+    assert tracker.usage == Usage(input_tokens=15, output_tokens=3)
+
+
+def test_unknown_usage_is_never_counted_as_zero_tokens():
+    tracker = BudgetTracker(Budget())
+    tracker.add_usage(Usage(input_tokens=10), Cost(usd=0.1, provenance='a'))
+    tracker.add_usage(None, Cost(provenance='failed request; billing unknown'))
+
+    assert tracker.usage == Usage(input_tokens=10)
+    assert tracker.cost.usd is None
+    # What was reported, with its cost, and the batch marked incomplete.
+    assert tracker.take_unrecorded() == (Usage(input_tokens=10), 0.1, False)
+    tracker.add_usage(None, Cost(provenance='failed request; billing unknown'))
+    assert tracker.take_unrecorded() == (None, None, False)
 
 
 def test_zero_budget_blocks_first_call():

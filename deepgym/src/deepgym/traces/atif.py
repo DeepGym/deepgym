@@ -24,6 +24,19 @@ Mapping, one ATIF document per trace:
   observation result's ``extra.cli_events``, never translated into executable actions.
 * Assistant token ids and logprobs become ``metrics.completion_token_ids`` and
   ``metrics.logprobs``; token data on other roles has no ATIF field and is dropped.
+* The provider usage of a turn's steps (:attr:`TraceStep.usage`), summed, goes in the
+  metrics of its ``agent`` step: ``prompt_tokens`` counts every input token, cache reads
+  and writes included, ``cached_tokens`` the cache reads, ``completion_tokens`` the output
+  (reasoning included, so it overrides the reply's token-id count), ``cost_usd`` the cost,
+  and ``extra`` the cache writes and reasoning tokens, which ATIF has no field for. That
+  usage covers every reply in the turn, those that issued no action included, so the
+  agent step's ``llm_call_count`` is the number of assistant messages in the turn (None
+  when the turn records no messages, as a computer agent's steps don't), and their own
+  steps carry neither ``completion_tokens`` nor ``llm_call_count``: step sums never count
+  a call twice. The trace's totals go in ``final_metrics`` the same way
+  (``total_prompt_tokens``, ...), so they include :attr:`Trace.unattached_usage`, which
+  is on no step; the root ``notes`` say so when there is some, and say when usage is
+  incomplete.
 * Screenshots are PNG files under ``images/<trace_id>/`` next to the document, referenced
   from ``image`` content parts, as the spec's storage convention says.
 * Root ``extra.deepgym`` holds the trace schema version, provenance, final result and
@@ -40,7 +53,15 @@ from pydantic import JsonValue
 
 from deepgym.exceptions import DeepGymError
 from deepgym.models import Observation
-from deepgym.traces.schema import Trace, TraceMessage, TraceStep, check_unique_ids, json_text
+from deepgym.traces.schema import (
+    Trace,
+    TraceMessage,
+    TraceStep,
+    Usage,
+    check_unique_ids,
+    json_text,
+    sum_usage,
+)
 
 ATIF_VERSION = 'ATIF-v1.7'
 
@@ -79,7 +100,7 @@ def to_atif(trace: Trace) -> tuple[dict[str, JsonValue], dict[str, bytes]]:
     for turn in trace.turns:
         steps.extend(_turn([trace.steps[index - 1] for index in turn], content))
     agent = trace.provenance.agent
-    document = {
+    document = _compact({
         'schema_version': ATIF_VERSION,
         'session_id': trace.trace_id,
         'trajectory_id': trace.trace_id,
@@ -90,13 +111,14 @@ def to_atif(trace: Trace) -> tuple[dict[str, JsonValue], dict[str, bytes]]:
             'extra': {'sampling': agent.sampling} if agent.sampling else None,
         }),
         'steps': [{'step_id': number, **step} for number, step in enumerate(steps, 1)],
-        'notes': 'Exported from a DeepGym trace; provenance and the verdict are in extra.deepgym.',
+        'notes': _notes(trace),
+        'final_metrics': _usage_metrics(trace.usage, trace.cost_usd, 'total_') or None,
         'extra': {
             'deepgym': trace.model_dump(
                 mode='json', exclude={'task', 'initial_observation', 'steps', 'turns'}
             )
         },
-    }  # fmt: skip
+    })  # fmt: skip
     return document, images
 
 
@@ -160,39 +182,87 @@ def _turn(
             'step_verifier': step.step_verifier,
             'cli_events': list(step.action.events) if step.action.action_type == 'cli' else None,
         })))  # fmt: skip
+    usage, cost_usd = sum_usage((step.usage, step.cost_usd) for step in steps)
+    if usage is None:
+        calls_made = None if reply is None else 1
+    else:  # the turn's usage covers every reply in it, those before the last included
+        calls_made = sum(message.role == 'assistant' for message in messages) or None
     action = _compact({
         'timestamp': steps[0].timestamp.isoformat(),
         'source': 'agent',
         'message': '' if reply is None else reply.content,
         'tool_calls': calls,
         'observation': {'results': results},
-        'metrics': None if reply is None else _metrics(reply),
-        'llm_call_count': None if reply is None else 1,
+        'metrics': {**_token_metrics(reply), **_usage_metrics(usage, cost_usd)} or None,
+        'llm_call_count': calls_made,
     })  # fmt: skip
-    return [*map(_message_step, context), action]
+    counted = usage is not None
+    return [*(_message_step(message, counted) for message in context), action]
 
 
-def _message_step(message: TraceMessage) -> dict[str, JsonValue]:
-    """Return the ATIF step for a model message that isn't the action's reply."""
+def _message_step(message: TraceMessage, counted: bool) -> dict[str, JsonValue]:
+    """Return the ATIF step for a model message that isn't the action's reply.
+
+    When the turn's usage is *counted* on its agent step, an assistant message's call is
+    counted there, so its own step has no ``completion_tokens`` or ``llm_call_count``.
+    """
     source = _ROLE_SOURCE[message.role]
     agent = source == 'agent'
+    metrics = _token_metrics(message, count=not counted) if agent else {}
     return _compact({
         'source': source,
         'message': message.content,
-        'metrics': _metrics(message) if agent else None,
-        'llm_call_count': 1 if agent else None,
+        'metrics': metrics or None,
+        'llm_call_count': 1 if agent and not counted else None,
         'extra': {'role': 'tool'} if message.role == 'tool' else None,
     })  # fmt: skip
 
 
-def _metrics(message: TraceMessage) -> dict[str, JsonValue] | None:
-    """Return ATIF metrics for an assistant message's token data, or None without any."""
-    metrics = _compact({
-        'completion_tokens': None if message.token_ids is None else len(message.token_ids),
-        'completion_token_ids': None if message.token_ids is None else list(message.token_ids),
+def _token_metrics(message: TraceMessage | None, *, count: bool = True) -> dict[str, JsonValue]:
+    """Return ATIF metrics for an assistant message's token data, with their count unless
+    not *count*; {} without any."""
+    if message is None:
+        return {}
+    ids = message.token_ids
+    return _compact({
+        'completion_tokens': len(ids) if count and ids is not None else None,
+        'completion_token_ids': None if ids is None else list(ids),
         'logprobs': None if message.logprobs is None else list(message.logprobs),
     })  # fmt: skip
-    return metrics or None
+
+
+def _notes(trace: Trace) -> str:
+    """Return the document's notes: where DeepGym's own data is, and what usage covers."""
+    notes = ['Exported from a DeepGym trace; provenance and the verdict are in extra.deepgym.']
+    if trace.unattached_usage is not None:
+        notes.append(
+            'final_metrics include usage recorded on no step (extra.deepgym.unattached_usage).'
+        )
+    if not trace.usage_complete:
+        notes.append(
+            'Some model calls reported no usage, so token totals are a lower bound and the '
+            'total cost is unknown.'
+        )
+    return ' '.join(notes)
+
+
+def _usage_metrics(
+    usage: Usage | None, cost_usd: float | None, prefix: str = ''
+) -> dict[str, JsonValue]:
+    """Return ATIF's token and cost fields for *usage*, named with *prefix*; {} without it."""
+    if usage is None:
+        return {}
+    prompt = usage.input_tokens + usage.cache_read_tokens + usage.cache_write_tokens
+    return _compact({
+        f'{prefix}prompt_tokens': prompt,
+        f'{prefix}completion_tokens': usage.output_tokens,
+        f'{prefix}cached_tokens': usage.cache_read_tokens,
+        f'{prefix}cost_usd': cost_usd,
+        'extra': _compact({
+            'cache_write_tokens': usage.cache_write_tokens,
+            'reasoning_tokens': usage.reasoning_tokens,
+        }),
+    })  # fmt: skip
 
 
 def _result(

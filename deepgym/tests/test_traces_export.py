@@ -21,6 +21,7 @@ from deepgym.traces import (
     AgentMeta,
     Trace,
     TraceMessage,
+    Usage,
     export_traces,
     load_trace,
     to_atif,
@@ -48,6 +49,12 @@ ACTIONS = (
     Action(action_type='bash', content='cat c.txt'),
     Action(action_type='done'),
 )
+# Each reply's usage and cost, passed with its first action only.
+USAGE = tuple(
+    Usage(input_tokens=100 * n, output_tokens=10 * n, cache_read_tokens=n) for n in (1, 2, 3)
+)
+COSTS = (0.001, 0.002, 0.003)
+STEP_USAGE = (USAGE[0], None, USAGE[1], None, USAGE[2])
 # (turn, action, observation, step reward) of every action, in order.
 EXPECTED = [
     (1, ACTIONS[0], 'A\n', 0.1),
@@ -60,6 +67,24 @@ EXPECTED = [
 
 def _samples() -> list[Trace]:
     return [graded_trace(), crashed_trace(), unjudged_trace()]
+
+
+def _turn_of_two_replies() -> Trace:
+    """One turn: a reply that took no action, then one that took two, with usage on both."""
+    graded = graded_trace()
+    first, _, last = graded.steps
+    messages = (
+        TraceMessage(role='user', content='Write hello.'),
+        TraceMessage(role='assistant', content='thinking', token_ids=(1, 2), logprobs=(-0.5, -1)),
+        TraceMessage(role='user', content='Use a tool.'),
+        _reply('mkdir'),
+    )
+    usage = Usage(input_tokens=5, output_tokens=2)
+    steps = (
+        first.model_copy(update={'messages': messages}),
+        last.model_copy(update={'index': 2, 'messages': (), 'usage': usage, 'cost_usd': 0.5}),
+    )
+    return graded.model_copy(update={'trace_id': 'trace0004', 'steps': steps})
 
 
 def _jsonl(path: Path) -> list[dict]:
@@ -84,13 +109,15 @@ def multi_action(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> tuple[Trace
     with DeepGym(mode='local').trace(THREE_FILES, AgentMeta(name='scripted')) as tr:
         tr.start()
         prompt = TraceMessage(role='user', content=THREE_FILES.task)
-        first = tr.step(ACTIONS[0], [prompt, _reply(REPLIES[0])]).observation
-        second = tr.step(ACTIONS[1]).observation  # the same reply: no new messages
+        reply = {'usage': USAGE[0], 'cost_usd': COSTS[0]}
+        first = tr.step(ACTIONS[0], [prompt, _reply(REPLIES[0])], **reply).observation
+        second = tr.step(ACTIONS[1]).observation  # the same reply: no new messages or usage
         seen = [TraceMessage(role='tool', content=obs.content) for obs in (first, second)]
-        third = tr.step(ACTIONS[2], [*seen, _reply(REPLIES[1])]).observation
+        reply = {'usage': USAGE[1], 'cost_usd': COSTS[1]}
+        third = tr.step(ACTIONS[2], [*seen, _reply(REPLIES[1])], **reply).observation
         fourth = tr.step(ACTIONS[3]).observation
         seen = [TraceMessage(role='tool', content=obs.content) for obs in (third, fourth)]
-        tr.step(ACTIONS[4], [*seen, _reply(REPLIES[2])])
+        tr.step(ACTIONS[4], [*seen, _reply(REPLIES[2])], usage=USAGE[2], cost_usd=COSTS[2])
         tr.score()
     return load_trace(tr.path), tr._session.trajectory
 
@@ -227,6 +254,10 @@ class TestExporters:
         )
         _check_golden(readable, 'summary.jsonl')
         assert [Trace.model_validate_json(row['trace']) for row in summary_rows] == _samples()
+        assert [(row['usage'], row['cost_usd']) for row in summary_rows] == [
+            (None if trace.usage is None else trace.usage.model_dump(), trace.cost_usd)
+            for trace in _samples()
+        ]
         rl_rows = pq.read_table(rl).to_pylist()
         golden_rl = _jsonl(GOLDEN / 'rl.jsonl')
         assert [row['trace_id'] for row in rl_rows] == [row['trace_id'] for row in golden_rl]
@@ -234,6 +265,18 @@ class TestExporters:
         assert (message['token_ids'], message['logprobs']) == ([11, 12, 13], [-0.25, -0.5, -0.125])
         assert rl_rows[0]['messages'][0]['token_ids'] is None
         assert (rl_rows[1]['reward'], rl_rows[1]['step_rewards']) == (None, [0.5, None, 0.5])
+        graded = graded_trace()
+        assert [step['usage'] for step in rl_rows[0]['steps']] == [
+            step.usage.model_dump() for step in graded.steps
+        ]
+        assert (rl_rows[0]['usage'], rl_rows[0]['cost_usd']) == (
+            graded.usage.model_dump(),
+            graded.cost_usd,
+        )
+        assert (rl_rows[0]['unattached_usage'], rl_rows[0]['unattached_cost_usd']) == (
+            graded.unattached_usage.model_dump(),
+            graded.unattached_cost_usd,
+        )
 
     def test_atif_document(self, tmp_path: Path) -> None:
         out = tmp_path / 'atif'
@@ -244,7 +287,9 @@ class TestExporters:
         _check_golden(out / 'trace0001.json', 'atif/trace0001.json')
         assert (out / 'images' / 'trace0001' / 'reset.png').read_bytes() == PNG
 
-    @pytest.mark.parametrize('make', [graded_trace, crashed_trace, unjudged_trace])
+    @pytest.mark.parametrize(
+        'make', [graded_trace, crashed_trace, unjudged_trace, _turn_of_two_replies]
+    )
     def test_atif_validates_against_harbor(self, make) -> None:
         harbor = pytest.importorskip('harbor.models.trajectories')
 
@@ -267,11 +312,94 @@ class TestExporters:
         provenance = old.provenance
         assert (provenance.deepgym_commit, provenance.env.digest_unavailable) == (None, None)
         assert old.prior_results == ()
+        assert (old.usage, old.cost_usd) == (None, None)
         (parquet,) = pq.read_table(tmp_path / 'out.parquet').to_pylist()
         atif = json.loads((tmp_path / 'atif' / 'trace0001.json').read_text())
         for exported in (*_jsonl(tmp_path / 'out.jsonl'), json.loads(parquet['trace'])):
             assert Trace.model_validate(exported) == old
         assert atif['extra']['deepgym']['schema_version'] == '1.0'
+
+    def test_schema_1_1_traces_still_load_and_export(self, tmp_path: Path) -> None:
+        pq = pytest.importorskip('pyarrow.parquet')
+        # Written by schema 1.1, before steps recorded usage.
+        old = load_trace(GOLDEN / 'v1_1' / 'events.jsonl')
+        (row,) = _jsonl(GOLDEN / 'v1_1' / 'export.jsonl')
+
+        export_traces([old], 'jsonl', tmp_path / 'out.jsonl')
+        export_traces([old], 'parquet', tmp_path / 'out.parquet')
+        export_traces([old], 'atif', tmp_path / 'atif')
+
+        assert Trace.model_validate(row) == old
+        assert old.schema_version == '1.1'
+        assert [(step.usage, step.cost_usd) for step in old.steps] == [(None, None)] * 3
+        assert (old.unattached_usage, old.unattached_cost_usd) == (None, None)
+        assert (old.usage, old.cost_usd) == (None, None)
+        (parquet,) = pq.read_table(tmp_path / 'out.parquet').to_pylist()
+        assert (parquet['usage'], parquet['cost_usd']) == (None, None)
+        for exported in (*_jsonl(tmp_path / 'out.jsonl'), json.loads(parquet['trace'])):
+            assert Trace.model_validate(exported) == old
+            assert (exported['usage'], exported['cost_usd']) == (None, None)
+        atif = json.loads((tmp_path / 'atif' / 'trace0001.json').read_text())
+        assert 'final_metrics' not in atif
+        assert all('prompt_tokens' not in step.get('metrics', {}) for step in atif['steps'])
+
+    def test_atif_counts_a_turns_usage_and_calls_once(self) -> None:
+        trace = _turn_of_two_replies()
+
+        document, _ = to_atif(trace)
+
+        thinking, acting = [step for step in document['steps'] if step['source'] == 'agent']
+        # The earlier reply's call is counted on the acting step: no count or tokens here.
+        assert 'llm_call_count' not in thinking
+        assert thinking['metrics'] == {'completion_token_ids': [1, 2], 'logprobs': [-0.5, -1]}
+        usage = trace.steps[0].usage + trace.steps[1].usage
+        assert acting['llm_call_count'] == 2
+        assert acting['metrics'] == {
+            'prompt_tokens': usage.input_tokens + usage.cache_read_tokens + 300,
+            'completion_tokens': usage.output_tokens,
+            'cached_tokens': usage.cache_read_tokens,
+            'cost_usd': pytest.approx(0.5042),
+            'extra': {'cache_write_tokens': 300},  # reasoning: unknown on one step
+        }
+        steps_total = sum(
+            step.get('metrics', {}).get('completion_tokens', 0) for step in document['steps']
+        )
+        assert steps_total == usage.output_tokens
+        # final_metrics add the usage on no step, and the notes say so.
+        assert document['final_metrics']['total_completion_tokens'] == trace.usage.output_tokens
+        assert (
+            trace.usage.output_tokens == usage.output_tokens + trace.unattached_usage.output_tokens
+        )
+        assert 'final_metrics include usage recorded on no step' in document['notes']
+
+    def test_atif_notes_usage_on_no_step_only_when_there_is_some(self) -> None:
+        graded = graded_trace()
+        on_steps_only = graded.model_copy(
+            update={'unattached_usage': None, 'unattached_cost_usd': None}
+        )
+
+        assert 'usage recorded on no step' in to_atif(graded)[0]['notes']
+        document, _ = to_atif(on_steps_only)
+        assert 'usage recorded on no step' not in document['notes']
+        assert document['final_metrics']['total_completion_tokens'] == 53
+
+    def test_atif_turn_without_messages_has_no_call_count(self) -> None:
+        # A computer agent's step: usage, but no recorded messages.
+        trace = crashed_trace()
+        step = trace.steps[0].model_copy(update={'usage': Usage(input_tokens=9), 'cost_usd': 0.1})
+        trace = trace.model_copy(update={'steps': (step,)})
+
+        document, _ = to_atif(trace)
+
+        (acting,) = [step for step in document['steps'] if step['source'] == 'agent']
+        assert 'llm_call_count' not in acting
+        assert acting['metrics']['prompt_tokens'] == 9
+
+    def test_atif_notes_incomplete_usage(self) -> None:
+        document, _ = to_atif(graded_trace().model_copy(update={'usage_complete': False}))
+
+        assert 'token totals are a lower bound' in document['notes']
+        assert 'total_cost_usd' not in document['final_metrics']
 
     def test_atif_needs_whole_traces(self, tmp_path: Path) -> None:
         with pytest.raises(ValueError, match='whole traces'):
@@ -322,6 +450,17 @@ class TestMultiActionTurns:
         assert _rl_records(row) == EXPECTED
         assert all(set(step['action']) == set(Action.model_fields) for step in row['steps'])
         assert row['step_rewards'] == [reward for *_, reward in EXPECTED]
+        assert [step['usage'] for step in row['steps']] == [
+            None if usage is None else usage.model_dump() for usage in STEP_USAGE
+        ]
+        assert [step['cost_usd'] for step in row['steps']] == [
+            COSTS[0],
+            None,
+            COSTS[1],
+            None,
+            COSTS[2],
+        ]
+        assert (row['usage'], row['cost_usd']) == (trace.usage.model_dump(), trace.cost_usd)
         assert [(m['role'], m['content']) for m in row['messages']] == [
             ('user', THREE_FILES.task),
             ('assistant', REPLIES[0]),
@@ -348,6 +487,15 @@ class TestMultiActionTurns:
         assert Trace.model_validate(data) == trace
         assert data['turns'] == [[1, 2], [3, 4], [5]]
         assert _trace_records(data) == EXPECTED
+        totals = row if fmt == 'parquet' else data
+        assert (totals['usage'], totals['cost_usd']) == (trace.usage.model_dump(), trace.cost_usd)
+
+    def test_a_replys_usage_is_counted_once(self, multi_action: tuple) -> None:
+        trace, _ = multi_action
+
+        assert tuple(step.usage for step in trace.steps) == STEP_USAGE
+        assert trace.usage == Usage(input_tokens=600, output_tokens=60, cache_read_tokens=6)
+        assert trace.cost_usd == pytest.approx(sum(COSTS))
 
     def test_atif(self, multi_action: tuple, tmp_path: Path) -> None:
         trace, _ = multi_action
@@ -359,6 +507,24 @@ class TestMultiActionTurns:
         agent = [step for step in document['steps'] if step['source'] == 'agent']
         assert [step['message'] for step in agent] == list(REPLIES)
         assert [step['llm_call_count'] for step in agent] == [1, 1, 1]
+        # Each turn's agent step has its reply's usage; ATIF's prompt tokens count cache reads.
+        assert [step['metrics'] for step in agent] == [
+            {
+                'prompt_tokens': 101 * n,
+                'completion_tokens': 10 * n,
+                'cached_tokens': n,
+                'cost_usd': cost,
+                'extra': {'cache_write_tokens': 0},
+            }
+            for n, cost in zip((1, 2, 3), COSTS)
+        ]
+        assert document['final_metrics'] == {
+            'total_prompt_tokens': 606,
+            'total_completion_tokens': 60,
+            'total_cached_tokens': 6,
+            'total_cost_usd': trace.cost_usd,
+            'extra': {'cache_write_tokens': 0},
+        }
 
     def test_atif_validates_against_harbor(self, multi_action: tuple) -> None:
         harbor = pytest.importorskip('harbor.models.trajectories')
@@ -511,6 +677,9 @@ def _event_log(trace: Trace) -> str:
         {'event': 'reset', 'observation': trace.initial_observation.model_dump(mode='json')},
         *({'event': 'step', 'step': step.model_dump(mode='json')} for step in trace.steps),
     ]
+    if trace.unattached_usage is not None:
+        usage = trace.unattached_usage.model_dump(mode='json')
+        events.append({'event': 'usage', 'usage': usage, 'cost_usd': trace.unattached_cost_usd})
     if trace.result is not None:
         for result in (*trace.prior_results, trace.result):
             events.append({'event': 'result', 'result': result.model_dump(mode='json')})

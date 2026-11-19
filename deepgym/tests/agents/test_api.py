@@ -11,7 +11,7 @@ from pathlib import Path
 
 import pytest
 
-from deepgym.agents import AnthropicToolAgent, Budget, OpenAIToolAgent, TokenPrices
+from deepgym.agents import AnthropicToolAgent, Budget, OpenAIToolAgent, TokenPrices, Usage, api
 from deepgym.agents.api import _NO_CALL, _SKIPPED
 from deepgym.agents.providers import ANTHROPIC_MAX_TOKENS, SDK_RETRIES
 from deepgym.models import MultiTurnEnvironment
@@ -504,12 +504,8 @@ def test_lost_write_is_recorded_uncertain_and_never_retried(app, monkeypatch):
     assert result.termination_reason == 'completed'
 
 
-def test_traced_steps_and_result_carry_every_message(app, monkeypatch, tmp_path):
-    anthropic(
-        monkeypatch,
-        stream(use('tracker', GET_BUG)),
-        stream(text('Triaged.'), use('done', {}, 'call-2')),
-    )
+def _traced(app: App, path: Path) -> TracedSession:
+    """A traced local session of the loopback app's environment, written to *path*."""
     env = app_env(app.url)
     provenance = Provenance(
         env=EnvFingerprint.of(env),
@@ -518,9 +514,18 @@ def test_traced_steps_and_result_carry_every_message(app, monkeypatch, tmp_path)
         deepgym_version='test',
         started_at=datetime.now(timezone.utc),
     )
-    with TracedSession(Session(env, LocalBackend()), env, provenance, tmp_path / 't.jsonl') as tr:
+    return TracedSession(Session(env, LocalBackend()), env, provenance, path)
+
+
+def test_traced_steps_and_result_carry_every_message(app, monkeypatch, tmp_path):
+    anthropic(
+        monkeypatch,
+        stream(use('tracker', GET_BUG)),
+        stream(text('Triaged.'), use('done', {}, 'call-2')),
+    )
+    with _traced(app, tmp_path / 't.jsonl') as tr:
         initial = tr.start()
-        result = AnthropicToolAgent('test').run(tr, initial, task=env.task, budget=UNLIMITED)
+        result = AnthropicToolAgent('test').run(tr, initial, task='Triage', budget=UNLIMITED)
         tr.score()
 
     assert API_KEY not in (tmp_path / 't.jsonl').read_text()
@@ -535,6 +540,157 @@ def test_traced_steps_and_result_carry_every_message(app, monkeypatch, tmp_path)
     assert done.action.action_type == 'done'
     assert result.messages == (*first.messages, *done.messages)
     assert json.loads(done.messages[0].content)['content'] == first.observation.content
+
+
+PRICES = TokenPrices(
+    input_per_million=3,
+    output_per_million=15,
+    cache_read_per_million=0.3,
+    cache_write_per_million=3.75,
+    source='test rates',
+)
+REPLY = Usage(input_tokens=100, output_tokens=5)  # what each fake Anthropic response reports
+REPLY_COST = PRICES.estimate(REPLY).usd
+
+
+def test_traced_usage_is_on_each_replys_first_action_and_sums_to_the_result(
+    app, monkeypatch, tmp_path
+):
+    anthropic(
+        monkeypatch,
+        stream(use('tracker', GET_BUG), use('tracker', GET_BUG, 'call-2')),
+        stream(use('done', {}, 'call-3')),
+    )
+    with _traced(app, tmp_path / 't.jsonl') as tr:
+        initial = tr.start()
+        result = AnthropicToolAgent('test', PRICES).run(tr, initial, task='T', budget=UNLIMITED)
+        tr.score()
+
+    trace = load_trace(tmp_path / 't.jsonl')
+    assert [step.action.action_type for step in trace.steps] == ['tool', 'tool', 'done']
+    # Two calls of one reply: its usage is on the first only, so nothing counts twice.
+    assert [(step.usage, step.cost_usd) for step in trace.steps] == [
+        (REPLY, REPLY_COST),
+        (None, None),
+        (REPLY, REPLY_COST),
+    ]
+    assert trace.unattached_usage is None  # every response led to an action
+    assert trace.usage == result.usage == REPLY + REPLY
+    assert trace.cost_usd == result.cost.usd
+
+
+@pytest.mark.parametrize(
+    'last,budget,reason',
+    [
+        # A closing answer without done: reminded, then the turn budget ends the run.
+        (
+            stream(text('Triaged.'), stop='end_turn'),
+            Budget(max_turns=2, max_seconds=None),
+            'turn_budget',
+        ),
+        (stream(text('I will not.'), stop='refusal'), UNLIMITED, 'refusal'),
+        # The reply that crosses the USD cap: its call never runs.
+        (
+            stream(use('tracker', GET_BUG, 'call-2')),
+            Budget(max_turns=None, max_seconds=None, max_cost_usd=1.5 * REPLY_COST),
+            'cost_budget',
+        ),
+    ],
+)
+def test_traced_usage_totals_are_the_agents_when_the_last_reply_takes_no_action(
+    app, monkeypatch, tmp_path, last, budget, reason
+):
+    anthropic(monkeypatch, stream(use('tracker', GET_BUG)), last)
+    with _traced(app, tmp_path / 't.jsonl') as tr:
+        initial = tr.start()
+        result = AnthropicToolAgent('test', PRICES).run(tr, initial, task='T', budget=budget)
+        tr.score()
+
+    trace = load_trace(tmp_path / 't.jsonl')
+    assert result.termination_reason == reason
+    assert [(step.usage, step.cost_usd) for step in trace.steps] == [(REPLY, REPLY_COST)]
+    # The last reply is on no step: it is recorded outside them, and counted.
+    assert (trace.unattached_usage, trace.unattached_cost_usd) == (REPLY, REPLY_COST)
+    assert trace.usage == result.usage == REPLY + REPLY
+    assert trace.cost_usd == result.cost.usd
+
+
+def test_a_run_without_model_calls_has_no_trace_usage(app, monkeypatch, tmp_path):
+    sent = anthropic(monkeypatch)
+    with _traced(app, tmp_path / 't.jsonl') as tr:
+        initial = tr.start()
+        budget = Budget(max_turns=None, max_seconds=None, max_cost_usd=0)
+        result = AnthropicToolAgent('test', PRICES).run(tr, initial, task='T', budget=budget)
+
+    trace = load_trace(tmp_path / 't.jsonl')
+    assert (result.termination_reason, sent) == ('cost_budget', [])
+    # Nothing was reported: the trace says unknown, while the agent's result counts zeros.
+    assert (trace.usage, trace.cost_usd) == (None, None)
+    assert (result.usage, result.cost.usd) == (Usage(reasoning_tokens=0), 0)
+
+
+def test_traced_usage_survives_an_uncaught_error(app, monkeypatch, tmp_path):
+    anthropic(monkeypatch, stream(text('Looking.'), stop='end_turn'))
+    real = api.anthropic_message
+    calls: list[int] = []
+
+    def fails_second(*args, **kwargs):
+        calls.append(1)
+        if len(calls) == 2:
+            raise OSError('disk full')
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr(api, 'anthropic_message', fails_second)
+    with pytest.raises(OSError, match='disk full'), _traced(app, tmp_path / 't.jsonl') as tr:
+        AnthropicToolAgent('test', PRICES).run(tr, tr.start(), task='T', budget=UNLIMITED)
+
+    trace = load_trace(tmp_path / 't.jsonl')
+    # The reply before the error took no action; the agent's finally recorded it, and the
+    # request in flight when the error escaped left the usage incomplete.
+    assert (trace.steps, trace.unattached_usage, trace.unattached_cost_usd) == (
+        (),
+        REPLY,
+        REPLY_COST,
+    )
+    assert trace.usage_complete is False
+    assert (trace.usage, trace.cost_usd) == (REPLY, None)
+
+
+def test_a_failed_request_marks_trace_usage_incomplete(app, monkeypatch, tmp_path):
+    def respond(httpx, index):
+        if index == 0:
+            headers = {'content-type': 'text/event-stream'}
+            return httpx.Response(200, headers=headers, content=stream(use('tracker', GET_BUG)))
+        error = {'type': 'error', 'error': {'type': 'api_error', 'message': 'boom'}}
+        return httpx.Response(500, json=error)
+
+    _install(monkeypatch, 'anthropic', respond)
+    with _traced(app, tmp_path / 't.jsonl') as tr:
+        initial = tr.start()
+        result = AnthropicToolAgent('test', PRICES).run(tr, initial, task='T', budget=UNLIMITED)
+
+    trace = load_trace(tmp_path / 't.jsonl')
+    assert result.termination_reason == 'provider_error'
+    # The failed request's usage is unknown: not counted as 0, and flagged.
+    assert trace.usage_complete is False
+    assert trace.usage == result.usage == REPLY  # a lower bound
+    assert trace.cost_usd is None and result.cost.usd is None
+    assert trace.unattached_usage is None
+
+
+def test_traced_usage_of_a_reply_without_calls_goes_on_the_next_action(app, monkeypatch, tmp_path):
+    openai(monkeypatch, response(message('Looking.')), response(function_call('done', {})))
+    with _traced(app, tmp_path / 't.jsonl') as tr:
+        initial = tr.start()
+        result = OpenAIToolAgent('test').run(tr, initial, task='T', budget=UNLIMITED)
+        tr.score()
+
+    (done,) = load_trace(tmp_path / 't.jsonl').steps
+    # Each response: 100 input of which 20 cached, 10 output of which 4 reasoning.
+    reply = Usage(input_tokens=80, output_tokens=10, cache_read_tokens=20, reasoning_tokens=4)
+    assert [message.role for message in done.messages].count('assistant') == 2
+    assert done.usage == result.usage == reply + reply
+    assert done.cost_usd is None  # no prices: unknown, never a guess
 
 
 def test_cost_cap_stops_before_running_returned_calls_and_keeps_the_reply(app, monkeypatch):

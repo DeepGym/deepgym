@@ -50,6 +50,7 @@ def test_claude_aggregate_usage_replaces_message_sum() -> None:
         'output_tokens': 13,
         'cache_read_tokens': 10,
         'cache_write_tokens': 2,
+        'reasoning_tokens': None,  # the CLI stream doesn't report it
     }
     assert events.tracker.cost.usd == 0.0012
     assert 'CLI-reported' in events.tracker.cost.provenance

@@ -114,10 +114,15 @@ class _CliAgent(BaseModel):
                 }
             )
             reason = tracker.failure(exc)
+            events.hold_usage(completed=False)
             result = tracker.result(session, reason, events.final_text, type(exc).__name__)
             if isinstance(exc, CliExecutionError):
                 result = result.model_copy(update={'cli_version': exc.cli_version})
             return result
+        except BaseException:
+            events.hold_usage(completed=False)
+            tracker.record_unattached(session)
+            raise
         if execution.version_error:
             tracker.cost = Cost(usd=0, provenance='CLI version rejected before inference')
             reason = (
@@ -128,6 +133,7 @@ class _CliAgent(BaseModel):
             result = tracker.result(session, reason, error=execution.version_error)
         else:
             reason = events.finish(execution.exit_code, execution.stop_reason)
+            events.hold_usage(completed=reason == 'completed')
             result = tracker.result(session, reason, events.final_text, events.error)
         return result.model_copy(update={'cli_version': execution.cli_version})
 

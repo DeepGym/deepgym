@@ -1,11 +1,11 @@
 """Record a session's trace to disk while the episode runs.
 
 Each trace is an append-only JSONL file of events: ``start`` (provenance and task),
-``reset`` (the first observation), one ``step`` per action, one ``result`` per grade
-(the last is the verdict) and ``end``. Every event is flushed when it happens, so a
-crash loses at most the record being written. :func:`load_trace` rebuilds a
-:class:`Trace` from whatever reached the disk; a trace that was never scored is
-incomplete.
+``reset`` (the first observation), one ``step`` per action, ``usage`` for usage on no
+step and ``usage_incomplete`` once a model call reported none, one ``result`` per grade
+(the last is the verdict) and ``end``. Every event is flushed when it happens, so a crash
+loses at most the record being written. :func:`load_trace` rebuilds a :class:`Trace` from
+whatever reached the disk; a trace that was never scored is incomplete.
 """
 
 from __future__ import annotations
@@ -22,8 +22,10 @@ from pathlib import Path
 from typing import Literal, TextIO, TypeVar
 from uuid import uuid4
 
+from pydantic import BaseModel, ConfigDict
+
 from deepgym.cli_runtime import CliExecution, CliExecutionError, CliRequest, EventObserver
-from deepgym.exceptions import DeepGymError, SandboxError
+from deepgym.exceptions import DeepGymError, SandboxError, SessionClosedError
 from deepgym.models import (
     Action,
     MultiTurnEnvironment,
@@ -40,7 +42,10 @@ from deepgym.traces.schema import (
     Trace,
     TraceMessage,
     TraceStep,
+    Usage,
+    Usd,
     json_text,
+    sum_usage,
 )
 
 _T = TypeVar('_T')
@@ -48,6 +53,14 @@ _T = TypeVar('_T')
 logger = logging.getLogger(__name__)
 
 UNFINISHED = 'trace ended before the episode was closed (process crashed or was killed?)'
+
+
+class _UsageEvent(BaseModel):
+    """A ``usage`` event: model calls that led to no action, and what they cost."""
+
+    model_config = ConfigDict(frozen=True)
+    usage: Usage
+    cost_usd: Usd | None
 
 
 def traces_dir() -> Path:
@@ -69,7 +82,8 @@ class TracedSession:
         tr.trace.has_verdict
 
     When one reply issues several actions, step each one, passing the reply's messages
-    with the first only: the others continue its turn (see :attr:`Trace.turns`).
+    and ``usage=`` with the first only: the others continue its turn (see
+    :attr:`Trace.turns`), and the reply's tokens are counted once.
 
     Leaving the block closes the session. An exception, or leaving before ``score()``,
     keeps everything recorded so far and marks the trace incomplete. The trace keeps
@@ -92,11 +106,19 @@ class TracedSession:
         self._initial: Observation | None = None
         self._steps: list[TraceStep] = []
         self._results: list[RunResult] = []
+        self._unattached: list[tuple[Usage, float | None]] = []
+        self._usage_complete = True
         self._error: str | None = None
         self._finished_at: datetime | None = None
         self._file: TextIO | None = None
         self._session_closed = False
         self._lock = threading.Lock()
+
+    @property
+    def step_count(self) -> int:
+        """How many steps the trace has recorded."""
+        with self._lock:
+            return len(self._steps)
 
     @property
     def done(self) -> bool:
@@ -118,6 +140,7 @@ class TracedSession:
     def trace(self) -> Trace:
         """A copy of everything recorded so far."""
         with self._lock:
+            usage, cost_usd = sum_usage(self._unattached)
             return Trace(
                 trace_id=self.trace_id,
                 task=self._env.task,
@@ -127,6 +150,9 @@ class TracedSession:
                 result=self._results[-1] if self._results else None,
                 prior_results=tuple(self._results[:-1]),
                 error=self._error,
+                unattached_usage=usage,
+                unattached_cost_usd=cost_usd,
+                usage_complete=self._usage_complete,
                 finished_at=self._finished_at,
             ).model_copy(deep=True)
 
@@ -153,6 +179,8 @@ class TracedSession:
         action: Action,
         messages: Sequence[TraceMessage] = (),
         *,
+        usage: Usage | None = None,
+        cost_usd: float | None = None,
         timeout: float | None = None,
     ) -> StepResult:
         """Apply *action* and record it with the model *messages* that produced it.
@@ -164,6 +192,10 @@ class TracedSession:
             action: The agent's action.
             messages: Model messages new at this step, ending with the assistant reply
                 that produced *action* (see :attr:`TraceStep.messages`).
+            usage: Provider-reported tokens of the model calls since the previous step;
+                pass a reply's usage with its first action only (see :attr:`TraceStep.usage`).
+            cost_usd: What *usage* cost from your rates (the agents use ``TokenPrices``);
+                None without rates.
             timeout: Optional action deadline forwarded to the session.
 
         Returns:
@@ -173,8 +205,16 @@ class TracedSession:
             DeepGymError: If the trace is closed or the episode isn't running (not
                 started, ended or already scored: a verdict must match the state the
                 trace ends in). Nothing is recorded then.
+            pydantic.ValidationError: If *messages*, *usage* or *cost_usd* can't be
+                recorded (a cost without usage, say); the action is not applied.
         """
-        return self._capture(action, messages, lambda: self._session.step(action, timeout=timeout))
+        return self._capture(
+            action,
+            messages,
+            lambda: self._session.step(action, timeout=timeout),
+            usage=usage,
+            cost_usd=cost_usd,
+        )
 
     def run_cli(self, request: CliRequest, on_event: EventObserver) -> CliExecution:
         """Run and capture one CLI launch, with its events nested under that action.
@@ -194,6 +234,46 @@ class TracedSession:
             (),
             lambda: self._session.run_cli(request, on_event),
         )
+
+    def record_unattached_usage(self, usage: Usage, cost_usd: float | None = None) -> None:
+        """Record usage that belongs to no step; the trace's totals include it.
+
+        The agents in :mod:`deepgym.agents` record it when they finish: an API agent's
+        responses after its last action (a closing answer, a refusal, a reply cut off, one
+        after which a budget ran out), and a CLI agent's whole run, whose one step is
+        recorded before the CLI reports its usage. Calls add up in
+        :attr:`Trace.unattached_usage`.
+
+        Args:
+            usage: Provider-reported tokens.
+            cost_usd: What *usage* cost: from your rates (the agents use ``TokenPrices``),
+                or a CLI's own reported total (Claude Code's ``total_cost_usd``); None
+                without either.
+
+        Raises:
+            SessionClosedError: If the trace is closed.
+            pydantic.ValidationError: If *cost_usd* isn't a finite amount of at least 0;
+                nothing is recorded then.
+        """
+        with self._lock:
+            self._check_open()
+            event = _UsageEvent(usage=usage, cost_usd=cost_usd)
+            self._unattached.append((event.usage, event.cost_usd))
+            self._write({'event': 'usage', **event.model_dump()})
+
+    def mark_usage_incomplete(self) -> None:
+        """Record that some model call reported no usage, or only part of it.
+
+        The trace's token totals are then a lower bound and its cost total None (see
+        :attr:`Trace.usage_complete`).
+
+        Raises:
+            SessionClosedError: If the trace is closed.
+        """
+        with self._lock:
+            self._check_open()
+            self._usage_complete = False
+            self._write({'event': 'usage_incomplete'})
 
     def abandon(self, error_type: Literal['provider_error', 'setup_error'], detail: str) -> None:
         """End the episode with no verdict, as :meth:`Session.abandon`; :meth:`score` records it."""
@@ -218,7 +298,13 @@ class TracedSession:
             self._recorded(self._session.finalize_cli)
 
     def _capture(
-        self, action: Action, messages: Sequence[TraceMessage], call: Callable[[], _T]
+        self,
+        action: Action,
+        messages: Sequence[TraceMessage],
+        call: Callable[[], _T],
+        *,
+        usage: Usage | None = None,
+        cost_usd: float | None = None,
     ) -> _T:
         """Record the one real Session action produced by *call*, even on failure."""
         with self._lock:
@@ -234,7 +320,11 @@ class TracedSession:
                 'action': action.model_copy(deep=True),
                 'messages': tuple(messages),
                 'timestamp': datetime.now(timezone.utc),
+                'usage': usage,
+                'cost_usd': cost_usd,
             }
+            # Refuse a step that can't be recorded before acting: an action taken is recorded.
+            TraceStep(**record, duration_ms=0)
             start = time.perf_counter()
             try:
                 result = call()
@@ -360,7 +450,7 @@ class TracedSession:
     def _check_open(self) -> None:
         """Refuse to touch the session once the trace is closed."""
         if self._finished_at is not None:
-            raise DeepGymError('The trace is closed; open a new one')
+            raise SessionClosedError('The trace is closed; open a new one')
 
     def _recorded(self, call: Callable[[], _T]) -> _T:
         """Return ``call()``, remembering its error for the trace before re-raising it."""
@@ -428,6 +518,7 @@ def load_trace(path: Path) -> Trace:
     fields['error'] = UNFINISHED
     steps = []
     results = []
+    unattached = []
     for event in rest:
         match event.get('event') if isinstance(event, dict) else None:
             case 'reset':
@@ -438,6 +529,11 @@ def load_trace(path: Path) -> Trace:
                 fields['provenance']['agent']['version'] = event['version']
             case 'result':
                 results.append(event['result'])
+            case 'usage':
+                record = _UsageEvent.model_validate(event)
+                unattached.append((record.usage, record.cost_usd))
+            case 'usage_incomplete':
+                fields['usage_complete'] = False
             case 'end':
                 fields['error'] = event['error']
                 fields['finished_at'] = event['finished_at']
@@ -445,6 +541,7 @@ def load_trace(path: Path) -> Trace:
                 raise DeepGymError(f'{path}: unknown trace event {other!r}')
     if results:
         fields['result'], fields['prior_results'] = results[-1], results[:-1]
+    fields['unattached_usage'], fields['unattached_cost_usd'] = sum_usage(unattached)
     return Trace.model_validate({**fields, 'steps': steps})
 
 

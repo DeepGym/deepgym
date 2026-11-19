@@ -2,16 +2,21 @@
 
 from __future__ import annotations
 
+import logging
 import math
 import time
+from collections.abc import Sequence
 from typing import Literal, Protocol, runtime_checkable
 
 from pydantic import BaseModel, ConfigDict, Field
 
-from deepgym.exceptions import DeepGymError, is_infrastructure_failure
-from deepgym.models import Observation, Trajectory
-from deepgym.session import Session
-from deepgym.traces.schema import TraceMessage
+from deepgym.exceptions import DeepGymError, SessionClosedError, is_infrastructure_failure
+from deepgym.models import Action, Observation, Trajectory
+from deepgym.session import Session, StepResult
+from deepgym.traces.capture import TracedSession
+from deepgym.traces.schema import TraceMessage, Usage, sum_usage
+
+logger = logging.getLogger(__name__)
 
 TerminationReason = Literal[
     'completed',
@@ -69,16 +74,6 @@ class Budget(BaseModel):
     max_turns: int | None = Field(default=30, ge=1)  # None: no turn limit
     max_seconds: float | None = Field(default=300, gt=0)  # None: no wall-clock limit
     max_cost_usd: float | None = Field(default=None, ge=0)
-
-
-class Usage(BaseModel):
-    """Record disjoint token categories; output includes reasoning tokens."""
-
-    model_config = ConfigDict(frozen=True)
-    input_tokens: int = Field(default=0, ge=0)
-    output_tokens: int = Field(default=0, ge=0)
-    cache_read_tokens: int = Field(default=0, ge=0)
-    cache_write_tokens: int = Field(default=0, ge=0)
 
 
 class Cost(BaseModel):
@@ -165,8 +160,10 @@ class BudgetTracker:
         self.budget = budget
         self.started = time.monotonic()
         self.turns = 0
-        self.usage = Usage()
+        self.usage = Usage(reasoning_tokens=0)
         self.cost = Cost(usd=0, provenance='no provider calls')
+        self._held: list[tuple[Usage | None, float | None, bool]] = []
+        self._in_flight = False  # a call was admitted and no usage has come back for it
 
     @property
     def remaining_seconds(self) -> float:
@@ -201,21 +198,68 @@ class BudgetTracker:
         if self.budget.max_turns is not None and self.turns >= self.budget.max_turns:
             raise BudgetExceeded('turn_budget')
         self.turns += 1
+        self._in_flight = True
 
-    def add_usage(self, usage: Usage, cost: Cost) -> None:
-        """Accumulate disjoint response usage and propagate unknown costs."""
-        self.usage = Usage(
-            **{
-                name: getattr(self.usage, name) + value
-                for name, value in usage.model_dump().items()
-            }
-        )
+    def add_usage(self, usage: Usage | None, cost: Cost, *, complete: bool = True) -> None:
+        """Accumulate a response's usage and cost, propagating unknown costs, and hold them
+        for the trace (see :meth:`take_unrecorded`).
+
+        Args:
+            usage: Disjoint token usage; None when the response reported none.
+            cost: Its cost, with provenance.
+            complete: False when *usage* is only part of what the response used.
+        """
+        self._in_flight = False
+        if usage is not None:
+            self.usage = self.usage + usage
         total = None if self.cost.usd is None or cost.usd is None else self.cost.usd + cost.usd
         sources = list(dict.fromkeys((self.cost.provenance, cost.provenance)))
         self.cost = Cost(
             usd=total,
             provenance='; '.join(source for source in sources if source != 'no provider calls'),
         )
+        self.hold(usage, cost.usd, complete=complete)
+
+    def hold(self, usage: Usage | None, cost_usd: float | None, *, complete: bool = True) -> None:
+        """Hold usage for the next trace step or the trace's unattached usage, without
+        counting it again here (a CLI run's, which its events already counted).
+
+        Args:
+            usage: Token usage; None when it is unknown.
+            cost_usd: Its USD cost; None when unknown.
+            complete: False when *usage* is only part of what was used.
+        """
+        self._held.append((usage, cost_usd, complete and usage is not None))
+
+    def take_unrecorded(self) -> tuple[Usage | None, float | None, bool]:
+        """Return and release what is held: the usage reported (None without any), its USD
+        (None when any of it has no cost) and whether every call reported all its usage."""
+        held, self._held = self._held, []
+        usage, cost_usd = sum_usage((tokens, usd) for tokens, usd, _ in held)
+        return usage, cost_usd, all(done for *_, done in held)
+
+    def record_unattached(self, session: Session | TracedSession) -> None:
+        """Record what is held as *session*'s unattached usage, if it is a TracedSession,
+        and mark the trace's usage incomplete if any of it is, or if a call is still in
+        flight (an exception escaped before its usage came back).
+
+        Idempotent, since what it records is released, so :meth:`result` and an agent's
+        ``finally`` can both call it. A trace already closed is left as it is (logged), so
+        an error that ended the run is never masked by this.
+        """
+        if not isinstance(session, TracedSession):
+            return
+        if self._in_flight:
+            self._in_flight = False
+            self.hold(None, None, complete=False)
+        usage, cost_usd, complete = self.take_unrecorded()
+        try:
+            if usage is not None:
+                session.record_unattached_usage(usage, cost_usd)
+            if not complete:
+                session.mark_usage_incomplete()
+        except SessionClosedError:
+            logger.warning('Trace %s closed before its last usage was recorded', session.trace_id)
 
     def failure(self, exc: BaseException) -> TerminationReason:
         """Why an episode that *exc* ended stopped: ``time_budget`` once the clock ran out,
@@ -234,8 +278,11 @@ class BudgetTracker:
         """Snapshot accounting and the session's real actions without grading.
 
         A reason that is nothing the policy did (``provider_error``, ``setup_error``)
-        also abandons the session, so whoever scores it gets no verdict, not a 0.
+        also abandons the session, so whoever scores it gets no verdict, not a 0. Under a
+        TracedSession, usage no step took is recorded first (see :meth:`record_unattached`),
+        so the trace's totals are the episode's.
         """
+        self.record_unattached(session)
         if reason in ('provider_error', 'setup_error'):
             session.abandon(reason, error or reason)
         elif reason in CUT_SHORT:
@@ -250,3 +297,35 @@ class BudgetTracker:
             final_text=final_text,
             error=error,
         )
+
+
+def apply_action(
+    session: Session | TracedSession,
+    action: Action,
+    tracker: BudgetTracker,
+    messages: Sequence[TraceMessage] = (),
+) -> StepResult:
+    """Apply *action* within the remaining time.
+
+    Under a TracedSession the step also records *messages* and the usage and cost of the
+    responses since the last step (see :meth:`BudgetTracker.take_unrecorded`): the first
+    action of a reply carries the reply's usage, later ones none. Usage that includes a
+    response without usage goes outside any step instead, and usage a refused step didn't
+    record stays held.
+    """
+    timeout = tracker.request_timeout
+    if not isinstance(session, TracedSession):
+        return session.step(action, timeout=timeout)
+    usage, cost_usd, complete = tracker.take_unrecorded()
+    if not complete:
+        # A response that reported no usage can't be priced on a step: record it outside.
+        tracker.hold(usage, cost_usd, complete=False)
+        tracker.record_unattached(session)
+        usage = cost_usd = None
+    recorded = session.step_count
+    try:
+        return session.step(action, messages, usage=usage, cost_usd=cost_usd, timeout=timeout)
+    except BaseException:
+        if usage is not None and session.step_count == recorded:
+            tracker.hold(usage, cost_usd)  # refused before recording: hold it for later
+        raise

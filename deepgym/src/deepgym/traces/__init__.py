@@ -17,6 +17,7 @@ from deepgym.traces.schema import (
     Trace,
     TraceMessage,
     TraceStep,
+    Usage,
 )
 
 __all__ = [
@@ -29,6 +30,7 @@ __all__ = [
     'TraceMessage',
     'TraceStep',
     'TracedSession',
+    'Usage',
     'export_traces',
     'is_trace_file',
     'load_trace',

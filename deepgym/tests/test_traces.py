@@ -28,6 +28,7 @@ from deepgym.traces import (
     TracedSession,
     TraceMessage,
     TraceStep,
+    Usage,
     export_traces,
     load_trace,
     merge_copies,
@@ -35,7 +36,7 @@ from deepgym.traces import (
 )
 from deepgym.traces.capture import UNFINISHED
 from deepgym.traces.checkout import deepgym_checkout, git_checkout
-from deepgym.traces.schema import NOT_RESOLVED, environment_sha256, json_text
+from deepgym.traces.schema import NOT_RESOLVED, environment_sha256, json_text, sum_usage
 from tests.trace_samples import ENV, crashed_trace, graded_trace, unjudged_trace
 
 SRC = Path(__file__).resolve().parent.parent / 'src'
@@ -205,6 +206,73 @@ class TestSchema:
         with pytest.raises(ValidationError, match='step indexes'):
             trace.model_validate({**trace.model_dump(), 'steps': trace.model_dump()['steps'][::-1]})
 
+    def test_usage_totals_sum_the_steps_and_unattached_usage(self) -> None:
+        graded = graded_trace()
+
+        assert graded.usage == Usage(
+            input_tokens=1330,
+            output_tokens=59,
+            cache_read_tokens=7250,
+            cache_write_tokens=300,
+            reasoning_tokens=17,
+        )
+        assert graded.cost_usd == pytest.approx(0.007)
+        dumped = graded.model_dump(mode='json')
+        assert (dumped['usage'], dumped['cost_usd']) == (graded.usage.model_dump(), 0.007)
+        # Unknown is never 0: nothing reported usage.
+        assert (crashed_trace().usage, crashed_trace().cost_usd) == (None, None)
+
+    def test_unattached_usage_alone_is_the_total(self) -> None:
+        usage = Usage(input_tokens=5, output_tokens=1)
+        trace = crashed_trace().model_copy(
+            update={'unattached_usage': usage, 'unattached_cost_usd': 0.5}
+        )
+
+        assert (trace.usage, trace.cost_usd) == (usage, 0.5)
+
+    @pytest.mark.parametrize('unpriced', ['step', 'unattached'])
+    def test_total_cost_is_unknown_when_any_usage_has_no_cost(self, unpriced: str) -> None:
+        trace = graded_trace()
+        if unpriced == 'step':
+            step = trace.steps[1].model_copy(update={'cost_usd': None})
+            trace = trace.model_copy(update={'steps': (trace.steps[0], step, trace.steps[2])})
+        else:
+            trace = trace.model_copy(update={'unattached_cost_usd': None})
+
+        assert trace.usage == graded_trace().usage
+        assert trace.cost_usd is None
+
+    def test_unattached_cost_needs_usage(self) -> None:
+        with pytest.raises(ValidationError, match='unattached_cost_usd needs the usage'):
+            Trace.model_validate({**graded_trace().model_dump(), 'unattached_usage': None})
+
+    def test_reasoning_is_unknown_when_any_part_is(self) -> None:
+        assert (Usage(reasoning_tokens=2) + Usage(reasoning_tokens=3)).reasoning_tokens == 5
+        assert (Usage(reasoning_tokens=5) + Usage()).reasoning_tokens is None
+        assert (Usage() + Usage(reasoning_tokens=5)).reasoning_tokens is None
+        parts = [(Usage(input_tokens=1, reasoning_tokens=1), None), (None, None)]
+        assert sum_usage(parts) == (Usage(input_tokens=1, reasoning_tokens=1), None)
+
+    def test_incomplete_usage_is_a_lower_bound_with_an_unknown_cost(self) -> None:
+        trace = graded_trace().model_copy(update={'usage_complete': False})
+
+        assert trace.usage == graded_trace().usage
+        assert trace.cost_usd is None
+        assert trace.model_dump(mode='json')['usage_complete'] is False
+
+    @pytest.mark.parametrize('cost', [float('nan'), float('inf'), -0.01])
+    def test_step_cost_must_be_a_finite_amount(self, cost: float) -> None:
+        step = graded_trace().steps[0].model_dump()
+
+        with pytest.raises(ValidationError):
+            TraceStep.model_validate({**step, 'cost_usd': cost})
+
+    def test_step_cost_needs_usage(self) -> None:
+        step = graded_trace().steps[0].model_dump()
+
+        with pytest.raises(ValidationError, match='cost_usd needs the usage'):
+            TraceStep.model_validate({**step, 'usage': None})
+
     def test_to_trajectory_skips_rejected_steps(self) -> None:
         trace = graded_trace()
 
@@ -360,7 +428,7 @@ class TestProvenance:
 
         provenance = trace.provenance
         head = subprocess.run(['git', '-C', str(SRC), 'rev-parse', 'HEAD'], capture_output=True)
-        assert trace.schema_version == '1.1'
+        assert trace.schema_version == '1.2'
         assert provenance.deepgym_version == deepgym.__version__
         assert provenance.deepgym_commit == (head.stdout.decode().strip() or None)
         assert (provenance.deepgym_commit, provenance.deepgym_dirty) == deepgym_checkout()
@@ -372,7 +440,7 @@ class TestProvenance:
         (parquet,) = pq.read_table(tmp_path / 'traces.parquet').to_pylist()
         atif = json.loads((tmp_path / 'atif' / f'{trace.trace_id}.json').read_text())
         for exported in (jsonl, json.loads(parquet['trace']), atif['extra']['deepgym']):
-            assert exported['schema_version'] == '1.1'
+            assert exported['schema_version'] == '1.2'
             assert Provenance.model_validate(exported['provenance']) == provenance
 
     def test_git_checkout(self, tmp_path: Path) -> None:
@@ -460,6 +528,94 @@ class TestCapture:
         assert trace.steps[0].exit_code == 0
         assert trace.steps[0].messages[-1].token_ids == (5,)
         assert trace.steps[1].observation is not None and trace.steps[1].observation.done
+
+    def test_usage_is_recorded_with_its_step(self, dg: DeepGym) -> None:
+        usage = Usage(input_tokens=90, output_tokens=12, cache_read_tokens=400)
+
+        with dg.trace(WRITE_ENV, AGENT) as tr:
+            tr.start()
+            tr.step(Action(action_type='bash', content='echo hello > out.txt'), usage=usage)
+            tr.step(Action(action_type='done'), usage=usage, cost_usd=0.25)
+            tr.score()
+
+        trace = load_trace(tr.path)
+        assert trace == tr.trace
+        assert [(step.usage, step.cost_usd) for step in trace.steps] == [
+            (usage, None),
+            (usage, 0.25),
+        ]
+        assert trace.usage == usage + usage
+        assert trace.cost_usd is None  # the first step's cost is unknown
+
+    def test_unattached_usage_is_recorded_outside_any_step(self, dg: DeepGym) -> None:
+        closing = Usage(input_tokens=300, output_tokens=20, cache_read_tokens=900)
+
+        with dg.trace(WRITE_ENV, AGENT) as tr:
+            tr.start()
+            tr.step(Action(action_type='bash', content='echo hello > out.txt'), usage=closing)
+            tr.record_unattached_usage(closing, 0.01)
+            tr.record_unattached_usage(closing, 0.02)  # calls add up
+            with pytest.raises(ValidationError):
+                tr.record_unattached_usage(closing, -1.0)  # refused before it is written
+            tr.score()
+
+        trace = load_trace(tr.path)
+        assert trace == tr.trace
+        assert trace.steps[0].usage == closing
+        assert (trace.unattached_usage, trace.unattached_cost_usd) == (
+            closing + closing,
+            pytest.approx(0.03),
+        )
+        assert trace.usage == closing + closing + closing
+        assert trace.cost_usd is None  # the step's usage has no cost
+        with pytest.raises(DeepGymError, match='closed'):
+            tr.record_unattached_usage(closing)
+
+    def test_incomplete_usage_is_recorded(self, dg: DeepGym) -> None:
+        with dg.trace(WRITE_ENV, AGENT) as tr:
+            tr.start()
+            tr.record_unattached_usage(Usage(input_tokens=7), 0.5)
+            tr.mark_usage_incomplete()
+
+        trace = load_trace(tr.path)
+        assert trace == tr.trace
+        assert (trace.usage_complete, trace.usage, trace.cost_usd) == (
+            False,
+            Usage(input_tokens=7),
+            None,
+        )
+
+    @pytest.mark.parametrize(
+        'event',
+        [
+            {'event': 'usage', 'usage': {'input_tokens': 1}},  # no cost_usd key
+            {'event': 'usage', 'cost_usd': 0.1},  # no usage key
+            {'event': 'usage', 'usage': {'input_tokens': 1}, 'cost_usd': 'x'},
+            {'event': 'usage', 'usage': {'input_tokens': 1}, 'cost_usd': -1},
+            {'event': 'usage', 'usage': {'input_tokens': 1}, 'cost_usd': float('nan')},
+            {'event': 'usage', 'usage': {'input_tokens': 1}, 'cost_usd': float('inf')},
+            {'event': 'usage', 'usage': {'input_tokens': -1}, 'cost_usd': None},
+            {'event': 'usage', 'usage': 5, 'cost_usd': None},
+        ],
+    )
+    def test_a_malformed_usage_event_is_a_validation_error(self, dg: DeepGym, event: dict) -> None:
+        with dg.trace(WRITE_ENV, AGENT) as tr:
+            tr.start()
+        with tr.path.open('a') as file:
+            file.write(json.dumps(event) + '\n')  # NaN and Infinity as Python writes them
+
+        with pytest.raises(ValidationError):
+            load_trace(tr.path)
+
+    def test_a_step_that_cannot_be_recorded_is_refused_before_acting(self, dg: DeepGym) -> None:
+        with dg.trace(WRITE_ENV, AGENT) as tr:
+            tr.start()
+            with pytest.raises(ValidationError, match='cost_usd needs the usage'):
+                tr.step(Action(action_type='bash', content='echo hello > out.txt'), cost_usd=0.1)
+
+            assert tr.trajectory.steps == [] and tr.trace.steps == ()
+            tr.step(Action(action_type='bash', content='echo hello > out.txt'))
+            assert [step.index for step in tr.trace.steps] == [1]
 
     def test_no_step_verifier_means_no_step_reward(self, dg: DeepGym) -> None:
         env = WRITE_ENV.model_copy(update={'step_verifier_code': ''})

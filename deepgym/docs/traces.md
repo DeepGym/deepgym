@@ -60,7 +60,8 @@ keeps the steps taken so far, and a trace that was never scored is `incomplete`.
 `deepgym.traces.load_trace(path)` reads one back; `path` is a `pathlib.Path`.
 
 `record_episode(tr.trace)` from `deepgym.console` also stores it in the
-[console](console.md), where episodes can be replayed step by step.
+[console](console.md), where episodes can be replayed step by step. Scores and expert
+marks on a trace or one of its steps are stored as [labels](console.md#labels).
 
 ## Export
 

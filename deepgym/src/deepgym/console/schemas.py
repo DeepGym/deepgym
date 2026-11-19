@@ -2,10 +2,12 @@
 
 from __future__ import annotations
 
-from typing import Literal
+from datetime import datetime, timezone
+from typing import Annotated, Literal
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import AfterValidator, AwareDatetime, BaseModel, ConfigDict, Field
 
+from deepgym.labels import SQLITE_MAX_INT, Label, LabelSource, LabelType, TargetKind
 from deepgym.models import Action, RunResult, Trajectory
 from deepgym.sandboxes.cli import RunningSandbox
 
@@ -227,3 +229,56 @@ class ProviderSandboxes(BaseModel):
     available: bool
     error: str | None = None
     sandboxes: list[RunningSandbox] = Field(default_factory=list)
+
+
+def _in_utc(moment: datetime) -> datetime:
+    """Return *moment* in UTC.
+
+    Raises:
+        ValueError: If it falls outside the years a datetime holds once in UTC.
+    """
+    try:
+        return moment.astimezone(timezone.utc)
+    except OverflowError as exc:
+        raise ValueError('is out of range once converted to UTC') from exc
+
+
+UtcTime = Annotated[AwareDatetime, AfterValidator(_in_utc)]
+
+
+class LabelQuery(BaseModel):
+    """Which labels to list: those matching every filter given."""
+
+    model_config = ConfigDict(frozen=True, extra='forbid')
+
+    type: LabelType | None = None
+    target_kind: TargetKind | None = None
+    target_id: str | None = None
+    step: int | None = Field(default=None, ge=0, le=SQLITE_MAX_INT)
+    name: str | None = None
+    source: LabelSource | None = None
+    author: str | None = None
+    blind: bool | None = None
+    rubric_version: str | None = None
+    rubric_sha256: str | None = None
+    group_id: str | None = None
+    since: UtcTime | None = None
+    """Created at or after this time."""
+
+    until: UtcTime | None = None
+    """Created before this time."""
+
+    after_seq: int | None = Field(default=None, ge=0, le=SQLITE_MAX_INT)
+    """Only labels stored after the one at this ``seq``: what a sync hasn't seen yet."""
+
+    current: bool = False
+    """Only records still in force: nothing supersedes them, and they aren't retractions
+    (``deepgym.labels.current_labels``). Safe to combine with any other filter."""
+
+
+class LabelPage(BaseModel):
+    """One page of labels, oldest first."""
+
+    labels: list[Label]
+    total: int
+    """Matching labels across every page."""

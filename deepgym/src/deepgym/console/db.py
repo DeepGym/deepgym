@@ -1,4 +1,4 @@
-"""SQLite file behind the console: runs, recorded episodes and their screenshots."""
+"""SQLite file behind the console: runs, recorded episodes, their screenshots and labels."""
 
 from __future__ import annotations
 
@@ -53,6 +53,27 @@ CREATE TABLE IF NOT EXISTS screenshots (
     png BLOB NOT NULL,
     PRIMARY KEY (episode_id, frame)
 );
+CREATE TABLE IF NOT EXISTS labels (
+    seq INTEGER PRIMARY KEY,
+    id TEXT NOT NULL UNIQUE,
+    type TEXT NOT NULL,
+    target_kind TEXT NOT NULL,
+    target_id TEXT NOT NULL,
+    step INTEGER,
+    name TEXT,
+    source TEXT NOT NULL,
+    author TEXT NOT NULL,
+    blind INTEGER,
+    rubric_version TEXT,
+    rubric_sha256 TEXT,
+    group_id TEXT,
+    supersedes TEXT,
+    created_at TEXT NOT NULL,
+    record TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS labels_target ON labels (target_kind, target_id);
+-- A label is superseded at most once, so its corrections never fork.
+CREATE UNIQUE INDEX IF NOT EXISTS labels_supersedes ON labels (supersedes);
 """
 
 

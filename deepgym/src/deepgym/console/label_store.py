@@ -11,7 +11,7 @@ from uuid import uuid4
 
 from pydantic import AwareDatetime, TypeAdapter
 
-from deepgym.console.db import connect, connect_read_only, init_db, table_columns
+from deepgym.console.db import connect, connect_read_only, init_db, iso_utc, table_columns
 from deepgym.console.schemas import LabelPage, LabelQuery
 from deepgym.labels import (
     Label,
@@ -61,43 +61,11 @@ class LabelStore:
     def add_many(self, labels: Sequence[LabelCreate]) -> list[Label]:
         """Store *labels* in one transaction: every one of them, or none if any is refused.
 
-        The time and positions are taken under the write lock, and the time never goes
-        back, so ``seq`` order is also ``created_at`` order across processes. A label
-        whose client id is stored with the same body is a retry: its stored record is
-        returned, and nothing new is stored for it.
-
-        Args:
-            labels: The labels, stored in this order under one creation time.
-
-        Returns:
-            The stored records, in the order of *labels*.
-
-        Raises:
-            ValueError: If a label's id is stored with another body, it supersedes a record
-                that isn't stored or doesn't fit it (see ``LabelCreate.supersedes``), or it
-                is a verdict its author already holds on that target (supersede that one).
+        See :func:`insert_labels`.
         """
         with connect(self._path) as conn:
             conn.execute('BEGIN IMMEDIATE')
-            seq, now = _last_position(conn)
-            stored: list[Label] = []
-            for label in labels:
-                retried = _retried(conn, label)
-                if retried is not None:
-                    stored.append(retried)
-                    continue
-                seq += 1
-                record = Label.model_validate(
-                    {**_body(label), 'seq': seq, 'id': label.id or uuid4().hex, 'created_at': now}
-                )
-                _check_supersedes(conn, record)
-                _check_verdict(conn, record)
-                try:
-                    conn.execute(_INSERT, _row(record))
-                except sqlite3.IntegrityError as exc:  # the unique index on supersedes
-                    raise ValueError(f'Label {record.supersedes} is already superseded') from exc
-                stored.append(record)
-        return stored
+            return insert_labels(conn, labels)
 
     def page(self, query: LabelQuery, offset: int, limit: int | None) -> LabelPage:
         """Return one page of the labels matching *query*, in ``seq`` order.
@@ -129,7 +97,8 @@ class LabelStore:
         any label; :meth:`excluded` names the targets to leave out.
         """
         query = LabelQuery(target_kind=kind, target_id=target_id, current=True)
-        return self.page(query, 0, None).labels
+        with connect(self._path) as conn:
+            return select_labels(conn, query)
 
     def excluded(self) -> set[tuple[TargetKind, str]]:
         """Return the ``(kind, id)`` of each target a current invalidation excludes."""
@@ -191,6 +160,55 @@ def load_jsonl(path: Path) -> list[Label]:
     return labels
 
 
+def select_labels(conn: sqlite3.Connection, query: LabelQuery) -> list[Label]:
+    """Return every label matching *query*, read on *conn* (so inside its transaction, if
+    it holds one), in ``seq`` order."""
+    where, params = _where(query)
+    rows = conn.execute(f'SELECT record FROM labels WHERE {where} ORDER BY seq', params)
+    return [_stored(row['record']) for row in rows]
+
+
+def insert_labels(conn: sqlite3.Connection, labels: Sequence[LabelCreate]) -> list[Label]:
+    """Store *labels* on *conn*, inside the write transaction (``BEGIN IMMEDIATE``) it holds.
+
+    The time and positions are taken under the write lock, and the time never goes
+    back, so ``seq`` order is also ``created_at`` order across processes. A label
+    whose client id is stored with the same body is a retry: its stored record is
+    returned, and nothing new is stored for it. Nothing is stored if the caller rolls back.
+
+    Args:
+        conn: A connection holding the write lock.
+        labels: The labels, stored in this order under one creation time.
+
+    Returns:
+        The stored records, in the order of *labels*.
+
+    Raises:
+        ValueError: If a label's id is stored with another body, it supersedes a record
+            that isn't stored or doesn't fit it (see ``LabelCreate.supersedes``), or it
+            is a verdict its author already holds on that target (supersede that one).
+    """
+    seq, now = _last_position(conn)
+    stored: list[Label] = []
+    for label in labels:
+        retried = _retried(conn, label)
+        if retried is not None:
+            stored.append(retried)
+            continue
+        seq += 1
+        record = Label.model_validate(
+            {**_body(label), 'seq': seq, 'id': label.id or uuid4().hex, 'created_at': now}
+        )
+        _check_supersedes(conn, record)
+        _check_verdict(conn, record)
+        try:
+            conn.execute(_INSERT, _row(record))
+        except sqlite3.IntegrityError as exc:  # the unique index on supersedes
+            raise ValueError(f'Label {record.supersedes} is already superseded') from exc
+        stored.append(record)
+    return stored
+
+
 def _row(label: Label) -> dict[str, object]:
     """Return the column values that store *label*."""
     return {
@@ -199,7 +217,7 @@ def _row(label: Label) -> dict[str, object]:
         'source': label.source, 'author': label.author, 'blind': label.blind,
         'rubric_version': label.rubric_version, 'rubric_sha256': label.rubric_sha256,
         'group_id': label.group_id, 'supersedes': label.supersedes,
-        'created_at': _iso(label.created_at), 'record': label.model_dump_json(),
+        'created_at': iso_utc(label.created_at), 'record': label.model_dump_json(),
     }  # fmt: skip
 
 
@@ -214,16 +232,20 @@ def _stored(record: str) -> Label:
 
 def _constructed(data: dict) -> Label:
     """Build a :class:`Label` from a stored record's parsed JSON (see :func:`_stored`)."""
-    target = data['target']
-    if target.get('span') is not None:
-        target = {**target, 'span': tuple(target['span'])}
     return Label.model_construct(
         **{
             **data,
-            'target': LabelTarget.model_construct(**target),
+            'target': stored_target(data['target']),
             'created_at': _TIME.validate_python(data['created_at']),
         }
     )
+
+
+def stored_target(target: dict[str, object]) -> LabelTarget:
+    """Rebuild a stored target from its JSON object, without checking today's rules."""
+    if target.get('span') is not None:
+        target = {**target, 'span': tuple(target['span'])}
+    return LabelTarget.model_construct(**target)
 
 
 def _body(label: LabelFields) -> dict[str, object]:
@@ -319,15 +341,10 @@ def _where(query: LabelQuery) -> tuple[str, list[object]]:
     """Build a WHERE clause (and its parameters) matching every filter *query* gives."""
     terms = [(f'{column} = ?', getattr(query, column)) for column in _EQUAL_FILTERS]
     terms += [
-        ('created_at >= ?', None if query.since is None else _iso(query.since)),
-        ('created_at < ?', None if query.until is None else _iso(query.until)),
+        ('created_at >= ?', None if query.since is None else iso_utc(query.since)),
+        ('created_at < ?', None if query.until is None else iso_utc(query.until)),
         ('seq > ?', query.after_seq),
     ]
     active = [(sql, value) for sql, value in terms if value is not None]
     clauses = [sql for sql, _ in active] + ([_CURRENT] if query.current else [])
     return ' AND '.join(clauses) or '1', [value for _, value in active]
-
-
-def _iso(moment: datetime) -> str:
-    """Return *moment* as fixed-width UTC ISO 8601, so stored times compare as strings."""
-    return moment.astimezone(timezone.utc).isoformat(timespec='microseconds')

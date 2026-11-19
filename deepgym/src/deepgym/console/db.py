@@ -88,17 +88,18 @@ def init_db(path: Path) -> None:
         # Older databases lack the newer columns. Holding the write lock makes
         # check-then-add atomic when two processes open an old database at once.
         conn.execute('BEGIN IMMEDIATE')
-        if 'environment_sha256' not in _columns(conn, 'runs'):
+        if 'environment_sha256' not in table_columns(conn, 'runs'):
             _add_hash_column(conn)
-        columns = _columns(conn, 'episodes')
+        columns = table_columns(conn, 'episodes')
         if 'trace' not in columns:
             conn.execute('ALTER TABLE episodes ADD COLUMN trace TEXT')
         if 'has_verdict' not in columns:
             _add_verdict_columns(conn)
 
 
-def _columns(conn: sqlite3.Connection, table: str) -> set[str]:
-    """Return the column names of *table* (a name from this module, never user input)."""
+def table_columns(conn: sqlite3.Connection, table: str) -> set[str]:
+    """Return the column names of *table* (a name from this module, never user input); none
+    when there is no such table."""
     return {row['name'] for row in conn.execute(f'PRAGMA table_info({table})')}
 
 
@@ -195,6 +196,41 @@ def connect(path: Path) -> Iterator[sqlite3.Connection]:
             yield conn
     finally:
         conn.close()
+
+
+@contextmanager
+def connect_read_only(path: Path) -> Iterator[sqlite3.Connection]:
+    """Open the existing database at *path* read-only, never creating or migrating it, and
+    always close it.
+
+    Reading a WAL database (the console's) needs its ``-shm`` file, which SQLite can't
+    create in a folder this process can't write. With no ``-wal`` content there is nothing
+    uncommitted to miss, so the file is then opened as immutable.
+
+    Raises:
+        sqlite3.OperationalError: If it can't be read, such as a WAL database with
+            uncommitted ``-wal`` content in a folder this process can't write.
+    """
+    uri = path.resolve().as_uri()
+    conn = _open(f'{uri}?mode=ro')
+    try:
+        conn.execute('PRAGMA schema_version')
+    except sqlite3.OperationalError:
+        conn.close()
+        wal = path.with_name(f'{path.name}-wal')
+        if wal.exists() and wal.stat().st_size:
+            raise
+        conn = _open(f'{uri}?immutable=1')
+    try:
+        yield conn
+    finally:
+        conn.close()
+
+
+def _open(uri: str) -> sqlite3.Connection:
+    conn = sqlite3.connect(uri, uri=True, timeout=30)
+    conn.row_factory = sqlite3.Row
+    return conn
 
 
 def utc_now() -> str:

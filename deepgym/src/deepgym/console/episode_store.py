@@ -11,7 +11,15 @@ import json
 from pathlib import Path
 from uuid import uuid4
 
-from deepgym.console.db import DEFAULT_DB_PATH, connect, init_db, utc_now, verdict_columns
+from deepgym.console.db import (
+    DEFAULT_DB_PATH,
+    connect,
+    connect_read_only,
+    init_db,
+    table_columns,
+    utc_now,
+    verdict_columns,
+)
 from deepgym.console.schemas import (
     EpisodeCreate,
     EpisodeDetail,
@@ -99,10 +107,7 @@ class EpisodeStore:
 
     def traces(self) -> tuple[list[Trace], int]:
         """Return the stored traces, and how many episodes were recorded without one."""
-        with connect(self._path) as conn:
-            rows = conn.execute('SELECT trace FROM episodes ORDER BY rowid').fetchall()
-        traces = [Trace.model_validate_json(row['trace']) for row in rows if row['trace']]
-        return traces, len(rows) - len(traces)
+        return read_traces(self._path)
 
     def get(self, episode_id: str) -> EpisodeDetail | None:
         """Return one episode with its frames and result, or None if unknown."""
@@ -126,6 +131,37 @@ class EpisodeStore:
                 (episode_id, frame),
             ).fetchone()
         return None if row is None else row['png']
+
+
+def read_traces(path: Path) -> tuple[list[Trace], int]:
+    """Return the traces stored in the console database at *path*, in the order stored,
+    and how many episodes were recorded without one.
+
+    *path* is opened read-only, so it is never created or migrated; in a database from
+    before episodes kept their trace, every episode is one without.
+    """
+    with connect_read_only(path) as conn:
+        columns = table_columns(conn, 'episodes')
+        if not columns:
+            return [], 0
+        if 'trace' not in columns:
+            return [], conn.execute('SELECT COUNT(*) FROM episodes').fetchone()[0]
+        rows = conn.execute('SELECT trace FROM episodes ORDER BY rowid').fetchall()
+    traces = [Trace.model_validate_json(row['trace']) for row in rows if row['trace']]
+    return traces, len(rows) - len(traces)
+
+
+def read_trace_ids(path: Path) -> dict[str, str]:
+    """Return the trace id of each episode recorded from a trace, by episode id.
+
+    *path* is opened read-only, so it is never created or migrated; a database from before
+    episodes kept their trace gives none.
+    """
+    with connect_read_only(path) as conn:
+        if 'trace' not in table_columns(conn, 'episodes'):
+            return {}
+        rows = conn.execute('SELECT id, trace FROM episodes WHERE trace IS NOT NULL').fetchall()
+    return {row['id']: json.loads(row['trace'])['trace_id'] for row in rows}
 
 
 def split_frames(trajectory: Trajectory) -> tuple[list[Frame], dict[int, bytes]]:

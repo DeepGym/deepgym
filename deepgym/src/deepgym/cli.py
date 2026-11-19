@@ -10,6 +10,7 @@ import os
 import socket
 import sys
 import time
+from collections.abc import Sequence
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -18,7 +19,10 @@ from deepgym.judge import ALLOW_UNSANDBOXED_ENV, local_isolation_kind, unsandbox
 from deepgym.sandboxes import PROVIDERS
 
 if TYPE_CHECKING:
+    from deepgym.dataset import DatasetSpec
+    from deepgym.labels import Label
     from deepgym.qa.report import QAStatus
+    from deepgym.traces import Trace
 
 
 def _build_parser() -> argparse.ArgumentParser:
@@ -268,6 +272,49 @@ def _build_parser() -> argparse.ArgumentParser:
         default=None,
         metavar='PATH',
         help='Trace files or directories (~/.deepgym/traces or $DEEPGYM_TRACES_DIR)',
+    )
+
+    # ── dataset ───────────────────────────────────────────────────────
+    dataset_p = sub.add_parser('dataset', help='Build and verify versioned trace datasets')
+    dataset_sub = dataset_p.add_subparsers(dest='dataset_command', required=True)
+    build_p = dataset_sub.add_parser(
+        'build',
+        help='Filter, deduplicate and split traces into a folder with a manifest',
+        description='Reads traces as traces export does (the console database and the traces '
+        'directory, or --db and --traces), and labels from that database, the default console '
+        'database when it exists, and any --labels files. Prints how many traces were dropped '
+        'for each reason, and the sha256 to publish.',
+    )
+    build_p.add_argument('--spec', required=True, help='DatasetSpec JSON: filters and splits')
+    build_p.add_argument('--name', required=True, help='Dataset name')
+    build_p.add_argument('--version', required=True, help='Dataset version')
+    build_p.add_argument('--out', required=True, help='New or empty output directory')
+    build_p.add_argument(
+        '--format',
+        nargs='+',
+        default=['jsonl'],
+        choices=['jsonl', 'parquet', 'atif'],
+        help='Export formats (default jsonl)',
+    )
+    build_p.add_argument('--db', default=None, help='Console database (~/.deepgym/console.db)')
+    build_p.add_argument(
+        '--traces',
+        nargs='+',
+        default=None,
+        metavar='PATH',
+        help='Trace files or directories (~/.deepgym/traces or $DEEPGYM_TRACES_DIR)',
+    )
+    build_p.add_argument(
+        '--labels',
+        nargs='+',
+        default=[],
+        metavar='PATH',
+        help='Label JSONL files written by LabelStore.export_jsonl',
+    )
+    verify_p = dataset_sub.add_parser('verify', help='Check a dataset folder against its manifest')
+    verify_p.add_argument('folder', help='Folder written by deepgym dataset build')
+    verify_p.add_argument(
+        '--sha256', default=None, help='The sha256 of manifest.json it was published with'
     )
 
     # ── serve ─────────────────────────────────────────────────────────
@@ -666,10 +713,14 @@ def _cmd_benchmark_audit(args: argparse.Namespace) -> None:
     _print_benchmark_audit(report)
 
 
-def _cmd_traces(args: argparse.Namespace) -> None:
+def _trace_sources(args: argparse.Namespace) -> tuple[Path | None, list[Path], int]:
+    """Return the console database and trace files ``--db`` and ``--traces`` name (or the
+    defaults), and how many other .jsonl files the trace directories hold.
+
+    Exits if a named source doesn't exist.
+    """
     from deepgym.console.db import DEFAULT_DB_PATH
-    from deepgym.console.episode_store import EpisodeStore
-    from deepgym.traces import export_traces, is_trace_file, load_trace, merge_copies, traces_dir
+    from deepgym.traces import is_trace_file, traces_dir
 
     if args.db is None and args.traces is None:
         db = DEFAULT_DB_PATH if DEFAULT_DB_PATH.exists() else None
@@ -686,13 +737,19 @@ def _cmd_traces(args: argparse.Namespace) -> None:
     found = [sorted(path.glob('*.jsonl')) if path.is_dir() else [path] for path in paths]
     files = [file for path, group in zip(paths, found) for file in group
              if not path.is_dir() or is_trace_file(file)]  # fmt: skip
-    others = sum(map(len, found)) - len(files)
-    out = Path(args.out)
-    if out.exists() and any(out.samefile(source) for source in [db, *files] if source):
-        print(f'Error: {out} is one of the inputs; write the export elsewhere', file=sys.stderr)
-        sys.exit(1)
+    return db, files, sum(map(len, found)) - len(files)
 
-    traces, untraced = EpisodeStore(db).traces() if db else ([], 0)
+
+def _read_traces(db: Path | None, files: Sequence[Path]) -> tuple[list[Trace], int, int]:
+    """Return one copy of each trace in *db* and *files*, how many console episodes were
+    recorded without a trace, and how many copies of a trace were merged into another.
+
+    Exits if copies of a trace disagree, or there are no traces.
+    """
+    from deepgym.console.episode_store import read_traces
+    from deepgym.traces import load_trace, merge_copies
+
+    traces, untraced = read_traces(db) if db else ([], 0)
     traces += [load_trace(file) for file in files]
     # A trace can be both on disk and in the console: keep the copy that got furthest.
     try:
@@ -703,7 +760,26 @@ def _cmd_traces(args: argparse.Namespace) -> None:
     if not unique:
         print('Error: no traces found', file=sys.stderr)
         sys.exit(1)
+    return unique, untraced, len(traces) - len(unique)
 
+
+def _print_unread(untraced: int, others: int) -> None:
+    if untraced:
+        print(f'  {untraced} console episodes were recorded without a trace and not read')
+    if others:
+        print(f'  {others} .jsonl files in the traces directories are not traces and were not read')
+
+
+def _cmd_traces(args: argparse.Namespace) -> None:
+    from deepgym.traces import export_traces
+
+    db, files, others = _trace_sources(args)
+    out = Path(args.out)
+    if out.exists() and any(out.samefile(source) for source in [db, *files] if source):
+        print(f'Error: {out} is one of the inputs; write the export elsewhere', file=sys.stderr)
+        sys.exit(1)
+
+    unique, untraced, _ = _read_traces(db, files)
     report = export_traces(
         sorted(unique, key=lambda trace: trace.provenance.started_at),
         args.format,
@@ -714,10 +790,122 @@ def _cmd_traces(args: argparse.Namespace) -> None:
     print(f'Wrote {report.written} of {len(unique)} traces to {args.out}')
     for reason, count in report.skipped.items():
         print(f'  skipped {count}: {reason}')
-    if untraced:
-        print(f'  {untraced} console episodes were recorded without a trace and not read')
-    if others:
-        print(f'  {others} .jsonl files in the traces directories are not traces and were not read')
+    _print_unread(untraced, others)
+
+
+def _cmd_dataset(args: argparse.Namespace) -> None:
+    from deepgym.dataset import (
+        DatasetSpec,
+        build_dataset,
+        checked_write,
+        manifest_sha256,
+        verify_dataset,
+        write_dataset,
+    )
+
+    if args.dataset_command == 'verify':
+        folder = Path(args.folder)
+        manifest = verify_dataset(folder, sha256=args.sha256)
+        about = f'{manifest.name} {manifest.version}, {len(manifest.entries)} traces'
+        if args.sha256:
+            print(f'{folder} matches the published sha256 {args.sha256.lower()}: {about}')
+        else:
+            print(
+                f'{folder} is self-consistent ({about}), but was not checked against a published '
+                f'sha256: pass --sha256. Its manifest.json has sha256 {manifest_sha256(folder)}'
+            )
+        return
+
+    spec = DatasetSpec.model_validate_json(Path(args.spec).read_text(encoding='utf-8'))
+    out = Path(args.out)
+    checked_write(out, name=args.name, version=args.version, formats=args.format)
+    db, files, others = _trace_sources(args)
+    traces, untraced, merged = _read_traces(db, files)
+    labels, episodes, label_sources = _read_labels(db, [Path(path) for path in args.labels])
+    dataset = build_dataset(
+        traces,
+        spec,
+        labels,
+        episodes,
+        {'episode_without_trace': untraced, 'not_a_trace_file': others, 'merged_copy': merged},
+    )
+    sha256 = write_dataset(dataset, out, name=args.name, version=args.version, formats=args.format)
+    counts = dataset.counts
+    splits = ', '.join(f'{split} {count}' for split, count in counts.splits.items())
+    print(f'Kept {len(dataset.entries)} of {counts.sources} traces in {out} ({splits})')
+    for reason, count in counts.dropped.items():
+        print(f'  dropped {count}: {reason}')
+    print(
+        f'  {len(labels)} label records read from {", ".join(map(str, label_sources)) or "nowhere"}'
+    )
+    if counts.overridden:
+        print(
+            f'  {counts.overridden} kept traces have a verifier verdict a human reversed; their '
+            "files keep the verifier's: read verdicts from <split>.verdicts.jsonl"
+        )
+    if counts.unmatched_labels:
+        print(f'  {counts.unmatched_labels} current label records matched none of these traces')
+    _warn_unmatched(dataset.unmatched, spec)
+    _print_unread(untraced, others)
+    if merged:
+        print(f'  {merged} copies of a trace were merged into the copy that got furthest')
+    print(f'Publish this sha256 of {out}/manifest.json: {sha256}')
+
+
+def _warn_unmatched(labels: Sequence[Label], spec: DatasetSpec) -> None:
+    """List on stderr the unmatched labels that would have changed what was kept: the
+    invalidations, human verdicts and labels the spec requires or forbids."""
+    from deepgym.labels import PASS_MARK
+
+    matches = (*spec.require_labels, *spec.forbid_labels)
+    missed = [
+        label
+        for label in labels
+        if label.type == 'invalidate'
+        or (label.source == 'human' and label.name == PASS_MARK)
+        or any(match.matches(label) for match in matches)
+    ]
+    if missed:
+        print(
+            f'WARNING: {len(missed)} invalidations, human verdicts and labels the spec requires '
+            'or forbids matched none of these traces:',
+            file=sys.stderr,
+        )
+    for label in missed:
+        what = 'invalidation' if label.type == 'invalidate' else f'{label.name}={label.value}'
+        target = label.target
+        step = '' if target.step is None else f' step {target.step}'
+        print(f'  {what} {label.id} on {target.kind} {target.id}{step}', file=sys.stderr)
+
+
+def _read_labels(
+    db: Path | None, files: Sequence[Path]
+) -> tuple[list[Label], dict[str, str], list[Path]]:
+    """Return the label records of *db* and of the default console database (when it
+    exists) plus *files*, the trace id of each episode in those databases, and the sources
+    read. The databases are opened read-only. Warns on stderr when no record was read."""
+    from deepgym.console.db import DEFAULT_DB_PATH
+    from deepgym.console.episode_store import read_trace_ids
+    from deepgym.console.label_store import load_jsonl, read_labels
+
+    databases = [db] if db else []
+    if DEFAULT_DB_PATH.exists() and not any(DEFAULT_DB_PATH.samefile(path) for path in databases):
+        databases.append(DEFAULT_DB_PATH)
+    labels: list[Label] = []
+    episodes: dict[str, str] = {}
+    for database in databases:
+        labels += read_labels(database)
+        episodes |= read_trace_ids(database)
+    for path in files:
+        labels += load_jsonl(path)
+    if not labels:
+        read = ', '.join(map(str, [*databases, *files])) or 'no console database, no --labels'
+        print(
+            f'WARNING: no label records were read ({read}): invalidations and expert verdicts '
+            'are not applied to this dataset',
+            file=sys.stderr,
+        )
+    return labels, episodes, [*databases, *files]
 
 
 def _loopback_hosts(host: str, netloc: str) -> list[str] | None:
@@ -960,6 +1148,7 @@ _COMMANDS = {
     'console': _cmd_console,
     'web': _cmd_console,
     'traces': _cmd_traces,
+    'dataset': _cmd_dataset,
 }
 
 

@@ -191,7 +191,7 @@ def export_traces(
 
 def _write_jsonl(records: Sequence[Row], out: Path) -> None:
     out.parent.mkdir(parents=True, exist_ok=True)
-    with out.open('w', encoding='utf-8') as file:
+    with out.open('w', encoding='utf-8', newline='\n') as file:
         file.writelines(json_text(record) + '\n' for record in records)
 
 

@@ -12,6 +12,7 @@ from fastapi import Depends, HTTPException, Request
 
 from deepgym.console.episode_store import EpisodeStore
 from deepgym.console.label_store import LabelStore
+from deepgym.console.queue_store import QueueStore
 from deepgym.console.run_store import RunStore
 from deepgym.console.runner import Runner
 
@@ -53,6 +54,11 @@ def get_label_store(request: Request) -> LabelStore:
     return request.app.state.labels
 
 
+def get_queue_store(request: Request) -> QueueStore:
+    """Return the app's review queue store."""
+    return request.app.state.queues
+
+
 def get_runner(request: Request) -> Runner:
     """Return the app's background runner."""
     return request.app.state.runner
@@ -66,5 +72,6 @@ def get_qa_dir(request: Request) -> Path:
 RunStoreDep = Annotated[RunStore, Depends(get_run_store)]
 EpisodeStoreDep = Annotated[EpisodeStore, Depends(get_episode_store)]
 LabelStoreDep = Annotated[LabelStore, Depends(get_label_store)]
+QueueStoreDep = Annotated[QueueStore, Depends(get_queue_store)]
 RunnerDep = Annotated[Runner, Depends(get_runner)]
 QADirDep = Annotated[Path, Depends(get_qa_dir)]

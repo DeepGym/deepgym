@@ -7,8 +7,9 @@ from typing import Annotated, Literal
 
 from pydantic import AfterValidator, AwareDatetime, BaseModel, ConfigDict, Field
 
-from deepgym.labels import SQLITE_MAX_INT, Label, LabelSource, LabelType, TargetKind
+from deepgym.labels import SQLITE_MAX_INT, Label, LabelSource, LabelType, Name, TargetKind
 from deepgym.models import Action, RunResult, Trajectory
+from deepgym.review_queues import ReviewLabel
 from deepgym.sandboxes.cli import RunningSandbox
 
 RunMode = Literal['local', 'daytona', 'auto', 'apple', 'docker', 'modal', 'e2b']
@@ -287,3 +288,17 @@ class LabelPage(BaseModel):
     labels: list[Label]
     total: int
     """Matching labels across every page."""
+
+
+class ReviewerBody(BaseModel):
+    """Who asks for an item, or hands one back."""
+
+    model_config = ConfigDict(frozen=True, extra='forbid')
+
+    reviewer: Name
+
+
+class ReviewSubmit(ReviewerBody):
+    """A reviewer's review of an item they hold."""
+
+    labels: list[ReviewLabel] = Field(min_length=1)

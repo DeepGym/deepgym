@@ -1,4 +1,5 @@
-"""SQLite file behind the console: runs, recorded episodes, their screenshots and labels."""
+"""SQLite file behind the console: runs, recorded episodes, their screenshots, labels and
+review queues."""
 
 from __future__ import annotations
 
@@ -76,6 +77,58 @@ CREATE TABLE IF NOT EXISTS labels (
 CREATE INDEX IF NOT EXISTS labels_target ON labels (target_kind, target_id);
 -- A label is superseded at most once, so its corrections never fork.
 CREATE UNIQUE INDEX IF NOT EXISTS labels_supersedes ON labels (supersedes);
+CREATE TABLE IF NOT EXISTS queues (
+    id TEXT PRIMARY KEY,
+    name TEXT NOT NULL,
+    description TEXT,
+    instructions TEXT,
+    label_names TEXT NOT NULL,
+    overlap INTEGER NOT NULL,
+    blind INTEGER NOT NULL,
+    reservation_seconds INTEGER NOT NULL,
+    reviewers TEXT NOT NULL,
+    closed INTEGER NOT NULL,
+    created_at TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS queue_items (
+    id TEXT PRIMARY KEY,
+    queue_id TEXT NOT NULL,
+    position INTEGER NOT NULL,
+    target TEXT NOT NULL,
+    -- The recording the target is on: an episode recorded from a trace is on that trace.
+    recording_kind TEXT NOT NULL,
+    recording_id TEXT NOT NULL,
+    context TEXT,
+    created_at TEXT NOT NULL,
+    UNIQUE (queue_id, target),
+    UNIQUE (queue_id, position)
+);
+CREATE INDEX IF NOT EXISTS queue_items_recording ON queue_items (recording_kind, recording_id);
+CREATE TABLE IF NOT EXISTS queue_assignments (
+    id TEXT PRIMARY KEY,
+    queue_id TEXT NOT NULL,
+    item_id TEXT NOT NULL,
+    reviewer TEXT NOT NULL,
+    status TEXT NOT NULL,
+    reserved_at TEXT NOT NULL,
+    expires_at TEXT NOT NULL,
+    finished_at TEXT
+);
+CREATE INDEX IF NOT EXISTS queue_assignments_item ON queue_assignments (item_id, status);
+CREATE INDEX IF NOT EXISTS queue_assignments_queue ON queue_assignments (queue_id, status);
+-- A reviewer reviews an item at most once, and holds one reservation per queue at a time.
+CREATE UNIQUE INDEX IF NOT EXISTS queue_assignments_review ON queue_assignments (item_id, reviewer)
+    WHERE status IN ('reserved', 'submitted');
+CREATE UNIQUE INDEX IF NOT EXISTS queue_assignments_held ON queue_assignments (queue_id, reviewer)
+    WHERE status = 'reserved';
+-- When a queue response first showed a reviewer someone else's label on a recording.
+CREATE TABLE IF NOT EXISTS queue_exposures (
+    reviewer TEXT NOT NULL,
+    recording_kind TEXT NOT NULL,
+    recording_id TEXT NOT NULL,
+    shown_at TEXT NOT NULL,
+    PRIMARY KEY (reviewer, recording_kind, recording_id)
+);
 """
 
 
@@ -236,3 +289,8 @@ def _open(uri: str) -> sqlite3.Connection:
 def utc_now() -> str:
     """Return the current UTC time as an ISO 8601 string."""
     return datetime.now(timezone.utc).isoformat()
+
+
+def iso_utc(moment: datetime) -> str:
+    """Return *moment* as fixed-width UTC ISO 8601, so stored times compare as strings."""
+    return moment.astimezone(timezone.utc).isoformat(timespec='microseconds')

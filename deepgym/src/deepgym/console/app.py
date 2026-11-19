@@ -20,10 +20,11 @@ except ImportError as _exc:
         'FastAPI is required for the console. Install with: pip install "deepgym[server]"'
     ) from _exc
 
-from deepgym.console import environments, episodes, labels, qa, runs, sandboxes
+from deepgym.console import environments, episodes, labels, qa, queues, runs, sandboxes
 from deepgym.console.db import DEFAULT_DB_PATH
 from deepgym.console.episode_store import EpisodeStore
 from deepgym.console.label_store import LabelStore
+from deepgym.console.queue_store import QueueStore
 from deepgym.console.run_store import RunStore
 from deepgym.console.runner import Runner
 from deepgym.console.security import TokenedStaticFiles, require_console_access
@@ -54,7 +55,7 @@ def create_app(
     """Create the console application.
 
     Args:
-        db_path: SQLite file for runs, episodes and labels.
+        db_path: SQLite file for runs, episodes, labels and review queues.
         qa_dir: Directory of QA report JSON files; defaults to ``deepgym qa``'s.
         allow_local_exec: Allow custom solutions to run on this machine (mode 'local',
             or 'auto' without Daytona). Reference solutions may run locally regardless.
@@ -79,6 +80,7 @@ def create_app(
     app.state.runs = run_store
     app.state.episodes = EpisodeStore(db_path)
     app.state.labels = LabelStore(db_path)
+    app.state.queues = QueueStore(db_path)
     app.state.runner = runner
     app.state.qa_dir = qa_dir or report_dir()
     app.state.token = token or os.environ.get('DEEPGYM_CONSOLE_TOKEN') or secrets.token_urlsafe(32)
@@ -87,7 +89,7 @@ def create_app(
         app.add_middleware(TrustedHostMiddleware, allowed_hosts=list(allowed_hosts))
 
     api = APIRouter(prefix='/api', dependencies=[Depends(require_console_access)])
-    for module in (environments, runs, episodes, labels, sandboxes, qa):
+    for module in (environments, runs, episodes, labels, queues, sandboxes, qa):
         api.include_router(module.router)
     app.include_router(api)
 

@@ -11,7 +11,7 @@ from uuid import uuid4
 
 from pydantic import AwareDatetime, TypeAdapter
 
-from deepgym.console.db import connect, init_db
+from deepgym.console.db import connect, connect_read_only, init_db, table_columns
 from deepgym.console.schemas import LabelPage, LabelQuery
 from deepgym.labels import (
     Label,
@@ -43,6 +43,8 @@ _CURRENT = (
     'NOT EXISTS (SELECT 1 FROM labels AS later WHERE later.supersedes = labels.id)'
 )
 _TIME = TypeAdapter(AwareDatetime)
+# Keys every stored record has (deepgym.labels.Label without its defaults).
+_RECORD_KEYS = {'seq', 'id', 'target', 'type', 'source', 'author', 'created_at'}
 
 
 class LabelStore:
@@ -149,6 +151,46 @@ class LabelStore:
         return written
 
 
+def read_labels(path: Path) -> list[Label]:
+    """Return every label record in the console database at *path*, in ``seq`` order.
+
+    *path* is opened read-only, so it is never created or migrated; a database from before
+    labels has none.
+    """
+    with connect_read_only(path) as conn:
+        if 'record' not in table_columns(conn, 'labels'):
+            return []
+        rows = conn.execute('SELECT record FROM labels ORDER BY seq').fetchall()
+    return [_stored(row['record']) for row in rows]
+
+
+def load_jsonl(path: Path) -> list[Label]:
+    """Read the records :meth:`LabelStore.export_jsonl` wrote, as they were written.
+
+    Raises:
+        ValueError: If a line isn't a stored label record.
+    """
+    labels: list[Label] = []
+    with path.open(encoding='utf-8') as file:
+        for number, line in enumerate(file, 1):
+            if not line.strip():
+                continue
+            try:
+                data = json.loads(line)
+            except ValueError as exc:
+                raise ValueError(f'{path} line {number} is not JSON: {exc}') from exc
+            fits = (
+                isinstance(data, dict) and _RECORD_KEYS <= data.keys() <= Label.model_fields.keys()
+            )
+            if not fits or not isinstance(data['target'], dict):
+                raise ValueError(
+                    f'{path} line {number} is not a label record, as LabelStore.export_jsonl '
+                    'writes them'
+                )
+            labels.append(_constructed(data))
+    return labels
+
+
 def _row(label: Label) -> dict[str, object]:
     """Return the column values that store *label*."""
     return {
@@ -167,7 +209,11 @@ def _stored(record: str) -> Label:
     Only its JSON types are parsed; today's rules aren't checked again, so a rule added
     since it was stored can't make it unreadable.
     """
-    data = json.loads(record)
+    return _constructed(json.loads(record))
+
+
+def _constructed(data: dict) -> Label:
+    """Build a :class:`Label` from a stored record's parsed JSON (see :func:`_stored`)."""
     target = data['target']
     if target.get('span') is not None:
         target = {**target, 'span': tuple(target['span'])}

@@ -348,12 +348,12 @@ def _client(
         ),
         (
             [_RIGHT],
-            'too_easy, no_variance, outside_band: pass@1=1.00 pass@2=1.00 pass@4=1.00 '
+            'too_easy, no_variance: pass@1=1.00 pass@2=1.00 pass@4=1.00 '
             'pass^1=1.00 pass^2=1.00 pass^4=1.00, mean reward 1.00, spread 0.00',
         ),
         (
             [_WRONG],
-            'too_hard, no_variance, outside_band: pass@1=0.00 pass@2=0.00 pass@4=0.00 '
+            'too_hard, no_variance: pass@1=0.00 pass@2=0.00 pass@4=0.00 '
             'pass^1=0.00 pass^2=0.00 pass^4=0.00, mean reward 0.00, spread 0.00',
         ),
     ],
@@ -434,9 +434,16 @@ def test_partial_rewards_are_variance_not_too_hard(local_dg: DeepGym) -> None:
     check = difficulty_check(_env(body), local_dg, _client(answers, []), samples=2)
 
     assert check.details.startswith(  # solved by none, so outside the band all the same
-        'outside_band: pass@1=0.00 pass@2=0.00 pass^1=0.00 pass^2=0.00, mean reward 0.50, '
-        'spread 0.30'
+        'pass@1=0.00 pass@2=0.00 pass^1=0.00 pass^2=0.00, mean reward 0.50, spread 0.30'
     )
+
+
+def test_a_rarely_solved_task_is_flagged_outside_the_band(local_dg: DeepGym) -> None:
+    answers = [_RIGHT] + [_WRONG] * 11  # 1 of 12 solved: learnable, under 10%
+
+    check = difficulty_check(_env(_ADD_VERIFIER), local_dg, _client(answers, []), samples=12)
+
+    assert check.details.startswith('outside_band: pass@1=0.08 ')
 
 
 def _flaky_client(statuses: list[int], seen: list[int]) -> ZaiChatClient:

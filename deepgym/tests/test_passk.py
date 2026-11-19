@@ -129,6 +129,8 @@ def test_a_tiny_pass_at_k_keeps_its_precision() -> None:
     ('kwargs', 'message'),
     [
         ({'tasks': [], 'ks': [1]}, 'at least one task'),
+        ({'tasks': [(4, 2)], 'ks': []}, 'at least one k'),
+        ({'tasks': [(4, 2), (2, 1)], 'ks': [4]}, r'task 1: k must be between 1 and n=2'),
         ({'tasks': [], 'ks': [], 'low': 0.9, 'high': 0.1}, 'low <= high'),
         ({'tasks': [(10, 5)], 'ks': [1], 'low': True}, 'low must be a number'),
         ({'tasks': [(10, 5)], 'ks': [1], 'high': 'a'}, 'high must be a number'),

@@ -48,7 +48,8 @@ def pass_at_k(n: int, c: int, k: int) -> float:
     """Estimate the chance that at least one of *k* attempts solves the task.
 
     The unbiased estimator ``1 - C(n - c, k) / C(n, k)`` (Chen et al. 2021, HumanEval),
-    computed as a product of k ratios rather than from binomials.
+    computed from a sum of k logarithms rather than from binomials, so a tiny result
+    keeps its precision.
 
     Args:
         n: Samples drawn.
@@ -142,12 +143,20 @@ def summarize(
         how many tasks fall outside ``[low, high]``.
 
     Raises:
-        ValueError: If *tasks* is empty, or any input is invalid as in
+        ValueError: If *tasks* or *ks* is empty, or any input is invalid as in
             :func:`pass_at_k` and :func:`task_difficulty`.
     """
     _validate_band(low, high)
     if not tasks:
         raise ValueError('summarize needs at least one task')
+    if not ks:
+        raise ValueError('summarize needs at least one k')
+    for index, (n, c) in enumerate(tasks):
+        for k in ks:
+            try:
+                _validate(n, c, k)
+            except ValueError as exc:
+                raise ValueError(f'task {index}: {exc}') from exc
     difficulties = [task_difficulty(n, c, low, high) for n, c in tasks]
     counts = Counter(difficulty.band for difficulty in difficulties)
     return PassKSummary(

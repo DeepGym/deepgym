@@ -120,8 +120,8 @@ attempts solves the task) and pass^k (all k do) for k = 1, each power of 2 below
 itself, and the mean and spread of the rewards. It is reported, never gated: it passes once
 measured and flags `too_easy` (every sample solved), `too_hard` (no sample earned
 anything), `no_variance` (every sample earned the same), since group-relative RL learns
-nothing from equal rewards, and `outside_band` (solved by under 10% or over 90% of the
-samples). Partial rewards are variance: `[0.2, 0.8]` is neither too hard nor flat.
+nothing from equal rewards, and `outside_band` (solved in full by some, but under 10% or over 90%, of the
+samples; it takes 11 or more samples to show). Partial rewards are variance: `[0.2, 0.8]` is neither too hard nor flat.
 
 For your own sampled runs, `deepgym.passk` has the same estimators (`pass_at_k(n, c, k)`,
 `pass_hat_k(n, c, k)`), the band of one task (`task_difficulty`) and their average over

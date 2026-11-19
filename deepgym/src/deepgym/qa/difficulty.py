@@ -61,9 +61,9 @@ def difficulty_check(env: Environment, dg: DeepGym, client: ZaiChatClient, sampl
     *samples* itself, and the mean and spread of the rewards. They flag a task every
     sample solves (too_easy), one where no sample earns any reward (too_hard), one
     where every sample earns the same reward (no_variance), since group-relative RL
-    learns nothing from equal rewards, and one solved by under 10% or over 90% of the
-    samples (outside_band). Partial rewards count as variance: [0.2, 0.8] is neither
-    too hard nor flat.
+    learns nothing from equal rewards, and one some but under 10% or over 90% of the
+    samples solve in full (outside_band, which needs 11 or more samples to show).
+    Partial rewards count as variance: [0.2, 0.8] is neither too hard nor flat.
 
     The last fenced code block of each completion is the solution; a completion with
     none is an empty answer, the model's own failure. The probe sets no output limit, so
@@ -105,7 +105,7 @@ def difficulty_check(env: Environment, dg: DeepGym, client: ZaiChatClient, sampl
             ('too_easy', difficulty.band == 'always_solved'),
             ('too_hard', max(scores) <= SCORE_TOLERANCE),
             ('no_variance', spread <= SCORE_TOLERANCE),
-            ('outside_band', difficulty.outside_band),
+            ('outside_band', difficulty.band == 'learnable' and difficulty.outside_band),
         )
         if raised
     ]

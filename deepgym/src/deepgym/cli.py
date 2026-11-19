@@ -376,6 +376,12 @@ def _build_parser() -> argparse.ArgumentParser:
         default=False,
         help="Allow runs that execute solutions on this machine (mode 'local')",
     )
+    console_p.add_argument(
+        '--ui-dir',
+        default=None,
+        help='Serve this UI build (a folder with index.html) instead of the bundled UI '
+        '(or set DEEPGYM_CONSOLE_UI_DIR)',
+    )
 
     return parser
 
@@ -1034,7 +1040,8 @@ def _cmd_console(args: argparse.Namespace) -> None:
 
     from deepgym.console.app import MISSING_UI_MESSAGE, create_app, ui_built
 
-    if not ui_built():
+    ui_dir = args.ui_dir or os.environ.get('DEEPGYM_CONSOLE_UI_DIR')
+    if not ui_dir and not ui_built():
         print(MISSING_UI_MESSAGE, file=sys.stderr)
     allow_local = args.allow_local_exec or os.environ.get(
         'DEEPGYM_ALLOW_LOCAL_EXEC', ''
@@ -1044,6 +1051,7 @@ def _cmd_console(args: argparse.Namespace) -> None:
     app = create_app(
         allow_local_exec=allow_local,
         allowed_hosts=_loopback_hosts(args.host, netloc),
+        static_dir=Path(ui_dir) if ui_dir else None,
     )
     print(f'DeepGym Console: http://{netloc}:{args.port}')
     uvicorn.run(app, host=args.host, port=args.port)

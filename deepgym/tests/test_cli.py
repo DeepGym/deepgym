@@ -2,6 +2,7 @@
 
 import json
 import sys
+from functools import partial
 from pathlib import Path
 from unittest.mock import patch
 
@@ -167,7 +168,9 @@ class TestConsoleCommand:
         ):
             main()
         create_app.assert_called_once_with(
-            allow_local_exec=True, allowed_hosts=['127.0.0.1', '[::1]', 'localhost']
+            allow_local_exec=True,
+            allowed_hosts=['127.0.0.1', '[::1]', 'localhost'],
+            static_dir=None,
         )
         run.assert_called_once_with(create_app.return_value, host='127.0.0.1', port=9191)
         assert 'http://127.0.0.1:9191' in capsys.readouterr().out
@@ -189,12 +192,12 @@ class TestConsoleCommand:
         name (DNS rebinding) must be refused, while the printed URL still works, as typed
         and as a browser normalizes it."""
 
-        def isolated(**kwargs: object) -> object:
-            return create_app(tmp_path / 'c.db', tmp_path / 'qa', **kwargs)
-
         with (
             patch.object(sys, 'argv', ['deepgym', 'console', '--host', host, '--port', '9191']),
-            patch('deepgym.console.app.create_app', side_effect=isolated),
+            patch(
+                'deepgym.console.app.create_app',
+                side_effect=partial(create_app, tmp_path / 'c.db', tmp_path / 'qa'),
+            ),
             patch('uvicorn.run') as run,
         ):
             main()
@@ -214,6 +217,54 @@ class TestConsoleCommand:
             main()
         assert 'bun run build' in capsys.readouterr().err
         assert create_app.call_args.kwargs['allowed_hosts'] is None
+
+    @pytest.mark.parametrize('from_env', [False, True])
+    def test_serves_the_ui_dir(
+        self,
+        from_env: bool,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture,
+    ) -> None:
+        ui = tmp_path / 'my-ui'
+        ui.mkdir()
+        (ui / 'index.html').write_text('<html><head></head><body>mine</body></html>')
+        argv = ['deepgym', 'console']
+        if from_env:
+            monkeypatch.setenv('DEEPGYM_CONSOLE_UI_DIR', str(ui))
+        else:
+            argv += ['--ui-dir', str(ui)]
+
+        with (
+            patch.object(sys, 'argv', argv),
+            patch('deepgym.console.app.ui_built', return_value=False),
+            patch(
+                'deepgym.console.app.create_app',
+                side_effect=partial(create_app, tmp_path / 'c.db', tmp_path / 'qa'),
+            ),
+            patch('uvicorn.run') as run,
+        ):
+            main()
+        client = TestClient(run.call_args.args[0], base_url='http://127.0.0.1')
+        assert 'mine' in client.get('/').text
+        assert 'bun run build' not in capsys.readouterr().err
+
+    def test_refuses_a_missing_ui_dir(self, tmp_path: Path, capsys: pytest.CaptureFixture) -> None:
+        missing = tmp_path / 'nope'
+
+        with (
+            patch.object(sys, 'argv', ['deepgym', 'console', '--ui-dir', str(missing)]),
+            patch(
+                'deepgym.console.app.create_app',
+                side_effect=partial(create_app, tmp_path / 'c.db', tmp_path / 'qa'),
+            ),
+            patch('uvicorn.run') as run,
+            pytest.raises(SystemExit) as exc_info,
+        ):
+            main()
+        assert exc_info.value.code == 1
+        assert f'Error: UI folder {missing} does not exist' in capsys.readouterr().err
+        run.assert_not_called()
 
 
 class TestReadFileOrString:

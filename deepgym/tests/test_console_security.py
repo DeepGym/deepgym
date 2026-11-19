@@ -1,5 +1,6 @@
 """Tests that other websites can't drive the console: token, same-origin writes, JSON, hosts."""
 
+import re
 from pathlib import Path
 
 import pytest
@@ -72,6 +73,37 @@ def test_html_carries_the_token(tmp_path: Path, built_ui: Path) -> None:
     assert 'runs' in page.text and TOKEN in page.text
     assert index.headers['cache-control'] == 'no-store'
     assert client.get('/app.js').text == 'console.log(1)'
+
+
+def test_serves_a_ui_dir_in_place_of_the_bundled_ui(tmp_path: Path, built_ui: Path) -> None:
+    ui = tmp_path / 'my-ui'
+    (ui / 'runs').mkdir(parents=True)
+    (ui / 'index.html').write_text('<html><head></head><body>mine</body></html>')
+    (ui / 'runs' / 'index.html').write_text('<html><head></head><body>my runs</body></html>')
+    default = TestClient(create_app(tmp_path / 'a.db', tmp_path / 'qa', token=TOKEN))
+    client = TestClient(create_app(tmp_path / 'b.db', tmp_path / 'qa', token=TOKEN, static_dir=ui))
+
+    index = client.get('/')
+    page = client.get('/runs/')
+
+    assert 'console' in default.get('/').text
+    assert 'mine' in index.text and 'console' not in index.text
+    assert f'<meta name="deepgym-token" content="{TOKEN}"/></head>' in index.text
+    assert 'my runs' in page.text and TOKEN in page.text
+    assert index.headers['cache-control'] == 'no-store'
+    assert client.get('/api/qa').status_code == 403
+    assert client.get('/api/qa', headers={TOKEN_HEADER: TOKEN}).status_code == 200
+
+
+@pytest.mark.parametrize(
+    ('exists', 'problem'), [(False, 'does not exist'), (True, 'has no index.html')]
+)
+def test_ui_dir_needs_an_index_html(tmp_path: Path, exists: bool, problem: str) -> None:
+    ui = tmp_path / 'my-ui'
+    if exists:
+        ui.mkdir()
+    with pytest.raises(FileNotFoundError, match=re.escape(f'UI folder {ui} {problem}')):
+        create_app(tmp_path / 'c.db', tmp_path / 'qa', static_dir=ui)
 
 
 def test_each_launch_gets_a_new_token(tmp_path: Path, built_ui: Path) -> None:

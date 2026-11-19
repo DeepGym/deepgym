@@ -331,7 +331,7 @@ class DatasetCounts(BaseModel):
     ) -> DatasetCounts:
         """Count *entries* per split and *dropped* per reason, with what is recorded as is."""
         splits = Counter(entry.split for entry in entries.values())
-        lost = {reason: len(ids) for reason, ids in dropped.items()}
+        lost: dict[DropReason, int] = {reason: len(ids) for reason, ids in dropped.items()}
         return cls(
             sources=len(entries) + sum(lost.values()),
             kept=len(entries),
@@ -432,7 +432,9 @@ def build_dataset(
     check_unique_ids(traces)
     ordered = sorted(traces, key=lambda trace: (trace.provenance.started_at, trace.trace_id))
     facts = _facts(ordered, spec, labels, episodes or {})
-    marked = {trace.trace_id: _marked(trace, spec, facts) for trace in ordered}
+    marked: dict[str, DropReason | None] = {
+        trace.trace_id: _marked(trace, spec, facts) for trace in ordered
+    }
     bands = _bands((trace for trace in ordered if marked[trace.trace_id] is None), facts, spec)
     dropped: dict[DropReason, list[str]] = {}
     survivors: dict[str, list[Trace]] = {}
@@ -553,7 +555,7 @@ def _facts(
     group = {trace.trace_id: copy_sha256(trace) for trace in traces}
     about = [(label, _trace_of(label, episodes)) for label in current_labels(labels)]
     unmatched = tuple(label for label, trace_id in about if trace_id not in group)
-    invalid = {trace_id for label, trace_id in about if label.type == 'invalidate'} & group.keys()
+    invalid = group.keys() & {trace_id for label, trace_id in about if label.type == 'invalidate'}
     pooled = {
         trace.trace_id
         for trace in traces

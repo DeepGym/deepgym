@@ -124,17 +124,20 @@ class LabelTarget(BaseModel):
             raise ValueError('a span needs a field naming the text it is in')
         if self.span is not None and self.span[0] >= self.span[1]:
             raise ValueError('a span is (start, end) with start < end')
-        if self.quote is not None and self.span is None:
-            raise ValueError('a quote needs a span')
-        if self.quote is not None and len(self.quote) != self.span[1] - self.span[0]:
-            raise ValueError('the quote must be the spanned text: end - start code points')
+        if self.quote is not None:
+            if self.span is None:
+                raise ValueError('a quote needs a span')
+            if len(self.quote) != self.span[1] - self.span[0]:
+                raise ValueError('the quote must be the spanned text: end - start code points')
         return self
 
 
-class LabelFields(BaseModel):
+class LabelFields(BaseModel, frozen=True):
     """What a labeler gives, shared by :class:`LabelCreate` and the stored :class:`Label`."""
 
-    model_config = ConfigDict(frozen=True, extra='forbid')
+    # frozen is a class keyword, not in model_config, so pyright sees the fields are
+    # read-only and lets Label narrow id; each subclass repeats it, as pyright requires.
+    model_config = ConfigDict(extra='forbid')
 
     target: LabelTarget
     type: LabelType = 'label'
@@ -180,7 +183,7 @@ class LabelFields(BaseModel):
     human may retract an invalidation, whoever made it."""
 
 
-class LabelCreate(LabelFields):
+class LabelCreate(LabelFields, frozen=True):
     """A label as its author gives it, checked against today's rules; storing it adds seq
     and time (:class:`Label`)."""
 
@@ -219,7 +222,7 @@ class LabelCreate(LabelFields):
         return self
 
 
-class Label(LabelFields):
+class Label(LabelFields, frozen=True):
     """A stored label record, as it was written; it never changes.
 
     It carries no write-time rules, so a record stored under older rules still reads back
@@ -229,7 +232,8 @@ class Label(LabelFields):
     seq: int = Field(ge=1)
     """Position in the store, increasing with each record stored; a sync cursor (``after_seq``)."""
 
-    id: Name
+    # Required: Field() with no default tells pyright the parent's None isn't inherited.
+    id: Name = Field()
     created_at: AwareDatetime
     """Never earlier than the record stored before it."""
 

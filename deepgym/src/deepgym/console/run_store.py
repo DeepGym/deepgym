@@ -9,6 +9,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from uuid import uuid4
 
+from deepgym.compare import Attempt
 from deepgym.console.db import connect, init_db, utc_now, verdict_columns
 from deepgym.console.schemas import (
     EnvironmentStats,
@@ -25,7 +26,7 @@ from deepgym.models import RunResult
 
 _SUMMARY_COLUMNS = (
     'id, group_id, environment, mode, provider, reference, status, score, passed, '
-    'error_type, duration_ms, created_at, finished_at'
+    'error_type, duration_ms, created_at, finished_at, environment_sha256'
 )
 # Columns page() and stats() may filter on; keys are code-defined, values are bound parameters.
 _FILTER_COLUMNS = frozenset({'status', 'environment', 'provider', 'group_id'})
@@ -77,25 +78,36 @@ class RunStore:
                 reference=spec.reference,
                 status='queued',
                 created_at=now,
+                environment_sha256=spec.environment_sha256,
             )
             for spec in specs
         ]
         with connect(self._path) as conn:
             conn.executemany(
                 'INSERT INTO runs (id, group_id, environment, mode, provider, reference, '
-                'solution, status, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)',
+                'solution, status, created_at, environment_sha256) '
+                'VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
                 [
                     (run.id, group_id, run.environment, mode, provider, spec.reference,
-                     spec.solution, 'queued', now)
+                     spec.solution, 'queued', now, spec.environment_sha256)
                     for run, spec in zip(runs, specs)
                 ],
             )  # fmt: skip
         return runs
 
-    def start(self, run_id: str) -> None:
-        """Mark a queued run as running."""
+    def start(self, run_id: str, environment_sha256: str) -> None:
+        """Mark a queued run as running, with the hash of the environment it runs now."""
         with connect(self._path) as conn:
-            conn.execute("UPDATE runs SET status = 'running' WHERE id = ?", (run_id,))
+            conn.execute(
+                "UPDATE runs SET status = 'running', environment_sha256 = ? WHERE id = ?",
+                (environment_sha256, run_id),
+            )
+
+    def forget_hash(self, run_id: str) -> None:
+        """Clear a run's environment hash: its environment changed while it ran, so which
+        definition it ran is unknown, and it compares as unverified."""
+        with connect(self._path) as conn:
+            conn.execute('UPDATE runs SET environment_sha256 = NULL WHERE id = ?', (run_id,))
 
     def complete(self, run_id: str, result: RunResult, duration_ms: float) -> None:
         """Record the verifier result of a run that finished.
@@ -216,6 +228,25 @@ class RunStore:
         data = dict(row)
         data['result'] = json.loads(data['result']) if data['result'] else None
         return RunDetail.model_validate(data)
+
+
+def run_attempt(run: RunSummary) -> Attempt:
+    """Return *run* as an attempt at its environment, for :func:`deepgym.compare.compare`.
+
+    The key is the environment name. A run has a verdict when it completed with a score
+    (see :meth:`RunStore.complete`), and is solved when the verifier passed it. One
+    without a verdict counts under its error type, or its status while queued or running.
+    The fingerprint is the environment hash, None for runs stored before it was kept.
+    """
+    judged = run.status == 'completed' and run.score is not None
+    return Attempt(
+        key=run.environment,
+        score=run.score or 0.0,
+        has_verdict=judged,
+        solved=judged and run.passed is True,
+        error_type=run.error_type or (None if judged else run.status),
+        fingerprint=run.environment_sha256,
+    )
 
 
 def _where(filters: dict[str, str | None]) -> tuple[str, list[str]]:

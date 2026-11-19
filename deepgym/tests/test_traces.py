@@ -15,9 +15,10 @@ from pydantic import ValidationError
 
 import deepgym
 from deepgym import ComputerUseEnvironment, DeepGym
+from deepgym.adversarial import grading_fingerprint
 from deepgym.console.episode_store import EpisodeStore, record_episode
 from deepgym.exceptions import ActionError, DeepGymError, SandboxError, VerifierError
-from deepgym.models import Action, MultiTurnEnvironment, RunResult, Trajectory
+from deepgym.models import Action, Environment, MultiTurnEnvironment, RunResult, Trajectory
 from deepgym.sandboxes import SandboxImage
 from deepgym.session import LOCAL_IMAGE, LocalBackend, Session
 from deepgym.traces import (
@@ -379,6 +380,20 @@ class TestProvenance:
         assert environment_sha256(ENV) == (
             '7f142979bcdf5748ac3baa872a5db2a58d701da9bb29b7451d747e8a3777b6f9'
         )
+
+    def test_file_verifier_counts_by_its_source_not_its_path(self, tmp_path: Path) -> None:
+        def env_in(folder: Path, verifier: str) -> Environment:
+            folder.mkdir()
+            (folder / 'verifier.py').write_text(verifier)
+            return Environment(name='e', task='t', verifier_path=folder / 'verifier.py')
+
+        here = env_in(tmp_path / 'checkout', 'return 1.0\n')
+        moved = env_in(tmp_path / 'site-packages', 'return 1.0\n')
+        edited = env_in(tmp_path / 'edited', 'return 0.0\n')
+
+        assert environment_sha256(here) == environment_sha256(moved)
+        assert environment_sha256(here) != environment_sha256(edited)
+        assert grading_fingerprint(here) != grading_fingerprint(edited)
 
     def test_hash_ignores_string_hash_seed(self) -> None:
         code = (

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import logging
 import math
 import uuid
@@ -10,7 +11,16 @@ from enum import Enum
 from pathlib import Path, PurePosixPath
 from typing import Any, Literal, get_args
 
-from pydantic import BaseModel, ConfigDict, Field, JsonValue, field_validator, model_validator
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    JsonValue,
+    SerializationInfo,
+    field_serializer,
+    field_validator,
+    model_validator,
+)
 
 from deepgym.exceptions import InvalidScoreError
 from deepgym.tools import HttpTool
@@ -37,6 +47,17 @@ its tests ran, or a sandbox it broke, hung or exhausted, see
 limit, or failed or broke the verifier any other way once its output was in play): a real 0
 to learn from, not a missing verdict. A timeout on DeepGym's side is
 ``timeout``, which has no verdict."""
+
+
+FINGERPRINT = 'deepgym_fingerprint'
+"""Serialization context key :func:`deepgym.traces.schema.environment_sha256` sets. A field
+naming a file or folder then serializes as a hash of what is there, so an environment's
+fingerprint changes when that content does, not when it moves."""
+
+
+def fingerprinting(info: SerializationInfo) -> bool:
+    """Whether a serializer runs for an environment fingerprint (see :data:`FINGERPRINT`)."""
+    return isinstance(info.context, dict) and info.context.get(FINGERPRINT) is True
 
 
 def is_verdict(exit_code: int | None, error_type: str | None) -> bool:
@@ -126,6 +147,13 @@ class Environment(BaseModel):
 
     verifier_path: Path | None = None
     """Optional filesystem path to a verifier script (alternative to inline code)."""
+
+    @field_serializer('verifier_path', when_used='json')
+    def _verifier_path_json(self, path: Path | None, info: SerializationInfo) -> str | None:
+        """The path; in a fingerprint (:data:`FINGERPRINT`), the hash of the verifier's source."""
+        if path is None or not fingerprinting(info):
+            return None if path is None else str(path)
+        return hashlib.sha256(self.verifier_source.encode('utf-8')).hexdigest()
 
     @model_validator(mode='after')
     def check_verifier_source(self) -> Environment:

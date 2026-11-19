@@ -17,7 +17,7 @@ from deepgym.exceptions import DeepGymError
 from deepgym.integrations.verl import extract_code
 from deepgym.integrations.zai import Completion, ZaiChatClient
 from deepgym.models import SCORE_TOLERANCE, Environment
-from deepgym.passk import pass_at_k, pass_hat_k, task_difficulty
+from deepgym.passk import default_ks, pass_at_k, pass_hat_k, task_difficulty
 from deepgym.qa.checks import solved
 from deepgym.qa.report import DIFFICULTY_CHECK, QACheck
 
@@ -109,7 +109,7 @@ def difficulty_check(env: Environment, dg: DeepGym, client: ZaiChatClient, sampl
         )
         if raised
     ]
-    ks = sorted({2**power for power in range(samples.bit_length())} | {samples})
+    ks = default_ks(samples)
     rates = [f'pass@{k}={pass_at_k(samples, count, k):.2f}' for k in ks] + [
         f'pass^{k}={pass_hat_k(samples, count, k):.2f}' for k in ks
     ]

@@ -35,7 +35,15 @@ from pydantic import (
 )
 from pydantic_core import to_json
 
-from deepgym.models import Action, MultiTurnEnvironment, Observation, RunResult, Trajectory
+from deepgym.models import (
+    FINGERPRINT,
+    Action,
+    Environment,
+    MultiTurnEnvironment,
+    Observation,
+    RunResult,
+    Trajectory,
+)
 from deepgym.sandboxes import SandboxImage
 
 TRACE_SCHEMA_VERSION = '1.2'
@@ -61,15 +69,26 @@ def json_text(value: object, *, indent: int | None = None) -> str:
     return to_json(value, indent=indent, inf_nan_mode='null').decode()
 
 
-def environment_sha256(env: MultiTurnEnvironment) -> str:
+def environment_sha256(env: MultiTurnEnvironment | Environment) -> str:
     """Fingerprint everything that defines *env*: task, files, setup, verifiers, limits.
 
     Fields left at their defaults are omitted, so adding a new field with a default
     doesn't change existing fingerprints; ``type`` is always kept, because subclasses
     have different defaults. Keys and the action set are sorted, so the hash doesn't
     depend on dict order or string hash seeds.
+
+    Files count by content, not path (see :data:`~deepgym.models.FINGERPRINT`): a verifier
+    read from a file by its source, and a Harbor task by its tests, solution and, when it
+    builds its image, its ``environment/`` folder. Not covered: the files under a
+    Terminal-Bench ``task_root`` or CyberGym ``artifacts``, which count by path only.
+
+    Raises:
+        PydanticSerializationError: If a file the environment names can't be read, or a
+            Harbor build context links outside its folder; the original ``OSError`` or
+            ``ValueError`` is its ``__cause__``.
     """
-    data = env.model_dump(mode='json', exclude_defaults=True) | {'type': env.type}
+    dump = env.model_dump(mode='json', exclude_defaults=True, context={FINGERPRINT: True})
+    data = dump | {'type': env.type}
     if 'allowed_actions' in data:
         data['allowed_actions'] = sorted(data['allowed_actions'])
     return sha256_text(json.dumps(data, sort_keys=True, separators=(',', ':')))

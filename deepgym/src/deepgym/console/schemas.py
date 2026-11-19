@@ -67,6 +67,8 @@ class RunSpec(BaseModel):
     environment: str
     solution: str
     reference: bool
+    environment_sha256: str
+    """Hash of the environment definition (:func:`deepgym.traces.schema.environment_sha256`)."""
 
 
 class RunSummary(BaseModel):
@@ -89,6 +91,9 @@ class RunSummary(BaseModel):
     duration_ms: float | None = None
     created_at: str
     finished_at: str | None = None
+    environment_sha256: str | None = None
+    """Hash of the environment definition the run was scored against; None for runs
+    stored before the console recorded it."""
 
 
 class RunPage(BaseModel):

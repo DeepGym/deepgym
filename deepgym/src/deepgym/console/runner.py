@@ -8,11 +8,14 @@ import time
 from collections.abc import Sequence
 from concurrent.futures import ThreadPoolExecutor
 
+from pydantic_core import PydanticSerializationError
+
 from deepgym.console.run_store import RunStore
 from deepgym.console.schemas import RunMode, RunSpec, RunSummary
 from deepgym.core import DeepGym
 from deepgym.exceptions import DeepGymError, error_type_for
 from deepgym.models import Environment
+from deepgym.traces.schema import environment_sha256
 
 logger = logging.getLogger(__name__)
 
@@ -83,15 +86,27 @@ class Runner:
         self._pool.shutdown(wait=False, cancel_futures=True)
 
     def _execute(self, run_id: str, dg: DeepGym, env: Environment, solution: str) -> None:
-        self._runs.start(run_id)
         start = time.perf_counter()
         try:
+            # Hashed again as it starts, since its files may have changed while it was queued.
+            fingerprint = environment_sha256(env)
+            self._runs.start(run_id, fingerprint)
             result = dg.run(env, solution)
         except Exception as exc:  # Recorded on the run; the pool would otherwise drop it.
             logger.warning('Console run %s failed: %s', run_id, exc)
             self._runs.fail(run_id, error_type_for(exc), str(exc), _elapsed_ms(start))
             return
+        if _hash_or_none(env) != fingerprint:  # changed while it ran: which one ran is unknown
+            self._runs.forget_hash(run_id)
         self._runs.complete(run_id, result, _elapsed_ms(start))
+
+
+def _hash_or_none(env: Environment) -> str | None:
+    """Return *env*'s hash, or None if it can no longer be hashed (a file it names is gone)."""
+    try:
+        return environment_sha256(env)
+    except PydanticSerializationError:
+        return None
 
 
 def _elapsed_ms(start: float) -> float:

@@ -12,6 +12,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 import pytest
+from pydantic import ValidationError
 
 from deepgym import registry as registry_module
 from deepgym.benchmark_envs import TerminalBenchEnvironment
@@ -25,6 +26,7 @@ from deepgym.qa import QACheck, run_qa
 from deepgym.registry import list_environments, load_environment, register_benchmark
 from deepgym.sandboxes import ExecResult
 from deepgym.session import check_workdir
+from deepgym.traces.schema import environment_sha256
 
 FIXTURES = Path(__file__).resolve().parent / 'fixtures' / 'harbor'
 TASKS = FIXTURES / 'tasks'
@@ -177,6 +179,91 @@ def test_rejects_a_build_context_that_links_out_of_the_task(tmp_path: Path) -> N
     inside = _task_copy(tmp_path / 'c', BUILT)
     (inside / 'environment' / 'Dockerfile.link').symlink_to('Dockerfile')
     assert HarborTask.from_dir(inside).build_context == (inside / 'environment').resolve()
+
+
+def _task_copies(tmp_path: Path, source: Path, *places: str) -> list[Path]:
+    """Copy the task at *source* into each of *places*, adding a binary test file."""
+    copies = [shutil.copytree(source, tmp_path / place / source.name) for place in places]
+    for copy in copies:
+        (copy / 'tests' / 'blob.bin').write_bytes(b'\xff\xfe\x00\x80')
+    return copies
+
+
+def test_binary_task_files_round_trip_as_json(tmp_path: Path) -> None:
+    (task_dir,) = _task_copies(tmp_path, HELLO, 'here')
+    task = HarborTask.from_dir(task_dir)
+
+    assert HarborTask.model_validate_json(task.model_dump_json()) == task
+
+
+def test_hash_reads_binary_files_and_ignores_where_the_folder_is(tmp_path: Path) -> None:
+    for source in (HELLO, BUILT):
+        here, moved = _task_copies(tmp_path, source, 'here', 'moved')
+
+        hashes = {environment_sha256(HarborEnvironment.from_dir(path)) for path in (here, moved)}
+
+        assert len(hashes) == 1, source.name
+
+
+def test_hash_covers_the_build_context_only_when_the_image_is_built(tmp_path: Path) -> None:
+    (built,) = _task_copies(tmp_path, BUILT, 'built')
+    (pulled,) = _task_copies(tmp_path, HELLO, 'pulled')  # names a prebuilt docker_image
+    (pulled / 'environment').mkdir()
+    (pulled / 'environment' / 'Dockerfile').write_text('FROM scratch\n')
+
+    def hashes() -> list[str]:
+        return [environment_sha256(HarborEnvironment.from_dir(path)) for path in (built, pulled)]
+
+    before = hashes()
+    for path in (built, pulled):
+        (path / 'environment' / 'setup.sh').write_text('echo hi\n')
+    after = hashes()
+    (built / 'environment' / 'setup.sh').chmod(0o755)
+
+    assert before[0] != after[0] != hashes()[0]  # content and the executable bit count
+    assert before[1] == after[1]  # environment/ is never built, so it isn't the task
+
+
+def test_python_strings_stay_utf8_and_json_reads_url_safe_base64() -> None:
+    def task(tests: dict[str, str | bytes]) -> HarborTask:
+        return HarborTask(name='t', path=Path('/tasks/t'), instruction='i', tests=tests)
+
+    blob = {'test.sh': b'\xfb\xff\xfe'}
+    text = task(blob).model_dump_json()
+
+    assert task({'test.sh': 'echo hi\n'}).tests == {'test.sh': b'echo hi\n'}
+    assert '"-__-"' in text  # the URL-safe alphabet: - and _ for + and /
+    assert HarborTask.model_validate_json(text).tests == blob
+    with pytest.raises(ValidationError, match='tests'):
+        HarborTask.model_validate_json(text.replace('-__-', 'echo hi'))
+
+
+def test_build_hash_records_links_modes_empty_folders_and_whole_files(tmp_path: Path) -> None:
+    (task_dir,) = _task_copies(tmp_path, BUILT, 'built')
+    context = task_dir / 'environment'
+    for name in ('a.txt', 'b.txt'):
+        (context / name).write_text('same')
+    (context / 'link').symlink_to('a.txt')
+
+    def digest() -> str:
+        return environment_sha256(HarborEnvironment.from_dir(task_dir))
+
+    seen = [digest()]
+    (context / 'link').unlink()
+    (context / 'link').symlink_to('b.txt')  # same content behind it: the target counts
+    seen.append(digest())
+    (context / 'a.txt').chmod(0o600)  # others lose read: counts
+    seen.append(digest())
+    (context / 'a.txt').chmod(0o400)  # only a write bit changed (as a umask would): doesn't
+    assert digest() == seen[-1]
+    (context / 'empty').mkdir()
+    seen.append(digest())
+    (context / 'big.bin').write_bytes(bytes(3 << 20))  # read in chunks, to its last byte
+    seen.append(digest())
+    (context / 'big.bin').write_bytes(bytes((3 << 20) - 1) + b'\x01')
+    seen.append(digest())
+
+    assert len(set(seen)) == len(seen)
 
 
 def test_verifier_network_falls_back_from_verifier_to_environment(tmp_path: Path) -> None:

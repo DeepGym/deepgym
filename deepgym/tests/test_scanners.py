@@ -84,6 +84,9 @@ def _scan_one(scanner: object, trace: Trace) -> list[Finding]:
 
 
 PROTECTED = ProtectedPathScanner(name='protected', globs=('tests/**',))
+PATTERN = {'kind': 'pattern', 'name': 'p', 'patterns': [{'regex': 'a', 'message': 'x'}]}
+GLOBS = {'kind': 'protected_paths', 'name': 'q', 'globs': ['a']}
+TOO_SHORT = 'Tuple should have at least 1 item after validation, not 0'
 
 
 class TestPatternScanner:
@@ -151,6 +154,35 @@ class TestPatternScanner:
         ):
             with pytest.raises(ValidationError):
                 load_rule_scanners(json.dumps(bad))
+
+    @pytest.mark.parametrize(
+        ('scanner', 'loc', 'msg'),
+        [
+            ({**PATTERN, 'patterns': [{'regex': '(', 'message': 'x'}]}, ('patterns', 0, 'regex'),
+             'Input should be a valid regular expression: missing ), unterminated subpattern '
+             'at position 0'),
+            ({**PATTERN, 'patterns': [{'regex': 'a{4294967296}', 'message': 'x'}]},
+             ('patterns', 0, 'regex'),
+             'Input should be a valid regular expression: the repetition number is too large'),
+            ({**PATTERN, 'patterns': [{'regex': '(' * 5000 + ')' * 5000, 'message': 'x'}]},
+             ('patterns', 0, 'regex'), None),
+            ({**PATTERN, 'patterns': [{'regex': 'a', 'message': ''}]}, ('patterns', 0, 'message'),
+             None),
+            ({**PATTERN, 'fields': ['nope']}, ('fields', 0), None),
+            ({**PATTERN, 'patterns': []}, ('patterns',), TOO_SHORT),
+            ({**GLOBS, 'globs': ['']}, ('globs', 0), None),
+            ({**GLOBS, 'globs': []}, ('globs',), TOO_SHORT),
+        ],
+    )  # fmt: skip
+    def test_a_bad_config_is_one_error_where_it_is(
+        self, scanner: dict, loc: tuple, msg: str | None
+    ) -> None:
+        with pytest.raises(ValidationError) as refused:
+            load_rule_scanners(json.dumps([scanner]))
+
+        [error] = refused.value.errors()
+        assert error['loc'] == (0, scanner['kind'], *loc)
+        assert msg is None or error['msg'] == msg
 
 
 class TestProtectedPaths:

@@ -359,6 +359,26 @@ class TestSupersede:
         with pytest.raises(ValueError, match='already superseded'):
             store.add(_retract(first.id))
 
+    def test_a_stale_correction_names_the_current_record(self, store: LabelStore) -> None:
+        first = store.add(_passed())
+        fixed = store.add(_passed(value=False, supersedes=first.id))
+        mark = store.add(_label())
+        retraction = store.add(_retract(mark.id))
+
+        with pytest.raises(ValueError) as stale:
+            store.add(_passed(comment='Fine after all.', supersedes=first.id))
+        with pytest.raises(ValueError) as late:
+            store.add(_retract(first.id))
+        with pytest.raises(ValueError) as gone:
+            store.add(_label(value='terse', supersedes=mark.id))
+
+        assert str(stale.value) == (
+            f'Label {first.id} was already superseded by {fixed.id}; correct {fixed.id} instead'
+        )
+        assert str(late.value).endswith(f'; retract {fixed.id} instead')
+        assert str(gone.value) == f'Label {mark.id} was already retracted by {retraction.id}'
+        assert store.current('trace', 't1') == [fixed]
+
 
 class TestOneCurrentVerdict:
     @pytest.mark.parametrize('name', ['passed', 'c3'])

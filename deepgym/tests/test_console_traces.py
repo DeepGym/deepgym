@@ -509,6 +509,20 @@ def test_refused_scans(client: TestClient, db: Path, body: dict) -> None:
     assert client.get('/api/labels').json()['total'] == 0
 
 
+def test_a_bad_regex_is_one_error(client: TestClient) -> None:
+    bad = {**ECHO, 'patterns': [{'regex': '(', 'message': 'm'}]}
+
+    response = client.post('/api/scans', json={'scanners': [bad]})
+
+    assert response.status_code == 422
+    [error] = response.json()['detail']
+    assert error['loc'] == ['body', 'scanners', 0, 'pattern', 'patterns', 0, 'regex']
+    assert error['msg'] == (
+        'Input should be a valid regular expression: missing ), unterminated subpattern at '
+        'position 0'
+    )
+
+
 def test_scan_takes_no_query_parameters(client: TestClient) -> None:
     response = client.post('/api/scans', params={'write_labels': 'true'}, json={'scanners': [ECHO]})
     assert response.status_code == 422

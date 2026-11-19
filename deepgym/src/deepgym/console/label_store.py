@@ -282,12 +282,14 @@ def _retried(conn: sqlite3.Connection, label: LabelCreate) -> Label | None:
 
 
 def _check_supersedes(conn: sqlite3.Connection, label: Label) -> None:
-    """Refuse *label* unless the record it supersedes, if any, is stored and fits it.
+    """Refuse *label* unless the record it supersedes, if any, is stored, fits it and is
+    still current.
 
     Raises:
         ValueError: If that record isn't stored, is on another target, is a retraction, is
-            from another source or author (unless a human retracts an invalidation), or
-            has another type than a correction of it.
+            from another source or author (unless a human retracts an invalidation), has
+            another type than a correction of it, or is already superseded (the message
+            names the record that did).
     """
     if label.supersedes is None:
         return
@@ -312,6 +314,18 @@ def _check_supersedes(conn: sqlite3.Connection, label: Label) -> None:
             f'Label {label.supersedes} is a {row["type"]} record; a correction keeps its '
             'type, and a retraction withdraws it'
         )
+    later = conn.execute(
+        'SELECT id, type FROM labels WHERE supersedes = ?', (label.supersedes,)
+    ).fetchone()
+    if later is None:
+        return
+    if later['type'] == 'retract':
+        raise ValueError(f'Label {label.supersedes} was already retracted by {later["id"]}')
+    verb = 'retract' if label.type == 'retract' else 'correct'
+    raise ValueError(
+        f'Label {label.supersedes} was already superseded by {later["id"]}; '
+        f'{verb} {later["id"]} instead'
+    )
 
 
 def _check_verdict(conn: sqlite3.Connection, label: Label) -> None:

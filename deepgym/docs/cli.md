@@ -63,7 +63,7 @@ See [traces](traces.md), [scanning](traces.md#scan-traces) and [datasets](traces
 | Command | What it does | Main flags |
 |---|---|---|
 | `deepgym serve` | Start the HTTP API | `--host` (default `127.0.0.1`), `--port` (default 8000), `--allow-local-exec`, `--no-auth`, `--reload` |
-| `deepgym console` | Launch the local web console (alias `deepgym web`) | `--host` (default `127.0.0.1`), `--port` (default 8080), `--allow-local-exec` |
+| `deepgym console` | Launch the local web console (alias `deepgym web`) | `--host` (default `127.0.0.1`), `--port` (default 8080), `--allow-local-exec`, `--ui-dir` |
 
 Both need `pip install "deepgym[server]"`. See [the API server](api-server.md) and
 [the console](console.md).

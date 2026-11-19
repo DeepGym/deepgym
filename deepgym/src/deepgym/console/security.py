@@ -10,11 +10,14 @@ from __future__ import annotations
 
 import hmac
 import os
+import re
 from html import escape
 from pathlib import Path
 
 from fastapi import HTTPException, Request, Response, status
 from fastapi.staticfiles import StaticFiles
+from starlette.responses import FileResponse
+from starlette.types import Scope
 
 TOKEN_HEADER = 'X-DeepGym-Token'
 TOKEN_META = 'deepgym-token'
@@ -56,7 +59,14 @@ class TokenedStaticFiles(StaticFiles):
 
     def __init__(self, directory: Path, token: str) -> None:
         super().__init__(directory=directory, html=True)
-        self._meta = f'<meta name="{TOKEN_META}" content="{escape(token)}"/></head>'.encode()
+        self._meta = f'<meta name="{TOKEN_META}" content="{escape(token)}"/>'.encode()
+
+    async def get_response(self, path: str, scope: Scope) -> Response:
+        """Serve as StaticFiles does, with its 404.html fallback going through file_response."""
+        response = await super().get_response(path, scope)
+        if isinstance(response, FileResponse) and response.status_code == 404:
+            return self.file_response(response.path, response.stat_result, scope, 404)
+        return response
 
     def file_response(
         self,
@@ -65,10 +75,16 @@ class TokenedStaticFiles(StaticFiles):
         scope: dict,
         status_code: int = 200,
     ) -> Response:
-        """Serve HTML with the token meta tag (never cached); other files unchanged."""
-        if not str(full_path).endswith('.html'):
+        """Serve HTML with the token meta tag before its first </head>, never cached."""
+        if not str(full_path).lower().endswith(('.html', '.htm')):
             return super().file_response(full_path, stat_result, scope, status_code)
-        page = Path(full_path).read_bytes().replace(b'</head>', self._meta, 1)
+        page = re.sub(
+            rb'</head>',
+            lambda end: self._meta + end[0],
+            Path(full_path).read_bytes(),
+            count=1,
+            flags=re.IGNORECASE,
+        )
         return Response(
             page,
             status_code=status_code,

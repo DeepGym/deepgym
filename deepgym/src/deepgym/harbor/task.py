@@ -57,11 +57,12 @@ _ENV_NAME = re.compile(r'[A-Za-z_][A-Za-z0-9_]*')
 def pack_files(files: Mapping[str, bytes]) -> bytes:
     """Return *files* (relative path -> content) as a gzipped tar, every file mode 755.
 
-    The same files always give the same bytes: the gzip header's time is 0, not now.
+    The same files give the same bytes on any Python with the same zlib: the gzip header's
+    time is 0, not now, and the level is pinned (Python 3.15 lowers the default).
     """
     buffer = io.BytesIO()
     with (
-        gzip.GzipFile(fileobj=buffer, mode='wb', mtime=0) as compressed,
+        gzip.GzipFile(fileobj=buffer, mode='wb', compresslevel=9, mtime=0) as compressed,
         tarfile.open(fileobj=compressed, mode='w') as archive,
     ):
         for name, data in files.items():

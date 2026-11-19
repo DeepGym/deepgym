@@ -1,4 +1,4 @@
-"""Difficulty probe: sample a model on the task and report pass@1 and pass@k."""
+"""Difficulty probe: sample a model on the task and report pass@k and pass^k."""
 
 from __future__ import annotations
 
@@ -17,6 +17,7 @@ from deepgym.exceptions import DeepGymError
 from deepgym.integrations.verl import extract_code
 from deepgym.integrations.zai import Completion, ZaiChatClient
 from deepgym.models import SCORE_TOLERANCE, Environment
+from deepgym.passk import pass_at_k, pass_hat_k, task_difficulty
 from deepgym.qa.checks import solved
 from deepgym.qa.report import DIFFICULTY_CHECK, QACheck
 
@@ -56,11 +57,13 @@ def difficulty_check(env: Environment, dg: DeepGym, client: ZaiChatClient, sampl
     """Score *samples* completions of ``env.task`` and report how the model does.
 
     Reported, never gated: the check passes once it has measured, and its details give
-    pass@1, pass@k, and the mean and spread of the rewards. They flag a task every
-    sample solves (too_easy), one where no sample earns any reward (too_hard), and one
+    the unbiased pass@k and pass^k for k = 1, each power of 2 below *samples* and
+    *samples* itself, and the mean and spread of the rewards. They flag a task every
+    sample solves (too_easy), one where no sample earns any reward (too_hard), one
     where every sample earns the same reward (no_variance), since group-relative RL
-    learns nothing from equal rewards. Partial rewards count as variance: [0.2, 0.8] is
-    neither too hard nor flat.
+    learns nothing from equal rewards, and one solved by under 10% or over 90% of the
+    samples (outside_band). Partial rewards count as variance: [0.2, 0.8] is neither
+    too hard nor flat.
 
     The last fenced code block of each completion is the solution; a completion with
     none is an empty answer, the model's own failure. The probe sets no output limit, so
@@ -95,19 +98,24 @@ def difficulty_check(env: Environment, dg: DeepGym, client: ZaiChatClient, sampl
     scores = [result.score for result in results]
     count = sum(solved(result) for result in results)
     spread = statistics.pstdev(scores)
+    difficulty = task_difficulty(samples, count)
     flags = [
         flag
         for flag, raised in (
-            ('too_easy', count == samples),
+            ('too_easy', difficulty.band == 'always_solved'),
             ('too_hard', max(scores) <= SCORE_TOLERANCE),
             ('no_variance', spread <= SCORE_TOLERANCE),
+            ('outside_band', difficulty.outside_band),
         )
         if raised
     ]
+    ks = sorted({2**power for power in range(samples.bit_length())} | {samples})
+    rates = [f'pass@{k}={pass_at_k(samples, count, k):.2f}' for k in ks] + [
+        f'pass^{k}={pass_hat_k(samples, count, k):.2f}' for k in ks
+    ]
     details = (
         (f'{", ".join(flags)}: ' if flags else '')
-        + f'pass@1={count / samples:.2f} pass@{samples}={float(count > 0):.2f}, '
-        f'mean reward {statistics.fmean(scores):.2f}, spread {spread:.2f} '
+        + f'{" ".join(rates)}, mean reward {statistics.fmean(scores):.2f}, spread {spread:.2f} '
         f'({count}/{samples} solved by {client.model})'
     )
     return QACheck(name=DIFFICULTY_CHECK, status='pass', details=details)

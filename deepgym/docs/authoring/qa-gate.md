@@ -114,12 +114,18 @@ Where mutants can run:
 
 ## Difficulty
 
-`--model` measures pass@1, pass@k, and the mean and spread of the rewards over k samples
-(`--samples`, default 8) from an OpenAI-compatible endpoint (`OPENAI_BASE_URL`,
-`OPENAI_API_KEY`). It is reported, never gated: it passes once measured and flags
-`too_easy` (every sample solved), `too_hard` (no sample earned anything) and `no_variance`
-(every sample earned the same), since group-relative RL learns nothing from equal
-rewards. Partial rewards are variance: `[0.2, 0.8]` is neither too hard nor flat.
+`--model` draws n samples (`--samples`, default 8) from an OpenAI-compatible endpoint
+(`OPENAI_BASE_URL`, `OPENAI_API_KEY`) and reports the unbiased pass@k (at least one of k
+attempts solves the task) and pass^k (all k do) for k = 1, each power of 2 below n and n
+itself, and the mean and spread of the rewards. It is reported, never gated: it passes once
+measured and flags `too_easy` (every sample solved), `too_hard` (no sample earned
+anything), `no_variance` (every sample earned the same), since group-relative RL learns
+nothing from equal rewards, and `outside_band` (solved by under 10% or over 90% of the
+samples). Partial rewards are variance: `[0.2, 0.8]` is neither too hard nor flat.
+
+For your own sampled runs, `deepgym.passk` has the same estimators (`pass_at_k(n, c, k)`,
+`pass_hat_k(n, c, k)`), the band of one task (`task_difficulty`) and their average over
+many tasks with counts per band (`summarize`).
 
 The probe sends no output limit. If the endpoint still cuts a sample off at its own
 (`finish_reason` `length`), that sample is no answer, so the check is inconclusive

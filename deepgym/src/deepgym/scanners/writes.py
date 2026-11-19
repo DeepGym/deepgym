@@ -9,7 +9,9 @@ Nothing is run, and only these forms are read:
   ``mv`` and ``rsync``, and what ``mv`` moves away. A destination that is a folder by its
   form (``.``, a ``..`` chain, or ending in ``/``) receives each source by its name, as
   ``DIR`` does with ``-t DIR`` (also bundled, ``-rt DIR``; not for ``rsync``, whose
-  ``-t`` keeps times). ``install -d`` makes every operand a destination. Long options
+  ``-t`` keeps times), unless ``-T`` (``--no-target-directory``) is given or a source has
+  characters the shell expands (``*?[{$``, a backtick, ``~``): then the folder itself is
+  the destination. ``install -d`` makes every operand a destination. Long options
   match by unique prefix; an unrecognised or ambiguous option, or a destination that
   can't be told, makes every operand a possible destination, and every option value is
   always one. Then the files of ``sed``, ``perl`` and ``ruby`` with ``-i`` (not the
@@ -135,6 +137,8 @@ _EDITORS = {
 }
 _SCRIPT_OPTIONS = frozenset({'--expression', '--file'})
 _TO_LAST = frozenset({'rsync'})
+_EXPANDS = re.compile(r'[*?\[{$`~]')
+"""Characters a shell may expand in a word, so its real names can't be read from the text."""
 
 
 def _long_options(spec: str) -> dict[str, str]:
@@ -421,7 +425,7 @@ def _copier_writes(command: str, words: Sequence[_Word]) -> list[Write]:
     directories: list[Write] = []  # each DIR, as a path cited where it is
     values: list[Write] = []  # every other option value
     skip: Literal['dir', 'value'] | None = None
-    ended = every = unknown = False
+    ended = every = unknown = no_target = False
     for word in words:
         value = word.value
         if skip is not None:
@@ -436,6 +440,7 @@ def _copier_writes(command: str, words: Sequence[_Word]) -> list[Write]:
             name, takes = _long_option(option[2:], copier.long)
             unknown |= name is None
             every |= command == 'install' and name == 'directory'
+            no_target |= name == 'no-target-directory'
             if given:
                 is_dir = name == 'target-directory'
                 (directories if is_dir else values).append(_part(word, len(option) + 1))
@@ -444,6 +449,7 @@ def _copier_writes(command: str, words: Sequence[_Word]) -> list[Write]:
         else:
             for at, letter in enumerate(value[1:], 1):
                 every |= command == 'install' and letter == 'd'
+                no_target |= letter == 'T'
                 if letter in copier.flags:
                     continue
                 unknown |= letter not in copier.takes  # an unknown option may take a value
@@ -456,12 +462,18 @@ def _copier_writes(command: str, words: Sequence[_Word]) -> list[Write]:
     unclear = unknown or skip == 'dir' or len({path for path, _, _ in directories}) > 1
     if every or unclear or (not directories and len(operands) < 2):
         return [operand.cite() for operand in operands] + directories + values
+    # A source the shell expands (/tmp/*, $X, ~/x) has names the text doesn't show: then the
+    # folder it lands in is cited itself, never a guessed DIR/<name>.
+    plain = not any(_EXPANDS.search(operand.value) for operand in operands)
     if directories:
         directory, cited, _ = directories[0]
-        return _into(directory, [operand.value for operand in operands], cited) + moved + values
+        written = [Write(directory, cited)]
+        if plain:
+            written = _into(directory, [operand.value for operand in operands], cited)
+        return written + moved + values
     *sources, destination = operands
     written = [destination.cite()]
-    if _folder_form(destination.value):
+    if plain and not no_target and _folder_form(destination.value):
         sources_named = [source.value for source in sources]
         written = _into(destination.value, sources_named, destination.cite().span)
     return [*moved[:-1], *written, *values]

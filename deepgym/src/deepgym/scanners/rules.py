@@ -148,7 +148,7 @@ class ProtectedPathScanner(_Rule):
     "tried to change <path> ...; the tool reported failure", with the same severity.
     """
 
-    reads: ClassVar[str] = 'protected-paths/5'
+    reads: ClassVar[str] = 'protected-paths/6'
     """Covers :mod:`deepgym.scanners.writes` and :func:`_compile`: bump it whenever what an
     action is read to change, or which paths a glob matches, changes."""
 

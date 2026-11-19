@@ -256,7 +256,7 @@ deepgym traces scan --config scanners.json --out report.json --write-labels
   action it sees only the launch command and the CLI's output (`ProtectedPathScanner`
   reads the edits and commands in the events). Its version is `pattern/1+config-sha256:`
   and the SHA-256 of its JSON config with each regex's flags (which the JSON leaves out);
-  `ProtectedPathScanner`'s is `protected-paths/5+config-sha256:...`. The part before `+`
+  `ProtectedPathScanner`'s is `protected-paths/6+config-sha256:...`. The part before `+`
   names how the scanner reads a trace and changes whenever that does.
 - **`ProtectedPathScanner`** flags each applied action whose text names a path matching
   one of its `globs` as one it writes, deletes or moves (severity `high` by default).
@@ -267,10 +267,12 @@ deepgym traces scan --config scanners.json --out report.json --write-labels
   folder by its form, `.`, a `..` chain or ending in `/`, receives each source by its
   name, so `cp /tmp/data.csv .` writes `./data.csv`; so does `DIR` with `-t DIR`, also
   bundled as `-rt DIR` or `-tDIR`, or `--target-directory[=]DIR`, though not for `rsync`,
-  whose `-t` keeps times; with `install -d`, every operand; long options match by unique
-  prefix, as GNU's do, such as `--target-dir`; unrecognised options, a prefix that
-  matches several, and a destination that can't be told, such as `-t` with no DIR, two
-  DIRs or a single operand, make the scanner report every operand and option value;
+  whose `-t` keeps times; with `-T` (`--no-target-directory`), or a source the shell
+  expands (`*?[{$`, a backtick, `~`), the folder itself is the destination; with
+  `install -d`, every operand; long options match by unique prefix, as GNU's do, such as
+  `--target-dir`; unrecognised options, a prefix that matches several, and a destination
+  that can't be told, such as `-t` with no DIR, two DIRs or a single operand, make the
+  scanner report every operand and option value;
   option values are always reported too, so a mistake in the option tables can't hide a
   path), the files of `sed`, `perl` and `ruby` with `-i` (not the script: the first
   operand unless `-e`, `-f` or `--expression` gives it), the paths named after
@@ -283,8 +285,9 @@ deepgym traces scan --config scanners.json --out report.json --write-labels
   literal paths given to `open` with a write mode (`file=` and `mode=` too), to `os` and
   `shutil` calls that change files (`path=`, `src=` and `dst=` too) and to `Path(...)`
   methods that do, and literal shell commands given to `os.system` or `subprocess` (a
-  `shutil.copy`, `copy2` or `move` destination that is a folder by its form receives the
-  source by its name), with the code's imports resolved (`from pathlib import Path
+  `shutil.copy`, `copy2` or `move` destination that is a folder by its form receives a
+  literal source by its name; with any other source, the folder itself is the
+  destination), with the code's imports resolved (`from pathlib import Path
   as P`, `import shutil as sh`, `import os.path as osp`; regardless of scope or order, a
   name bound in several places takes every meaning, and `os`, `shutil`, `subprocess`,
   `io`, `builtins` and builtins such as `open` keep their own, so a conditional or

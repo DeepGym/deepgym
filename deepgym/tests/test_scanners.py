@@ -242,6 +242,13 @@ class TestProtectedPaths:
             ('cp /tmp/tests .', ['.']),  # lands as ./tests
             ('cp a.py b.py tests/', ['tests/', 'tests/']),
             ("find . -name '*.pyc' -delete", ['.']),  # . holds every relative path
+            ('cp -T src .', ['.']),  # . is the destination itself
+            ('cp --no-target-directory src .', ['.']),
+            ('cp --no-target src .', ['.']),  # a unique prefix
+            ('cp /tmp/* .', ['.']),  # the shell's names aren't in the text
+            ('mv $X .', ['.']),
+            ('cp ~/tests ./', ['./']),
+            ('cp -t . /tmp/*', ['.']),
             ('rm -rf .', ['.']),
             ('rm -rf ../..', ['../..']),
             ('git checkout .', ['.']),
@@ -390,6 +397,7 @@ class TestProtectedPaths:
             "shutil.move('/tmp/h.py', 'tests/')\n"
             "shutil.copy('/tmp/a.py', 'tests/b.py')\n"
             "shutil.copytree('/tmp/x', '.')\n"
+            "shutil.copy(name, '.')\n"
         )
 
         assert [w.path for w in python_writes(code)] == [
@@ -399,6 +407,7 @@ class TestProtectedPaths:
             'tests/h.py',
             'tests/b.py',
             '.',  # copytree merges into it
+            '.',  # a source not written as a literal
         ]
 
     def test_python_keywords_and_path_parts(self) -> None:
@@ -853,7 +862,7 @@ class TestScanTraces:
         )
 
         config = sha256_text(json_text(PROTECTED.model_dump(mode='json')))
-        assert PROTECTED.version == f'protected-paths/5+config-sha256:{config}'
+        assert PROTECTED.version == f'protected-paths/6+config-sha256:{config}'
         assert other.version != PROTECTED.version
         assert plain.version.startswith('pattern/1+config-sha256:')
         assert plain.model_dump_json() == folded.model_dump_json()

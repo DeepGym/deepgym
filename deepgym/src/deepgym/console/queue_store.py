@@ -449,8 +449,8 @@ class QueueStore:
 
         Raises:
             NotReviewerError: If the queue lists its reviewers and *reviewer* isn't one.
-            ValueError: If *reviewer* has reviewed the item and couldn't submit a review of
-                it now.
+            ValueError: If *reviewer* hasn't reviewed the item and couldn't submit a review
+                of it now.
             QueueNotFoundError: Also if the console holds no run, episode or trace for the
                 item's target.
             ConflictingRecordingError: A ``ValueError``, if a trace's stored copies disagree

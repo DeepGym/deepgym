@@ -9,14 +9,15 @@ from __future__ import annotations
 
 import json
 import sqlite3
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 
 from pydantic import JsonValue
 
+from deepgym.console.db import TRACE_ID, TRACE_KEY
 from deepgym.console.episode_store import select_held_traces
 from deepgym.console.schemas import Frame
 from deepgym.models import Action
-from deepgym.registry import load_environment
+from deepgym.registry import environment_dir, load_environment
 from deepgym.review_queues import (
     ContentAction,
     ContentMessage,
@@ -101,7 +102,9 @@ def episode_content(conn: sqlite3.Connection, item: QueueItem) -> ItemContent | 
             index=frame.index,
             action=_action(frame.action),
             observation=_output(frame.content, produced_by),
-            exit_code=None if frame.action is None or then is None else _exit_code(then),
+            exit_code=None
+            if frame.action is None or then is None
+            else _exit_code((then.metadata or {}).get('exit_code')),
             has_screenshot=frame.has_screenshot,
             applied=True,
             error=None,
@@ -121,10 +124,16 @@ def trace_content(conn: sqlite3.Connection, item: QueueItem) -> ItemContent | No
         raise ConflictingRecordingError(conflict.detail)
     trace = next((trace for trace in held.traces if trace.trace_id == trace_id), None)
     if trace is None:
-        if held.unreadable:
+        # Only a copy stored under this exact id makes it unreadable; one whose id matches
+        # but for case is another trace, so this one isn't held (404, as the trace route).
+        if _stored_under(conn, held.unreadable, trace_id):
             raise ValueError(f'No stored copy of trace {trace_id} reads as a trace')
         return None
-    verified = trace.provenance.env.step_verifier_sha256 is not None
+    # A step verifier ran if the fingerprint names one or any step kept its output or reward,
+    # so an imported trace without the fingerprint still has its step errors cut.
+    verified = trace.provenance.env.step_verifier_sha256 is not None or any(
+        step.step_verifier is not None or step.reward is not None for step in trace.steps
+    )
     steps = [
         ContentStep(
             index=step.index,
@@ -132,7 +141,7 @@ def trace_content(conn: sqlite3.Connection, item: QueueItem) -> ItemContent | No
             observation=None
             if step.observation is None
             else _output(step.observation.content, step.action),
-            exit_code=step.exit_code,
+            exit_code=_exit_code(step.exit_code),
             has_screenshot=False,
             applied=step.applied,
             error=_step_error(step, verified=verified),
@@ -154,10 +163,23 @@ def _action(action: Action | None) -> ContentAction | None:
     return ContentAction.model_validate(action.model_dump(include=set(ContentAction.model_fields)))
 
 
-def _exit_code(frame: Frame) -> int | None:
-    """Return the exit code in *frame*'s observation metadata, if it records one."""
-    code = (frame.metadata or {}).get('exit_code')
+def _exit_code(code: object) -> int | None:
+    """Return an exit code read from observation metadata, if it is an integer: anything
+    else there is left out rather than failing the whole item."""
     return code if isinstance(code, int) else None
+
+
+def _stored_under(conn: sqlite3.Connection, episode_ids: Sequence[str], trace_id: str) -> bool:
+    """Return whether one of *episode_ids* stores a trace whose id is exactly *trace_id*."""
+    if not episode_ids:
+        return False
+    marks = ', '.join('?' * len(episode_ids))
+    row = conn.execute(
+        f'SELECT 1 FROM episodes WHERE {TRACE_KEY} = lower(?) AND {TRACE_ID} = ? '
+        f'AND id IN ({marks}) LIMIT 1',
+        (trace_id, trace_id, *episode_ids),
+    ).fetchone()
+    return row is not None
 
 
 def _step_error(step: TraceStep, *, verified: bool) -> str | None:
@@ -211,7 +233,11 @@ def _without_usage(value: JsonValue) -> JsonValue:
 def _run_task(environment: str, sha256: str | None) -> str | None:
     """Return the task of the registry environment a run ran, if it still hashes to
     *sha256*; None when the run kept no hash, or the environment changed, is gone or no
-    longer loads or hashes.
+    longer loads or hashes, or picks its task per instance when the run starts.
+
+    The registry builds in code only the benchmark adapters that pick an instance at run
+    time (``swebench_pro``, ``terminal_bench_2``): their ``task`` is a generic instruction,
+    not the instance's problem the run was graded on, so they have no task here.
 
     Raises:
         OSError: If a file the environment names can't be read while loading it.
@@ -219,6 +245,8 @@ def _run_task(environment: str, sha256: str | None) -> str | None:
     if sha256 is None:
         return None
     try:
+        if environment_dir(environment) is None:
+            return None
         env = load_environment(environment)
         same = environment_sha256(env) == sha256
     except ValueError:  # unknown or invalid environment, or one that can't be hashed

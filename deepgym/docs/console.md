@@ -293,8 +293,11 @@ an `ItemContent`:
 
 - `item`: the queue item, with its `context`.
 - `task`: a trace's task, and an episode's when it was recorded from a trace; a run's,
-  read from the registry, when its environment still hashes to what the run ran.
-  Otherwise none: give the task as the item's `context`.
+  read from the registry, when its environment still hashes to what the run ran. A run
+  of a benchmark adapter that picks its task per instance when the run starts
+  (`swebench_pro`, `terminal_bench_2`) has none: the adapter's own task is a generic
+  instruction, not the instance's problem. Otherwise none too: give the task as the
+  item's `context`.
 - `answer`: a run's solution, the text it was graded on.
 - `initial_observation` (a trace's) and `steps`: every step of the recording, whatever
   step the item is. Each step has its `index`, as the item's target numbers it; its
@@ -403,9 +406,13 @@ recording are then marked not blind:
 
 Blind mode, the reveal policy and the content route cover what the queue routes return, and
 nothing else. The local console has no login: any client can pass another reviewer's name,
-and a client that calls the general routes can still see grades:
+and a client that calls any of the general routes can still see grades. For example:
 
-- `GET /api/labels` and `GET /api/labels/current` list labels, the judge's included.
+- `GET /api/traces/{trace_id}` returns a whole trace with its verdict, step rewards, step
+  verifier output and labels, the most direct way to see a trace item's grade, and
+  `GET /api/traces` lists traces with their verdicts.
+- `GET /api/labels` and `GET /api/labels/current` list labels, the judge's included, and
+  `GET /api/calibration/agreement` compares the judge's verdicts with the experts'.
 - `GET /api/runs` lists runs with their score and pass, `GET /api/runs/stats` totals them
   with score bins, `GET /api/runs/compare` compares groups' solve rates, and
   `GET /api/runs/{id}` returns a run's score, pass and verifier result.

@@ -969,10 +969,14 @@ class TestReveal:
 
 
 def _without_step_verifier(trace: Trace) -> Trace:
-    """*trace* as if its environment had no step verifier."""
+    """*trace* as if its environment had no step verifier: no fingerprint of one, and no
+    step reward or step verifier output."""
     env = trace.provenance.env.model_copy(update={'step_verifier_sha256': None})
     provenance = trace.provenance.model_copy(update={'env': env})
-    return trace.model_copy(update={'provenance': provenance})
+    steps = [
+        step.model_copy(update={'reward': None, 'step_verifier': None}) for step in trace.steps
+    ]
+    return trace.model_copy(update={'provenance': provenance, 'steps': tuple(steps)})
 
 
 def _with_steps(trace: Trace, **changes: dict) -> Trace:
@@ -1037,16 +1041,29 @@ class TestContent:
         unnamed = 'the step verifier printed 0.2'
         errors = {'s1': {'error': died}, 's2': {'error': rejected}, 's3': {'error': unnamed}}
         verified = _with_steps(graded_trace(), **errors)
-        unverified = _without_step_verifier(verified).model_copy(update={'trace_id': 'trace0009'})
-        for trace in (verified, unverified):
-            record_episode(trace, db_path=store._path)
+        unverified = _without_step_verifier(verified)
+        traces = {
+            'fingerprint': verified,
+            'none': unverified,
+            # No fingerprint (an imported trace, say), but a step kept a reward or the step
+            # verifier's output: a step verifier ran all the same.
+            'reward': _with_steps(unverified, s3={'reward': 0.5}),
+            'output': _with_steps(unverified, s3={'step_verifier': {'details': 'ran'}}),
+        }
+        for key, trace in traces.items():
+            record_episode(trace.model_copy(update={'trace_id': key}), db_path=store._path)
 
-        cut = self._read(store, LabelTarget(kind='trace', id='trace0001'))
-        whole = self._read(store, LabelTarget(kind='trace', id='trace0009'))
+        errors_by = {
+            key: [step.error for step in self._read(store, LabelTarget(kind='trace', id=key)).steps]
+            for key in traces
+        }
 
-        assert [step.error for step in cut.steps] == ['SandboxDiedError', rejected, None]
-        assert '0.2' not in json.dumps([step.model_dump() for step in cut.steps])
-        assert [step.error for step in whole.steps] == [died, rejected, unnamed]
+        cut = ['SandboxDiedError', rejected, None]
+        assert errors_by == {
+            'fingerprint': cut, 'none': [died, rejected, unnamed], 'reward': cut, 'output': cut,
+        }  # fmt: skip
+        shown = self._read(store, LabelTarget(kind='trace', id='fingerprint'))
+        assert '0.2' not in json.dumps([step.model_dump() for step in shown.steps])
 
     def test_cli_output_loses_usage_and_cost(self, store: QueueStore) -> None:
         events = [
@@ -1135,6 +1152,39 @@ class TestContent:
         assert item_content._run_task('coin_change', digest) == env.task
         for name, sha256 in (('coin_change', '0' * 64), ('coin_change', None), ('nope', digest)):
             assert item_content._run_task(name, sha256) is None
+
+    @pytest.mark.parametrize('name', ['swebench_pro', 'terminal_bench_2'])
+    def test_an_adapter_that_picks_its_instance_at_run_time_has_no_task(self, name: str) -> None:
+        env = load_environment(name)
+
+        assert env.task  # a generic instruction, not the instance's problem
+        assert item_content._run_task(name, environment_sha256(env)) is None
+
+    # Recording the trace warns that its exit_code isn't an int: that odd value is the point.
+    @pytest.mark.filterwarnings('ignore:Pydantic serializer warnings')
+    def test_an_odd_exit_code_is_left_out(self, store: QueueStore) -> None:
+        odd = Observation(content='', step=1, metadata={'exit_code': 'killed'})
+        trace = _with_steps(graded_trace(), s1={'observation': odd})
+        episode_id = record_episode(trace, db_path=store._path)
+
+        recorded = self._read(store, LabelTarget(kind='trace', id=trace.trace_id))
+        episode = self._read(store, LabelTarget(kind='episode', id=episode_id))
+
+        assert recorded.steps[0].exit_code is None
+        assert episode.steps[0].exit_code is None
+        assert recorded.steps[0].action == episode.steps[0].action
+
+    def test_an_unreadable_copy_counts_only_under_its_exact_id(self, store: QueueStore) -> None:
+        record_episode(
+            graded_trace().model_copy(update={'trace_id': 'TRACE0001'}), db_path=store._path
+        )
+        with connect(store._path) as conn:  # valid JSON, so the lookup finds it, but no trace
+            conn.execute('UPDATE episodes SET trace = \'{"trace_id": "TRACE0001"}\'')
+
+        with pytest.raises(QueueNotFoundError, match='holds no trace trace0001'):
+            self._read(store, LabelTarget(kind='trace', id='trace0001'))
+        with pytest.raises(item_content.UnreadableRecordingError):
+            self._read(store, LabelTarget(kind='trace', id='TRACE0001'))
 
 
 def test_an_older_database_gets_the_default_reveal_and_the_trace_index(db: Path) -> None:

@@ -294,9 +294,11 @@ class ItemContent(BaseModel):
     item: QueueItem
     task: str | None
     """A trace's task (also for an episode recorded from one); a run's from the registry
-    when its environment still hashes to what the run ran. None otherwise: give it as the
-    item's ``context``. A trace stored more than once is read as the trace routes read it:
-    the copy that got furthest, when the copies agree."""
+    when its environment still hashes to what the run ran, unless it is a benchmark adapter
+    that picks its task per instance when the run starts (``swebench_pro``,
+    ``terminal_bench_2``). None otherwise: give it as the item's ``context``. A trace
+    stored more than once is read as the trace routes read it: the copy that got furthest,
+    when the copies agree."""
 
     answer: str | None
     """A run's solution, the text it was graded on; None for an episode or a trace."""

@@ -1,0 +1,208 @@
+"""Rule scanners the user configures: regexes over chosen texts, and protected paths.
+
+Both are JSON models told apart by ``kind`` (:data:`RuleScanner`, read by
+:func:`load_rule_scanners`); their findings are ``verifier`` marks, and their version is a
+hash of their config.
+"""
+
+from __future__ import annotations
+
+import posixpath
+import re
+from collections.abc import Iterator
+from typing import Annotated, Literal, NamedTuple
+
+from pydantic import BaseModel, ConfigDict, Field, PrivateAttr, TypeAdapter
+
+from deepgym.labels import Name
+from deepgym.scanners.core import Finding, ScannerSource, Severity
+from deepgym.scanners.writes import action_writes
+from deepgym.traces.schema import Trace, TraceStep, sha256_text
+
+ScanField = Literal['action', 'observation', 'system', 'user', 'assistant', 'tool']
+"""A step's text to scan: its action, its observation, or its messages of one role."""
+
+
+class Pattern(BaseModel):
+    """One regex, and what a match of it means."""
+
+    model_config = ConfigDict(frozen=True, extra='forbid')
+
+    regex: re.Pattern[str]
+    """Python ``re`` syntax; flags go inline, e.g. ``(?i)``."""
+    message: Name
+    severity: Severity = 'medium'
+
+
+class _Rule(BaseModel):
+    """What the rule scanners share: a JSON config, the ``verifier`` source, no instruction."""
+
+    model_config = ConfigDict(frozen=True, extra='forbid')
+
+    name: Name
+
+    @property
+    def source(self) -> ScannerSource:
+        """``verifier``: a rule's findings are labeled as a verifier's."""
+        return 'verifier'
+
+    @property
+    def instruction_sha256(self) -> None:
+        """None: a rule follows no written instruction."""
+        return None
+
+    @property
+    def version(self) -> str:
+        """``config-sha256:`` and the SHA-256 of the scanner's JSON config."""
+        return f'config-sha256:{sha256_text(self.model_dump_json())}'
+
+
+class PatternScanner(_Rule):
+    """Flag every match of each pattern in the chosen texts of every step.
+
+    A match is cited by its code point span and text; an empty match has nothing to quote
+    and is skipped.
+    """
+
+    kind: Literal['pattern'] = 'pattern'
+    patterns: tuple[Pattern, ...] = Field(min_length=1)
+    fields: tuple[ScanField, ...] = Field(default=('action',), min_length=1)
+
+    def scan(self, trace: Trace) -> list[Finding]:
+        """Return a finding per match."""
+        return [
+            Finding(
+                scanner=self.name,
+                trace_id=trace.trace_id,
+                step=step.index,
+                field=field,
+                span=match.span(),
+                quote=match.group(),
+                message=pattern.message,
+                severity=pattern.severity,
+            )
+            for step in trace.steps
+            for field, text in _texts(step, self.fields)
+            for pattern in self.patterns
+            for match in pattern.regex.finditer(text)
+            if match.end() > match.start()
+        ]
+
+
+def _texts(step: TraceStep, fields: tuple[ScanField, ...]) -> Iterator[tuple[str, str]]:
+    """Yield the ``(field, text)`` of each of *step*'s texts *fields* chooses."""
+    if 'action' in fields:
+        yield 'action', step.action.content
+    if 'observation' in fields and step.observation is not None:
+        yield 'observation', step.observation.content
+    for number, message in enumerate(step.messages):
+        if message.role in fields:
+            yield f'message:{number}', message.content
+
+
+class _Glob(NamedTuple):
+    """A protected-path glob, normalised and compiled."""
+
+    text: str
+    """As configured."""
+    regex: re.Pattern[str]
+    fixed: str
+    """Its leading part before any wildcard."""
+    anchored: bool
+    """Whether it starts with ``/``."""
+
+
+class ProtectedPathScanner(_Rule):
+    """Flag each applied action that names a protected path as one it writes, deletes or
+    moves.
+
+    Only the forms :mod:`deepgym.scanners.writes` lists are read, so no finding means none
+    of them named a protected path, not that no protected file changed: diff the final
+    workspace for that. A rejected action changed nothing.
+
+    Globs are normalised first (``./tests/**`` is ``tests/**``, ``tests/`` is ``tests``).
+    ``**`` matches any run of folders, ``*`` and ``?`` stay within one name, and ``[...]``
+    and ``{a,b}`` are literal text. A glob that matches a folder covers everything under it,
+    so ``tests`` protects ``tests/test_x.py``. A glob starting with ``/`` matches absolute
+    paths only, never a relative one (so never a ``write_file`` path). Any other matches
+    the path's names wherever they are: ``tests/**`` matches ``/repo/tests/a.py``,
+    ``conftest.py`` any ``conftest.py``, and ``tests`` a folder named ``tests`` anywhere. A
+    folder holding a glob's fixed leading part counts too: ``rm -r tests`` changes
+    ``tests/conftest.py``. A finding quotes the path where the action's text has it; where
+    it doesn't (``write_file``, ``cli``), its message names the path.
+    """
+
+    kind: Literal['protected_paths'] = 'protected_paths'
+    globs: tuple[Name, ...] = Field(min_length=1)
+    severity: Severity = 'high'
+    _globs: list[_Glob] = PrivateAttr()
+
+    def model_post_init(self, context: object) -> None:
+        """Normalise and compile each glob."""
+        self._globs = []
+        for glob in self.globs:
+            norm = posixpath.normpath(glob)
+            fixed = re.split(r'[*?]', norm)[0]
+            self._globs.append(_Glob(glob, _glob_regex(norm), fixed, norm.startswith('/')))
+
+    def scan(self, trace: Trace) -> list[Finding]:
+        """Return a finding per path an applied action changes that a glob matches."""
+        findings: list[Finding] = []
+        for step in trace.steps:
+            if not step.applied:
+                continue
+            for path, span in action_writes(step):
+                glob = next((glob.text for glob in self._globs if _matches(path, glob)), None)
+                if glob is None:
+                    continue
+                quote = None if span is None else step.action.content[slice(*span)]
+                findings.append(
+                    Finding(
+                        scanner=self.name,
+                        trace_id=trace.trace_id,
+                        step=step.index,
+                        field='action',
+                        span=span,
+                        quote=quote,
+                        message=f'changes {"a path" if quote else path} matching {glob}',
+                        severity=self.severity,
+                    )
+                )
+        return findings
+
+
+def _glob_regex(glob: str) -> re.Pattern[str]:
+    """Translate *glob*: ``**/`` any run of folders, ``**`` anything, ``*`` and ``?`` one name's."""
+    wild = {'**/': '(?:.*/)?', '**': '.*', '*': '[^/]*', '?': '[^/]'}
+    parts = re.findall(r'\*\*/|\*\*|\*|\?|[^*?]+', glob)
+    return re.compile(''.join(wild.get(part) or re.escape(part) for part in parts), re.DOTALL)
+
+
+def _matches(path: str, glob: _Glob) -> bool:
+    """Return whether *glob* matches *path* or a folder it is in, or *path* is a folder
+    holding the glob's fixed part."""
+    if not path:
+        return False
+    names = posixpath.normpath(path).split('/')
+    starts = range(1) if glob.anchored else range(len(names))
+    if any(
+        glob.regex.fullmatch('/'.join(names[first:last]))
+        for first in starts
+        for last in range(first + 1, len(names) + 1)
+    ):
+        return True
+    return any(glob.fixed.startswith(f'{"/".join(names[first:]).rstrip("/")}/') for first in starts)
+
+
+RuleScanner = Annotated[PatternScanner | ProtectedPathScanner, Field(discriminator='kind')]
+
+_RULE_SCANNERS = TypeAdapter(list[RuleScanner])
+
+
+def load_rule_scanners(text: str) -> list[PatternScanner | ProtectedPathScanner]:
+    """Read a JSON list of rule scanners, each told apart by ``kind``.
+
+    Raises:
+        pydantic.ValidationError: If the JSON doesn't describe valid scanners.
+    """
+    return _RULE_SCANNERS.validate_json(text)

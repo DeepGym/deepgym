@@ -408,24 +408,13 @@ class RubricReward:
 
     def _verdicts(self, reply: str) -> list[bool]:
         """Read whether each check is met from the judge's *reply*: exactly a JSON object
-        mapping every check id, and nothing else, to ``"MET"`` or ``"UNMET"``. One
-        ```` ```json ```` fence around the whole reply is taken off first; nothing else is.
+        mapping every check id, and nothing else, to ``"MET"`` or ``"UNMET"`` (see
+        :func:`reply_json`).
 
         Raises:
             JudgeError: For any other reply, which is quoted whole.
         """
-        opening, closing = _FENCE
-        text = reply.strip()
-        if (
-            len(text) >= len(opening + closing)
-            and text.startswith(opening)
-            and text.endswith(closing)
-        ):
-            text = text[len(opening) : -len(closing)]
-        try:
-            verdicts = json.loads(text, object_pairs_hook=_unique_keys)
-        except ValueError as exc:  # not JSON, or a key given twice
-            raise JudgeError(f'the reply is not JSON with unique keys ({exc}): {reply!r}') from exc
+        verdicts = reply_json(reply)
         if not isinstance(verdicts, dict):
             raise JudgeError(f'the reply is not a JSON object: {reply!r}')
         ids = self.rubric.ids
@@ -438,6 +427,24 @@ class RubricReward:
                 f'{missing}, unknown {unknown}, neither MET nor UNMET {invalid}: {reply!r}'
             )
         return [verdicts[cid] == 'MET' for cid in ids]
+
+
+def reply_json(reply: str) -> object:
+    """Parse a judge's *reply* as JSON. One ```` ```json ```` fence around the whole reply
+    is taken off first; nothing else is.
+
+    Raises:
+        JudgeError: If the rest isn't JSON, or gives an object key twice; the reply is
+            quoted whole.
+    """
+    opening, closing = _FENCE
+    text = reply.strip()
+    if len(text) >= len(opening + closing) and text.startswith(opening) and text.endswith(closing):
+        text = text[len(opening) : -len(closing)]
+    try:
+        return json.loads(text, object_pairs_hook=_unique_keys)
+    except ValueError as exc:  # not JSON, or a key given twice
+        raise JudgeError(f'the reply is not JSON with unique keys ({exc}): {reply!r}') from exc
 
 
 def _too_long(status: object, text: str) -> bool:

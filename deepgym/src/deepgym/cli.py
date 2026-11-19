@@ -22,6 +22,7 @@ if TYPE_CHECKING:
     from deepgym.dataset import DatasetSpec
     from deepgym.labels import Label
     from deepgym.qa.report import QAStatus
+    from deepgym.scanners import Finding
     from deepgym.traces import Trace
 
 
@@ -245,7 +246,7 @@ def _build_parser() -> argparse.ArgumentParser:
     bench_p.add_argument('--json', action='store_true', help='Print machine-readable JSON only')
 
     # ── traces ────────────────────────────────────────────────────────
-    traces_p = sub.add_parser('traces', help='Export recorded agent traces as training data')
+    traces_p = sub.add_parser('traces', help='Export or scan recorded agent traces')
     traces_sub = traces_p.add_subparsers(dest='traces_command', required=True)
     export_p = traces_sub.add_parser(
         'export',
@@ -267,6 +268,34 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     export_p.add_argument('--db', default=None, help='Console database (~/.deepgym/console.db)')
     export_p.add_argument(
+        '--traces',
+        nargs='+',
+        default=None,
+        metavar='PATH',
+        help='Trace files or directories (~/.deepgym/traces or $DEEPGYM_TRACES_DIR)',
+    )
+    scan_p = traces_sub.add_parser(
+        'scan',
+        help='Run rule scanners over traces and print their findings, grouped',
+        description='Reads traces as traces export does: --db and --traces name the sources. '
+        '--config is a JSON list of one or more scanners, each {"kind": "pattern", ...} or '
+        '{"kind": "protected_paths", ...}. Exits 3 when a scanner failed on a trace: that '
+        'trace is not cleared.',
+    )
+    scan_p.add_argument('--config', required=True, help='JSON list of rule scanners')
+    scan_p.add_argument('--out', default=None, help='Also write the whole report here as JSON')
+    scan_p.add_argument(
+        '--write-labels',
+        action='store_true',
+        help='Store a label per finding and per scan error in the console database: --db, '
+        'else ~/.deepgym/console.db, created if missing',
+    )
+    scan_p.add_argument(
+        '--db',
+        default=None,
+        help='Console database to read traces from, and to store labels in (~/.deepgym/console.db)',
+    )
+    scan_p.add_argument(
         '--traces',
         nargs='+',
         default=None,
@@ -770,14 +799,22 @@ def _print_unread(untraced: int, others: int) -> None:
         print(f'  {others} .jsonl files in the traces directories are not traces and were not read')
 
 
+def _refuse_input(out: Path, db: Path | None, files: Sequence[Path]) -> None:
+    """Exit if *out* is one of the trace sources."""
+    if out.exists() and any(out.samefile(source) for source in [db, *files] if source):
+        print(f'Error: {out} is one of the inputs; write elsewhere', file=sys.stderr)
+        sys.exit(1)
+
+
 def _cmd_traces(args: argparse.Namespace) -> None:
     from deepgym.traces import export_traces
 
+    if args.traces_command == 'scan':
+        _traces_scan(args)
+        return
     db, files, others = _trace_sources(args)
     out = Path(args.out)
-    if out.exists() and any(out.samefile(source) for source in [db, *files] if source):
-        print(f'Error: {out} is one of the inputs; write the export elsewhere', file=sys.stderr)
-        sys.exit(1)
+    _refuse_input(out, db, files)
 
     unique, untraced, _ = _read_traces(db, files)
     report = export_traces(
@@ -791,6 +828,58 @@ def _cmd_traces(args: argparse.Namespace) -> None:
     for reason, count in report.skipped.items():
         print(f'  skipped {count}: {reason}')
     _print_unread(untraced, others)
+
+
+def _traces_scan(args: argparse.Namespace) -> None:
+    from deepgym.console.db import DEFAULT_DB_PATH
+    from deepgym.console.label_store import LabelStore
+    from deepgym.scanners import finding_labels, group_findings, load_rule_scanners, scan_traces
+
+    scanners = load_rule_scanners(Path(args.config).read_text(encoding='utf-8'))
+    db, files, others = _trace_sources(args)
+    if args.out:
+        _refuse_input(Path(args.out), db, files)
+    traces, untraced, _ = _read_traces(db, files)
+    report = scan_traces(traces, scanners)
+    groups = group_findings(report.findings)
+    print(
+        f'Scanned {len(traces)} traces with {len(scanners)} scanners: '
+        f'{len(report.findings)} findings in {len(groups)} groups, {len(report.errors)} errors'
+    )
+    for group in groups:
+        first = group.findings[0]
+        print(
+            f'  {group.scanner}: {first.message} ({len(group.findings)} in {group.traces} traces)'
+        )
+        for finding in group.findings:
+            print(f'    {_citation(finding)}')
+    for error in report.errors:
+        print(f'  error: {error.scanner} on {error.trace_id}: {error.error}', file=sys.stderr)
+    if args.out:
+        Path(args.out).write_text(f'{report.model_dump_json(indent=2)}\n', encoding='utf-8')
+        print(f'  wrote the report to {args.out}')
+    if args.write_labels:
+        path = Path(args.db) if args.db else DEFAULT_DB_PATH
+        stored = LabelStore(path).add_many(finding_labels(report))
+        print(
+            f'  stored {len(stored)} labels ({len(report.findings)} findings, '
+            f'{len(report.errors)} scan errors) in {path} (group_id {report.run_id})'
+        )
+    _print_unread(untraced, others)
+    if report.errors:
+        sys.exit(3)  # 2 is argparse's
+
+
+def _citation(finding: Finding) -> str:
+    """Where *finding* is: trace, step, text, span and quote, as far as it says."""
+    parts = [finding.trace_id]
+    if finding.step is not None:
+        parts.append(f'step {finding.step}')
+    if finding.field is not None:
+        parts.append(finding.field)
+    if finding.span is not None:
+        parts.append(f'[{finding.span[0]}:{finding.span[1]}] {finding.quote!r}')
+    return f'{" ".join(parts)} ({finding.severity})'
 
 
 def _cmd_dataset(args: argparse.Namespace) -> None:

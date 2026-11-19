@@ -259,7 +259,10 @@ deepgym traces scan --config scanners.json --out report.json --write-labels
   literal paths given to `open` with a write mode, to `os` and `shutil` calls that change
   files and to `Path(...)` methods that do, and literal shell commands given to
   `os.system` or `subprocess`, with the code's imports resolved (`from pathlib import Path
-  as P`, `import shutil as sh`, `import os.path as osp`) and a literal counted through
+  as P`, `import shutil as sh`, `import os.path as osp`; regardless of scope or order, a
+  name bound in several places takes every meaning, and `os`, `shutil`, `subprocess`,
+  `io`, `builtins` and builtins such as `open` keep their own, so a conditional or
+  function-local `import foo as os` can't hide `os.remove`) and a literal counted through
   calls that keep the path (`str`, `os.fspath`, `os.path.abspath`, `realpath`,
   `normpath`, `Path(...).resolve()`) or join literals (`Path('a') / 'b'`,
   `os.path.join('a', 'b')`, `joinpath`); methods of anything else, such as

@@ -15,11 +15,13 @@ Nothing is run, and only these forms are read:
 * ``code`` (Python): literal paths given to ``open`` with a write mode, to ``os`` and
   ``shutil`` calls that change files, to ``Path(...)`` methods that do, and literal
   shell commands given to ``os.system`` or ``subprocess``. Imports are resolved
-  (``from pathlib import Path as P``, ``import shutil as sh``), and a literal counts
-  through calls that keep the path (``str``, ``os.fspath``, ``os.path.abspath``,
-  ``realpath``, ``normpath``, ``Path(...).resolve()``) or join literals
-  (``Path('a') / 'b'``, ``os.path.join('a', 'b')``, ``joinpath``). Methods of anything
-  else, such as ``str(...).replace``, change no file.
+  (``from pathlib import Path as P``, ``import shutil as sh``) regardless of scope or
+  order: a name bound in several places takes every meaning, and module names and
+  builtins keep their own, so a conditional ``import foo as os`` can't hide
+  ``os.remove``. A literal counts through calls that keep the path (``str``,
+  ``os.fspath``, ``os.path.abspath``, ``realpath``, ``normpath``, ``Path(...).resolve()``)
+  or join literals (``Path('a') / 'b'``, ``os.path.join('a', 'b')``, ``joinpath``).
+  Methods of anything else, such as ``str(...).replace``, change no file.
 * ``cli``: the files Claude Code's Write, Edit, MultiEdit and NotebookEdit calls and
   Codex's file changes touched or tried to (an attempt the tool reported failing is
   marked ``failed``), and what the shell commands each ran name as above.
@@ -36,6 +38,7 @@ every file that changed.
 from __future__ import annotations
 
 import ast
+import builtins
 import posixpath
 import re
 import shlex
@@ -106,6 +109,7 @@ _CHANGES_ALL = frozenset({
 })  # fmt: skip
 
 _PY_MODULES = frozenset({'os', 'shutil', 'subprocess', 'io', 'builtins'})
+_BUILTINS = frozenset(dir(builtins))
 _PATH_TYPES = frozenset({'Path', 'PosixPath', 'PurePath', 'PurePosixPath'})
 _PATH_CALLS = _PATH_TYPES | {f'pathlib.{name}' for name in _PATH_TYPES}
 _SAME_PATH = frozenset({
@@ -346,17 +350,26 @@ class _PythonSource:
         return sorted(writes, key=lambda write: write.span or (0, 0))
 
     def _call_writes(self, node: ast.Call) -> list[Write]:
-        """Return the paths one call changes."""
-        func, receiver = node.func, None
+        """Return the paths one call changes under any meaning its name may have (see
+        :meth:`_qualified`)."""
+        func = node.func
         if isinstance(func, ast.Attribute) and self._is_path(func.value):
-            name, receiver = func.attr, func.value
-        else:
-            qualified = self._qualified(func)
-            if qualified is None:
-                return []
-            module, _, name = qualified.rpartition('.')
-            if module and module not in _PY_MODULES:
-                return []  # a method of something else, such as str.replace
+            return self._writes_as(node, func.attr, func.value)
+        names = {
+            name
+            for module, _, name in (
+                qualified.rpartition('.') for qualified in self._qualified(func)
+            )
+            if not module or module in _PY_MODULES  # not a method of anything else (str.replace)
+        }
+        writes = [write for name in sorted(names) for write in self._writes_as(node, name)]
+        return list(dict.fromkeys(writes))
+
+    def _writes_as(
+        self, node: ast.Call, name: str, receiver: ast.expr | None = None
+    ) -> list[Write]:
+        """Return the paths *node* changes as a call of *name*: an ``os``, ``shutil``,
+        ``subprocess``, ``io`` or builtin function, or a method of the ``Path`` *receiver*."""
         if name == 'open':
             at = 1 if receiver is None else 0  # open(path, mode), Path(path).open(mode)
             mode = node.args[at] if len(node.args) > at else _keyword(node, 'mode')
@@ -378,15 +391,21 @@ class _PythonSource:
             return []
         return [found.cite() for path in paths if (found := self._word(path)) is not None]
 
-    def _qualified(self, node: ast.expr) -> str | None:
-        """Return the dotted name *node* refers to, its imports resolved (``P`` from
-        ``from pathlib import Path as P`` is ``pathlib.Path``); None if it isn't a name."""
+    def _qualified(self, node: ast.expr) -> set[str]:
+        """Return every dotted name *node* may refer to; empty if it isn't a name.
+
+        Imports are resolved without regard to scope or order (``P`` from
+        ``from pathlib import Path as P`` is ``pathlib.Path``), so a name bound in several
+        places has each meaning, and a module name or builtin keeps its own: a conditional
+        or function-local ``import foo as os`` can't hide ``os.remove``.
+        """
         if isinstance(node, ast.Name):
-            return self.aliases.get(node.id, node.id)
+            bound = self.aliases.get(node.id, set())
+            own = not bound or node.id in _PY_MODULES or node.id in _BUILTINS
+            return bound | {node.id} if own else bound
         if isinstance(node, ast.Attribute):
-            base = self._qualified(node.value)
-            return None if base is None else f'{base}.{node.attr}'
-        return None
+            return {f'{base}.{node.attr}' for base in self._qualified(node.value)}
+        return set()
 
     def _is_path(self, node: ast.expr) -> bool:
         """Return whether *node* makes a ``Path``: a call of one, ``/`` on one, or a method
@@ -395,7 +414,7 @@ class _PythonSource:
             return isinstance(node.op, ast.Div) and self._is_path(node.left)
         if not isinstance(node, ast.Call):
             return False
-        if self._qualified(node.func) in _PATH_CALLS:
+        if self._qualified(node.func) & _PATH_CALLS:
             return True
         func = node.func
         methods = _PATH_METHODS | {'joinpath'}
@@ -414,11 +433,9 @@ class _PythonSource:
         if not isinstance(node, ast.Call):
             return None
         qualified, func = self._qualified(node.func), node.func
-        if qualified in _SAME_PATH or qualified in _PATH_CALLS:
-            if len(node.args) == 1:
-                return self._word(node.args[0])
-            return self._joined(node, node.args) if qualified in _PATH_CALLS else None
-        if qualified == 'os.path.join':
+        if qualified & (_SAME_PATH | _PATH_CALLS) and len(node.args) == 1:
+            return self._word(node.args[0])
+        if qualified & (_PATH_CALLS | {'os.path.join'}):
             return self._joined(node, node.args)
         if isinstance(func, ast.Attribute) and self._is_path(func.value):
             if func.attr in _PATH_METHODS and not node.args:
@@ -465,17 +482,19 @@ class _PythonSource:
         return [script.inside(found) for found in shell_writes(script.value)]
 
 
-def _aliases(tree: ast.AST) -> dict[str, str]:
-    """Return the dotted name each name bound by an import in *tree* stands for."""
-    aliases: dict[str, str] = {}
+def _aliases(tree: ast.AST) -> dict[str, set[str]]:
+    """Return every dotted name each name is bound to by an import anywhere in *tree*."""
+    aliases: dict[str, set[str]] = {}
     for node in ast.walk(tree):
         if isinstance(node, ast.Import):
             for alias in node.names:
                 root = alias.name.partition('.')[0]
-                aliases[alias.asname or root] = alias.name if alias.asname else root
+                bound = alias.name if alias.asname else root
+                aliases.setdefault(alias.asname or root, set()).add(bound)
         elif isinstance(node, ast.ImportFrom) and node.module and not node.level:
             for alias in node.names:
-                aliases[alias.asname or alias.name] = f'{node.module}.{alias.name}'
+                bound = f'{node.module}.{alias.name}'
+                aliases.setdefault(alias.asname or alias.name, set()).add(bound)
     return aliases
 
 

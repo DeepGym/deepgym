@@ -315,6 +315,41 @@ class TestProtectedPaths:
             ('tests/n.py', 'tests/n.py'),
         ]
 
+    @pytest.mark.parametrize(
+        ('code', 'paths'),
+        [
+            (  # a conditional rebinding can't hide the module
+                "import os\nif flag:\n    import foo as os\nos.remove('tests/a.py')\n",
+                ['tests/a.py'],
+            ),
+            (  # a later or nested rebinding neither
+                "import os\ndef f():\n    import mylib as os\n    os.remove('tests/b.py')\n",
+                ['tests/b.py'],
+            ),
+            (  # a function-local import
+                "def clean():\n    import shutil as s\n    s.rmtree('tests/c')\nclean()\n",
+                ['tests/c'],
+            ),
+            (  # one name bound to a module and to something unrelated
+                'try:\n    import shutil as sh\nexcept ImportError:\n'
+                "    from mylib import helper as sh\nsh.move('src/x', 'tests/d.py')\n",
+                ['src/x', 'tests/d.py'],
+            ),
+            (  # a builtin shadowed by an import somewhere keeps its own meaning
+                "if flag:\n    from mylib import open\nopen('tests/e.py', 'w')\n",
+                ['tests/e.py'],
+            ),
+            (  # a name bound only to something unrelated is not a file call
+                "from mylib import move\nmove('tests/f.py')\n",
+                [],
+            ),
+        ],
+    )
+    def test_python_names_take_every_meaning_they_may_have(
+        self, code: str, paths: list[str]
+    ) -> None:
+        assert [write.path for write in python_writes(code)] == paths
+
     def test_a_very_deep_path_matches_in_linear_time(self) -> None:
         deep = 'd/' * 200_000
         scanner = ProtectedPathScanner(

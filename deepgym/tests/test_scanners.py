@@ -34,7 +34,7 @@ from deepgym.scanners import (
     scanner_agreement,
     scanner_forbids,
 )
-from deepgym.scanners.writes import cli_writes, python_writes
+from deepgym.scanners.writes import cli_writes, python_writes, shell_writes
 from deepgym.traces import Trace, TraceMessage, TraceStep
 from deepgym.traces.schema import json_text, sha256_text
 from tests.test_traces_export import _event_log
@@ -207,9 +207,20 @@ class TestProtectedPaths:
             ("sed -ie 's/a/b/' tests/x.py", ['tests/x.py']),
             ("perl -i -pe 's/tests/x/' docs.md", []),
             ('cp -t tests/ a.py b.py', ['tests/', 'tests/']),
-            ('cp --target-directory=tests a.py', ['--target-directory=tests']),
-            ('install -ttests a.py', ['-ttests']),
+            ('cp --target-directory=tests a.py', ['tests']),
+            ('install -ttests a.py', ['tests']),
             ('mv -t /tmp tests/a.py', ['tests/a.py']),
+            ('cp -rt tests/ x.py', ['tests/']),
+            ('cp -rttests x.py', ['tests']),
+            ('install -Dt tests/ f', ['tests/']),
+            ('cp --target-directory tests x.py y.py', ['tests', 'tests']),
+            ('cp -v --target-directory=tests/sub x.py', ['tests/sub']),
+            ('install -m 755 tests/run.sh /usr/local/bin/', []),
+            ('install -d tests/sub out', ['tests/sub']),
+            ('cp a.py tests/b.py --suffix .bak', ['tests/b.py']),
+            ('cp tests/a.py -t', ['tests/a.py']),  # no DIR: every operand
+            ('cp -t a -t b tests/x.py', ['tests/x.py']),  # two DIRs: every operand
+            ('cp tests/a.py', ['tests/a.py']),  # one operand: every operand
             ('rm -rf .', ['.']),
             ('rm -rf ../..', ['../..']),
             ('git checkout .', ['.']),
@@ -222,6 +233,17 @@ class TestProtectedPaths:
         assert all(command[slice(*f.span)] == f.quote for f in found)
         assert {f.message for f in found} <= {'changes a path matching tests/**'}
         assert {f.severity for f in found} <= {'high'}
+
+    def test_target_directories_name_each_source_inside(self) -> None:
+        cases = {
+            'cp -rt tests/ x.py src/y.py': ['tests/x.py', 'tests/y.py'],
+            'install -Dttests f': ['tests/f'],
+            'mv --target-directory tests a b/': ['tests/a', 'tests/b', 'a', 'b/'],
+            'mv src/a tests/b': ['src/a', 'tests/b'],
+            'cp -t a -t b x': ['x', 'a', 'b'],
+        }
+
+        assert {command: [w.path for w in shell_writes(command)] for command in cases} == cases
 
     @pytest.mark.parametrize(
         ('globs', 'command', 'flagged'),
@@ -768,7 +790,7 @@ class TestScanTraces:
         )
 
         config = sha256_text(json_text(PROTECTED.model_dump(mode='json')))
-        assert PROTECTED.version == f'protected-paths/1+config-sha256:{config}'
+        assert PROTECTED.version == f'protected-paths/2+config-sha256:{config}'
         assert other.version != PROTECTED.version
         assert plain.version.startswith('pattern/1+config-sha256:')
         assert plain.model_dump_json() == folded.model_dump_json()

@@ -5,8 +5,10 @@ Nothing is run, and only these forms are read:
 * ``write_file``: its path.
 * ``bash``: redirection targets (``>``, ``>>``, ``&>``, ...); the operands of ``rm``,
   ``rmdir``, ``unlink``, ``shred``, ``mv``, ``touch``, ``truncate``, ``tee``, ``mkdir``,
-  ``chmod``, ``chown`` and ``chgrp``; the destination of ``cp``, ``install``, ``ln`` and
-  ``rsync`` (with ``-t DIR``, ``DIR/<name>`` of each source); the files of ``sed``,
+  ``chmod``, ``chown`` and ``chgrp``; the destination of ``cp``, ``install``, ``ln``,
+  ``mv`` and ``rsync`` (with ``-t DIR``, also bundled as ``-rt DIR``, ``DIR/<name>`` of
+  each source; with ``install -d``, every operand; every operand when it can't be told),
+  and what ``mv`` moves away; the files of ``sed``,
   ``perl`` and ``ruby`` with ``-i`` (not the script: the first operand, unless ``-e``,
   ``-f`` or ``--expression`` gives it); the paths named after ``git rm``,
   ``git mv``, ``git checkout``, ``git restore`` and ``git clean`` (which deletes untracked
@@ -51,7 +53,7 @@ import re
 import shlex
 from collections.abc import Sequence
 from itertools import takewhile
-from typing import NamedTuple, cast
+from typing import Literal, NamedTuple, cast
 
 from pydantic import JsonValue
 
@@ -127,11 +129,14 @@ _EDITORS = {
     'ruby': _Editor('eIrEC', 'ixFl0', 'e'),
 }
 _SCRIPT_OPTIONS = frozenset({'--expression', '--file'})
-_TO_LAST = frozenset({'cp', 'install', 'ln', 'rsync'})
-_INTO_DIRECTORY = frozenset({'cp', 'install', 'ln', 'mv'})
-"""Commands whose ``-t DIR`` (``--target-directory``) puts each source in DIR."""
+_TO_LAST = frozenset({'rsync'})
+_COPIERS = {'cp': 'S', 'install': 'mogS', 'ln': 'S', 'mv': 'S'}
+"""Commands that write a destination or, with ``-t DIR``, put each source in DIR, with
+their short options other than ``-t`` that take an argument."""
+_COPIER_LONG = frozenset({'--suffix', '--mode', '--owner', '--group'})
+"""Their long options that take the next word unless given as ``--option=value``."""
 _CHANGES_ALL = frozenset({
-    'rm', 'rmdir', 'unlink', 'shred', 'mv', 'touch', 'truncate', 'tee', 'mkdir', 'chmod',
+    'rm', 'rmdir', 'unlink', 'shred', 'touch', 'truncate', 'tee', 'mkdir', 'chmod',
     'chown', 'chgrp',
 })  # fmt: skip
 
@@ -274,8 +279,8 @@ def _command_writes(words: Sequence[_Word]) -> list[Write]:
         changed = [] if takes is None else _operands(args[1:], takes)
     elif command in _EDITORS:
         changed = _edited(args, _EDITORS[command])
-    elif command in _INTO_DIRECTORY and (into := _into_directory(command, args)) is not None:
-        return into
+    elif command in _COPIERS:
+        return _copier_writes(command, args)
     elif command == 'find':
         deletes = any(word.value == '-delete' for word in args)
         changed = list(takewhile(lambda w: not w.value.startswith('-'), args)) if deletes else []
@@ -346,25 +351,66 @@ def _edited(words: Sequence[_Word], editor: _Editor) -> list[_Word]:
     return files if scripted else files[1:]
 
 
-def _into_directory(command: str, words: Sequence[_Word]) -> list[Write] | None:
-    """Return what ``-t DIR`` (``-tDIR``, ``--target-directory[=]DIR``) makes *command*
-    write: ``DIR/<name>`` of each source, cited at DIR, and for ``mv`` the sources too;
-    None without it."""
-    for at, word in enumerate(words):
+def _copier_writes(command: str, words: Sequence[_Word]) -> list[Write]:
+    """Return what ``cp``, ``install``, ``ln`` or ``mv`` writes, and ``mv`` moves away.
+
+    With ``-t DIR`` (also in a cluster such as ``-rt DIR`` or ``-Dttests``, and
+    ``--target-directory[=]DIR``) that is ``DIR/<name>`` of each source, cited at DIR;
+    without it, the last operand; with ``install -d``, every operand. Where the destination
+    can't be told (``-t`` with no DIR, two different DIRs, fewer than two operands without
+    ``-t``), every operand and DIR is reported: over-flagged, never missed.
+    """
+    takes = _COPIERS[command]
+    operands: list[_Word] = []
+    directories: list[Write] = []  # each DIR, as a path cited where it is
+    skip: Literal['dir', 'argument'] | None = None
+    ended = every = False
+    for word in words:
         value = word.value
-        if value in ('-t', '--target-directory') and at + 1 < len(words):
-            directory, cited = words[at + 1].value, words[at + 1].cite().span
-        elif value.startswith('--target-directory='):
-            directory, cited = value.partition('=')[2], word.span
-        elif value.startswith('-t') and not value.startswith('--') and len(value) > 2:
-            directory, cited = value[2:], word.span
+        if skip is not None:
+            if skip == 'dir':
+                directories.append(word.cite())
+            skip = None
+        elif ended or not value.startswith('-') or value == '-':
+            operands.append(word)
+        elif value == '--':
+            ended = True
+        elif value.startswith('--'):
+            option, given, rest = value.partition('=')
+            every |= command == 'install' and option == '--directory'
+            if option == '--target-directory':
+                directories += [_part(word, len(option) + 1)] if given else []
+                skip = None if given else 'dir'
+            elif option in _COPIER_LONG and not given:
+                skip = 'argument'
         else:
-            continue
-        sources = _operands(words, frozenset({'-t', '--target-directory'}))
-        names = [posixpath.basename(source.value.rstrip('/')) for source in sources]
-        into = [Write(posixpath.join(directory, name), cited) for name in names]
-        return into + ([source.cite() for source in sources] if command == 'mv' else [])
-    return None
+            for at, letter in enumerate(value[1:], 1):
+                every |= command == 'install' and letter == 'd'
+                if letter == 't' or letter in takes:
+                    rest = at + 1 < len(value)
+                    if letter == 't' and rest:
+                        directories.append(_part(word, at + 1))
+                    elif not rest:
+                        skip = 'dir' if letter == 't' else 'argument'
+                    break
+    moved = [operand.cite() for operand in operands] if command == 'mv' else []
+    unknown = skip == 'dir' or len({path for path, _, _ in directories}) > 1
+    if every or unknown or (not directories and len(operands) < 2):
+        return [operand.cite() for operand in operands] + directories
+    if directories:
+        directory, cited, _ = directories[0]
+        names = [posixpath.basename(operand.value.rstrip('/')) for operand in operands]
+        return [Write(posixpath.join(directory, name), cited) for name in names] + moved
+    return [*moved[:-1], operands[-1].cite()]
+
+
+def _part(word: _Word, offset: int) -> Write:
+    """Return the rest of *word* from *offset* as a path, cited there when the word is
+    written as is, else at the whole word."""
+    rest = word.value[offset:]
+    if word.start is None or not rest:
+        return Write(rest, word.span)
+    return Write(rest, (word.start + offset, word.start + len(word.value)))
 
 
 def _operands(words: Sequence[_Word], takes: frozenset[str] = frozenset()) -> list[_Word]:

@@ -31,7 +31,10 @@ def db(tmp_path: Path) -> Path:
 
 
 def _runs(db: Path, *solutions: str) -> list[str]:
-    specs = [RunSpec(environment='pricing', solution=text, reference=False) for text in solutions]
+    specs = [
+        RunSpec(environment='pricing', solution=text, reference=False, environment_sha256='ab' * 32)
+        for text in solutions
+    ]
     return [run.id for run in RunStore(db).create_group(specs, 'local', 'local')]
 
 

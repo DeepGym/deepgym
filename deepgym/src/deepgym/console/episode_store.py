@@ -17,6 +17,7 @@ from pydantic import BaseModel, ConfigDict, ValidationError
 
 from deepgym.console.db import (
     DEFAULT_DB_PATH,
+    TRACE_KEY,
     connect,
     connect_read_only,
     init_db,
@@ -39,10 +40,10 @@ _SUMMARY_COLUMNS = (
     'id, environment, steps, total_reward, score, passed, has_verdict, error_type, created_at'
 )
 # The rows whose stored trace's id is the one given ignoring case, so a case collision
-# shows; CASE keeps json_extract off rows that aren't JSON, which would fail the query.
+# shows. TRACE_KEY keeps json_extract off rows that aren't JSON, which would fail the
+# query, and is what the episodes_trace_id index holds, so this is an index search.
 _COPIES_OF = (
-    'SELECT id, trace, 1 AS valid FROM episodes WHERE CASE WHEN json_valid(trace) '
-    "THEN lower(json_extract(trace, '$.trace_id')) END = lower(?) ORDER BY rowid"
+    f'SELECT id, trace, 1 AS valid FROM episodes WHERE {TRACE_KEY} = lower(?) ORDER BY rowid'
 )
 
 
@@ -169,11 +170,15 @@ class EpisodeStore:
     def screenshot(self, episode_id: str, frame: int) -> bytes | None:
         """Return the PNG shown at *frame*, or None if that frame had no screenshot."""
         with connect(self._path) as conn:
-            row = conn.execute(
-                'SELECT png FROM screenshots WHERE episode_id = ? AND frame = ?',
-                (episode_id, frame),
-            ).fetchone()
-        return None if row is None else row['png']
+            return select_screenshot(conn, episode_id, frame)
+
+
+def select_screenshot(conn: sqlite3.Connection, episode_id: str, frame: int) -> bytes | None:
+    """Return the PNG an episode showed at *frame*, read in *conn*; None if it had none."""
+    row = conn.execute(
+        'SELECT png FROM screenshots WHERE episode_id = ? AND frame = ?', (episode_id, frame)
+    ).fetchone()
+    return None if row is None else row['png']
 
 
 def read_traces(path: Path) -> tuple[list[Trace], int]:
@@ -208,17 +213,21 @@ def read_held_traces(path: Path, trace_id: str | None = None) -> HeldTraces:
             (their ``untraced`` is 0); None reads every stored trace.
     """
     with connect_read_only(path) as conn:
-        columns = table_columns(conn, 'episodes')
-        if 'trace' not in columns:
-            rows = (
-                conn.execute('SELECT id, NULL AS trace FROM episodes').fetchall() if columns else []
-            )
-        elif trace_id is None:
-            rows = conn.execute(
-                'SELECT id, trace, json_valid(trace) AS valid FROM episodes ORDER BY rowid'
-            ).fetchall()
-        else:
-            rows = conn.execute(_COPIES_OF, (trace_id,)).fetchall()
+        return select_held_traces(conn, trace_id)
+
+
+def select_held_traces(conn: sqlite3.Connection, trace_id: str | None = None) -> HeldTraces:
+    """Return :func:`read_held_traces` of the database *conn* is open on, read in *conn*,
+    so a caller can read a trace by id in the same transaction as its other reads."""
+    columns = table_columns(conn, 'episodes')
+    if 'trace' not in columns:
+        rows = conn.execute('SELECT id, NULL AS trace FROM episodes').fetchall() if columns else []
+    elif trace_id is None:
+        rows = conn.execute(
+            'SELECT id, trace, json_valid(trace) AS valid FROM episodes ORDER BY rowid'
+        ).fetchall()
+    else:
+        rows = conn.execute(_COPIES_OF, (trace_id,)).fetchall()
     stored = [row for row in rows if row['trace'] is not None]
     return _held(stored, untraced=len(rows) - len(stored))
 

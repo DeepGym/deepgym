@@ -9,7 +9,9 @@ item's ``overlap``. No reviewer reviews an item twice. In a blind queue a review
 label on the item's kind and id until they have submitted their own review of it (see
 :class:`ReviewView`), and the review's labels are marked ``blind`` only if no queue response
 showed the reviewer someone else's label on that recording and they had no turn at it in a
-queue that isn't blind. An episode recorded from a trace is on that trace's recording.
+queue that isn't blind. A queue's ``reveal`` policy narrows what they see after that. An
+episode recorded from a trace is on that trace's recording. :class:`ItemContent` is what a
+reviewer reads to grade an item: the recording without any grade.
 
 The console keeps queues in its database (:class:`deepgym.console.queue_store.QueueStore`).
 """
@@ -24,14 +26,18 @@ from pydantic import (
     BaseModel,
     ConfigDict,
     Field,
+    JsonValue,
     StrictBool,
     StrictInt,
     model_validator,
 )
 
 from deepgym.labels import SQLITE_MAX_INT, Label, LabelTarget, LabelValue, Name, Text
+from deepgym.models import ActionType
+from deepgym.traces.schema import MessageRole
 
 ReviewStatus = Literal['reserved', 'submitted', 'released', 'skipped', 'expired']
+Reveal = Literal['after_submit', 'humans_only', 'on_close']
 
 MAX_RESERVATION_SECONDS = 10**9
 """About 31 years: the longest reservation, so that its expiry time stays a datetime."""
@@ -63,6 +69,11 @@ class QueueCreate(BaseModel, frozen=True):
     blind: StrictBool = True
     """Hide the labels on an item's kind and id from a reviewer until they submit their
     review of it (see :class:`ReviewView`)."""
+
+    reveal: Reveal = 'after_submit'
+    """Which labels a reviewer sees once the queue would show them (see
+    :class:`ReviewView`): ``after_submit`` every one, ``humans_only`` only humans' (never a
+    judge's or a verifier's), ``on_close`` only their review's own until the queue is closed."""
 
     reservation_seconds: StrictInt = Field(default=3600, ge=1, le=MAX_RESERVATION_SECONDS)
     """How long a reviewer holds an item they were handed before it is free again."""
@@ -97,7 +108,8 @@ class Queue(QueueCreate, frozen=True):
 
 class QueueUpdate(BaseModel):
     """Changes to a queue; a field left out keeps its value. ``overlap``, ``blind`` and
-    ``label_names`` never change."""
+    ``label_names`` never change, and ``reveal`` only until it has decided what a reviewer
+    saw (see :attr:`reveal`)."""
 
     model_config = ConfigDict(frozen=True, extra='forbid')
 
@@ -111,10 +123,14 @@ class QueueUpdate(BaseModel):
     """The whole new list: every current reviewer, plus those added. A queue that lets
     anyone review keeps doing so."""
 
+    reveal: Reveal | None = None
+    """Refused once the policy has decided what a reviewer saw: in a blind queue once a
+    review is submitted, and in one that isn't once an item was handed out."""
+
     @model_validator(mode='after')
     def check_given(self) -> QueueUpdate:
         """Refuse null where a value is needed, and repeated reviewers."""
-        needed = ('closed', 'reservation_seconds', 'reviewers')
+        needed = ('closed', 'reservation_seconds', 'reviewers', 'reveal')
         nulls = [
             name for name in needed if name in self.model_fields_set and getattr(self, name) is None
         ]
@@ -198,7 +214,99 @@ class ReviewView(BaseModel):
     they have submitted their review. Then only their review's own while they may still
     review another item on the same recording in a blind queue (one in a queue that is open,
     or that they hold a live reservation of, that lets them review, still needs reviews, and
-    that they haven't reviewed or skipped); every one after that."""
+    that they haven't reviewed or skipped); every one after that. The queue's ``reveal``
+    narrows that: ``humans_only`` leaves out judges' and verifiers' labels, and ``on_close``
+    shows only their review's own while the queue is open."""
+
+
+class ContentMessage(BaseModel):
+    """One model message of a trace step: who said it, and what."""
+
+    role: MessageRole
+    content: str
+
+
+class ContentAction(BaseModel):
+    """What an agent did: an :class:`deepgym.models.Action` without its ``events``, which
+    can carry a CLI agent's usage and cost."""
+
+    action_type: ActionType
+    content: str
+    x: int | None
+    y: int | None
+    to_x: int | None
+    to_y: int | None
+    path: str | None
+    amount: int
+    tool: str | None
+    arguments: dict[str, JsonValue]
+
+
+class ContentStep(BaseModel):
+    """One step of a recording, as a reviewer reads it."""
+
+    index: int
+    """The step as the item's target numbers it: the replay frame index for an episode
+    (from 0), ``TraceStep.index`` for a trace (from 1)."""
+
+    action: ContentAction | None
+    """None on an episode's last frame, its final observation."""
+
+    observation: str | None
+    """``Observation.content``: for an episode, what the agent saw before acting; for a
+    trace, what the action produced (None if it produced nothing). Output a CLI action
+    produced (Claude Code stream-json, Codex ``--json``) has each JSON line's usage, token
+    counts and cost removed; other lines are as stored, so a span marked on a changed line
+    counts in the text shown here, not the stored one."""
+
+    exit_code: int | None
+    """The exit code of this step's action, for a code or bash action: for an episode, read
+    from the next frame, which shows what the action produced."""
+
+    has_screenshot: bool
+    """Whether the queue's screenshot route serves this step's frame: an episode frame with
+    a screenshot. Never for a trace: queue the episode recorded from it to review its
+    screenshots."""
+
+    applied: bool
+    """False for a trace step whose action was rejected; an episode's replay holds only
+    actions that were applied."""
+
+    error: str | None
+    """Why a trace step failed. The whole text when the step wasn't applied (refused before
+    anything ran) or the trace has no step verifier; otherwise only the exception's name,
+    such as ``SandboxDiedError``, since a message raised while the step verifier ran can
+    quote what it printed. None for an episode."""
+
+    messages: list[ContentMessage]
+    """A trace step's model messages; none for an episode."""
+
+
+class ItemContent(BaseModel):
+    """What a reviewer needs to grade an item, and nothing that reveals a grade.
+
+    Every field returned is listed here: no score, pass, reward, step verifier output,
+    verifier result or error, error type, usage, cost or label, at any depth. It is what the
+    agent saw and did, so an environment that showed the agent a reward in an observation or
+    message shows it here too.
+    """
+
+    item: QueueItem
+    task: str | None
+    """A trace's task (also for an episode recorded from one); a run's from the registry
+    when its environment still hashes to what the run ran. None otherwise: give it as the
+    item's ``context``. A trace stored more than once is read as the trace routes read it:
+    the copy that got furthest, when the copies agree."""
+
+    answer: str | None
+    """A run's solution, the text it was graded on; None for an episode or a trace."""
+
+    initial_observation: str | None
+    """What a trace's agent saw first; None for a run, and for an episode, whose frame 0
+    holds it."""
+
+    steps: list[ContentStep]
+    """Every step of the recording, whatever step the item is; none for a run."""
 
 
 class ItemProgress(BaseModel):

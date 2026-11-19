@@ -1,19 +1,22 @@
-"""Review queue routes: create queues and add items, hand items to reviewers, take their
-reviews, and report progress."""
+"""Review queue routes: create queues and add items, hand items to reviewers, serve what they
+grade, take their reviews, and report progress."""
 
 from __future__ import annotations
 
 from collections.abc import Iterator
 from contextlib import contextmanager
+from typing import Annotated
 
-from fastapi import APIRouter, Depends, HTTPException, Query, status
+from fastapi import APIRouter, Depends, HTTPException, Path, Query, Response, status
 
 from deepgym.console.deps import QueueStoreDep, strict_query
+from deepgym.console.item_content import UnreadableRecordingError
 from deepgym.console.queue_store import NotReviewerError, QueueInputError, QueueNotFoundError
 from deepgym.console.schemas import ReviewerBody, ReviewSubmit
 from deepgym.labels import SQLITE_MAX_INT, Name
 from deepgym.review_queues import (
     Assignment,
+    ItemContent,
     ItemCreate,
     ItemPage,
     Queue,
@@ -32,7 +35,8 @@ _NO_QUERY = [Depends(strict_query())]
 def _refusals() -> Iterator[None]:
     """Answer the store's refusals: 404 for an unknown queue or item, 403 for a reviewer
     the queue doesn't list, 422 for input its settings or the label rules refuse (each
-    problem's ``loc`` from the body), 409 for the rest.
+    problem's ``loc`` from the body), 409 for the rest; and 500, with fixed text that quotes
+    nothing stored, for a recording whose content can't be read.
 
     Raises:
         HTTPException: For each refusal.
@@ -46,6 +50,11 @@ def _refusals() -> Iterator[None]:
     except QueueInputError as exc:
         detail = [{**error, 'loc': ('body', *error['loc'])} for error in exc.errors]
         raise HTTPException(status_code=422, detail=detail) from exc
+    except UnreadableRecordingError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="The console can't read this item's stored recording",
+        ) from exc
     except ValueError as exc:
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc
 
@@ -72,8 +81,9 @@ def get_queue(queue_id: str, queues: QueueStoreDep) -> Queue:
 
 @router.patch('/{queue_id}', response_model=Queue, dependencies=_NO_QUERY)
 def update_queue(queue_id: str, body: QueueUpdate, queues: QueueStoreDep) -> Queue:
-    """Close or reopen a queue, add reviewers, or change its description, instructions or
-    reservation time; fields left out keep their value."""
+    """Close or reopen a queue, add reviewers, or change its description, instructions,
+    reservation time or (until a review is submitted) reveal policy; fields left out keep
+    their value."""
     with _refusals():
         return queues.update(queue_id, body)
 
@@ -127,6 +137,37 @@ def view_item(queue_id: str, item_id: str, reviewer: Name, queues: QueueStoreDep
     """Return an item as a reviewer may see it."""
     with _refusals():
         return queues.view(queue_id, item_id, reviewer)
+
+
+@router.get(
+    '/{queue_id}/items/{item_id}/content',
+    response_model=ItemContent,
+    dependencies=[Depends(strict_query('reviewer'))],
+)
+def item_content(queue_id: str, item_id: str, reviewer: Name, queues: QueueStoreDep) -> ItemContent:
+    """Return what a reviewer who could submit a review of the item, or has, needs to grade
+    it, and nothing that reveals a grade."""
+    with _refusals():
+        return queues.content(queue_id, item_id, reviewer)
+
+
+@router.get(
+    '/{queue_id}/items/{item_id}/frames/{frame}/screenshot',
+    response_class=Response,
+    dependencies=[Depends(strict_query('reviewer'))],
+)
+def item_screenshot(
+    queue_id: str,
+    item_id: str,
+    frame: Annotated[int, Path(ge=0, le=SQLITE_MAX_INT)],
+    reviewer: Name,
+    queues: QueueStoreDep,
+) -> Response:
+    """Return the PNG shown at one frame of an episode item, to a reviewer who may read its
+    content."""
+    with _refusals():
+        png = queues.screenshot(queue_id, item_id, reviewer, frame)
+    return Response(content=png, media_type='image/png')
 
 
 @router.post(

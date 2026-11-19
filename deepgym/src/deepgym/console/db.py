@@ -14,6 +14,15 @@ from deepgym.models import RunResult, is_verdict
 
 DEFAULT_DB_PATH = Path.home() / '.deepgym' / 'console.db'
 
+TRACE_ID = "CASE WHEN json_valid(trace) THEN json_extract(trace, '$.trace_id') END"
+"""The trace id of an episode recorded from a trace, as SQL; NULL for a trace column that
+isn't valid JSON, so one corrupt row never fails a query or the index below."""
+
+TRACE_KEY = f'lower({TRACE_ID})'
+""":data:`TRACE_ID` ignoring case, which the ``episodes_trace_id`` index holds: a lookup
+by trace id compares this exact expression (``episode_store.select_held_traces``), so
+SQLite finds the copies through the index, and a case collision shows."""
+
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS runs (
     id TEXT PRIMARY KEY,
@@ -88,7 +97,8 @@ CREATE TABLE IF NOT EXISTS queues (
     reservation_seconds INTEGER NOT NULL,
     reviewers TEXT NOT NULL,
     closed INTEGER NOT NULL,
-    created_at TEXT NOT NULL
+    created_at TEXT NOT NULL,
+    reveal TEXT NOT NULL DEFAULT 'after_submit'
 );
 CREATE TABLE IF NOT EXISTS queue_items (
     id TEXT PRIMARY KEY,
@@ -148,6 +158,12 @@ def init_db(path: Path) -> None:
             conn.execute('ALTER TABLE episodes ADD COLUMN trace TEXT')
         if 'has_verdict' not in columns:
             _add_verdict_columns(conn)
+        if 'reveal' not in table_columns(conn, 'queues'):
+            conn.execute(
+                "ALTER TABLE queues ADD COLUMN reveal TEXT NOT NULL DEFAULT 'after_submit'"
+            )
+        # After the migrations: an older episodes table may only now have its trace column.
+        conn.execute(f'CREATE INDEX IF NOT EXISTS episodes_trace_id ON episodes ({TRACE_KEY})')
 
 
 def table_columns(conn: sqlite3.Connection, table: str) -> set[str]:

@@ -5,10 +5,30 @@ from pathlib import Path
 import pytest
 from fastapi.testclient import TestClient
 
+from deepgym.console import episode_store, item_content, record_episode
+from deepgym.console.db import connect
 from deepgym.console.queue_store import QueueStore
+from deepgym.console.run_store import RunStore
+from deepgym.console.schemas import RunSpec
+from deepgym.models import RunResult
+from deepgym.registry import load_environment
+from deepgym.review_queues import ContentAction
+from deepgym.traces.schema import environment_sha256
 from tests.console_client import make_client
+from tests.trace_samples import PNG, graded_trace
 
 PASSED = {'name': 'passed', 'value': False, 'comment': 'Opens port 80 instead.'}
+# Keys that would carry a grade, its inputs or its cost, anywhere in an item's content.
+GRADE_KEYS = {
+    'score', 'passed', 'reward', 'rewards', 'step_rewards', 'total_reward', 'step_verifier',
+    'result', 'results', 'prior_results', 'error_type', 'has_verdict', 'status', 'reference',
+    'verifier', 'usage', 'cost_usd', 'unattached_usage', 'labels', 'label', 'events',
+    'metadata', 'token_ids', 'logprobs', 'provenance',
+}  # fmt: skip
+STEP_KEYS = {
+    'index', 'action', 'observation', 'exit_code', 'has_screenshot', 'applied', 'error',
+    'messages',
+}  # fmt: skip
 
 
 @pytest.fixture()
@@ -23,6 +43,251 @@ def _queue(client: TestClient, items: int = 2, **settings: object) -> str:
     targets = [{'target': {'kind': 'trace', 'id': f't{n}'}} for n in range(1, items + 1)]
     client.post(f'/api/queues/{queue_id}/items', json=targets)
     return queue_id
+
+
+def _keys(value: object) -> set[str]:
+    """Every object key in a JSON *value*, at any depth."""
+    if isinstance(value, dict):
+        return set(value).union(*map(_keys, value.values()))
+    if isinstance(value, list):
+        return set().union(*map(_keys, value))
+    return set()
+
+
+def test_content_has_what_a_reviewer_grades_and_no_grade(
+    client: TestClient, tmp_path: Path
+) -> None:
+    db = tmp_path / 'console.db'
+    env = load_environment('coin_change')
+    runs = RunStore(db)
+    spec = RunSpec(environment='coin_change', solution='print(42)', reference=True,
+                   environment_sha256=environment_sha256(env))  # fmt: skip
+    run_id = runs.create_group([spec], 'local', 'local')[0].id
+    runs.complete(
+        run_id,
+        RunResult(score=0.75, passed=True, output='GRADE-OUTPUT', stderr='GRADE-STDERR',
+                  exit_code=0, execution_time_ms=1.0, sandbox_id='sb'),
+        5.0,
+    )  # fmt: skip
+    trace = graded_trace()
+    targets = [
+        {'kind': 'run', 'id': run_id},
+        {'kind': 'episode', 'id': record_episode(trace, db_path=db)},
+        {'kind': 'trace', 'id': trace.trace_id},
+    ]
+    for target in targets:
+        client.post(
+            '/api/labels',
+            json={'target': target, 'name': 'passed', 'value': True, 'source': 'judge',
+                  'author': 'judge-a', 'comment': 'GRADE-LABEL'},
+        )  # fmt: skip
+    queue_id = client.post(
+        '/api/queues', json={'name': 'judge check', 'label_names': ['passed']}
+    ).json()['id']
+    client.post(
+        f'/api/queues/{queue_id}/items',
+        json=[{'target': target, 'context': 'Grade it.'} for target in targets],
+    )
+
+    responses = []
+    for _ in targets:
+        item = client.post(f'/api/queues/{queue_id}/next', json={'reviewer': 'ana'}).json()['item']
+        url = f'/api/queues/{queue_id}/items/{item["id"]}'
+        responses.append(client.get(f'{url}/content', params={'reviewer': 'ana'}))
+        client.post(f'{url}/submit', json={'reviewer': 'ana', 'labels': [PASSED]})
+        assert client.get(f'{url}/content', params={'reviewer': 'ana'}).json() == (
+            responses[-1].json()
+        )
+
+    assert [response.status_code for response in responses] == [200] * 3
+    run, episode, recorded = [response.json() for response in responses]
+    assert client.get(f'/api/runs/{run_id}').json()['score'] == 0.75  # the grade is stored
+    assert (run['task'], run['answer'], run['steps']) == (env.task, 'print(42)', [])
+    assert [
+        (step['index'], step['observation'], step['exit_code'], step['has_screenshot'])
+        for step in episode['steps']
+    ] == [(0, '$ ', 0, True), (1, '', None, False), (2, '', None, False)]
+    assert {(step['applied'], step['error']) for step in episode['steps']} == {(True, None)}
+    assert [step['action'] and step['action']['action_type'] for step in episode['steps']] == [
+        'bash', 'done', None,
+    ]  # fmt: skip
+    assert (episode['task'], recorded['task']) == (trace.task, trace.task)
+    assert recorded['initial_observation'] == '$ '
+    assert [
+        (step['index'], step['observation'], step['exit_code'], step['applied'], step['error'])
+        for step in recorded['steps']
+    ] == [
+        (1, '', 0, True, None),
+        (2, None, None, False, "ActionError: Action 'write_file' not allowed here."),
+        (3, '', None, True, None),
+    ]
+    assert {step['has_screenshot'] for step in recorded['steps']} == {False}
+    assert recorded['steps'][0]['messages'] == [
+        {'role': message.role, 'content': message.content} for message in trace.steps[0].messages
+    ]
+    for content in (run, episode, recorded):
+        assert set(content) == {'item', 'task', 'answer', 'initial_observation', 'steps'}
+        assert content['item']['context'] == 'Grade it.'
+        assert _keys(content) & GRADE_KEYS == set()
+        for step in content['steps']:
+            assert set(step) == STEP_KEYS
+            assert step['action'] is None or set(step['action']) == set(ContentAction.model_fields)
+        text = str(content)
+        for grade in ('GRADE-', 'notes/out.txt says hello'):
+            assert grade not in text
+
+
+def test_content_needs_a_held_or_reviewed_item(client: TestClient) -> None:
+    queue_id = _queue(client, items=1, reviewers=['ana', 'bo'])
+    view = client.post(f'/api/queues/{queue_id}/next', json={'reviewer': 'ana'}).json()
+    url = f'/api/queues/{queue_id}/items/{view["item"]["id"]}/content'
+
+    cases = {
+        'not listed': client.get(url, params={'reviewer': 'cy'}),
+        'no turn': client.get(url, params={'reviewer': 'bo'}),
+        'not in the console': client.get(url, params={'reviewer': 'ana'}),
+        'unknown item': client.get(
+            f'/api/queues/{queue_id}/items/nope/content', params={'reviewer': 'ana'}
+        ),
+    }
+
+    assert {name: response.status_code for name, response in cases.items()} == {
+        'not listed': 403, 'no turn': 409, 'not in the console': 404, 'unknown item': 404,
+    }  # fmt: skip
+    assert cases['no turn'].json()['detail'].startswith('bo holds no reservation')
+    assert cases['not in the console'].json()['detail'] == 'The console holds no trace t1'
+
+
+def test_unreadable_recordings_get_a_fixed_500(
+    client: TestClient, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    db = tmp_path / 'console.db'
+    record_episode(graded_trace(), db_path=db)
+    with connect(db) as conn:  # valid JSON, so the trace id index still takes it
+        conn.execute('UPDATE episodes SET trace = \'{"trace_id": "trace0001", "x": "GRADE"}\'')
+    env = load_environment('coin_change')
+    spec = RunSpec(environment='coin_change', solution='print(42)', reference=False,
+                   environment_sha256=environment_sha256(env))  # fmt: skip
+    run_id = RunStore(db).create_group([spec], 'local', 'local')[0].id
+
+    def unreadable(_name: str) -> None:
+        raise PermissionError('GRADE: /envs/coin_change/task.md')
+
+    monkeypatch.setattr(item_content, 'load_environment', unreadable)
+    queue_id = client.post('/api/queues', json={'name': 'q', 'reviewers': ['ana', 'bo']}).json()[
+        'id'
+    ]
+    targets = [{'kind': 'trace', 'id': 'trace0001'}, {'kind': 'run', 'id': run_id}]
+    items = client.post(
+        f'/api/queues/{queue_id}/items', json=[{'target': target} for target in targets]
+    ).json()
+    responses = []
+    for reviewer, item in zip(('ana', 'bo'), items):
+        client.post(f'/api/queues/{queue_id}/next', json={'reviewer': reviewer})
+        url = f'/api/queues/{queue_id}/items/{item["id"]}/content'
+        responses.append(client.get(url, params={'reviewer': reviewer}))
+
+    assert [(response.status_code, response.json()) for response in responses] == [
+        (500, {'detail': "The console can't read this item's stored recording"})
+    ] * 2
+
+
+def test_a_corrupt_trace_never_stops_the_console(tmp_path: Path) -> None:
+    db = tmp_path / 'console.db'
+    good = record_episode(graded_trace(), db_path=db)
+    with connect(db) as conn:  # an older database: a corrupt row, and no trace id index yet
+        conn.execute('DROP INDEX episodes_trace_id')
+        conn.execute(
+            'INSERT INTO episodes (id, environment, steps, total_reward, frames, created_at, '
+            "trace) VALUES ('broken', 'e', 0, 0, '[]', '2026-11-20T00:00:00+00:00', '{not json')"
+        )
+
+    client = make_client(tmp_path)
+    with connect(db) as conn:
+        index = conn.execute("SELECT 1 FROM sqlite_master WHERE name = 'episodes_trace_id'")
+        exists = index.fetchone() is not None
+        plan = conn.execute(f'EXPLAIN QUERY PLAN {episode_store._COPIES_OF}', ('x',)).fetchall()
+    queue_id = client.post('/api/queues', json={'name': 'q'}).json()['id']
+    targets = [
+        {'kind': 'trace', 'id': 'trace0001'},
+        {'kind': 'episode', 'id': good},
+        {'kind': 'episode', 'id': 'broken'},
+    ]
+    items = client.post(
+        f'/api/queues/{queue_id}/items', json=[{'target': target} for target in targets]
+    )
+    contents = []
+    for reviewer in ('ana', 'bo', 'cy'):
+        item = client.post(f'/api/queues/{queue_id}/next', json={'reviewer': reviewer}).json()
+        url = f'/api/queues/{queue_id}/items/{item["item"]["id"]}/content'
+        contents.append(client.get(url, params={'reviewer': reviewer}))
+
+    assert exists
+    assert any('USING INDEX episodes_trace_id' in row['detail'] for row in plan)
+    assert items.status_code == 201
+    assert client.get(f'/api/episodes/{good}').status_code == 200
+    assert [response.status_code for response in contents] == [200, 200, 500]
+    assert contents[0].json()['task'] == contents[1].json()['task'] == graded_trace().task
+    assert contents[2].json() == {'detail': "The console can't read this item's stored recording"}
+
+
+def test_screenshots_of_an_episode_item(client: TestClient, tmp_path: Path) -> None:
+    trace = graded_trace()
+    episode = {'kind': 'episode', 'id': record_episode(trace, db_path=tmp_path / 'console.db')}
+    queue_id = client.post(
+        '/api/queues', json={'name': 'cua', 'label_names': ['passed'], 'reviewers': ['ana', 'bo']}
+    ).json()['id']
+    items = client.post(
+        f'/api/queues/{queue_id}/items',
+        json=[{'target': episode}, {'target': {'kind': 'trace', 'id': trace.trace_id}}],
+    ).json()
+    client.post(f'/api/queues/{queue_id}/next', json={'reviewer': 'ana'})
+    client.post(f'/api/queues/{queue_id}/next', json={'reviewer': 'bo'})
+
+    def shot(item: int, frame: object, reviewer: str = 'ana') -> object:
+        url = f'/api/queues/{queue_id}/items/{items[item]["id"]}/frames/{frame}/screenshot'
+        return client.get(url, params={'reviewer': reviewer})
+
+    first = shot(0, 0)
+    cases = {
+        'not listed': shot(0, 0, 'cy'),
+        'no turn': shot(1, 1),
+        'no screenshot': shot(0, 1),
+        'no such frame': shot(0, 9),
+        'a trace': shot(1, 0, 'bo'),
+        'negative': shot(0, -1),
+        'too big': shot(0, 2**63),
+    }
+
+    assert (first.status_code, first.headers['content-type'], first.content) == (
+        200, 'image/png', PNG,
+    )  # fmt: skip
+    assert {name: response.status_code for name, response in cases.items()} == {
+        'not listed': 403, 'no turn': 409, 'no screenshot': 404, 'no such frame': 404,
+        'a trace': 404, 'negative': 422, 'too big': 422,
+    }  # fmt: skip
+    assert cases['no screenshot'].json()['detail'] == (
+        f'The console holds no screenshot of episode {episode["id"]} at frame 1'
+    )
+
+
+def test_reveal_policy(client: TestClient) -> None:
+    default = _queue(client, items=1)
+    queue_id = _queue(client, items=2, reveal='on_close')
+    view = client.post(f'/api/queues/{queue_id}/next', json={'reviewer': 'ana'}).json()
+    client.post(
+        f'/api/queues/{queue_id}/items/{view["item"]["id"]}/submit',
+        json={'reviewer': 'ana', 'labels': [PASSED]},
+    )
+
+    refused = client.patch(f'/api/queues/{queue_id}', json={'reveal': 'after_submit'})
+
+    assert client.get(f'/api/queues/{default}').json()['reveal'] == 'after_submit'
+    assert refused.status_code == 409
+    assert 'reveal policy no longer changes' in refused.json()['detail']
+    assert client.get(f'/api/queues/{queue_id}').json()['reveal'] == 'on_close'
+    patched = client.patch(f'/api/queues/{default}', json={'reveal': 'humans_only'})
+    assert patched.json()['reveal'] == 'humans_only'
 
 
 def test_review_round_trip(client: TestClient) -> None:
@@ -144,7 +409,14 @@ def test_patch_changes_what_may_change(client: TestClient) -> None:
     dropped = client.patch(f'/api/queues/{queue_id}', json={'reviewers': ['bo']})
     frozen = [
         client.patch(f'/api/queues/{queue_id}', json=body)
-        for body in ({'overlap': 2}, {'blind': False}, {'label_names': []}, {'closed': None})
+        for body in (
+            {'overlap': 2},
+            {'blind': False},
+            {'label_names': []},
+            {'closed': None},
+            {'reveal': None},
+            {'reveal': 'never'},
+        )
     ]
 
     assert patched.status_code == 200
@@ -157,7 +429,7 @@ def test_patch_changes_what_may_change(client: TestClient) -> None:
     assert queue['reservation_seconds'] == 60
     assert client.get(f'/api/queues/{queue_id}').json() == queue
     assert dropped.status_code == 409
-    assert [response.status_code for response in frozen] == [422] * 4
+    assert [response.status_code for response in frozen] == [422] * 6
     assert client.post(f'/api/queues/{queue_id}/next', json={'reviewer': 'bo'}).json()
 
 
@@ -223,6 +495,7 @@ def test_refusals(client: TestClient) -> None:
         ('/api/queues', {'name': 'q', 'overlap': 0}),
         ('/api/queues', {'name': 'q', 'reviewers': ['ana'], 'overlap': 2}),
         ('/api/queues', {'name': 'q', 'extra': 1}),
+        ('/api/queues', {'name': 'q', 'reveal': 'never'}),
         ('/api/queues/{q}', {'closed': 'yes'}),
         ('/api/queues/{q}/items', [{'target': {'kind': 'job', 'id': 'j1'}}]),
         ('/api/queues/{q}/items', [{'target': {'kind': 'trace', 'id': 't9', 'step': 1}}]),
@@ -250,6 +523,10 @@ def test_bad_bodies_get_a_422(client: TestClient, path: str, body: object) -> No
         '/api/queues/{q}/items/i',
         '/api/queues/{q}/items/i?reviewer=ana&reviewer=bo',
         '/api/queues/{q}/items/i?reviewer=%20ana',
+        '/api/queues/{q}/items/i/content',
+        '/api/queues/{q}/items/i/content?reviewer=ana&step=1',
+        '/api/queues/{q}/items/i/frames/0/screenshot',
+        '/api/queues/{q}/items/i/frames/0/screenshot?reviewer=ana&size=2',
     ],
 )
 def test_bad_queries_get_a_422(client: TestClient, url: str) -> None:

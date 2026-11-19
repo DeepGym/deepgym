@@ -1,5 +1,6 @@
 """Tests for review queues: settings, items, reservations, reviews, blind mode and progress."""
 
+import json
 import multiprocessing
 import sqlite3
 import threading
@@ -11,9 +12,10 @@ from pathlib import Path
 import pytest
 from pydantic import ValidationError
 
-from deepgym.console import queue_store
-from deepgym.console.db import connect, iso_utc
+from deepgym.console import episode_store, item_content, queue_store
+from deepgym.console.db import TRACE_KEY, connect, iso_utc
 from deepgym.console.episode_store import record_episode
+from deepgym.console.item_content import ConflictingRecordingError
 from deepgym.console.label_store import LabelStore
 from deepgym.console.queue_store import (
     NotReviewerError,
@@ -23,7 +25,19 @@ from deepgym.console.queue_store import (
 )
 from deepgym.console.schemas import LabelQuery
 from deepgym.labels import Label, LabelCreate, LabelTarget
-from deepgym.review_queues import ItemCreate, Queue, QueueCreate, QueueUpdate, ReviewLabel
+from deepgym.models import Action, Observation
+from deepgym.registry import load_environment
+from deepgym.review_queues import (
+    ItemContent,
+    ItemCreate,
+    Queue,
+    QueueCreate,
+    QueueUpdate,
+    ReviewLabel,
+    ReviewView,
+)
+from deepgym.traces import Trace
+from deepgym.traces.schema import environment_sha256
 from tests.trace_samples import graded_trace
 
 PASSED = ReviewLabel(name='passed', value=True, comment='Solves it.')
@@ -58,6 +72,13 @@ def _given(store: QueueStore, target: LabelTarget, author: str, **changes: objec
     fields = {'target': target, 'name': 'quality', 'value': 'good', 'source': 'judge',
               'author': author, **changes}  # fmt: skip
     return LabelStore(store._path).add(LabelCreate.model_validate(fields))
+
+
+def _exposed(path: Path) -> list[str]:
+    """Every reviewer with a recorded exposure, by name."""
+    with connect(path) as conn:
+        rows = conn.execute('SELECT reviewer FROM queue_exposures ORDER BY reviewer')
+        return [row[0] for row in rows]
 
 
 def _assignments(path: Path) -> list[tuple[str, str, str]]:
@@ -117,6 +138,7 @@ class TestSettings:
             {'reviewers': ('ana', 'ana')},
             {'reviewers': ('ana',), 'overlap': 2},
             {'blind': 'yes'},
+            {'reveal': 'never'},
             {'extra': 1},
         ],
     )
@@ -128,7 +150,7 @@ class TestSettings:
         queue = QueueCreate(name='q')
 
         assert (queue.overlap, queue.blind, queue.reservation_seconds) == (1, True, 3600)
-        assert (queue.label_names, queue.reviewers) == ((), ())
+        assert (queue.label_names, queue.reviewers, queue.reveal) == ((), (), 'after_submit')
 
     def test_create_reads_back(self, store: QueueStore) -> None:
         created = store.create(
@@ -147,8 +169,9 @@ class TestSettings:
         first = store.create(QueueCreate(id='q1', name='calibration'))
 
         assert store.create(QueueCreate(id='q1', name='calibration')) == first
-        with pytest.raises(ValueError, match='other settings'):
-            store.create(QueueCreate(id='q1', name='calibration', overlap=2))
+        for other in ({'overlap': 2}, {'reveal': 'on_close'}):
+            with pytest.raises(ValueError, match='other settings'):
+                store.create(QueueCreate(id='q1', name='calibration', **other))
         assert store.queues() == [first]
 
     def test_unknown_queue(self, store: QueueStore) -> None:
@@ -214,11 +237,35 @@ class TestUpdate:
             {'reservation_seconds': 0},
             {'reviewers': None},
             {'reviewers': ['ana', 'ana']},
+            {'reveal': None},
+            {'reveal': 'never'},
         ],
     )
     def test_bad(self, changes: dict) -> None:
         with pytest.raises(ValidationError):
             QueueUpdate.model_validate(changes)
+
+    def test_reveal_changes_only_until_a_review_is_submitted(self, store: QueueStore) -> None:
+        queue = _queue(store, items=2)
+        held = store.next_item(queue.id, 'ana')
+
+        reserved = store.update(queue.id, QueueUpdate(reveal='on_close'))
+        store.submit(queue.id, held.item.id, 'ana', [PASSED])
+
+        assert reserved.reveal == 'on_close'
+        with pytest.raises(ValueError, match="submitted reviews under reveal 'on_close'"):
+            store.update(queue.id, QueueUpdate(reveal='after_submit', closed=True))
+        assert (store.get(queue.id).reveal, store.get(queue.id).closed) == ('on_close', False)
+        assert store.update(queue.id, QueueUpdate(reveal='on_close', closed=True)).closed
+
+    def test_reveal_freezes_at_the_first_turn_outside_blind_mode(self, store: QueueStore) -> None:
+        queue = _queue(store, items=1, blind=False)
+
+        store.next_item(queue.id, 'ana')
+
+        with pytest.raises(ValueError, match="handed out items under reveal 'after_submit'"):
+            store.update(queue.id, QueueUpdate(reveal='on_close'))
+        assert store.get(queue.id).reveal == 'after_submit'
 
 
 class TestItems:
@@ -831,6 +878,293 @@ class TestBlind:
             label.author: label.blind for label in done['bo'].labels if label.source == 'human'
         }
         assert blind_flags == {'ana': False, 'bo': True}
+
+
+class TestReveal:
+    def _reviewed(
+        self, store: QueueStore, reveal: str, **settings: object
+    ) -> tuple[Queue, ReviewView, ReviewView]:
+        """A one-item queue on t1, which a judge labeled and bo reviewed; ana's view of the
+        item when handed it, and when she submitted her review."""
+        queue = _queue(store, items=1, overlap=2, reveal=reveal, **settings)
+        _given(store, T1, 'judge-a', name='passed', value=True)
+        _review(store, queue, 'bo')
+        held = store.next_item(queue.id, 'ana')
+        return queue, held, store.submit(queue.id, held.item.id, 'ana', [PASSED])
+
+    @pytest.mark.parametrize(
+        ('reveal', 'shown', 'exposed'),
+        [
+            ('after_submit', ['judge-a', 'bo', 'ana'], ['ana', 'bo']),
+            ('humans_only', ['bo', 'ana'], ['ana']),
+            ('on_close', ['ana'], []),
+        ],
+    )
+    def test_what_a_reviewer_sees_once_submitted(
+        self, store: QueueStore, reveal: str, shown: list[str], exposed: list[str]
+    ) -> None:
+        queue, held, done = self._reviewed(store, reveal)
+        viewed = store.view(queue.id, held.item.id, 'ana')
+        exposures = _exposed(store._path)
+        later = _queue(store, items=1)
+
+        _review(store, later, 'ana')
+
+        assert held.labels == []
+        assert [label.author for label in done.labels] == shown
+        assert [label.author for label in viewed.labels] == shown
+        assert exposures == exposed
+        assert LabelStore(store._path).current('trace', 't1')[-1].blind is ('ana' not in exposed)
+
+    def test_on_close_shows_every_label_once_closed(self, store: QueueStore) -> None:
+        queue, held, _ = self._reviewed(store, 'on_close')
+        bo = store.view(queue.id, held.item.id, 'bo')
+
+        store.update(queue.id, QueueUpdate(closed=True))
+        closed = store.view(queue.id, held.item.id, 'ana')
+        later = _queue(store, items=1)
+        _review(store, later, 'ana')
+
+        assert [label.author for label in bo.labels] == ['bo']
+        assert [label.author for label in closed.labels] == ['judge-a', 'bo', 'ana']
+        assert _exposed(store._path) == ['ana']
+        assert LabelStore(store._path).current('trace', 't1')[-1].blind is False
+
+    def test_humans_only_never_shows_a_judge_or_a_verifier(self, store: QueueStore) -> None:
+        _given(store, T1, 'judge-a', name='passed', value=True)
+        _given(store, T1, 'tests', source='verifier', name='score', value=1.0)
+        queue = _queue(store, items=1, reveal='humans_only')
+        held = store.next_item(queue.id, 'ana')
+
+        done = store.submit(queue.id, held.item.id, 'ana', [PASSED])
+        exposures = _exposed(store._path)
+        _review(store, _queue(store, items=1), 'ana')
+
+        assert [label.author for label in done.labels] == ['ana']
+        assert exposures == []
+        assert LabelStore(store._path).current('trace', 't1')[-1].blind is True
+
+    @pytest.mark.parametrize(
+        ('reveal', 'handed', 'submitted', 'exposed'),
+        [
+            ('after_submit', ['judge-a', 'bo'], ['judge-a', 'bo', 'ana'], ['ana', 'bo']),
+            ('humans_only', ['bo'], ['bo', 'ana'], ['ana']),
+            ('on_close', [], ['ana'], []),
+        ],
+    )
+    def test_outside_blind_mode(
+        self,
+        store: QueueStore,
+        reveal: str,
+        handed: list[str],
+        submitted: list[str],
+        exposed: list[str],
+    ) -> None:
+        _, held, done = self._reviewed(store, reveal, blind=False)
+
+        assert [label.author for label in held.labels] == handed
+        assert [label.author for label in done.labels] == submitted
+        assert _exposed(store._path) == exposed
+        assert done.labels[-1].blind is False
+
+
+def _without_step_verifier(trace: Trace) -> Trace:
+    """*trace* as if its environment had no step verifier."""
+    env = trace.provenance.env.model_copy(update={'step_verifier_sha256': None})
+    provenance = trace.provenance.model_copy(update={'env': env})
+    return trace.model_copy(update={'provenance': provenance})
+
+
+def _with_steps(trace: Trace, **changes: dict) -> Trace:
+    """*trace* with each step's fields changed, by step index: ``s1={'error': ...}``."""
+    steps = [step.model_copy(update=changes.get(f's{step.index}', {})) for step in trace.steps]
+    return trace.model_copy(update={'steps': tuple(steps)})
+
+
+class TestContent:
+    def _read(self, store: QueueStore, target: LabelTarget) -> ItemContent:
+        """The content of a one-item queue on *target*, as ana, who holds it."""
+        queue = store.create(QueueCreate(name='q'))
+        item = store.add_items(queue.id, [ItemCreate(target=target)])[0]
+        store.next_item(queue.id, 'ana')
+        return store.content(queue.id, item.id, 'ana')
+
+    def test_readable_while_a_review_could_be_submitted(
+        self, store: QueueStore, clock: _Clock
+    ) -> None:
+        record_episode(graded_trace(), db_path=store._path)
+        queue = store.create(
+            QueueCreate(name='q', label_names=('passed',), overlap=2, reservation_seconds=60,
+                        reviewers=('ana', 'bo', 'cy'))
+        )  # fmt: skip
+        item = store.add_items(queue.id, [_item('trace0001')])[0]
+
+        def read(reviewer: str) -> str:
+            return store.content(queue.id, item.id, reviewer).item.target.id
+
+        def refused(reviewer: str, match: str) -> None:
+            with pytest.raises(ValueError, match=match):
+                read(reviewer)
+
+        refused('ana', 'ana holds no reservation')
+        store.next_item(queue.id, 'ana')
+        assert read('ana') == 'trace0001'
+        refused('bo', 'bo holds no reservation')
+        store.release(queue.id, item.id, 'ana')
+        assert read('ana') == 'trace0001'  # released, with a slot free: a submit is taken
+        store.next_item(queue.id, 'ana')
+        clock.advance(60)
+        assert read('ana') == 'trace0001'  # expired, with a slot free
+        store.next_item(queue.id, 'bo')
+        store.next_item(queue.id, 'cy')
+        refused('ana', 'every review and reservation it needs')
+        store.submit(queue.id, item.id, 'bo', [PASSED])
+        store.skip(queue.id, item.id, 'cy')
+        refused('cy', 'cy skipped item')
+        store.next_item(queue.id, 'ana')
+        store.update(queue.id, QueueUpdate(closed=True))
+        assert read('bo') == read('ana') == 'trace0001'
+        with pytest.raises(NotReviewerError):
+            read('di')
+        with pytest.raises(QueueNotFoundError, match='has no item'):
+            store.content(queue.id, 'nope', 'ana')
+
+    def test_a_steps_error_is_cut_to_its_name_where_the_step_verifier_ran(
+        self, store: QueueStore
+    ) -> None:
+        died = 'SandboxDiedError: Container c1 stopped: {"score": 0.2, "passed": false}'
+        rejected = "ActionError: Action 'write_file' not allowed here."
+        unnamed = 'the step verifier printed 0.2'
+        errors = {'s1': {'error': died}, 's2': {'error': rejected}, 's3': {'error': unnamed}}
+        verified = _with_steps(graded_trace(), **errors)
+        unverified = _without_step_verifier(verified).model_copy(update={'trace_id': 'trace0009'})
+        for trace in (verified, unverified):
+            record_episode(trace, db_path=store._path)
+
+        cut = self._read(store, LabelTarget(kind='trace', id='trace0001'))
+        whole = self._read(store, LabelTarget(kind='trace', id='trace0009'))
+
+        assert [step.error for step in cut.steps] == ['SandboxDiedError', rejected, None]
+        assert '0.2' not in json.dumps([step.model_dump() for step in cut.steps])
+        assert [step.error for step in whole.steps] == [died, rejected, unnamed]
+
+    def test_cli_output_loses_usage_and_cost(self, store: QueueStore) -> None:
+        events = [
+            {'type': 'assistant', 'message': {'id': 'm1', 'content': [
+                {'type': 'text', 'text': 'Writing hello'}],
+                'usage': {'input_tokens': 913, 'output_tokens': 41}}},
+            {'type': 'result', 'subtype': 'success', 'result': 'done', 'total_cost_usd': 0.0173,
+             'usage': {'input_tokens': 1913}, 'modelUsage': {'opus': {'inputTokens': 1913,
+                                                                    'costUSD': 0.0173}}},
+            {'type': 'turn.completed', 'usage': {'cached_input_tokens': 7, 'output_tokens': 2}},
+        ]  # fmt: skip
+        stream = '\n'.join([json.dumps(events[0]), 'progress: café {not json', *map(
+            json.dumps, events[1:])])  # fmt: skip
+        not_cli = '{"usage": "kept: a done action produced this"}'
+        trace = _with_steps(
+            graded_trace(),
+            s1={'action': Action(action_type='cli', content='Write hello'),
+                'observation': Observation(content=stream, step=1, metadata={'exit_code': 0})},
+            s3={'observation': Observation(content=not_cli, step=2, done=True)},
+        )  # fmt: skip
+        episode_id = record_episode(trace, db_path=store._path)
+
+        recorded = self._read(store, LabelTarget(kind='trace', id=trace.trace_id))
+        episode = self._read(store, LabelTarget(kind='episode', id=episode_id))
+
+        for content, cli, done in ((recorded, 0, 2), (episode, 1, 2)):
+            shown = content.steps[cli].observation or ''
+            assert shown.split('\n') == [
+                json.dumps({'type': 'assistant', 'message': {'id': 'm1', 'content': [
+                    {'type': 'text', 'text': 'Writing hello'}]}}),
+                'progress: café {not json',
+                json.dumps({'type': 'result', 'subtype': 'success', 'result': 'done'}),
+                json.dumps({'type': 'turn.completed'}),
+            ]  # fmt: skip
+            assert content.steps[done].observation == not_cli
+            text = json.dumps([step.model_dump() for step in content.steps])
+            for spent in ('913', '1913', '0.0173', 'tokens', 'Tokens', 'cost'):
+                assert spent not in text
+
+    def test_an_episodes_exit_code_is_its_own_actions(self, store: QueueStore) -> None:
+        trace = _with_steps(
+            graded_trace(),
+            s3={'observation': Observation(content='', step=2, done=True,
+                                           metadata={'exit_code': 3})},
+        )  # fmt: skip
+        episode_id = record_episode(trace, db_path=store._path)
+
+        recorded = self._read(store, LabelTarget(kind='trace', id=trace.trace_id))
+        episode = self._read(store, LabelTarget(kind='episode', id=episode_id))
+
+        acted = [step.exit_code for step in episode.steps if step.action is not None]
+        assert acted == [step.exit_code for step in recorded.steps if step.applied] == [0, 3]
+        assert episode.steps[-1].exit_code is None
+
+    def test_a_trace_stored_twice_is_read_as_the_trace_routes_read_it(
+        self, store: QueueStore
+    ) -> None:
+        trace = graded_trace()
+        cut_short = trace.model_copy(
+            update={'steps': trace.steps[:1], 'result': None, 'finished_at': None}
+        )
+        for copy in (trace, cut_short, trace.model_copy(update={'trace_id': 'other'})):
+            record_episode(copy, db_path=store._path)
+        record_episode(trace.model_copy(update={'trace_id': 'OTHER'}), db_path=store._path)
+
+        merged = self._read(store, LabelTarget(kind='trace', id='trace0001'))
+
+        assert [step.index for step in merged.steps] == [1, 2, 3]  # the copy that got furthest
+        record_episode(trace.model_copy(update={'task': 'Another task'}), db_path=store._path)
+        for trace_id, match in (('trace0001', 'disagree'), ('other', 'differ only in case')):
+            with pytest.raises(ConflictingRecordingError, match=match):
+                self._read(store, LabelTarget(kind='trace', id=trace_id))
+
+    def test_a_trace_is_found_through_its_index(self, store: QueueStore) -> None:
+        with connect(store._path) as conn:
+            plan = conn.execute(
+                f'EXPLAIN QUERY PLAN {episode_store._COPIES_OF}', ('trace0001',)
+            ).fetchall()
+
+        assert any('USING INDEX episodes_trace_id' in row['detail'] for row in plan)
+
+    def test_a_runs_task_is_read_only_while_its_environment_is_unchanged(self) -> None:
+        env = load_environment('coin_change')
+        digest = environment_sha256(env)
+
+        assert item_content._run_task('coin_change', digest) == env.task
+        for name, sha256 in (('coin_change', '0' * 64), ('coin_change', None), ('nope', digest)):
+            assert item_content._run_task(name, sha256) is None
+
+
+def test_an_older_database_gets_the_default_reveal_and_the_trace_index(db: Path) -> None:
+    with sqlite3.connect(db) as conn:
+        conn.execute(
+            'CREATE TABLE episodes (id TEXT PRIMARY KEY, environment TEXT NOT NULL, '
+            'steps INTEGER NOT NULL, total_reward REAL NOT NULL, score REAL, passed INTEGER, '
+            'frames TEXT NOT NULL, result TEXT, created_at TEXT NOT NULL)'
+        )
+        conn.execute(
+            'CREATE TABLE queues (id TEXT PRIMARY KEY, name TEXT NOT NULL, description TEXT, '
+            'instructions TEXT, label_names TEXT NOT NULL, overlap INTEGER NOT NULL, '
+            'blind INTEGER NOT NULL, reservation_seconds INTEGER NOT NULL, '
+            'reviewers TEXT NOT NULL, closed INTEGER NOT NULL, created_at TEXT NOT NULL)'
+        )
+        conn.execute(
+            "INSERT INTO queues VALUES ('q1', 'calibration', NULL, NULL, '[\"passed\"]', 1, 1, "
+            "3600, '[]', 0, '2026-11-19T12:00:00.000000+00:00')"
+        )
+    conn.close()
+
+    store = QueueStore(db)
+
+    assert store.get('q1').reveal == 'after_submit'
+    assert store.update('q1', QueueUpdate(reveal='on_close')).reveal == 'on_close'
+    assert store.get('q1').reveal == 'on_close'
+    assert store.create(QueueCreate(name='new')).reveal == 'after_submit'
+    with connect(db) as conn:
+        indexes = conn.execute("SELECT sql FROM sqlite_master WHERE name = 'episodes_trace_id'")
+        assert TRACE_KEY in indexes.fetchone()['sql']
 
 
 def test_progress(store: QueueStore, clock: _Clock) -> None:

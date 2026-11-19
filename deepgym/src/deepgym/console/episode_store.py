@@ -8,8 +8,12 @@ from __future__ import annotations
 
 import base64
 import json
+import sqlite3
+from collections.abc import Sequence
 from pathlib import Path
 from uuid import uuid4
+
+from pydantic import BaseModel, ConfigDict, ValidationError
 
 from deepgym.console.db import (
     DEFAULT_DB_PATH,
@@ -26,13 +30,48 @@ from deepgym.console.schemas import (
     EpisodePage,
     EpisodeSummary,
     Frame,
+    TraceConflict,
 )
 from deepgym.models import RunResult, Trajectory
-from deepgym.traces import Trace
+from deepgym.traces import Trace, merge_copies
 
 _SUMMARY_COLUMNS = (
     'id, environment, steps, total_reward, score, passed, has_verdict, error_type, created_at'
 )
+# The rows whose stored trace's id is the one given ignoring case, so a case collision
+# shows; CASE keeps json_extract off rows that aren't JSON, which would fail the query.
+_COPIES_OF = (
+    'SELECT id, trace, 1 AS valid FROM episodes WHERE CASE WHEN json_valid(trace) '
+    "THEN lower(json_extract(trace, '$.trace_id')) END = lower(?) ORDER BY rowid"
+)
+
+
+class HeldTraces(BaseModel):
+    """The traces the console holds, one copy each, and the stored traces that don't read
+    as one."""
+
+    model_config = ConfigDict(frozen=True)
+
+    traces: tuple[Trace, ...]
+    """One copy of each trace, the one that got furthest
+    (:func:`~deepgym.traces.merge_copies`), in the order first stored."""
+    episodes: dict[str, tuple[str, ...]]
+    """The episodes holding each kept trace's copies, by trace id."""
+    untraced: int
+    """Episodes recorded without a trace."""
+    conflicts: tuple[TraceConflict, ...]
+    unreadable: tuple[str, ...]
+    """Episodes whose stored trace doesn't read as a trace."""
+
+    @property
+    def merged(self) -> int:
+        """Copies of kept traces merged into the copy kept."""
+        return sum(len(ids) - 1 for ids in self.episodes.values())
+
+    @property
+    def conflicting(self) -> int:
+        """Copies of the conflicting traces."""
+        return sum(len(conflict.episodes) for conflict in self.conflicts)
 
 
 class EpisodeStore:
@@ -109,6 +148,10 @@ class EpisodeStore:
         """Return the stored traces, and how many episodes were recorded without one."""
         return read_traces(self._path)
 
+    def held_traces(self, trace_id: str | None = None) -> HeldTraces:
+        """Return :func:`read_held_traces` of this database."""
+        return read_held_traces(self._path, trace_id)
+
     def get(self, episode_id: str) -> EpisodeDetail | None:
         """Return one episode with its frames and result, or None if unknown."""
         with connect(self._path) as conn:
@@ -149,6 +192,94 @@ def read_traces(path: Path) -> tuple[list[Trace], int]:
         rows = conn.execute('SELECT trace FROM episodes ORDER BY rowid').fetchall()
     traces = [Trace.model_validate_json(row['trace']) for row in rows if row['trace']]
     return traces, len(rows) - len(traces)
+
+
+def read_held_traces(path: Path, trace_id: str | None = None) -> HeldTraces:
+    """Return the traces stored in the console database at *path*, one copy of each, and
+    what doesn't read as one trace: copies that disagree, ids that differ only in case
+    (both left out as conflicts), and stored traces that don't parse (left out as
+    unreadable). Nothing raises for one bad trace.
+
+    *path* is opened read-only, so it is never created or migrated.
+
+    Args:
+        path: The console database.
+        trace_id: Read only the copies of this trace and of ids differing only in case
+            (their ``untraced`` is 0); None reads every stored trace.
+    """
+    with connect_read_only(path) as conn:
+        columns = table_columns(conn, 'episodes')
+        if 'trace' not in columns:
+            rows = (
+                conn.execute('SELECT id, NULL AS trace FROM episodes').fetchall() if columns else []
+            )
+        elif trace_id is None:
+            rows = conn.execute(
+                'SELECT id, trace, json_valid(trace) AS valid FROM episodes ORDER BY rowid'
+            ).fetchall()
+        else:
+            rows = conn.execute(_COPIES_OF, (trace_id,)).fetchall()
+    stored = [row for row in rows if row['trace'] is not None]
+    return _held(stored, untraced=len(rows) - len(stored))
+
+
+def _held(rows: Sequence[sqlite3.Row], *, untraced: int) -> HeldTraces:
+    """Parse each row's trace, merge each trace's copies, and set aside what won't.
+
+    A trace that SQLite's ``json_valid`` refuses (such as one holding ``NaN``) is unreadable
+    even where pydantic would parse it, so the one-trace query, which can only select valid
+    JSON, agrees with reading them all.
+    """
+    copies: dict[str, list[tuple[str, Trace]]] = {}
+    unreadable: list[str] = []
+    for row in rows:
+        trace = _parsed(row['trace']) if row['valid'] else None
+        if trace is None:
+            unreadable.append(row['id'])
+            continue
+        copies.setdefault(trace.trace_id, []).append((row['id'], trace))
+    kept: dict[str, Trace] = {}
+    conflicts: list[TraceConflict] = []
+    for trace_id, held in copies.items():
+        episodes = tuple(episode_id for episode_id, _ in held)
+        try:
+            (kept[trace_id],) = merge_copies([trace for _, trace in held])
+        except ValueError as exc:
+            conflicts.append(
+                TraceConflict(
+                    trace_id=trace_id, reason='copies_disagree', episodes=episodes, detail=str(exc)
+                )
+            )
+    folded: dict[str, list[str]] = {}
+    for trace_id in kept:
+        folded.setdefault(trace_id.casefold(), []).append(trace_id)
+    for ids in (ids for ids in folded.values() if len(ids) > 1):
+        detail = f'Trace ids {ids} differ only in case, which exports cannot tell apart'
+        for trace_id in ids:
+            del kept[trace_id]
+            episodes = tuple(episode_id for episode_id, _ in copies[trace_id])
+            conflicts.append(
+                TraceConflict(
+                    trace_id=trace_id, reason='case_collision', episodes=episodes, detail=detail
+                )
+            )
+    return HeldTraces(
+        traces=tuple(kept.values()),
+        episodes={
+            trace_id: tuple(episode_id for episode_id, _ in copies[trace_id]) for trace_id in kept
+        },
+        untraced=untraced,
+        conflicts=tuple(conflicts),
+        unreadable=tuple(unreadable),
+    )
+
+
+def _parsed(text: str) -> Trace | None:
+    """Return the trace *text* holds, or None if it doesn't read as one."""
+    try:
+        return Trace.model_validate_json(text)
+    except ValidationError:
+        return None
 
 
 def read_trace_ids(path: Path) -> dict[str, str]:

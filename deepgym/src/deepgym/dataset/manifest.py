@@ -55,6 +55,11 @@ VERDICTS = '{split}.verdicts.jsonl'
 IGNORED = frozenset({'.DS_Store'})
 """File names :func:`verify_dataset` skips: folder metadata macOS Finder writes."""
 
+MAX_FOLDER_BYTES = 255 - len(b'.-') - 32
+"""Longest output folder name, in UTF-8 bytes, :func:`write_dataset` can stage (221): file
+systems take names of up to 255 bytes, and its staging folder ``.<name>-<uuid hex>`` adds a
+dot, a dash and 32 hex digits."""
+
 _NAME = TypeAdapter(Name)
 _FORMATS = TypeAdapter(tuple[ExportFormat, ...])
 
@@ -121,7 +126,8 @@ def write_dataset(
     Raises:
         ValueError: If *name*, *version* or *formats* isn't valid.
         DeepGymError: If *out* isn't a new or empty directory, Parquet is asked for
-            without pyarrow, or the folder written fails verification.
+            without pyarrow, the folder written fails verification, or another build
+            created *out* meanwhile.
     """
     name, version, unique = checked_write(out, name=name, version=version, formats=formats)
     out.parent.mkdir(parents=True, exist_ok=True)
@@ -130,9 +136,14 @@ def write_dataset(
     try:
         published = _sha256(_write(dataset, staging, name, version, unique))
         verify_dataset(staging, sha256=published)
-        if out.exists():
-            out.rmdir()
-        staging.rename(out)
+        try:
+            if out.exists():
+                out.rmdir()
+            staging.rename(out)
+        except OSError as exc:  # it was checked empty or absent, so another build wrote it
+            raise DeepGymError(
+                f'{out} was created by another build while this one ran; nothing was written'
+            ) from exc
     except BaseException:
         shutil.rmtree(staging, ignore_errors=True)
         raise
@@ -171,8 +182,29 @@ def checked_write(
 
 
 def manifest_sha256(folder: Path) -> str:
-    """Return the SHA-256 of *folder*'s ``manifest.json``: the dataset's identifier."""
-    return _file_sha256(folder / MANIFEST)
+    """Return the SHA-256 of *folder*'s ``manifest.json``: the dataset's identifier.
+
+    Raises:
+        DeepGymError: If there is no ``manifest.json`` or it isn't a regular file (a
+            symlink is never followed).
+    """
+    return _file_sha256(_manifest_path(folder))
+
+
+def _manifest_path(folder: Path) -> Path:
+    """Return *folder*'s ``manifest.json``, read with ``lstat`` so a symlink is never followed.
+
+    Raises:
+        DeepGymError: If it is missing or isn't a regular file.
+    """
+    path = folder / MANIFEST
+    try:
+        mode = path.lstat().st_mode
+    except (FileNotFoundError, NotADirectoryError) as exc:
+        raise DeepGymError(f'{path} not found') from exc
+    if not stat.S_ISREG(mode):
+        raise DeepGymError(f'{path} is not a regular file (a symlink is never followed)')
+    return path
 
 
 def verify_dataset(folder: Path, *, sha256: str | None = None) -> DatasetManifest:
@@ -207,16 +239,15 @@ def verify_dataset(folder: Path, *, sha256: str | None = None) -> DatasetManifes
         The manifest.
 
     Raises:
-        DeepGymError: If the manifest is missing or isn't JSON with unique keys, or
+        DeepGymError: If the manifest is missing, isn't a regular file (a symlink is never
+            followed) or isn't JSON with unique keys, or a :class:`DatasetMismatchError`
             listing every problem found.
         pydantic.ValidationError: If the manifest doesn't have a manifest's fields.
     """
-    path = folder / MANIFEST
-    if not path.is_file():
-        raise DeepGymError(f'{path} not found')
+    path = _manifest_path(folder)
     try:
         data = json.loads(path.read_text(encoding='utf-8'), object_pairs_hook=_unique_keys)
-    except ValueError as exc:
+    except (ValueError, RecursionError) as exc:  # RecursionError: nested too deep to read
         raise DeepGymError(f'{path} is not JSON with unique keys: {exc}') from exc
     manifest = DatasetManifest.model_validate(data)
     problems: list[str] = []
@@ -229,9 +260,22 @@ def verify_dataset(folder: Path, *, sha256: str | None = None) -> DatasetManifes
     problems += walked
     problems += _file_problems(folder, manifest, set(present) - {MANIFEST})
     if problems:
-        listing = ''.join(f'\n- {problem}' for problem in problems)
-        raise DeepGymError(f'{folder} does not match its manifest:{listing}')
+        raise DatasetMismatchError(folder, problems)
     return manifest
+
+
+class DatasetMismatchError(DeepGymError):
+    """A dataset folder that doesn't match its manifest; ``problems`` lists every mismatch."""
+
+    def __init__(self, folder: Path, problems: Sequence[str]) -> None:
+        listing = ''.join(f'\n- {problem}' for problem in problems)
+        super().__init__(f'{folder} does not match its manifest:{listing}')
+        self.folder = folder
+        self.problems = list(problems)
+
+    def __reduce__(self) -> tuple[type[DatasetMismatchError], tuple[Path, list[str]]]:
+        """Pickle by the arguments, which ``args`` (the message alone) doesn't hold."""
+        return type(self), (self.folder, self.problems)
 
 
 def _write(

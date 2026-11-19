@@ -83,8 +83,14 @@ DropReason = Literal[
     'over_cost', 'no_score', 'score', 'passed', 'failed', 'no_band', 'band', 'outside_band',
     'missing_label', 'duplicate',
 ]  # fmt: skip
-UnreadReason = Literal['episode_without_trace', 'not_a_trace_file', 'merged_copy']
-"""Why a source held something that never reached :func:`build_dataset` as a trace."""
+UnreadReason = Literal[
+    'episode_without_trace', 'not_a_trace_file', 'merged_copy', 'conflicting_copy',
+    'unreadable_trace',
+]  # fmt: skip
+"""Why a source held something that never reached :func:`build_dataset` as a trace:
+``conflicting_copy`` is a copy of a trace whose copies disagree, or whose id another
+trace's matches but for case, and ``unreadable_trace`` a stored trace that doesn't read
+as one (the console counts both; ``deepgym dataset build`` refuses them)."""
 
 VerdictSource = Literal['verifier', 'human']
 Sha256 = Annotated[str, Field(pattern=r'^[0-9a-f]{64}$')]

@@ -20,7 +20,20 @@ except ImportError as _exc:
         'FastAPI is required for the console. Install with: pip install "deepgym[server]"'
     ) from _exc
 
-from deepgym.console import environments, episodes, labels, qa, queues, runs, sandboxes
+from deepgym.console import (
+    calibration,
+    datasets,
+    environments,
+    episodes,
+    labels,
+    qa,
+    queues,
+    runs,
+    sandboxes,
+    scans,
+    traces,
+)
+from deepgym.console.datasets import DEFAULT_DATASETS_DIR
 from deepgym.console.db import DEFAULT_DB_PATH
 from deepgym.console.episode_store import EpisodeStore
 from deepgym.console.label_store import LabelStore
@@ -52,6 +65,7 @@ def create_app(
     allowed_hosts: Sequence[str] | None = None,
     token: str | None = None,
     static_dir: Path | None = None,
+    datasets_dir: Path | None = None,
 ) -> FastAPI:
     """Create the console application.
 
@@ -66,6 +80,9 @@ def create_app(
             the served HTML. Defaults to $DEEPGYM_CONSOLE_TOKEN, else a fresh random one.
         static_dir: Folder of a UI build to serve instead of the bundled one, the same way
             (token in every HTML page, never cached). It must hold an index.html.
+        datasets_dir: Directory /api/datasets builds datasets into and verifies them in;
+            defaults to ``~/.deepgym/datasets``. Clients name a folder in it, never a path.
+            ``~`` is expanded and the path resolved once, here.
 
     Returns:
         The FastAPI app. Runs left unfinished by a previous process are marked failed.
@@ -91,13 +108,26 @@ def create_app(
     app.state.queues = QueueStore(db_path)
     app.state.runner = runner
     app.state.qa_dir = qa_dir or report_dir()
+    app.state.datasets_dir = (datasets_dir or DEFAULT_DATASETS_DIR).expanduser().resolve()
     app.state.token = token or os.environ.get('DEEPGYM_CONSOLE_TOKEN') or secrets.token_urlsafe(32)
     app.add_exception_handler(RequestValidationError, _validation_error)
     if allowed_hosts:
         app.add_middleware(TrustedHostMiddleware, allowed_hosts=list(allowed_hosts))
 
     api = APIRouter(prefix='/api', dependencies=[Depends(require_console_access)])
-    for module in (environments, runs, episodes, labels, queues, sandboxes, qa):
+    for module in (
+        environments,
+        runs,
+        episodes,
+        traces,
+        labels,
+        queues,
+        scans,
+        datasets,
+        calibration,
+        sandboxes,
+        qa,
+    ):
         api.include_router(module.router)
     app.include_router(api)
 

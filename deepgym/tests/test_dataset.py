@@ -3,6 +3,7 @@
 import hashlib
 import json
 import os
+import pickle
 import random
 import stat
 import sys
@@ -20,6 +21,8 @@ from deepgym.console.schemas import LabelQuery
 from deepgym.dataset import (
     MANIFEST,
     Dataset,
+    DatasetManifest,
+    DatasetMismatchError,
     DatasetSpec,
     LabelMatch,
     TaskBand,
@@ -28,6 +31,7 @@ from deepgym.dataset import (
     verify_dataset,
     write_dataset,
 )
+from deepgym.dataset import manifest as manifest_module
 from deepgym.dataset.build import copy_sha256
 from deepgym.exceptions import DeepGymError
 from deepgym.labels import Label, LabelCreate
@@ -1539,3 +1543,67 @@ class TestCli:
         assert exit_info.value.code == 1
         err = capsys.readouterr().err
         assert 'changed: train.jsonl' in err and 'not the published' in err
+
+
+def test_a_mismatch_lists_its_problems_and_pickles(tmp_path: Path) -> None:
+    out = tmp_path / 'ds'
+    _write(_build([_trace('t1')]), out)
+    (out / 'train.jsonl').write_text('\n')
+
+    with pytest.raises(DatasetMismatchError) as caught:
+        verify_dataset(out, sha256='0' * 64)
+
+    problems = caught.value.problems
+    assert 'changed: train.jsonl' in problems
+    assert any('not the published' in problem for problem in problems)
+    assert str(caught.value) == f'{out} does not match its manifest:' + ''.join(
+        f'\n- {problem}' for problem in problems
+    )
+    copy = pickle.loads(pickle.dumps(caught.value))
+    assert (type(copy), str(copy), copy.problems, copy.folder) == (
+        DatasetMismatchError,
+        str(caught.value),
+        problems,
+        out,
+    )
+
+
+def test_a_manifest_nested_too_deep_is_not_json(tmp_path: Path) -> None:
+    (tmp_path / MANIFEST).write_text('[' * 100_000)
+
+    with pytest.raises(DeepGymError, match='is not JSON with unique keys'):
+        verify_dataset(tmp_path)
+
+
+def test_a_symlinked_manifest_is_never_followed(tmp_path: Path) -> None:
+    out = tmp_path / 'ds'
+    _write(_build([_trace('t1')]), out)
+    linked = tmp_path / 'linked'
+    linked.mkdir()
+    (linked / MANIFEST).symlink_to(out / MANIFEST)
+
+    for read in (lambda: verify_dataset(linked), lambda: manifest_sha256(linked)):
+        with pytest.raises(DeepGymError, match='is not a regular file'):
+            read()
+    with pytest.raises(DeepGymError, match='not found'):
+        manifest_sha256(tmp_path / 'missing')
+
+
+def test_a_folder_another_build_wrote_first_is_refused(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    out = tmp_path / 'ds'
+    real = manifest_module.verify_dataset
+
+    def racing(folder: Path, *, sha256: str | None = None) -> DatasetManifest:
+        out.mkdir(exist_ok=True)
+        (out / 'theirs.txt').write_text('x')
+        return real(folder, sha256=sha256)
+
+    monkeypatch.setattr(manifest_module, 'verify_dataset', racing)
+
+    with pytest.raises(DeepGymError, match='created by another build'):
+        _write(_build([_trace('t1')]), out)
+
+    assert sorted(path.name for path in tmp_path.iterdir()) == ['ds']
+    assert sorted(path.name for path in out.iterdir()) == ['theirs.txt']

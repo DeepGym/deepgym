@@ -308,17 +308,19 @@ def _build_context(task_dir: Path) -> Path:
     return real
 
 
-_READ_EXEC = 0o555
-"""Read and execute bits for owner, group and others."""
+_HASHED_MODE = 0o7000 | 0o555 | 0o002
+"""Mode bits the build-folder hash keeps: setuid, setgid and sticky, read and execute
+for everyone, and write for others. Owner and group write are left out: they are what a
+machine's umask (022 or 002) changes, and a task's files are owned by root in the image."""
 
 
 def _tree_sha256(root: Path) -> str:
     """Hash the folder at *root* as a builder sends it: every entry under it by its path
-    relative to *root*, its type and read/execute bits, a file by its content, a link by
+    relative to *root*, its type and mode bits, a file by its content, a link by
     its target (never followed), and a folder, empty or not, by its path and mode alone.
-    Write bits are left out: they differ with each machine's umask, while losing a read or
-    execute bit (0600 to an unprivileged agent) changes what the task can do. A missing
-    folder hashes as empty."""
+    The mode keeps every bit but owner and group write (see :data:`_HASHED_MODE`), so a
+    lost read bit, a world-writable file or a setuid one changes the hash and a different
+    umask doesn't. A missing folder hashes as empty."""
     digest = hashlib.sha256()
     for path in sorted(root.rglob('*')):  # doesn't descend into linked folders
         mode = path.lstat().st_mode
@@ -329,7 +331,7 @@ def _tree_sha256(root: Path) -> str:
         else:
             content = ''
         # A path never holds NUL, and content is empty or 64 hex digits: entries can't run together.
-        kept = stat.S_IFMT(mode) | (mode & _READ_EXEC)
+        kept = stat.S_IFMT(mode) | (mode & _HASHED_MODE)
         entry = f'{path.relative_to(root).as_posix()}\0{kept:o}\0{content}\n'
         digest.update(entry.encode('utf-8', 'surrogateescape'))  # any file name hashes
     return digest.hexdigest()

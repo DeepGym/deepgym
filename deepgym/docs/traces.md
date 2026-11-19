@@ -180,7 +180,7 @@ for task in report.tasks:
   its compared task is listed in `unverified`.
 - The environment hash counts files by content, not path: a verifier read from a file by
   its source, and a Harbor task by its tests, its solution and, when it builds its image,
-  its `environment/` folder: every entry's path, type and read/execute bits, each file's content, each
+  its `environment/` folder: every entry's path, type and mode (all but owner and group write), each file's content, each
   link's target (not followed) and every folder, empty ones included. The files under a
   Terminal-Bench `task_root` and CyberGym `artifacts` still count by path only.
 

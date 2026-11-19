@@ -254,8 +254,12 @@ def test_build_hash_records_links_modes_empty_folders_and_whole_files(tmp_path: 
     seen.append(digest())
     (context / 'a.txt').chmod(0o600)  # others lose read: counts
     seen.append(digest())
-    (context / 'a.txt').chmod(0o400)  # only a write bit changed (as a umask would): doesn't
+    (context / 'a.txt').chmod(0o420)  # owner and group write differ (as a umask would): doesn't
     assert digest() == seen[-1]
+    (context / 'a.txt').chmod(0o402)  # others may write: counts
+    seen.append(digest())
+    (context / 'a.txt').chmod(0o4400)  # setuid: counts
+    seen.append(digest())
     (context / 'empty').mkdir()
     seen.append(digest())
     (context / 'big.bin').write_bytes(bytes(3 << 20))  # read in chunks, to its last byte

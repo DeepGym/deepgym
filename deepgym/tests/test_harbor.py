@@ -571,3 +571,12 @@ def test_cli_export_writes_task_folders(tmp_path: Path, capsys: pytest.CaptureFi
         str(tmp_path / 'two_sum'),
     ]
     assert HarborTask.from_dir(tmp_path / 'two_sum').solution
+
+
+def test_packed_files_are_the_same_bytes_every_time(monkeypatch: pytest.MonkeyPatch) -> None:
+    from deepgym.harbor.task import pack_files
+
+    files = {'solve.sh': b'echo hi\n', 'data/x.bin': bytes(range(256))}
+    first = pack_files(files)
+    monkeypatch.setattr('time.time', lambda: 4_000_000_000.0)  # a later clock changes nothing
+    assert pack_files(files) == first

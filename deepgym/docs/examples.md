@@ -1,9 +1,8 @@
 # Examples
 
-This page collects worked examples for each part of DeepGym: scoring batches, the trainer
-integrations, multi-turn sessions, computer-use and CLI agents, traces, writing
-environments and verifiers, and importing benchmarks. Some continue the
-[quickstart](../README.md#quickstart), whose `dg`, `env` and `solution` they reuse.
+This page has worked examples for scoring batches, each trainer integration, sessions,
+agents, traces, authoring and benchmark imports. Some continue the
+[quickstart](../README.md#quickstart) and reuse its `dg`, `env` and `solution`.
 
 ## Score a batch for GRPO
 

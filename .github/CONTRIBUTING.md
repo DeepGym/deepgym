@@ -19,7 +19,7 @@ git clone https://github.com/DeepGym/deepgym.git
 cd deepgym/deepgym          # the Python package lives in deepgym/
 pip install -e ".[dev]"
 pytest                      # no Daytona or API keys needed
-ruff check src/ && ruff format --check src/
+ruff check src/ tests/ && ruff format --check src/ tests/
 ```
 
 The console UI lives in `deepgym/console-ui/` (Next.js static export, built with bun) and

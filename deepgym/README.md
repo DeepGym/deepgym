@@ -194,12 +194,27 @@ flowchart LR
 The rules are in [the reward contract][reward-contract], [the QA gate][qa-gate] and
 [rubric-judged rewards][rubric].
 
+## What ships
+
+| Area | Included |
+|---|---|
+| Environments | 31 built-ins: 22 coding, 5 computer-use desktops with 8 seeded variants each, 2 tool-use, 2 cyber ([list][built-ins]). Single-turn, multi-turn (one live sandbox per episode, from Python or over HTTP) and computer use (screenshots in, mouse and keyboard out, scored on the state the agent leaves) |
+| Benchmarks | SWE-bench Pro, Terminal-Bench 2.0 and any other Harbor dataset, BigCodeBench, HumanEval, MBPP, EvalPlus, MiMo-V2.6-RL code tasks, CyberGym, and 16 OSWorld LibreOffice tasks ([importers][importers]); `MixedEnvironment` puts several behind one reward function |
+| Sandboxes | Docker, Apple container, Daytona (cloud or self-hosted), Modal and E2B; `local` for development. Desktop tasks need Daytona ([sandboxes][sandboxes]) |
+| Agents | Claude Code and Codex CLI inside the sandbox, Anthropic and OpenAI computer-use and API tool agents, with turn, time and cost budgets ([agents][agents]) |
+| Training and eval | [verl][verl] (reward function and agent loops), [TRL][trl], [OpenRLHF][openrlhf], [Axolotl][axolotl], [lm-evaluation-harness][lm-eval], `RewardFunction` for your own loop, and a Gymnasium-style `reset`/`step` API |
+| Authoring | `deepgym new`, `check` and `qa`, controls, mutation testing and approvals ([authoring][authoring], [verifiers][verifiers]); Hugging Face Hub sharing |
+| Traces | Recorded with provenance, token usage and cost; exported as JSONL, Parquet rows for verl and TRL, or ATIF ([traces][traces]) |
+| Analysis | Two runs compared task by task with pass@k, pass^k and an exact significance test; scanners for behaviour the verifier missed; versioned datasets with splits by prompt and a manifest hash ([compare][compare], [scanners][scan-traces], [datasets][datasets]) |
+| Review | Labels on runs, episodes, traces and single steps; review queues for expert reviewers, blind by default; judge calibration from stored labels ([console][console]) |
+| Serving | `deepgym serve`, an HTTP API with jobs and live sessions ([API server][api-server]); `deepgym console`, a local web console for environments, runs, episode replay, sandboxes and QA reports ([console][console]) |
+
 ## Agents and traces
 
 An episode is one agent working through a multi-turn task in a sandbox. `dg.trace()`
 records it while it runs, one event per line under `~/.deepgym/traces/` (or
-`$DEEPGYM_TRACES_DIR`), so a crash or a killed process keeps the steps taken so far. The
-agents in `deepgym.agents` fill in the model messages, token usage and cost as they go:
+`$DEEPGYM_TRACES_DIR`), so a crash or a killed process keeps the steps taken so far. Here
+Claude Code works on a task inside the sandbox:
 
 ```python
 from deepgym import DeepGym
@@ -207,9 +222,11 @@ from deepgym.agents import Budget, ClaudeCodeAgent
 from deepgym.traces import AgentMeta
 
 dg = DeepGym(mode='daytona')
+# allow_model_credentials: the CLI, and so the model, can read the provider API key
 agent = ClaudeCodeAgent(model='claude-opus-5-5', allow_model_credentials=True)
 
-# env is a MultiTurnEnvironment whose image has the Claude Code CLI installed
+# env: a MultiTurnEnvironment whose image has the Claude Code CLI, with 'cli' in
+# allowed_actions and cli_provider_egress=True (see the examples)
 with dg.trace(env, AgentMeta(name='claude-code', model='claude-opus-5-5')) as tr:
     agent.run(tr, tr.start(), task=env.task,
               budget=Budget(max_turns=None, max_seconds=4 * 3600))  # CLI runs need a deadline
@@ -218,19 +235,26 @@ with dg.trace(env, AgentMeta(name='claude-code', model='claude-opus-5-5')) as tr
 print(tr.trace.has_verdict, tr.trace.usage, tr.trace.cost_usd)
 ```
 
-The CLI runs headless as an unprivileged user, its network reaches only the model
-provider's API, and every process it started is stopped before grading. `CodexAgent` works
-the same way, and the Anthropic and OpenAI computer-use and API tool agents drive the
-sandbox from the host. Setting up the environment is in [the examples][examples].
+The CLI runs headless as an unprivileged user, and its network reaches only the provider's
+hostname on port 443. `CodexAgent` works the same way. The Anthropic and OpenAI
+computer-use and API tool agents drive the sandbox from the host ([agents][agents]). What
+lands in the trace depends on the agent:
+
+| Agent | Records |
+|---|---|
+| API tool agents | Each step's model messages, token usage and cost |
+| Computer-use agents | Each step's token usage and cost, no messages |
+| Claude Code, Codex | The run's token usage and cost when it ends, no messages |
+| Your own loop | What you pass to `tr.step(action, messages, usage=..., cost_usd=...)` |
 
 A trace holds:
 
 - **Provenance:** SHA-256 hashes of the environment, task, verifiers and reference, the
   image digest the sandbox booted from, the deepgym version and git commit, and the agent,
   model and sampling config you passed.
-- **Every step:** the action, the model messages behind it (token ids and logprobs when you
-  have them), the token usage and USD cost of those calls, what came back, and the step
-  reward.
+- **Every step:** the action, the model messages behind it when the agent records them
+  (with token ids and logprobs if you have them), token usage and USD cost, what came back,
+  and the step reward.
 - **The verdict,** with every earlier `score()` result kept. Usage or cost that a provider
   never reported stays null, never 0, and `usage_complete` says whether any is missing.
 
@@ -243,7 +267,9 @@ deepgym traces export --format atif --out atif/ --only-valid        # ATIF docum
 ```
 
 A trace without a verdict is exported with `has_verdict: false` and its RL row gets a null
-reward; `--only-valid` leaves it out. Details are in [traces][traces].
+reward; `--only-valid` leaves it out. `--rows rl` needs the model messages of every turn,
+so it skips traces without them, Claude Code and Codex runs included. Details are in
+[traces][traces].
 
 ## Compare two runs
 
@@ -260,19 +286,21 @@ base = [load_trace(p) for p in Path('runs/base').glob('*.jsonl')]
 tuned = [load_trace(p) for p in Path('runs/step-400').glob('*.jsonl')]
 
 report = compare(attempts_from_traces(base), attempts_from_traces(tuned))
-print(report.flips)          # tasks improved, regressed, both_solved, both_failed, mixed
-print(report.significance)   # exact stratified permutation test, two-sided p-value
+print(report.flips)          # task count per flip
+print(report.significance)   # two-sided p-value
 for task in report.tasks:
     if task.flip == 'regressed':
         print(task.key, task.a.solve_rate, task.b.solve_rate)
 ```
 
 - Each task gets its solve rate (pass@1) and mean score on both sides, and a flip:
-  improved, regressed, both solved, both failed, or mixed.
-- Each side gets mean pass@k and pass^k, and a count of tasks the model never solves,
-  always solves, or solves some of the time.
-- The p-value tells a real gain from sampling noise. It holds with different numbers of
-  attempts per task, and with one attempt per task it equals exact McNemar.
+  improved, regressed, both solved, both failed, or mixed (a side solved only some of its
+  attempts).
+- Each side gets mean pass@k and pass^k (all k attempts pass), and a count of tasks the
+  model never solves, always solves, or solves some of the time.
+- The p-value comes from an exact permutation test stratified by task, so it stays valid
+  when tasks have different attempt counts. With one attempt per task it equals exact
+  McNemar.
 - An attempt without a verdict counts in no rate. A task whose environment changed between
   the runs (its verifier edited, say) is listed as `changed` and left out, so a new
   checkpoint is never compared against an old verifier.
@@ -294,7 +322,7 @@ scanners = [
         {'regex': r'pytest\.skip|@unittest\.skip', 'message': 'Skips a test', 'severity': 'high'},
     ]),
 ]
-report = scan_traces(traces, scanners)
+report = scan_traces(traces, scanners)   # traces: loaded with load_trace, as above
 for group in group_findings(report.findings):
     print(group.scanner, group.message, len(group.findings), group.traces)
 ```
@@ -303,12 +331,12 @@ for group in group_findings(report.findings):
 deepgym traces scan --config scanners.json --out report.json --write-labels
 ```
 
-- Each finding cites its trace, step and field, and quotes the exact text, so a reviewer
-  can go straight to it.
-- `ProtectedPathScanner` reads shell commands, Python file writes and the edits Claude Code
-  and Codex made, without running anything. It reads the forms [listed in the
-  docs][scan-traces]; to know every file that changed, diff the final workspace.
-  `LLMScanner` asks a judge model with your own instruction, from Python.
+- Each finding cites its trace and step, and quotes the text where the action has it; for
+  file writes and CLI edits the message names the path instead.
+- `ProtectedPathScanner` reads shell commands, Python file writes and Claude Code and Codex
+  edits without running anything. It only knows the write patterns [listed in the
+  docs][scan-traces], so diff the final workspace when you need every changed file.
+  `LLMScanner` (Python only) has a judge model read each trace with your instruction.
 - A scanner that fails on a trace is reported as an error for that trace, never as clean,
   and the CLI exits 3.
 - `--write-labels` stores every finding as a label, so review queues can pick them up and a
@@ -316,16 +344,19 @@ deepgym traces scan --config scanners.json --out report.json --write-labels
 
 ## Expert review and judge calibration
 
-A label scores one thing about a run, an episode or a trace, or a single step or quoted
-span of one: a verifier score, a judge's verdict, or an expert's mark with the reason.
-Labels are an append-only log, so a correction supersedes the old label instead of
-overwriting it.
+A label is one judgment about a run, episode or trace, or one step or quoted span of it.
+It comes from a verifier, an LLM judge or an expert, and an expert's label carries the
+reason. Labels are an append-only log, so a correction supersedes the old label instead
+of overwriting it.
 
 Review queues hand items to experts. Each item gets `overlap` reviews from different
-people, reservations stop two reviewers taking the same item, and in a blind queue (the
-default) a reviewer sees no other label, verifier or judge until they submit:
+people, and reservations never hand it to more reviewers than that. In a blind queue (the
+default) a reviewer sees no other label, verifier or judge until they submit. Blind mode
+covers the queue routes only, and the local console has no login, so a shared setup must
+limit reviewers to those routes ([console][console]).
 
 ```python
+from deepgym.console import record_episode
 from deepgym.console.db import DEFAULT_DB_PATH
 from deepgym.console.queue_store import QueueStore
 from deepgym.labels import LabelTarget
@@ -336,20 +367,25 @@ queue = queues.create(QueueCreate(
     name='judge v3 calibration', instructions='Pass only if the config is fixed.',
     label_names=('passed',), overlap=3, blind=True,
 ))
+for t in traces:
+    record_episode(t)   # stores the trace, so the queue can show it to reviewers
+trace_ids = [t.trace_id for t in traces]
 queues.add_items(queue.id, [ItemCreate(target=LabelTarget(kind='trace', id=t)) for t in trace_ids])
 
-view = queues.next_item(queue.id, 'ana')   # None once nothing is left for ana
+view = queues.next_item(queue.id, 'ana')                  # None once nothing is left for ana
+content = queues.content(queue.id, view.item.id, 'ana')   # task, answer and steps, no grades
 queues.submit(queue.id, view.item.id, 'ana', [
     ReviewLabel(name='passed', value=False, comment='Opens port 80 instead of fixing the config.'),
 ])
 ```
 
-Before you train on an LLM judge's reward, `calibrate` grades expert-labeled answers with
-it several times and reports TPR, TNR, Cohen's kappa and how often the judge agrees with
-itself, next to how well the experts agree with each other. It refuses any answer that was
-used to write the rubric, and `report.meets(min_tpr=0.9, min_tnr=0.9)` gives a pass or fail
-you can put in CI. The console computes the same numbers from stored labels, without
-calling the judge ([rubric judge][rubric], [console][console]).
+Before you train on an LLM judge's reward, run `calibrate`. It has the judge grade
+expert-labeled answers several times and reports TPR, TNR, Cohen's kappa and the judge's
+agreement with itself, beside the experts' agreement with each other. It refuses any answer
+you list in `built_from` as used to write the rubric, and `report.meets(min_tpr=0.9,
+min_tnr=0.9)` gives a pass or fail you can put in CI. The console computes the same
+numbers from stored labels, without calling the judge ([rubric judge][rubric],
+[console][console]).
 
 ## Build a dataset
 
@@ -383,12 +419,13 @@ deepgym dataset build --spec spec.json --name notes --version 1.0.0 --out notes-
 deepgym dataset verify notes-v1 --sha256 <the sha256 build printed>
 ```
 
-- Copies of one trajectory ship once, with their verdicts pooled. An expert's `passed`
-  label overrides the verifier, and experts who disagree drop the trace as `contested`.
+- Copies of one trajectory ship once. Human `passed` labels on any copy are pooled and
+  override the verifier. Humans who disagree drop it as `contested`, and copies the
+  verifier both passed and failed, with no human verdict, drop it as `inconsistent`.
 - Splits go by a hash of the prompt, so one prompt never lands in both train and test, and
   adding prompts later never moves an existing one.
-- Every dropped trace is listed under the reason it was dropped. A trace without a verdict
-  is never counted as a fail.
+- Every dropped trace is listed under the reason it was dropped. By default a trace without
+  a verdict is dropped as `no_verdict`, never kept as a fail.
 - `manifest.json` pins every file by SHA-256. Publish the manifest's own hash, and
   `deepgym dataset verify` checks a downloaded copy against it, file by file.
 
@@ -396,15 +433,16 @@ deepgym dataset verify notes-v1 --sha256 <the sha256 build printed>
 
 `deepgym console` is a local web app over the same database: browse environments, score
 solutions on any provider, replay episodes step by step with screenshots, and read QA
-reports. Everything in the sections above also has a REST route, so you can build your own
-review tool or dashboard on top:
+reports. Traces stored with `record_episode(tr.trace)`, labels, review queues, scans,
+datasets and judge agreement also have REST routes, so you can build your own review tool
+or dashboard on top:
 
 | Route | What it does |
 |---|---|
 | `/api/runs`, `/api/runs/compare` | Score solutions in the background; compare two run groups |
-| `/api/traces` | List traces with their verdicts; read one with every step |
+| `/api/traces` | List stored traces with their verdicts; read one with every step |
 | `/api/labels` | Add, correct, retract and query labels |
-| `/api/queues` | Review queues: next item, grade-free content, submit, skip, progress |
+| `/api/queues` | Review queues: next item, its content with grades hidden, submit, skip, progress |
 | `/api/scans` | Run rule scanners over stored traces |
 | `/api/datasets` | Build, list and verify datasets |
 | `/api/calibration/agreement` | A judge's stored verdicts against the experts' |
@@ -417,21 +455,6 @@ deepgym console --port 8080   # http://127.0.0.1:8080
 It binds to `127.0.0.1` by default, and every API call needs the per-launch token the
 console writes into its pages. `--ui-dir` serves your own UI build in place of the bundled
 one ([console][console]).
-
-## What ships
-
-| Area | Included |
-|---|---|
-| Environments | 31 built-ins: 22 coding, 5 computer-use desktops with 8 seeded variants each, 2 tool-use, 2 cyber ([list][built-ins]). Single-turn, multi-turn (one live sandbox per episode, from Python or over HTTP) and computer use (screenshots in, mouse and keyboard out, scored on the state the agent leaves) |
-| Benchmarks | SWE-bench Pro, Terminal-Bench 2.0 and any other Harbor dataset, BigCodeBench, HumanEval, MBPP, EvalPlus, MiMo-V2.6-RL code tasks, CyberGym, and 16 OSWorld LibreOffice tasks ([importers][importers]); `MixedEnvironment` puts several behind one reward function |
-| Sandboxes | Docker, Apple container, Daytona (cloud or self-hosted), Modal and E2B; `local` for development. Desktop tasks need Daytona ([sandboxes][sandboxes]) |
-| Agents | Claude Code and Codex CLI inside the sandbox, Anthropic and OpenAI computer-use and API tool agents, with turn, time and cost budgets ([agents][agents]) |
-| Training and eval | [verl][verl] (reward function and agent loops), [TRL][trl], [OpenRLHF][openrlhf], [Axolotl][axolotl], [lm-evaluation-harness][lm-eval], `RewardFunction` for your own loop, and a Gymnasium-style `reset`/`step` API |
-| Authoring | `deepgym new`, `check` and `qa`, controls, mutation testing and approvals ([authoring][authoring], [verifiers][verifiers]); Hugging Face Hub sharing |
-| Traces | Recorded with provenance, token usage and cost; exported as JSONL, Parquet rows for verl and TRL, or ATIF ([traces][traces]) |
-| Analysis | Two runs compared task by task with pass@k, pass^k and an exact significance test; scanners for behaviour the verifier missed; versioned datasets with splits by prompt and a manifest hash ([compare][compare], [scanners][scan-traces], [datasets][datasets]) |
-| Review | Labels on runs, episodes, traces and single steps; review queues for expert reviewers, blind by default; judge calibration from stored labels ([console][console]) |
-| Serving | `deepgym serve`, an HTTP API with jobs and live sessions ([API server][api-server]); `deepgym console`, a local web console for environments, runs, episode replay, sandboxes and QA reports, with REST routes for traces, labels, review queues, scans, datasets and judge agreement ([console][console]) |
 
 ## Install
 

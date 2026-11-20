@@ -1,6 +1,7 @@
 # DeepGym
 
 [![PyPI](https://img.shields.io/pypi/v/deepgym?label=pypi)](https://pypi.org/project/deepgym/)
+[![Docs](https://img.shields.io/badge/docs-deepgym.io-blue)](https://deepgym.io/docs)
 [![CI](https://github.com/DeepGym/deepgym/actions/workflows/deepgym-ci.yml/badge.svg)](https://github.com/DeepGym/deepgym/actions/workflows/deepgym-ci.yml)
 [![License: PolyForm Noncommercial](https://img.shields.io/badge/license-PolyForm%20Noncommercial-blue)](https://github.com/DeepGym/deepgym/blob/main/LICENSE)
 
@@ -8,7 +9,8 @@
 shortcut answers and infrastructure failures.**
 
 DeepGym is a Python library for teams that build gyms and trace datasets, and for
-researchers who train models on them.
+researchers who train models on them. The full documentation is at
+[deepgym.io/docs](https://deepgym.io/docs).
 
 Take the coin-change task in the quickstart below. The answer `return -1` passes 3 of its
 25 cases, so a verifier that pays partial credit gives it 0.12, and a policy trained on

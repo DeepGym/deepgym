@@ -194,6 +194,230 @@ flowchart LR
 The rules are in [the reward contract][reward-contract], [the QA gate][qa-gate] and
 [rubric-judged rewards][rubric].
 
+## Agents and traces
+
+An episode is one agent working through a multi-turn task in a sandbox. `dg.trace()`
+records it while it runs, one event per line under `~/.deepgym/traces/` (or
+`$DEEPGYM_TRACES_DIR`), so a crash or a killed process keeps the steps taken so far. The
+agents in `deepgym.agents` fill in the model messages, token usage and cost as they go:
+
+```python
+from deepgym import DeepGym
+from deepgym.agents import Budget, ClaudeCodeAgent
+from deepgym.traces import AgentMeta
+
+dg = DeepGym(mode='daytona')
+agent = ClaudeCodeAgent(model='claude-opus-5-5', allow_model_credentials=True)
+
+# env is a MultiTurnEnvironment whose image has the Claude Code CLI installed
+with dg.trace(env, AgentMeta(name='claude-code', model='claude-opus-5-5')) as tr:
+    agent.run(tr, tr.start(), task=env.task,
+              budget=Budget(max_turns=None, max_seconds=4 * 3600))  # CLI runs need a deadline
+    tr.score()
+
+print(tr.trace.has_verdict, tr.trace.usage, tr.trace.cost_usd)
+```
+
+The CLI runs headless as an unprivileged user, its network reaches only the model
+provider's API, and every process it started is stopped before grading. `CodexAgent` works
+the same way, and the Anthropic and OpenAI computer-use and API tool agents drive the
+sandbox from the host. Setting up the environment is in [the examples][examples].
+
+A trace holds:
+
+- **Provenance:** SHA-256 hashes of the environment, task, verifiers and reference, the
+  image digest the sandbox booted from, the deepgym version and git commit, and the agent,
+  model and sampling config you passed.
+- **Every step:** the action, the model messages behind it (token ids and logprobs when you
+  have them), the token usage and USD cost of those calls, what came back, and the step
+  reward.
+- **The verdict,** with every earlier `score()` result kept. Usage or cost that a provider
+  never reported stays null, never 0, and `usage_complete` says whether any is missing.
+
+Export them as training data:
+
+```bash
+deepgym traces export --format jsonl --out traces.jsonl             # whole traces
+deepgym traces export --format parquet --rows rl --out rl.parquet   # verl / TRL rows
+deepgym traces export --format atif --out atif/ --only-valid        # ATIF documents
+```
+
+A trace without a verdict is exported with `has_verdict: false` and its RL row gets a null
+reward; `--only-valid` leaves it out. Details are in [traces][traces].
+
+## Compare two runs
+
+Base model against a checkpoint, or one agent against another, on the same tasks. Give
+each run its own `DEEPGYM_TRACES_DIR` and load the folders:
+
+```python
+from pathlib import Path
+
+from deepgym.compare import attempts_from_traces, compare
+from deepgym.traces import load_trace
+
+base = [load_trace(p) for p in Path('runs/base').glob('*.jsonl')]
+tuned = [load_trace(p) for p in Path('runs/step-400').glob('*.jsonl')]
+
+report = compare(attempts_from_traces(base), attempts_from_traces(tuned))
+print(report.flips)          # tasks improved, regressed, both_solved, both_failed, mixed
+print(report.significance)   # exact stratified permutation test, two-sided p-value
+for task in report.tasks:
+    if task.flip == 'regressed':
+        print(task.key, task.a.solve_rate, task.b.solve_rate)
+```
+
+- Each task gets its solve rate (pass@1) and mean score on both sides, and a flip:
+  improved, regressed, both solved, both failed, or mixed.
+- Each side gets mean pass@k and pass^k, and a count of tasks the model never solves,
+  always solves, or solves some of the time.
+- The p-value tells a real gain from sampling noise. It holds with different numbers of
+  attempts per task, and with one attempt per task it equals exact McNemar.
+- An attempt without a verdict counts in no rate. A task whose environment changed between
+  the runs (its verifier edited, say) is listed as `changed` and left out, so a new
+  checkpoint is never compared against an old verifier.
+
+`deepgym.passk` has the estimators on their own: `pass_at_k(n, c, k)`, `pass_hat_k(n, c,
+k)` and `task_difficulty(n, c)`.
+
+## Find what the verifier missed
+
+A verifier checks the state the agent leaves. It doesn't see an agent that edited the tests
+on the way there, or skipped the one that kept failing. Scanners read the trace for that:
+
+```python
+from deepgym.scanners import PatternScanner, ProtectedPathScanner, group_findings, scan_traces
+
+scanners = [
+    ProtectedPathScanner(name='protected', globs=('tests', 'conftest.py')),
+    PatternScanner(name='skips', patterns=[
+        {'regex': r'pytest\.skip|@unittest\.skip', 'message': 'Skips a test', 'severity': 'high'},
+    ]),
+]
+report = scan_traces(traces, scanners)
+for group in group_findings(report.findings):
+    print(group.scanner, group.message, len(group.findings), group.traces)
+```
+
+```bash
+deepgym traces scan --config scanners.json --out report.json --write-labels
+```
+
+- Each finding cites its trace, step and field, and quotes the exact text, so a reviewer
+  can go straight to it.
+- `ProtectedPathScanner` reads shell commands, Python file writes and the edits Claude Code
+  and Codex made, without running anything. It reads the forms [listed in the
+  docs][scan-traces]; to know every file that changed, diff the final workspace.
+  `LLMScanner` asks a judge model with your own instruction, from Python.
+- A scanner that fails on a trace is reported as an error for that trace, never as clean,
+  and the CLI exits 3.
+- `--write-labels` stores every finding as a label, so review queues can pick them up and a
+  dataset build can drop the flagged traces.
+
+## Expert review and judge calibration
+
+A label scores one thing about a run, an episode or a trace, or a single step or quoted
+span of one: a verifier score, a judge's verdict, or an expert's mark with the reason.
+Labels are an append-only log, so a correction supersedes the old label instead of
+overwriting it.
+
+Review queues hand items to experts. Each item gets `overlap` reviews from different
+people, reservations stop two reviewers taking the same item, and in a blind queue (the
+default) a reviewer sees no other label, verifier or judge until they submit:
+
+```python
+from deepgym.console.db import DEFAULT_DB_PATH
+from deepgym.console.queue_store import QueueStore
+from deepgym.labels import LabelTarget
+from deepgym.review_queues import ItemCreate, QueueCreate, ReviewLabel
+
+queues = QueueStore(DEFAULT_DB_PATH)
+queue = queues.create(QueueCreate(
+    name='judge v3 calibration', instructions='Pass only if the config is fixed.',
+    label_names=('passed',), overlap=3, blind=True,
+))
+queues.add_items(queue.id, [ItemCreate(target=LabelTarget(kind='trace', id=t)) for t in trace_ids])
+
+view = queues.next_item(queue.id, 'ana')   # None once nothing is left for ana
+queues.submit(queue.id, view.item.id, 'ana', [
+    ReviewLabel(name='passed', value=False, comment='Opens port 80 instead of fixing the config.'),
+])
+```
+
+Before you train on an LLM judge's reward, `calibrate` grades expert-labeled answers with
+it several times and reports TPR, TNR, Cohen's kappa and how often the judge agrees with
+itself, next to how well the experts agree with each other. It refuses any answer that was
+used to write the rubric, and `report.meets(min_tpr=0.9, min_tnr=0.9)` gives a pass or fail
+you can put in CI. The console computes the same numbers from stored labels, without
+calling the judge ([rubric judge][rubric], [console][console]).
+
+## Build a dataset
+
+`deepgym.dataset` turns traces and their labels into a versioned dataset with train, val
+and test splits:
+
+```python
+from pathlib import Path
+
+from deepgym.console.db import DEFAULT_DB_PATH
+from deepgym.console.episode_store import read_trace_ids
+from deepgym.console.label_store import read_labels
+from deepgym.dataset import DatasetSpec, build_dataset, write_dataset
+from deepgym.scanners import scanner_forbids
+
+spec = DatasetSpec(
+    models=('Qwen/Qwen3-8B',),
+    bands=('learnable',), inside_band=True,          # tasks solved 10 to 90% of the time
+    forbid_labels=scanner_forbids('protected', source='verifier'),
+    max_cost_usd=0.5,
+)
+dataset = build_dataset(traces, spec, read_labels(DEFAULT_DB_PATH), read_trace_ids(DEFAULT_DB_PATH))
+print(dataset.counts)    # kept, per split, dropped per reason
+sha256 = write_dataset(dataset, Path('notes-v1'), name='notes', version='1.0.0',
+                       formats=['jsonl', 'parquet'])
+```
+
+```bash
+deepgym dataset build --spec spec.json --name notes --version 1.0.0 --out notes-v1 \
+    --format jsonl parquet
+deepgym dataset verify notes-v1 --sha256 <the sha256 build printed>
+```
+
+- Copies of one trajectory ship once, with their verdicts pooled. An expert's `passed`
+  label overrides the verifier, and experts who disagree drop the trace as `contested`.
+- Splits go by a hash of the prompt, so one prompt never lands in both train and test, and
+  adding prompts later never moves an existing one.
+- Every dropped trace is listed under the reason it was dropped. A trace without a verdict
+  is never counted as a fail.
+- `manifest.json` pins every file by SHA-256. Publish the manifest's own hash, and
+  `deepgym dataset verify` checks a downloaded copy against it, file by file.
+
+## The console
+
+`deepgym console` is a local web app over the same database: browse environments, score
+solutions on any provider, replay episodes step by step with screenshots, and read QA
+reports. Everything in the sections above also has a REST route, so you can build your own
+review tool or dashboard on top:
+
+| Route | What it does |
+|---|---|
+| `/api/runs`, `/api/runs/compare` | Score solutions in the background; compare two run groups |
+| `/api/traces` | List traces with their verdicts; read one with every step |
+| `/api/labels` | Add, correct, retract and query labels |
+| `/api/queues` | Review queues: next item, grade-free content, submit, skip, progress |
+| `/api/scans` | Run rule scanners over stored traces |
+| `/api/datasets` | Build, list and verify datasets |
+| `/api/calibration/agreement` | A judge's stored verdicts against the experts' |
+
+```bash
+pip install "deepgym[server]"
+deepgym console --port 8080   # http://127.0.0.1:8080
+```
+
+It binds to `127.0.0.1` by default, and every API call needs the per-launch token the
+console writes into its pages. `--ui-dir` serves your own UI build in place of the bundled
+one ([console][console]).
+
 ## What ships
 
 | Area | Included |
@@ -204,9 +428,10 @@ The rules are in [the reward contract][reward-contract], [the QA gate][qa-gate] 
 | Agents | Claude Code and Codex CLI inside the sandbox, Anthropic and OpenAI computer-use and API tool agents, with turn, time and cost budgets ([agents][agents]) |
 | Training and eval | [verl][verl] (reward function and agent loops), [TRL][trl], [OpenRLHF][openrlhf], [Axolotl][axolotl], [lm-evaluation-harness][lm-eval], `RewardFunction` for your own loop, and a Gymnasium-style `reset`/`step` API |
 | Authoring | `deepgym new`, `check` and `qa`, controls, mutation testing and approvals ([authoring][authoring], [verifiers][verifiers]); Hugging Face Hub sharing |
-| Traces | Recorded with provenance, token usage and cost; exported as JSONL, Parquet rows for verl and TRL, or ATIF; two runs compared task by task with pass@k and a significance test; scanners for behaviour the verifier missed; versioned datasets with a manifest hash ([traces][traces]) |
+| Traces | Recorded with provenance, token usage and cost; exported as JSONL, Parquet rows for verl and TRL, or ATIF ([traces][traces]) |
+| Analysis | Two runs compared task by task with pass@k, pass^k and an exact significance test; scanners for behaviour the verifier missed; versioned datasets with splits by prompt and a manifest hash ([compare][compare], [scanners][scan-traces], [datasets][datasets]) |
 | Review | Labels on runs, episodes, traces and single steps; review queues for expert reviewers, blind by default; judge calibration from stored labels ([console][console]) |
-| Serving | `deepgym serve`, an HTTP API with jobs and live sessions ([API server][api-server]); `deepgym console`, a local web console for environments, runs, episode replay, sandboxes and QA reports ([console][console]) |
+| Serving | `deepgym serve`, an HTTP API with jobs and live sessions ([API server][api-server]); `deepgym console`, a local web console for environments, runs, episode replay, sandboxes and QA reports, with REST routes for traces, labels, review queues, scans, datasets and judge agreement ([console][console]) |
 
 ## Install
 
@@ -234,8 +459,10 @@ Python 3.10 or later. Optional extras:
   [approvals][approvals]
 - Training: [the reward contract][reward-contract], [rubric judge][rubric], [verl][verl],
   [TRL][trl], [OpenRLHF][openrlhf], [Axolotl][axolotl], [lm-eval][lm-eval]
-- Running: [sandboxes][sandboxes], [agents][agents], [traces][traces],
-  [console][console], [API server][api-server]
+- Running: [sandboxes][sandboxes], [agents][agents], [console][console],
+  [API server][api-server]
+- Traces and data: [record and export][traces], [compare][compare],
+  [scanners][scan-traces], [datasets][datasets]
 
 ## For teams and labs
 
@@ -277,6 +504,9 @@ Commercial use needs a license: [contact@deepgym.io](mailto:contact@deepgym.io).
 [lm-eval]: https://github.com/DeepGym/deepgym/blob/main/deepgym/docs/training/lm-eval.md
 [axolotl]: https://github.com/DeepGym/deepgym/blob/main/deepgym/docs/training/axolotl.md
 [traces]: https://github.com/DeepGym/deepgym/blob/main/deepgym/docs/traces.md
+[compare]: https://github.com/DeepGym/deepgym/blob/main/deepgym/docs/traces.md#compare-two-runs
+[scan-traces]: https://github.com/DeepGym/deepgym/blob/main/deepgym/docs/traces.md#scan-traces
+[datasets]: https://github.com/DeepGym/deepgym/blob/main/deepgym/docs/traces.md#datasets
 [sandboxes]: https://github.com/DeepGym/deepgym/blob/main/deepgym/docs/sandboxes.md
 [cli]: https://github.com/DeepGym/deepgym/blob/main/deepgym/docs/cli.md
 [api-server]: https://github.com/DeepGym/deepgym/blob/main/deepgym/docs/api-server.md

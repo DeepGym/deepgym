@@ -19,7 +19,7 @@ newer releases and our gyms now live in a private repository. To request access,
 ## Install
 
 ```bash
-pip install deepgym==0.5.0
+pip install deepgym
 ```
 
 Python 3.10 or later. Optional extras:

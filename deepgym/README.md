@@ -9,8 +9,7 @@
 shortcut answers and infrastructure failures.**
 
 DeepGym is a Python library for teams that build gyms and trace datasets, and for
-researchers who train models on them. The full documentation is at
-[deepgym.io/docs](https://deepgym.io/docs).
+researchers who train models on them.
 
 Take the coin-change task in the quickstart below. The answer `return -1` passes 3 of its
 25 cases, so a verifier that pays partial credit gives it 0.12, and a policy trained on
@@ -478,6 +477,8 @@ Python 3.10 or later. Optional extras:
 | `deepgym[all]` | Everything above except `lm_eval` and the agent extras |
 
 ## Documentation
+
+The same pages, with search, are at [deepgym.io/docs](https://deepgym.io/docs).
 
 - [Core concepts][concepts]: how a run moves through environment, sandbox, verifier and
   trainer

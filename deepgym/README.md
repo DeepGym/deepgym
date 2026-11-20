@@ -12,10 +12,14 @@ fails instead of judging the answer, the run gets no verdict and can be kept out
 training instead of counting as a 0. It's for teams training and evaluating coding and
 computer-use agents with verl, TRL, OpenRLHF, Axolotl or their own GRPO loop.
 
+**Looking for the current version?** This repository is frozen at 0.5.0. Active development,
+newer releases and our gyms now live in a private repository. To request access, email
+[contact@deepgym.io](mailto:contact@deepgym.io).
+
 ## Install
 
 ```bash
-pip install deepgym
+pip install deepgym==0.5.0
 ```
 
 Python 3.10 or later. Optional extras:

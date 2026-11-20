@@ -56,7 +56,7 @@ and [the QA gate](authoring/qa-gate.md).
 | `deepgym dataset build` | Filter, deduplicate and split traces into a dataset folder with a manifest; prints the manifest's SHA-256 to publish | `--spec`, `--name`, `--version`, `--out` (required); `--format` (default `jsonl`), `--db`, `--traces`, `--labels` |
 | `deepgym dataset verify FOLDER` | Check a dataset folder against its manifest and, with `--sha256`, the published SHA-256 | `--sha256` |
 
-See [traces](traces.md), [scanning](traces.md#scan-traces) and [datasets](traces.md#datasets).
+See [traces](traces.md), [scanning](scanners.md) and [datasets](datasets.md).
 
 ## Servers
 

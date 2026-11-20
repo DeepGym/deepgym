@@ -206,7 +206,7 @@ The rules are in [the reward contract][reward-contract], [the QA gate][qa-gate] 
 | Authoring | `deepgym new`, `check` and `qa`, controls, mutation testing and approvals ([authoring][authoring], [verifiers][verifiers]); Hugging Face Hub sharing |
 | Traces | Recorded with provenance, token usage and cost; exported as JSONL, Parquet rows for verl and TRL, or ATIF ([traces][traces]) |
 | Analysis | Two runs compared task by task with pass@k, pass^k and an exact significance test; scanners for behaviour the verifier missed; versioned datasets with splits by prompt and a manifest hash ([compare][compare], [scanners][scan-traces], [datasets][datasets]) |
-| Review | Labels on runs, episodes, traces and single steps; review queues for expert reviewers, blind by default; judge calibration from stored labels ([console][console]) |
+| Review | Labels on runs, episodes, traces and single steps; review queues for expert reviewers, blind by default; judge calibration from stored labels ([labels][labels], [review queues][review-queues], [console][console]) |
 | Serving | `deepgym serve`, an HTTP API with jobs and live sessions ([API server][api-server]); `deepgym console`, a local web console for environments, runs, episode replay, sandboxes and QA reports ([console][console]) |
 
 ## Agents and traces
@@ -348,7 +348,7 @@ deepgym traces scan --config scanners.json --out report.json --write-labels
 A label is one judgment about a run, episode or trace, or one step or quoted span of it.
 It comes from a verifier, an LLM judge or an expert, and an expert's label carries the
 reason. Labels are an append-only log, so a correction supersedes the old label instead
-of overwriting it.
+of overwriting it ([labels][labels]).
 
 Review queues hand items to experts. Each item gets `overlap` reviews from different
 people, and reservations never hand it to more reviewers than that. In a blind queue (the
@@ -356,7 +356,7 @@ default) a reviewer sees no one else's label, the verifier's and judge's include
 they submit. That covers only what the queue routes return. The local console has no
 login, so anyone can review under another name or read grades from other routes; a shared
 setup must put reviewers behind a login that reaches only the queue routes
-([console][console]).
+([review queues][review-queues]).
 
 ```python
 from deepgym.console import record_episode
@@ -490,7 +490,8 @@ Python 3.10 or later. Optional extras:
 - Running: [sandboxes][sandboxes], [agents][agents], [console][console],
   [API server][api-server]
 - Traces and data: [record and export][traces], [compare][compare],
-  [scanners][scan-traces], [datasets][datasets]
+  [scanners][scan-traces], [datasets][datasets], [labels][labels],
+  [review queues][review-queues]
 
 ## For teams and labs
 
@@ -532,9 +533,11 @@ Commercial use needs a license: [contact@deepgym.io](mailto:contact@deepgym.io).
 [lm-eval]: https://github.com/DeepGym/deepgym/blob/main/deepgym/docs/training/lm-eval.md
 [axolotl]: https://github.com/DeepGym/deepgym/blob/main/deepgym/docs/training/axolotl.md
 [traces]: https://github.com/DeepGym/deepgym/blob/main/deepgym/docs/traces.md
-[compare]: https://github.com/DeepGym/deepgym/blob/main/deepgym/docs/traces.md#compare-two-runs
-[scan-traces]: https://github.com/DeepGym/deepgym/blob/main/deepgym/docs/traces.md#scan-traces
-[datasets]: https://github.com/DeepGym/deepgym/blob/main/deepgym/docs/traces.md#datasets
+[compare]: https://github.com/DeepGym/deepgym/blob/main/deepgym/docs/compare.md
+[scan-traces]: https://github.com/DeepGym/deepgym/blob/main/deepgym/docs/scanners.md
+[datasets]: https://github.com/DeepGym/deepgym/blob/main/deepgym/docs/datasets.md
+[labels]: https://github.com/DeepGym/deepgym/blob/main/deepgym/docs/labels.md
+[review-queues]: https://github.com/DeepGym/deepgym/blob/main/deepgym/docs/review-queues.md
 [sandboxes]: https://github.com/DeepGym/deepgym/blob/main/deepgym/docs/sandboxes.md
 [cli]: https://github.com/DeepGym/deepgym/blob/main/deepgym/docs/cli.md
 [api-server]: https://github.com/DeepGym/deepgym/blob/main/deepgym/docs/api-server.md

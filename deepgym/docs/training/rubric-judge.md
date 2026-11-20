@@ -206,7 +206,7 @@ before these numbers existed.
 
 ### From stored labels
 
-Expert labels in the console's label store (see [the console](../console.md)) become
+Expert labels in the console's label store (see [labels](../labels.md)) become
 calibration input with `labeled_answers`:
 
 ```python

@@ -244,7 +244,7 @@ lands in the trace depends on the agent:
 |---|---|
 | API tool agents | Each step's model messages, token usage and cost |
 | Computer-use agents | Each step's token usage and cost, no messages |
-| Claude Code, Codex | The run's token usage and cost when it ends, no messages |
+| Claude Code, Codex | One step holding the CLI's own events (tool calls, edits, output), and the run's token usage and cost when it ends; no model messages |
 | Your own loop | What you pass to `tr.step(action, messages, usage=..., cost_usd=...)` |
 
 A trace holds:
@@ -268,8 +268,7 @@ deepgym traces export --format atif --out atif/ --only-valid        # ATIF docum
 
 A trace without a verdict is exported with `has_verdict: false` and its RL row gets a null
 reward; `--only-valid` leaves it out. `--rows rl` needs the model messages of every turn,
-so it skips traces without them, Claude Code and Codex runs included. Details are in
-[traces][traces].
+so it skips computer-use, Claude Code and Codex runs. Details are in [traces][traces].
 
 ## Compare two runs
 
@@ -287,7 +286,7 @@ tuned = [load_trace(p) for p in Path('runs/step-400').glob('*.jsonl')]
 
 report = compare(attempts_from_traces(base), attempts_from_traces(tuned))
 print(report.flips)          # task count per flip
-print(report.significance)   # two-sided p-value
+print(report.significance)   # exact test: p_value, b_better, a_better, ties
 for task in report.tasks:
     if task.flip == 'regressed':
         print(task.key, task.a.solve_rate, task.b.solve_rate)
@@ -336,11 +335,13 @@ deepgym traces scan --config scanners.json --out report.json --write-labels
 - `ProtectedPathScanner` reads shell commands, Python file writes and Claude Code and Codex
   edits without running anything. It only knows the write patterns [listed in the
   docs][scan-traces], so diff the final workspace when you need every changed file.
-  `LLMScanner` (Python only) has a judge model read each trace with your instruction.
+- `PatternScanner` matches your regexes in actions, observations or messages. It doesn't
+  see a CLI agent's own tool calls.
+- `LLMScanner` (Python only) has a judge model read each trace with your instruction.
 - A scanner that fails on a trace is reported as an error for that trace, never as clean,
   and the CLI exits 3.
-- `--write-labels` stores every finding as a label, so review queues can pick them up and a
-  dataset build can drop the flagged traces.
+- `--write-labels` stores a label for every finding and every scan error, so a dataset
+  build can drop flagged traces and the ones no scanner cleared.
 
 ## Expert review and judge calibration
 
@@ -351,9 +352,11 @@ of overwriting it.
 
 Review queues hand items to experts. Each item gets `overlap` reviews from different
 people, and reservations never hand it to more reviewers than that. In a blind queue (the
-default) a reviewer sees no other label, verifier or judge until they submit. Blind mode
-covers the queue routes only, and the local console has no login, so a shared setup must
-limit reviewers to those routes ([console][console]).
+default) a reviewer sees no one else's label, the verifier's and judge's included, until
+they submit. That covers only what the queue routes return. The local console has no
+login, so anyone can review under another name or read grades from other routes; a shared
+setup must put reviewers behind a login that reaches only the queue routes
+([console][console]).
 
 ```python
 from deepgym.console import record_episode
@@ -381,9 +384,10 @@ queues.submit(queue.id, view.item.id, 'ana', [
 
 Before you train on an LLM judge's reward, run `calibrate`. It has the judge grade
 expert-labeled answers several times and reports TPR, TNR, Cohen's kappa and the judge's
-agreement with itself, beside the experts' agreement with each other. It refuses any answer
-you list in `built_from` as used to write the rubric, and `report.meets(min_tpr=0.9,
-min_tnr=0.9)` gives a pass or fail you can put in CI. The console computes the same
+agreement with itself, beside the experts' agreement with each other. Pass the ids of the
+answers you wrote the rubric from as `built_from`: if any is among the labeled answers, it
+raises before calling the judge. `report.meets(min_tpr=0.9, min_tnr=0.9)` gives a pass or
+fail you can put in CI. The console computes the same
 numbers from stored labels, without calling the judge ([rubric judge][rubric],
 [console][console]).
 
@@ -420,8 +424,9 @@ deepgym dataset verify notes-v1 --sha256 <the sha256 build printed>
 ```
 
 - Copies of one trajectory ship once. Human `passed` labels on any copy are pooled and
-  override the verifier. Humans who disagree drop it as `contested`, and copies the
-  verifier both passed and failed, with no human verdict, drop it as `inconsistent`.
+  override the verifier. When humans disagree, every copy is dropped as `contested`; when
+  the verifier passed some copies and failed others and no human judged them, every copy
+  is dropped as `inconsistent`.
 - Splits go by a hash of the prompt, so one prompt never lands in both train and test, and
   adding prompts later never moves an existing one.
 - Every dropped trace is listed under the reason it was dropped. By default a trace without

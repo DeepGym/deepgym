@@ -12,9 +12,24 @@ fails instead of judging the answer, the run gets no verdict and can be kept out
 training instead of counting as a 0. It's for teams training and evaluating coding and
 computer-use agents with verl, TRL, OpenRLHF, Axolotl or their own GRPO loop.
 
-**Looking for the current version?** This repository is frozen at 0.5.0. Active development,
-newer releases and our gyms now live in a private repository. To request access, email
-[contact@deepgym.io](mailto:contact@deepgym.io).
+## DeepGym Pro
+
+This repository is the public 0.5.0 release. Everything we've built since ships in DeepGym
+Pro, a private build we give teams on request:
+
+- **Agent harnesses:** Claude Code, Codex, and Anthropic and OpenAI computer-use and tool
+  agents, run in the sandbox and scored like any other answer.
+- **Stricter rewards:** all-or-nothing built-ins, a QA gate that fails any shortcut reward,
+  your own must-pass and must-fail controls, and LLM rubric judges checked against expert labels.
+- **Trace tools:** token usage and cost on every step, scanners that point at what the
+  verifier missed, and training datasets built from traces and labels.
+- **Expert review:** labels, blind review queues and judge agreement scores.
+- **Run comparison:** model against model or checkpoint against checkpoint, with pass@k and pass^k.
+- **Private gyms:** ready-made coding and computer-use environments built on real applications.
+- **Hosted console and custom work:** a hosted review console for your team, environments built
+  to your spec, and help running RL training.
+
+For access, email [contact@deepgym.io](mailto:contact@deepgym.io).
 
 ## Install
 

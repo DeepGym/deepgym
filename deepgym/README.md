@@ -12,9 +12,25 @@ fails instead of judging the answer, the run gets no verdict and can be kept out
 training instead of counting as a 0. It's for teams training and evaluating coding and
 computer-use agents with verl, TRL, OpenRLHF, Axolotl or their own GRPO loop.
 
-**Looking for the current version?** This repository is frozen at 0.5.0. Active development,
-newer releases and our gyms now live in a private repository. To request access, email
-[contact@deepgym.io](mailto:contact@deepgym.io).
+## DeepGym Pro
+
+This repository is the public 0.5.0 release. Development continues in DeepGym Pro, a private
+build available to teams on request. It adds:
+
+- **Agent harnesses:** Claude Code, Codex, and Anthropic and OpenAI computer-use and tool
+  agents, acting in the sandbox and scored like any other answer.
+- **Stricter rewards:** built-in environments that score only when every test passes, a QA
+  gate that fails when any of its shortcut attacks earns reward, your own must-pass and
+  must-fail controls, and LLM rubric judges.
+- **Trace tools:** token usage and cost per step, scanners that point at what the verifier
+  missed, and training datasets built from traces and labels.
+- **Expert review:** labels, blind review queues, and agreement scores between your judges
+  and your experts.
+- **Run comparison:** model against model or checkpoint against checkpoint, with pass@k and pass^k.
+- **Private gyms:** computer-use environments built on real business applications with real data.
+
+We can also host the console for your team, build environments to your spec and help with RL
+training. For access, email [contact@deepgym.io](mailto:contact@deepgym.io).
 
 ## Install
 
@@ -424,10 +440,9 @@ verl loads DeepGym's reward function with one config line (see
 ## For teams and labs
 
 DeepGym is free for personal, research and other noncommercial use. Commercial use,
-including inside a company or in a product you sell, needs a commercial license. We also
-build private environments and verifiers for your tasks, deploy DeepGym privately or
-self-hosted, and help set up and run RL training. Email
-[contact@deepgym.io](mailto:contact@deepgym.io) or visit [deepgym.io](https://deepgym.io).
+including inside a company or in a product you sell, needs a commercial license. For
+private builds, custom environments and training help, see [DeepGym Pro](#deepgym-pro) or email
+[contact@deepgym.io](mailto:contact@deepgym.io).
 
 ## CLI
 
